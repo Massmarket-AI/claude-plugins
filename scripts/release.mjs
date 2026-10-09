@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Release the Massmarket plugins (Rob only).
+// Release the Massmarket plugins (anyone on the pms or web-builders team; main keeps its history).
 //
 //   node scripts/release.mjs            copy the hook, bump changed plugins, validate, scan, commit, push
 //   node scripts/release.mjs --dry-run  everything except commit and push
@@ -29,7 +29,7 @@ const git = (...args) => run('git', args)
 function claudeBin() {
   const found = []
   try {
-    found.push(run('which', ['claude']).trim())
+    found.push(run(process.platform === 'win32' ? 'where' : 'which', ['claude']).trim().split(/\r?\n/)[0])
   } catch {}
   const app = join(homedir(), 'Library', 'Application Support', 'Claude', 'claude-code')
   if (existsSync(app)) {

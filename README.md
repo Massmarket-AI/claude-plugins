@@ -2,7 +2,7 @@
 
 The plugins every Massmarket teammate runs in Claude Code. They update themselves: once installed,
 each new release reaches your computer on its own (Claude Code checks for updates when a session
-starts, and the new version loads the next time you open it). Releases come from Rob only.
+starts, and the new version loads the next time you open it).
 
 | Plugin | What it does |
 | --- | --- |
@@ -22,8 +22,15 @@ claude plugin install mm-bridge@massmarket
 
 then set `"autoUpdate": true` on `extraKnownMarketplaces.massmarket` in `~/.claude/settings.json`.
 
-## Releasing (Rob)
+## Releasing
+
+Anyone on the `pms` or `web-builders` team can release. A release runs on every teammate's computer
+at their next session, so treat it like a deploy: test it on your own machine first.
 
 `node scripts/release.mjs` copies the worklog hook from the onboarding-wizard `origin/main`, bumps the
-version of each plugin that changed, validates, scans for secrets, commits and pushes. A push that
-does not bump a version reaches nobody.
+version of each plugin that changed, validates, runs the bridge's tests, scans for secrets, commits
+and pushes. `--dry-run` does everything but the commit and push. A push that does not bump a version
+reaches nobody: the version number is the release.
+
+`main` keeps its full history: force pushes and deleting `main` are blocked (the org's "Keep history on
+main" rule), so every release stays on record and any version can be restored with a normal commit.

@@ -1,7 +1,11 @@
 {
   "name": "massmarket",
-  "owner": { "name": "Massmarket AI" },
-  "metadata": { "description": "Massmarket's own Claude Code plugins for the team. Releases come from Rob only." },
+  "owner": {
+    "name": "Massmarket AI"
+  },
+  "metadata": {
+    "description": "Massmarket's own Claude Code plugins for the team. Anyone on the pms or web-builders team can release; main keeps its full history."
+  },
   "plugins": [
     {
       "name": "mm-hooks",
