@@ -10,6 +10,8 @@
 //     token, the tracked-folder list and the settings entries; no installed hook, no write here.
 //   - touch the token, consent.json or any settings.json.
 //   - replace a symlink (someone pointing the hook at a working copy keeps their link).
+//   - undo an uninstall. `setup.js --uninstall` leaves a two-line stub in place of the hook so a
+//     leftover registration does nothing; that stub means "not installed" and stays as it is.
 //   - print anything. SessionStart output is shown to the model, so this hook stays silent and records
 //     what it did in ~/.claude/mm-hooks/plugin-sync.json instead.
 "use strict";
@@ -22,6 +24,9 @@ const HOOK_DIR = path.join(process.env.MM_HOOK_HOME || os.homedir(), ".claude", 
 const TARGET = path.join(HOOK_DIR, "worklog-hook.js");
 const STATUS = path.join(HOOK_DIR, "plugin-sync.json");
 const BUNDLED = path.join(__dirname, "worklog-hook.js");
+// The first line of the stub the installer's --uninstall writes (UNINSTALLED_HOOK_STUB in OW's
+// src/lib/ext/hook-setup-source.ts).
+const UNINSTALLED_MARK = "// Massmarket worklog hook: uninstalled.";
 
 function sha(buf) {
   return crypto.createHash("sha256").update(buf).digest("hex");
@@ -46,6 +51,7 @@ function sync() {
   if (st.isSymbolicLink()) return Object.assign(out, { action: "skipped-symlink" });
   const want = fs.readFileSync(BUNDLED);
   const have = fs.readFileSync(TARGET);
+  if (have.toString("utf8").replace(/^\uFEFF/, "").startsWith(UNINSTALLED_MARK)) return Object.assign(out, { action: "uninstalled" });
   out.hook_sha256 = sha(want);
   if (sha(have) === out.hook_sha256) return Object.assign(out, { action: "current" });
   const tmp = TARGET + ".new-" + process.pid;
