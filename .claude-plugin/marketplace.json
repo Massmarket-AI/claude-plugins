@@ -1,0 +1,17 @@
+{
+  "name": "massmarket",
+  "owner": { "name": "Massmarket AI" },
+  "metadata": { "description": "Massmarket's own Claude Code plugins for the team. Releases come from Rob only." },
+  "plugins": [
+    {
+      "name": "mm-hooks",
+      "source": "./plugins/mm-hooks",
+      "description": "Keeps the Massmarket worklog hook on this computer current, with nothing for the person to do."
+    },
+    {
+      "name": "mm-bridge",
+      "source": "./plugins/mm-bridge",
+      "description": "Pins and names each client thread with what is due, shows the reply drafts in a side pane, never starts a model turn on its own."
+    }
+  ]
+}

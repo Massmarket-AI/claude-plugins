@@ -1,0 +1,5 @@
+# laid by the engine when it loads a plugin from this folder
+plugins/*/.claude-plugin/types/
+plugins/*/tsconfig.json
+node_modules/
+.DS_Store
