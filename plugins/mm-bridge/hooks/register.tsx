@@ -10,7 +10,7 @@ import type { Feed, QueueItem } from './queue'
 // ⛔ It only touches threads linked to a client, and only unpins a thread it pinned itself.
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
-// Keep equal to .claude-plugin/plugin.json; scripts/release.sh checks it.
+// Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
 const VERSION = '0.3.0'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
 const VIEW = { plugin: 'mm-bridge', key: 'view' } as const
@@ -165,7 +165,7 @@ async function sync($: EngineInterface): Promise<Last> {
   await $.store.set('mm.links', links)
   await $.store.set('mm.pins', pins)
   await $.store.set('mm.last', last)
-  const note = `_Updated ${new Date(now).toISOString().slice(11, 16)} UTC for ${feed.member}. Pins: overdue up to 3 days, due in the next 24 hours. /mm link <client> links this thread to a client._`
+  const note = `_Updated ${new Date(now).toISOString().slice(11, 16)} UTC for ${feed.member}. Pins: overdue by up to 3 business days, or due within the next 24 business hours. Weekends do not count. /mm link <client> links this thread to a client._`
   await $.state.set(QUEUE, queueMarkdown(items, links, now, note))
   $.ui.status(items.length ? `MM: ${items.length} need you · ${want.size} pinned` : 'MM: clear')
   return last

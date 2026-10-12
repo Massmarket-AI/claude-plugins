@@ -2,11 +2,18 @@
 //
 // What pins (Rob, 2026-10-08): "for what shows up in the pins, we really just want to be talking about
 // what's going on right now, nothing more than 3 days old." A client pins when one of these is true:
-//   - an unanswered client message whose reply is due (24 h after it arrived) between 3 days ago and 24 h from now
-//   - a prepared reply package (drafts ready) less than 3 days past its reply time
-//   - a ticket with a date WE committed to, between 3 days overdue and 24 h from now
+//   - an unanswered client message whose reply is due (24 business hours after it arrived) between
+//     3 business days ago and 24 business hours from now
+//   - a prepared reply package (drafts ready) less than 3 business days past its reply time
+//   - a ticket with a date WE committed to, between 3 business days overdue and 24 business hours from now
 //     (clients never set dates; SLA and phase dates are not promises and do not pin)
 // Work that must start now at 1.5 h a day waits for real hour estimates (quote line items).
+//
+// Every client clock here counts business time (Rob, 2026-10-12: "the weekends don't count as days towards
+// the 24-hour response time... We're only counting business days in our timelines for clients"): Saturday
+// and Sunday, America/New_York, contribute zero. See ./business-time.ts.
+
+import { businessDeadline, businessMsBetween } from './business-time'
 
 export type FeedMail = {
   message_id_key: string
@@ -68,6 +75,7 @@ export type QueueItem = {
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
+/** Both windows are business time: 3 business days back, 24 business hours ahead. */
 export const WINDOW_BACK_MS = 3 * DAY
 export const WINDOW_AHEAD_MS = DAY
 export const MAX_PINS = 8
@@ -89,9 +97,24 @@ function isMine(owner: string | null | undefined, feed: Feed): boolean {
   return feed.role === 'founder' // unowned clients are Rob's until someone owns them
 }
 
+/**
+ * businessMsBetween(fromMs, toMs) <= limit, without walking the calendar when real time already settles it.
+ * Business time never exceeds real time, so a stretch no longer than `limit` is within it. Each weekend
+ * adds at most 49 real hours (a 25-hour Sunday when the clocks go back) and a stretch holding `limit` of
+ * business time touches at most floor(limit / 5 days) + 1 weekends, so a longer stretch than that is not.
+ * Only what lies in between is measured, which keeps a far-off date in the feed from costing a long walk.
+ */
+function businessWithin(fromMs: number, toMs: number, limit: number): boolean {
+  const real = toMs - fromMs
+  if (real <= limit) return true
+  if (real > limit + (Math.floor(limit / (5 * DAY)) + 1) * (2 * DAY + HOUR)) return false
+  return businessMsBetween(fromMs, toMs) <= limit
+}
+
 export function buildQueue(feed: Feed, now: number): QueueItem[] {
-  const lo = now - WINDOW_BACK_MS
-  const hi = now + WINDOW_AHEAD_MS
+  // Overdue by up to 3 business days, or due within the next 24 business hours.
+  const inWindow = (due: number): boolean =>
+    Number.isFinite(due) && (due < now ? businessWithin(due, now, WINDOW_BACK_MS) : businessWithin(now, due, WINDOW_AHEAD_MS))
   const byProject = new Map<string, QueueItem>()
   const item = (projectId: string, projectName: string): QueueItem => {
     let it = byProject.get(projectId)
@@ -108,8 +131,9 @@ export function buildQueue(feed: Feed, now: number): QueueItem[] {
   for (const m of feed.mail ?? []) {
     if (m.reply_status !== 'unanswered' || !m.project_id || !m.project_name) continue
     if (!isMine(m.project_owner_email, feed)) continue
-    const due = Number.isFinite(ms(m.reply_due_at)) ? ms(m.reply_due_at) : ms(m.received_at) + DAY
-    if (!(due >= lo && due <= hi)) continue
+    // The feed's reply time is trusted when it gives one; otherwise 24 business hours after the message arrived.
+    const due = Number.isFinite(ms(m.reply_due_at)) ? ms(m.reply_due_at) : businessDeadline(ms(m.received_at), DAY)
+    if (!inWindow(due)) continue
     const it = item(m.project_id, m.project_name)
     it.messages += 1
     it.dueAt = Math.min(it.dueAt, due)
@@ -121,8 +145,8 @@ export function buildQueue(feed: Feed, now: number): QueueItem[] {
     if (d.status !== 'prepared' || (d.drafts_ready ?? 0) < 1) continue
     if (!isMine(d.project_owner_email, feed)) continue
     if (d.picked_up_by && d.picked_up_by.toLowerCase() !== feed.member.toLowerCase()) continue
-    const due = Number.isFinite(ms(d.covers_through)) ? ms(d.covers_through) + DAY : now
-    if (due < lo) continue
+    const due = Number.isFinite(ms(d.covers_through)) ? businessDeadline(ms(d.covers_through), DAY) : now
+    if (due < now && !businessWithin(due, now, WINDOW_BACK_MS)) continue
     const it = item(d.project_id, d.project_name)
     it.kind = 'ready'
     it.packageId = d.package_id
@@ -137,7 +161,7 @@ export function buildQueue(feed: Feed, now: number): QueueItem[] {
       if (tk.due_source !== 'commitment') continue
       if ((tk.assignee_email ?? '').toLowerCase() !== feed.member.toLowerCase()) continue
       const due = ms(tk.due_at)
-      if (!(due >= lo && due <= hi)) continue
+      if (!inWindow(due)) continue
       const it = item(tk.project_id, tk.project_name)
       it.tasks += 1
       it.dueAt = Math.min(it.dueAt, due)
@@ -173,7 +197,7 @@ function etParts(t: number): { day: string; date: string; time: string } {
 
 export function whenText(due: number, now: number): string {
   if (due < now) {
-    const late = now - due
+    const late = businessMsBetween(due, now) // weekends do not count toward how late
     return late < DAY ? `overdue ${Math.max(1, Math.round(late / HOUR))}h` : `overdue ${Math.round(late / DAY)}d`
   }
   const a = etParts(due)
@@ -188,7 +212,7 @@ export function isRed(it: QueueItem, now: number): boolean {
   return it.dueAt < now || etParts(it.dueAt).date === etParts(now).date
 }
 
-/** The pinned thread's name: `🔴 Contoso Cooling · reply ready · due 7 PM · 3 new`. */
+/** The pinned thread's name: `🔴 Acme Legal · reply ready · due 7 PM · 3 new`. */
 export function titleFor(it: QueueItem, now: number): string {
   const what = it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : 'task'
   const when = whenText(it.dueAt, now)

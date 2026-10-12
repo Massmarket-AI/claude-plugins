@@ -3,6 +3,7 @@
 //
 //   node scripts/release.mjs            copy the hook, bump changed plugins, validate, scan, commit, push
 //   node scripts/release.mjs --dry-run  everything except commit and push
+//   CLAUDE_BIN=/path/to/claude          the CLI to validate and test with, when that file exists; otherwise the newest desktop build, then claude on PATH
 //
 // 1. Copies .claude/scripts/worklog-hook.js from the onboarding-wizard origin/main (OW_REPO, default
 //    ~/Projects/onboarding-wizard) into plugins/mm-hooks/scripts/. That is the same file GET
@@ -27,6 +28,7 @@ const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { cwd: ROOT, encod
 const git = (...args) => run('git', args)
 
 function claudeBin() {
+  if (process.env.CLAUDE_BIN && existsSync(process.env.CLAUDE_BIN)) return process.env.CLAUDE_BIN
   const found = []
   try {
     found.push(run(process.platform === 'win32' ? 'where' : 'which', ['claude']).trim().split(/\r?\n/)[0])
