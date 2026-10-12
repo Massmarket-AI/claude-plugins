@@ -5,6 +5,7 @@
 //   - an unanswered client message whose reply is due (24 business hours after it arrived) between
 //     3 business days ago and 24 business hours from now
 //   - a prepared reply package (drafts ready) less than 3 business days past its reply time
+//   - a reply package the viewer picked up, with a draft not sent, pins like a prepared one
 //   - a ticket with a date WE committed to, between 3 business days overdue and 24 business hours from now
 //     (clients never set dates; SLA and phase dates are not promises and do not pin)
 // Work that must start now at 1.5 h a day waits for real hour estimates (quote line items).
@@ -35,8 +36,11 @@ export type FeedDraft = {
   status: string
   covers_through?: string
   drafts_ready?: number
+  /** Drafts not sent yet (ready, edited, sending, failed). Absent on a server that does not send it yet. */
+  drafts_unsent?: number
   flagged_for_rob?: boolean
   picked_up_by?: string | null
+  picked_up_at?: string | null
   project_owner_email?: string | null
 }
 
@@ -65,6 +69,26 @@ export type Feed = {
   threads?: FeedThread[]
 }
 
+/**
+ * The client's open reply package when it is not simply "ready for you" (Rob, 2026-10-12: a thread that
+ * held the drafts was told none were prepared).
+ *   held_by_me     the viewer picked it up and a draft is not sent yet
+ *   held_by_other  a teammate picked it up; `by` is their name
+ *   stale          drafts exist but are marked out of date, and nobody holds it
+ *   prepared       drafts are ready, but the client does not pin for the viewer on them (another owner's
+ *                  client, or a package older than the window)
+ * `unsent` is the drafts not sent on a held package, the drafts ready otherwise. `newer` is the client
+ * messages that arrived after a package the viewer holds was written.
+ */
+export type OpenPackage = {
+  id: string
+  state: 'held_by_me' | 'held_by_other' | 'stale' | 'prepared'
+  by: string
+  at: string | null
+  unsent: number
+  newer: number
+}
+
 export type QueueItem = {
   projectId: string
   projectName: string
@@ -78,6 +102,7 @@ export type QueueItem = {
   flagged: boolean
   mail: Array<{ at: string; sender: string; subject: string; snippet: string }>
   taskTitles: string[]
+  open: OpenPackage | null
 }
 
 const HOUR = 3_600_000
@@ -112,6 +137,13 @@ export function cleanText(text: unknown, max: number): string {
 export const cleanName = (name: unknown): string => cleanText(name, 80)
 /** A thread's title, as it may be shown in a sentence. */
 export const cleanTitle = (title: unknown): string => cleanText(title, 60)
+
+/** A teammate's name as it may be shown or passed on: the part of their address before the @, cleaned. */
+export function holderName(address: unknown): string {
+  const local = (typeof address === 'string' ? address : '').split('@')[0] ?? ''
+  const name = cleanText(local.replace(/[._-]+/g, ' '), 40).replace(/(^|\s)\p{L}/gu, c => c.toUpperCase())
+  return name || 'a teammate'
+}
 
 /** The client's short name: the project name before " — ", " - " or " (", cleaned. */
 export function shortName(projectName: string): string {
@@ -152,7 +184,7 @@ export function buildQueue(feed: Feed, now: number): QueueItem[] {
     if (!it) {
       it = {
         projectId, projectName: cleanName(projectName), client: shortName(projectName), dueAt: Infinity, kind: 'task',
-        messages: 0, tasks: 0, packageId: null, coversThrough: null, flagged: false, mail: [], taskTitles: [],
+        messages: 0, tasks: 0, packageId: null, coversThrough: null, flagged: false, mail: [], taskTitles: [], open: null,
       }
       byProject.set(projectId, it)
     }
@@ -173,20 +205,38 @@ export function buildQueue(feed: Feed, now: number): QueueItem[] {
     it.mail.push({ at: m.received_at, sender: m.sender ?? '?', subject: m.subject ?? '', snippet: m.snippet ?? '' })
   }
 
+  const me = feed.member.toLowerCase()
   for (const d of feed.drafts ?? []) {
-    if (d.status !== 'prepared' || (d.drafts_ready ?? 0) < 1) continue
     // the package id goes into the kickoff and the pickup request: a lower-case uuid or nothing
     if (!usable(d.project_id, d.project_name) || !isUuid(d.package_id)) continue
-    if (!isMine(d.project_owner_email, feed)) continue
-    if (d.picked_up_by && d.picked_up_by.toLowerCase() !== feed.member.toLowerCase()) continue
-    const due = Number.isFinite(ms(d.covers_through)) ? businessDeadline(ms(d.covers_through), DAY) : now
-    if (due < now && !businessWithin(due, now, WINDOW_BACK_MS)) continue
+    const holder = (d.picked_up_by ?? '').toLowerCase()
+    const held = d.status === 'picked_up'
+    const ready = d.drafts_ready ?? 0
+    const unsent = d.drafts_unsent ?? ready
+    // What counts: a held package with a draft not sent, or a prepared or stale one with a draft ready.
+    if (held ? unsent < 1 || holder === '' : (d.status !== 'prepared' && d.status !== 'stale') || ready < 1) continue
+    const heldByMe = held && holder === me
     const it = item(d.project_id, d.project_name)
-    it.kind = 'ready'
-    it.packageId = d.package_id
-    it.coversThrough = d.covers_through ?? null
-    it.flagged = Boolean(d.flagged_for_rob)
-    it.dueAt = Math.min(it.dueAt, due)
+    const due = Number.isFinite(ms(d.covers_through)) ? businessDeadline(ms(d.covers_through), DAY) : now
+    const inReach = !(due < now && !businessWithin(due, now, WINDOW_BACK_MS))
+    const open = (state: OpenPackage['state']): OpenPackage => ({
+      id: d.package_id, state, by: state === 'held_by_other' ? holderName(holder) : '', at: held ? d.picked_up_at ?? null : null,
+      unsent: held ? unsent : ready, newer: 0,
+    })
+    // A package the viewer holds is theirs to finish whoever owns the client. A prepared one is theirs when the client is.
+    const readyForMe = d.status === 'prepared' && (holder === '' || holder === me) && isMine(d.project_owner_email, feed) && inReach
+    if (heldByMe || readyForMe) {
+      it.kind = 'ready'
+      it.packageId = d.package_id
+      it.coversThrough = d.covers_through ?? null
+      it.flagged = Boolean(d.flagged_for_rob)
+      if (inReach) it.dueAt = Math.min(it.dueAt, due)
+      it.open = heldByMe ? open('held_by_me') : null
+      continue
+    }
+    // Any other open package never pins by itself: it only changes what the client's row, pane and note say.
+    if (it.packageId) continue
+    it.open = open(held ? 'held_by_other' : d.status === 'stale' ? 'stale' : 'prepared')
   }
 
   const t = feed.tickets ?? {}
@@ -202,6 +252,13 @@ export function buildQueue(feed: Feed, now: number): QueueItem[] {
       it.dueAt = Math.min(it.dueAt, due)
       it.taskTitles.push(tk.title)
     }
+  }
+
+  // How many client messages arrived after the drafts of a package the viewer holds were written.
+  for (const it of byProject.values()) {
+    const through = ms(it.coversThrough)
+    if (it.open?.state !== 'held_by_me' || !Number.isFinite(through)) continue
+    it.open.newer = (feed.mail ?? []).filter(m => m.project_id === it.projectId && m.reply_status === 'unanswered' && ms(m.received_at) > through).length
   }
 
   return [...byProject.values()]
@@ -249,10 +306,11 @@ export function isRed(it: QueueItem, now: number): boolean {
 
 /** The pinned thread's name: `🔴 Acme Legal · reply ready · due 7 PM · 3 new`. */
 export function titleFor(it: QueueItem, now: number): string {
-  const what = it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : 'task'
+  const what = it.open?.state === 'held_by_me' ? 'your draft' : it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : 'task'
   const when = whenText(it.dueAt, now)
   const parts = [`${isRed(it, now) ? '🔴' : '🟡'} ${it.client}`, `${what} ${when}`.replace('reply due', 'reply due')]
   if (it.messages > 1) parts.push(`${it.messages} new`)
+  if (it.open?.state === 'held_by_other') parts.push(`with ${it.open.by}`)
   if (it.flagged) parts.push('flagged')
   return parts.join(' · ')
 }
@@ -268,7 +326,50 @@ export function titleNames(title: string, client: string): boolean {
   return bare.length > 0 && (bare === c || bare.startsWith(c) || (bare.length >= 6 && c.startsWith(bare)))
 }
 
-/** What a client's own thread shows when it has no prepared drafts: the messages waiting and the tasks due. */
+const pickedAt = (at: string | null): string => {
+  const t = ms(at)
+  return Number.isFinite(t) ? ` (${etParts(t).day} ${etParts(t).time})` : ''
+}
+const draftCount = (n: number): string => `${n} draft${n === 1 ? '' : 's'}`
+
+/** The last line of a client's pane when the pickup view is not shown: what is true of its reply drafts. */
+export function draftsLine(it: QueueItem): string {
+  const ask = (verb: string) => `Ask Claude: "${verb} the reply drafts for ${it.client}"`
+  const o = it.open ?? null
+  if (o?.state === 'held_by_me') return `_You picked up the reply drafts for this client: ${draftCount(o.unsent)} not sent yet. ${ask('Show me')}._`
+  if (it.packageId) return `_Reply drafts are prepared for this client, but the pickup view could not be loaded here. ${ask('Show me')}._`
+  if (o?.state === 'held_by_other') return `_${o.by} picked up the reply drafts for this client${pickedAt(o.at)} and has ${draftCount(o.unsent)} not sent yet. Ask ${o.by} before writing a second reply._`
+  if (o?.state === 'stale') return `_Reply drafts exist for this client but are marked out of date. ${ask('Pick up')} and it will rebuild them first._`
+  if (o?.state === 'prepared') return `_Reply drafts are prepared for this client. ${ask('Pick up')}._`
+  return `_No reply drafts are prepared yet. ${ask('Pick up')}._`
+}
+
+/** One line above the pickup view when the viewer holds the package: that they hold it, what is unsent, what arrived since. */
+export function holdBanner(it: QueueItem): string {
+  const o = it.open ?? null
+  if (o?.state !== 'held_by_me') return ''
+  const newer = o.newer > 0 ? ` ${o.newer} client message${o.newer === 1 ? '' : 's'} arrived after ${o.unsent === 1 ? 'it was' : 'they were'} written.` : ''
+  return `> **You picked this up**${pickedAt(o.at)}. ${draftCount(o.unsent)} not sent yet.${newer}`
+}
+
+/** What the bridge's note tells Claude about a client's reply drafts and what is waiting. `member` is the viewer's address. */
+export function noteText(it: QueueItem, member: string): string {
+  const waiting = `${it.messages} client message${it.messages === 1 ? '' : 's'} waiting on our reply and ${it.tasks} committed task${it.tasks === 1 ? '' : 's'} due`
+  const o = it.open ?? null
+  if (o?.state === 'held_by_me' && it.packageId) {
+    const newer = o.newer > 0
+      ? ` ${o.newer} client message${o.newer === 1 ? '' : 's'} arrived after ${o.unsent === 1 ? 'that draft was' : 'those drafts were'} written: read the package again and revise the open draft, never write a second email.`
+      : ''
+    return `Reply package ${it.packageId.slice(0, 8)} is already picked up by ${holderName(member)}, the person in this session, with ${draftCount(o.unsent)} not sent yet${it.flagged ? ', flagged for approval' : ''}; the five-part pickup view is in the side pane.${newer} The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${it.packageId}.`
+  }
+  if (it.packageId) return `Reply package ${it.packageId.slice(0, 8)} is prepared${it.flagged ? ' and flagged for approval' : ''}; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${it.packageId}.`
+  if (o?.state === 'held_by_other') return `${waiting}; ${o.by} picked up the reply drafts for this client (package ${o.id.slice(0, 8)}) and has ${draftCount(o.unsent)} not sent yet. Do not write a second reply: ask ${o.by}.`
+  if (o?.state === 'stale') return `${waiting}; reply drafts exist (package ${o.id.slice(0, 8)}) but are marked out of date. When the person asks for the reply, pick the package up and rebuild the drafts first (client-reply-prep §9 with --package ${o.id}).`
+  if (o?.state === 'prepared') return `${waiting}; reply drafts are prepared for this client (package ${o.id.slice(0, 8)}). When the person asks to act on them, follow client-reply-prep §9 with --package ${o.id}.`
+  return `${waiting}; no reply drafts are prepared yet.`
+}
+
+/** What a client's thread shows when the pickup view is not shown: the messages waiting, the tasks due, and what is true of its reply drafts. */
 export function clientMarkdown(it: QueueItem, now: number): string {
   const out = [`## ${it.projectName}`, `${titleFor(it, now)}`]
   if (it.mail.length) {
@@ -282,6 +383,6 @@ export function clientMarkdown(it: QueueItem, now: number): string {
     out.push('', '### Due (dates we committed to)')
     for (const t of it.taskTitles) out.push(`- ${t}`)
   }
-  out.push('', '_No reply drafts are prepared yet. Ask Claude: "Pick up the reply drafts for ' + it.client + '"._')
+  out.push('', draftsLine(it))
   return out.join('\n')
 }
