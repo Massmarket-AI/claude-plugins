@@ -205,7 +205,7 @@ export function buildQueue(feed: Feed, now: number): QueueItem[] {
     it.mail.push({ at: m.received_at, sender: m.sender ?? '?', subject: m.subject ?? '', snippet: m.snippet ?? '' })
   }
 
-  const me = feed.member.toLowerCase()
+  const me = typeof feed.member === 'string' ? feed.member.toLowerCase() : ''
   for (const d of feed.drafts ?? []) {
     // the package id goes into the kickoff and the pickup request: a lower-case uuid or nothing
     if (!usable(d.project_id, d.project_name) || !isUuid(d.package_id)) continue

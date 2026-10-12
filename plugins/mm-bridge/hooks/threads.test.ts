@@ -332,14 +332,29 @@ describe('R5: the kickoff and the row for a package that is not simply ready', (
     expect(waitingText(it)).toBe('2 messages waiting, drafts out of date')
   })
 
-  test('a prepared package the client does not pin on (another owner\'s client): pick it up', async () => {
+  test('a prepared package on another owner\'s client, where only my task is due: the kickoff is still about the task', async () => {
     const it = itemOf({ ...FEED, drafts: [draftFor(CEDAR, 'Cedar Dental', { project_owner_email: 'builder-b@example.com' })] }, CEDAR)
     expect(it).toMatchObject({ kind: 'task', packageId: null })
     expect(it.open?.state).toBe('prepared')
-    expect(kickoffText(it)).toBe(
-      `[mm-link ${CEDAR}] Pick up the reply drafts for Cedar Dental (OW project ${CEDAR}). Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package aaaaaaaa and wait for me. Send nothing without my go.`,
-    )
+    expect(kickoffText(it)).toBe(kickoffText(item(CEDAR)))
     expect(waitingText(it)).toBe('1 task due, drafts ready')
+  })
+
+  test('messages waiting and a prepared package older than the window: pick it up, never "no package exists yet"', async () => {
+    const it = itemOf({ ...FEED, drafts: [draftFor(BOLT, 'Bolt Staffing (Sam)', { covers_through: at('2026-09-28 08:00') })] }, BOLT)
+    expect(it).toMatchObject({ kind: 'reply', packageId: null })
+    expect(it.open?.state).toBe('prepared')
+    expect(kickoffText(it)).toBe(
+      `[mm-link ${BOLT}] Pick up the reply drafts for Bolt Staffing (Sam) (OW project ${BOLT}). Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package aaaaaaaa and wait for me. Send nothing without my go.`,
+    )
+    expect(waitingText(it)).toBe('2 messages waiting, drafts ready')
+  })
+
+  test('a package marked out of date where only my task is due: the kickoff is still about the task', async () => {
+    const it = itemOf({ ...FEED, drafts: [draftFor(CEDAR, 'Cedar Dental', { status: 'stale' })] }, CEDAR)
+    expect(it.open?.state).toBe('stale')
+    expect(kickoffText(it)).toBe(kickoffText(item(CEDAR)))
+    expect(waitingText(it)).toBe('1 task due, drafts out of date')
   })
 
   test('the three kickoffs that were there before read exactly as they did', async () => {

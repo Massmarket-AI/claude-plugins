@@ -223,10 +223,11 @@ export function waitingText(it: QueueItem): string {
  *   1. a package the person already picked up, with a draft not sent: carry on with it
  *   2. a prepared package that is theirs to pick up
  *   3. a package a teammate picked up: show what is waiting, run no prep, draft no second reply
- *   4. a package marked out of date: pick it up and rebuild the drafts
- *   5. a prepared package the client does not pin for them on: pick it up
+ *   4. client messages waiting and a package marked out of date: pick it up and rebuild the drafts
+ *   5. client messages waiting and a prepared package older than the window: pick it up
  *   6. client messages with no package yet
- *   7. committed tasks only
+ *   7. committed tasks only (a package that is out of date, or another owner's, changes nothing here:
+ *      the client is in the list for the task)
  */
 export function kickoffText(it: QueueItem, opts: { update?: boolean } = {}): string {
   const id = it.projectId
@@ -240,9 +241,9 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean } = {}): str
         ? `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${it.packageId.slice(0, 8)} and wait for me. Send nothing without my go.`
         : o?.state === 'held_by_other'
           ? `[mm-link ${id}] ${who}: ${o.by} picked up the reply drafts (package ${o.id.slice(0, 8)}) and has ${o.unsent} not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`
-          : o?.state === 'stale'
+          : o?.state === 'stale' && it.messages > 0
             ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting, reply due ${due}. Load the client's project skill first, then follow client-reply-prep §9: package ${o.id.slice(0, 8)} exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.`
-            : o?.state === 'prepared'
+            : o?.state === 'prepared' && it.messages > 0
               ? `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${o.id.slice(0, 8)} and wait for me. Send nothing without my go.`
               : it.messages > 0
                 ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting, reply due ${due}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
