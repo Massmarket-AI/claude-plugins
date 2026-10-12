@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { buildQueue } from './queue'
 import type { Feed, FeedThread, QueueItem } from './queue'
-import { LABEL, OLD_THREAD_MS, PANE_SENTENCE, autoLinkFor, clientThreads, dueText, kickoffText, ownerOf, paneText, recommend, rowButtons, rowDetail, rowFor, titleLooksLike, titleSuggestion, waitingText } from './threads'
+import { LABEL, OLD_THREAD_MS, PANE_SENTENCE, autoLinkFor, clientThreads, dueText, kickoffText, ownerOf, paneText, recommend, rowButtons, rowDetail, rowFor, sharedThreads, titleLooksLike, titleSuggestion, waitingText } from './threads'
 import type { AppThread, ClientThread, Pairs } from './threads'
 
 // Every client and address below is made up.
@@ -166,6 +166,25 @@ describe('R1: which threads are a client\'s', () => {
     // and with nothing else of Bolt's open, Bolt has no thread at all
     expect(clientThreads(BOLT, links, feedThreads.slice(0, 2), both, live)).toEqual([])
     expect(recommend(clientThreads(BOLT, links, feedThreads.slice(0, 2), both, live), titleSuggestion('Bolt Staffing', links, live), NOW)).toEqual({ action: 'start', reason: 'no thread yet' })
+  })
+
+  test('a thread reached by sessions of more than one client is never linked by itself, to either; it is still a thread of both for the person to choose', async () => {
+    // a session for Acme 200 hours ago and, after a /clear, one for Bolt today, in the same app thread
+    const one = liveOf(app('local_a', 'One reused thread', '2026-10-12 10:00'), app('local_b', 'Bolt only', '2026-10-08 10:00'))
+    const both = pairsOf({ 'cli-old': 'local_a', 'cli-new': 'local_a', 'cli-b': 'local_b' })
+    const feedThreads = [declared(ACME, 'cli-old', '2026-10-04 03:00'), declared(BOLT, 'cli-new', '2026-10-12 10:00')]
+    expect([...sharedThreads(feedThreads, both)]).toEqual(['local_a'])
+    expect(autoLinkFor(ACME, {}, feedThreads, both, one)).toBeUndefined()
+    expect(autoLinkFor(BOLT, {}, feedThreads, both, one)).toBeUndefined()
+    // Bolt's other thread, which only ever ran Bolt, still links itself
+    const withOther = [...feedThreads, declared(BOLT, 'cli-b', '2026-10-08 10:00')]
+    expect(autoLinkFor(BOLT, {}, withOther, both, one)).toBe('local_b')
+    expect(autoLinkFor(ACME, {}, withOther, both, one)).toBeUndefined()
+    // the row of each client can still show it, for Update
+    expect(clientThreads(ACME, {}, feedThreads, both, one).map(t => t.sid)).toEqual(['local_a'])
+    expect(clientThreads(BOLT, {}, feedThreads, both, one).map(t => t.sid)).toEqual(['local_a'])
+    // two sessions of ONE client in a thread do not make it shared, and a session the app cannot place counts for nothing
+    expect([...sharedThreads([declared(ACME, 'cli-old', '2026-10-04 03:00'), declared(ACME, 'cli-new', '2026-10-12 10:00'), declared(BOLT, 'cli-elsewhere', '2026-10-12 10:00')], both)]).toEqual([])
   })
 
   test('two clients linked to one thread (an older version allowed it): it is the first one\'s', async () => {

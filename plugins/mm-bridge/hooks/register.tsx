@@ -4,7 +4,7 @@ import type { MmNotice, MmQueue } from '../types'
 
 import { MAX_PINS, buildQueue, cleanName, cleanTitle, clearedTitle, clientMarkdown, isUuid, titleFor } from './queue'
 import type { Feed, FeedThread, QueueItem } from './queue'
-import { LABEL, PANE_SENTENCE, autoLinkFor, clientThreads, kickoffText, ownerOf, recommend, rowButtons, rowDetail, rowFor, titleSuggestion } from './threads'
+import { LABEL, PANE_SENTENCE, autoLinkFor, clientThreads, kickoffText, ownerOf, recommend, rowButtons, rowDetail, rowFor, sharedThreads, titleSuggestion } from './threads'
 import type { AppThread, Pairs, Recommendation, Row } from './threads'
 
 // The Massmarket bridge.
@@ -24,8 +24,10 @@ import type { AppThread, Pairs, Recommendation, Row } from './threads'
 // ⛔ CLAUDE CANNOT DO EITHER. The model can call the `mm` tool, and the tool runs the same `runCommand`:
 //    there, and for a /mm command that did not come from the person's own prompt (a message from another
 //    session, a scheduled task, a channel, another plugin), `update` and `start` are refused before
-//    anything is read, called or written.
-// ⛔ A thread is one client's. Update never sends one client's kickoff into a thread linked to another.
+//    anything is read, called or written. The same for `link` in a thread that is already another
+//    client's: only the person moves a thread from one client to another.
+// ⛔ A thread is one client's. Update never sends one client's kickoff into a thread linked to another,
+//    and a thread that ran sessions for more than one client is never linked by itself, to either.
 // ⛔ A press acts on the thread its row showed, or on none. A link, an unlink record and a stamp are
 //    written only after the message went.
 // ⛔ It only touches threads linked to a client, and only unpins a thread it pinned itself.
@@ -36,7 +38,11 @@ import type { AppThread, Pairs, Recommendation, Row } from './threads'
 //    the link is undone once the feed stops listing that thread's session for the client.
 // ⛔ Where the app's thread list is not there (a terminal session, or an answer that is not a list of
 //    threads), nothing about threads is changed and there is nothing for Update to act on.
-// ⛔ Feed text and thread titles are data: ids must be uuids, names and titles are cleaned (./queue.ts).
+// ⛔ A link is never dropped only because its thread is missing from the app's list (the 60 most recent):
+//    the app is asked for that thread by id, and only "no such thread" or "archived" drops it. An empty
+//    list is this thread alone (the list leaves the calling thread out) and drops nothing at all.
+// ⛔ Feed text and thread titles are data: ids must be uuids, names and titles are cleaned (./queue.ts). A
+//    200 that is not a feed is a failed call. The [mm-link] marker is the person's own prompt's alone.
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
@@ -67,15 +73,18 @@ const RECORDS_PER_SYNC = 40
 const SESSION_ID = /^[A-Za-z0-9_-]{1,100}$/
 /** A link the bridge made by itself is undone once its thread is missing from the feed's threads this many syncs in a row. */
 const AUTO_MISSES = 3
+/** Two of those misses count only when they are this far apart: three /mm in a row are one sync, not three. */
+const MISS_GAP_MS = 5 * 60_000
+/** The most threads asked for by id in one sync: linked or pinned threads the app's list (its 60 most recent) left out. */
+const LOOKUPS_PER_SYNC = 10
 /** `[mm-link <project id>]`, counted only at the very start of a prompt. */
 const MARKER = /^\[mm-link ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]/
 /**
  * Where a prompt or a /mm command is the person's own: typed here (`composer`), sent from their phone or
  * the web (`bridge`), or the app's own turn for them, as when it starts a thread from a chip (`sdk`).
+ * ⛔ Nothing else: not another Claude session's message (`peer`), a schedule, a channel or a plugin.
  */
 const PERSON_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge', 'sdk'])
-/** Another Claude session's message: how Update's kickoff arrives in the thread it was sent to. */
-const SESSION_ORIGIN = 'peer'
 
 const NO_THREAD_LIST = 'The app\'s thread list is not available here.'
 const THREAD_GONE = 'That thread is no longer available. The list has been refreshed.'
@@ -100,12 +109,24 @@ type Last = {
 type Verb = 'update' | 'start' | 'drafts'
 /** A link the person made or used: which thread, and when. */
 type Acted = Record<string, { sid: string; at: number }>
-/** A link the bridge made by itself and the person has not acted on: its thread, and how many syncs in a row the feed has not listed it. */
-type Auto = Record<string, { sid: string; miss: number }>
+/**
+ * A link the bridge made by itself and the person has not acted on: its thread, how many syncs in a row
+ * the feed has not listed it, and when the last of those was counted.
+ */
+type Auto = Record<string, { sid: string; miss: number; at?: number }>
 /** What the app's record of a thread said when it was opened: its modified time then, and the session id if it gave one. */
 type Records = Record<string, { m: number; cli?: string }>
-/** One pass over a feed. `listed` is false where the app's thread list could not be had. */
-type Pass = { last: Last; live: Map<string, AppThread>; pairs: Pairs; listed: boolean }
+/**
+ * The app's threads as one sync sees them. `complete` is false for an empty list (the app's list leaves the
+ * calling thread out, so a person with one open thread gets none): this thread is then the whole list, and
+ * ⛔ nothing may be dropped on its word.
+ */
+type Listed = { threads: AppThread[]; complete: boolean }
+/**
+ * One pass over a feed. `listed` is false where the app's thread list could not be had. `unseen` holds the
+ * linked or pinned threads the list left out and the app did not answer for: kept, and not acted on.
+ */
+type Pass = { last: Last; live: Map<string, AppThread>; pairs: Pairs; listed: boolean; unseen: ReadonlySet<string> }
 /** Who ran a /mm command: the person, or anything else (the model through the tool, another session, a schedule, a plugin). */
 type By = 'person' | 'other'
 
@@ -169,29 +190,66 @@ async function instanceId($: EngineInterface): Promise<string> {
   return instanceCache
 }
 
+/** A thread as the app answered it, kept to the fields the bridge uses; null for anything that is not an open thread. */
+function asThread(raw: unknown): AppThread | null {
+  const t = raw as Partial<AppThread> | null | undefined
+  if (!t || typeof t !== 'object' || typeof t.sessionId !== 'string' || !t.sessionId || t.isArchived) return null
+  return {
+    sessionId: t.sessionId,
+    title: typeof t.title === 'string' ? t.title : '',
+    pinned: Boolean(t.pinned),
+    isArchived: false,
+    ...(typeof t.lastActivityAt === 'string' ? { lastActivityAt: t.lastActivityAt } : {}),
+  }
+}
+
 /**
  * The app's open threads, or null where the list cannot be had: no app to ask (a terminal session), a call
- * that failed, or an answer that is not a list with threads in it. ⛔ null is "unknown", never "none": an
- * empty or odd answer must not read as "every thread is gone" and drop every link.
+ * that failed, or an answer that is not a list. ⛔ null is "unknown", never "none".
+ *
+ * The app's list leaves the calling thread out, so a person with one open thread gets an empty list. An
+ * empty list from a call that worked, in a session that knows its own thread, is a list of one: this
+ * thread may link, pin and name itself. It is marked not `complete`: ⛔ an empty answer never drops a
+ * link, a pin, a title or a record, because it cannot be told from the app answering nothing by mistake.
  */
-async function sessions($: EngineInterface): Promise<AppThread[] | null> {
-  return desktopOnly<AppThread[] | null>(async () => {
+async function sessions($: EngineInterface): Promise<Listed | null> {
+  return desktopOnly<Listed | null>(async () => {
     const others = await mcpJson($, 'ccd_session_mgmt', 'list_sessions', { limit: 60 })
-    if (!Array.isArray(others) || others.length === 0) return null
-    const me = await mcpJson($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' })
+    if (!Array.isArray(others)) return null
+    const me = asThread(await mcpJson($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' }))
+    if (others.length === 0) return me ? { threads: [me], complete: false } : null
     const threads: AppThread[] = []
-    for (const raw of [me, ...others] as Array<Partial<AppThread> | null | undefined>) {
-      if (!raw || typeof raw !== 'object' || typeof raw.sessionId !== 'string' || !raw.sessionId || raw.isArchived) continue
-      threads.push({
-        sessionId: raw.sessionId,
-        title: typeof raw.title === 'string' ? raw.title : '',
-        pinned: Boolean(raw.pinned),
-        isArchived: false,
-        ...(typeof raw.lastActivityAt === 'string' ? { lastActivityAt: raw.lastActivityAt } : {}),
-      })
+    for (const raw of [me, ...others]) {
+      const t = asThread(raw)
+      if (t && !threads.some(x => x.sessionId === t.sessionId)) threads.push(t)
     }
-    return threads
+    return { threads, complete: true }
   }, null)
+}
+
+/**
+ * One thread, asked for by id: for a linked or pinned thread the app's list left out (the list holds its 60
+ * most recent). The thread when it is open; 'gone' ONLY when the app says there is no such thread or shows
+ * it archived; 'unknown' for any error, any other answer, or no app to ask. ⛔ Only 'gone' may drop a link.
+ */
+async function lookup($: EngineInterface, sid: string): Promise<AppThread | 'gone' | 'unknown'> {
+  const noSuchThread = (text: string) => text.includes(sid) && /\bnot found\b/i.test(text)
+  try {
+    const r = (await $.mcp.call('ccd_session_mgmt', 'get_session', { session_id: sid })) as Mcp
+    const text = textOf(r)
+    if (r.isError) return noSuchThread(text) ? 'gone' : 'unknown'
+    let raw: Partial<AppThread> | null
+    try {
+      raw = JSON.parse(text.slice(text.search(/[[{]/))) as Partial<AppThread> | null
+    } catch {
+      return 'unknown' // an answer that is not a thread says nothing about this one
+    }
+    if (!raw || typeof raw !== 'object' || raw.sessionId !== sid) return 'unknown'
+    return raw.isArchived ? 'gone' : (asThread(raw) ?? 'unknown')
+  } catch (err) {
+    // the call itself was refused: "no such thread" only when that is what the app said, about this thread
+    return noSuchThread(errorText(err)) ? 'gone' : 'unknown'
+  }
 }
 
 /** Every project id a feed carries, uuids only: what an [mm-link] marker may name. */
@@ -214,8 +272,13 @@ function feedThreadsOf(feed: Feed): FeedThread[] {
 
 async function fetchFeed($: EngineInterface): Promise<Feed> {
   const r = await $.http.fetch(`${EXT}/closeout?mail_hours=96`, { headers: { Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER } })
-  if (!r.ok) throw new Error(`closeout HTTP ${r.status}: ${short(r.text, 160)}`)
-  return JSON.parse(r.text) as Feed
+  const failed = () => new Error(`closeout HTTP ${r.status}: ${short(r.text, 160)}`)
+  if (!r.ok) throw failed()
+  const feed = JSON.parse(r.text) as Feed | null
+  // ⛔ A 200 that is not a feed (neither `tickets` nor `mail` in it) is a failed call, not "nobody needs
+  // you": read as an empty feed it would take every pin off and rename every thread "clear".
+  if (!feed || typeof feed !== 'object' || !('tickets' in feed || 'mail' in feed)) throw failed()
+  return feed
 }
 
 async function storeGet<T>($: EngineInterface, key: string, fallback: T): Promise<T> {
@@ -404,37 +467,56 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   const member = memberText(feed.member)
   const projects = feedProjects(feed)
   const listed = await sessions($)
-  const live = new Map((listed ?? []).map(s => [s.sessionId, s] as const))
+  const live = new Map((listed?.threads ?? []).map(s => [s.sessionId, s] as const))
   const feedThreads = feedThreadsOf(feed)
+  const before = await storeGet<Last | null>($, 'mm.last', null)
+  /** The recommendation the last sync gave a client, in its words and without its thread: for a client whose thread cannot be seen now. */
+  const carried = (it: QueueItem): Recommendation => {
+    const was = before?.recs?.[it.projectId]
+    return was && (was.action === 'update' || was.action === 'start') && typeof was.reason === 'string' ? { action: was.action, reason: was.reason } : recommend([], undefined, now)
+  }
 
   // No thread list here (a terminal session, or an answer from the app that is not a list of threads): the
   // list of clients is shown, each with the recommendation the last sync in the app gave it, and nothing
   // about threads is touched. Links, pins, unlink records and stored titles stay exactly as they are.
   // ⛔ No recommendation carries a thread: with no list there is nothing for Update to act on.
   if (listed === null) {
-    const before = await storeGet<Last | null>($, 'mm.last', null)
     const recs: Record<string, Recommendation> = {}
-    for (const it of items) {
-      const was = before?.recs?.[it.projectId]
-      recs[it.projectId] = was && (was.action === 'update' || was.action === 'start') && typeof was.reason === 'string' ? { action: was.action, reason: was.reason } : recommend([], undefined, now)
-    }
+    for (const it of items) recs[it.projectId] = carried(it)
     const last: Last = { at: now, member, items, pinned: before?.pinned ?? 0, recs, projects }
     await $.store.set('mm.last', last)
     await showQueue($, member, items, items.map(it => rowFor(it, recs[it.projectId] as Recommendation, now)), last.pinned, now)
-    return { last, live, pairs: known ?? {}, listed: false }
+    return { last, live, pairs: known ?? {}, listed: false, unseen: new Set() }
   }
 
   const links = await storeGet<Record<string, string>>($, 'mm.links', {})
   const pins = await storeGet<Record<string, Pin>>($, 'mm.pins', {})
-  const pairs = known ?? (await allPairs($, now, live, feedThreads))
   const unlinked = await storeGet<Record<string, number>>($, 'mm.unlinked', {})
   const titles = await storeGet<Record<string, string>>($, 'mm.titles', {})
   const acted = await storeGet<Acted>($, 'mm.acted', {})
   const auto = await storeGet<Auto>($, 'mm.auto', {})
 
+  // ⛔ A thread missing from the app's list is not a thread that is gone: the list holds the 60 most
+  // recent. Each linked or pinned thread the list left out is asked for by id. One the app shows open is a
+  // thread like any other. One the app says does not exist, or shows archived, is `gone`. Anything else (an
+  // error, no answer, more of them than one sync asks for) is `unseen`: its link, pin record and title are
+  // kept exactly as they are, and nothing is done to it.
+  // ⛔ And an empty list never drops anything at all, whatever a lookup says.
+  const gone = new Set<string>()
+  const unseen = new Set<string>()
+  const missing = [...new Set([...Object.values(links), ...Object.keys(pins)])].filter(sid => !live.has(sid))
+  for (const [n, sid] of missing.entries()) {
+    const found = n < LOOKUPS_PER_SYNC ? await lookup($, sid) : 'unknown'
+    if (found === 'unknown') unseen.add(sid)
+    else if (found !== 'gone') live.set(sid, found)
+    else if (listed.complete) gone.add(sid)
+    else unseen.add(sid)
+  }
+  const pairs = known ?? (await allPairs($, now, live, feedThreads))
+
   // A link to a thread that is gone, or that the person unlinked (a sync in another thread may have written
   // an older copy of the links back after the unlink), is dropped.
-  for (const [pid, sid] of Object.entries(links)) if (!live.has(sid) || sid in unlinked) delete links[pid]
+  for (const [pid, sid] of Object.entries(links)) if (gone.has(sid) || sid in unlinked) delete links[pid]
   // ⛔ A thread is one client's. Where two clients are linked to one thread (an older version allowed it),
   // the client it is pinned for keeps it, else the first; the other link is dropped.
   const owners = new Map<string, string>()
@@ -445,16 +527,23 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // (An entry of any other shape is dropped with them.)
   for (const [pid, a] of Object.entries(auto)) if (!a || typeof a.sid !== 'string' || links[pid] !== a.sid || acted[pid]?.sid === a.sid) delete auto[pid]
   // ⛔ And it is undone when it stops being true: its thread's session missing from the feed's threads for
-  // that client AUTO_MISSES syncs in a row. Counted once per feed, and only when the feed's list has
-  // entries: a feed with no `threads`, or an empty one, says nothing either way and changes no count.
+  // that client, or the thread now reached by sessions of more than one client, AUTO_MISSES syncs in a row.
+  // Counted once per feed, and only when the feed's list has entries: a feed with no `threads`, or an
+  // empty one, says nothing either way and changes no count. A miss counts only when the one before it is
+  // MISS_GAP_MS old: three /mm in a row are one sync. A thread that cannot be seen is left as it is.
   const undone: string[] = []
   if (!known && feedThreads.length) {
+    const shared = sharedThreads(feedThreads, pairs)
     for (const [pid, a] of Object.entries(auto)) {
-      if (feedThreads.some(t => t.project_id === pid && pairs[t.session_id]?.app === a.sid)) {
+      if (unseen.has(a.sid)) continue
+      if (!shared.has(a.sid) && feedThreads.some(t => t.project_id === pid && pairs[t.session_id]?.app === a.sid)) {
         a.miss = 0
+        delete a.at
         continue
       }
+      if (typeof a.at === 'number' && now - a.at < MISS_GAP_MS) continue
       a.miss = (Number(a.miss) || 0) + 1
+      a.at = now
       if (a.miss < AUTO_MISSES) continue
       delete auto[pid]
       delete links[pid]
@@ -462,7 +551,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     }
   }
 
-  // R1: a client with no thread takes the most recently active thread whose session declared it.
+  // R1: a client with no thread takes the most recently active thread whose session declared it, unless
+  // that thread ran sessions for more than one client (autoLinkFor).
   for (const it of items) {
     const sid = autoLinkFor(it.projectId, links, feedThreads, pairs, live, unlinked)
     if (!sid) continue
@@ -476,14 +566,15 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const a = acted[it.projectId]
     return Boolean(a && a.sid === links[it.projectId] && now - a.at < ACTED_MS)
   }
+  // (A linked thread that cannot be seen takes no place: nothing can be done to it in this sync.)
   const want = new Map<string, QueueItem>()
   for (const it of items) {
     const sid = links[it.projectId]
-    if (sid && byHand(it) && !want.has(sid)) want.set(sid, it)
+    if (sid && live.has(sid) && byHand(it) && !want.has(sid)) want.set(sid, it)
   }
   for (const it of items) {
     const sid = links[it.projectId]
-    if (sid && !want.has(sid) && want.size < MAX_PINS) want.set(sid, it)
+    if (sid && live.has(sid) && !want.has(sid) && want.size < MAX_PINS) want.set(sid, it)
   }
 
   let writes = 0
@@ -533,10 +624,15 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   }
 
   // A thread we were tracking that no longer needs the person: unpin it if we pinned it, and say so in its name.
+  // ⛔ The record of a thread that cannot be seen is kept: it is what lets a later sync take our pin off.
   for (const [sid, pin] of Object.entries(pins)) {
     if (want.has(sid)) continue
     const s = live.get(sid)
-    if (s && writes < MAX_WRITES) {
+    if (!s) {
+      if (gone.has(sid)) delete pins[sid]
+      continue
+    }
+    if (writes < MAX_WRITES) {
       if (pin.byUs && s.pinned) {
         await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: sid, pinned: false })
         s.pinned = false
@@ -555,8 +651,10 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   const recs: Record<string, Recommendation> = {}
   const rows: Row[] = []
   for (const it of items) {
+    const linked = links[it.projectId]
     const threads = clientThreads(it.projectId, links, feedThreads, pairs, live)
-    const rec = recommend(threads, threads.length ? undefined : titleSuggestion(it.client, links, live), now)
+    // A client whose linked thread cannot be seen keeps the last recommendation's words, and no thread to act on.
+    const rec = linked && unseen.has(linked) ? carried(it) : recommend(threads, threads.length ? undefined : titleSuggestion(it.client, links, live), now)
     recs[it.projectId] = rec
     rows.push(rowFor(it, rec, now))
   }
@@ -568,7 +666,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   await $.store.set('mm.auto', auto)
   await $.store.set('mm.last', last)
   await showQueue($, member, items, rows, want.size, now)
-  return { last, live, pairs, listed: true }
+  return { last, live, pairs, listed: true, unseen }
 }
 
 /** Puts the list in the Needs-you pane and on the status line. */
@@ -710,6 +808,17 @@ function severalClients(name: string, found: readonly QueueItem[]): string {
   return `More than one client matches "${cleanName(name)}": ${names.join(', ')}. Type more of the name.`
 }
 
+/**
+ * The name of the client a thread is linked to, for a sentence: from the queue, else from the thread's pin
+ * record, else from the name the bridge itself gave the thread. '' when none of those has it.
+ */
+function ownerName(projectId: string, items: readonly QueueItem[], pin: Pin | undefined, title: string | undefined): string {
+  const inQueue = items.find(i => i.projectId === projectId)?.client
+  if (inQueue) return inQueue
+  if (pin?.projectId === projectId && cleanName(pin.client)) return cleanName(pin.client)
+  return title && isOurTitle(title) ? cleanName(title.replace(/^\S+\s/u, '').split(' · ')[0]) : ''
+}
+
 // ---------------------------------------------------------------- what a button or a command does
 // ⛔ Everything below this line runs only because the person pressed a button or typed a command.
 // ⛔ startThread and updateThread are never reached for Claude: see `runCommand`.
@@ -746,13 +855,15 @@ async function updateThread($: EngineInterface, feed: Feed, it: QueueItem, pass:
   if (!pass.listed) return NO_THREAD_LIST
   const target = pass.last.recs[it.projectId]?.target
   const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+  // The same for a client whose linked thread the app's list left out and the app did not answer for.
+  const linked = links[it.projectId]
+  if ((linked && pass.unseen.has(linked)) || (!how.typed && how.shown && pass.unseen.has(how.shown))) return NO_THREAD_LIST
   /** The refusal for a thread that is another client's, or null when it is free or this client's. */
   const anothers = async (sid: string): Promise<string | null> => {
     const owner = ownerOf(sid, links)
     if (owner === undefined || owner === it.projectId) return null
-    const pin = (await storeGet<Record<string, Pin>>($, 'mm.pins', {}))[sid]
-    const other = pass.last.items.find(i => i.projectId === owner)?.client ?? cleanName(pin?.projectId === owner ? pin.client : '')
-    // a client that no longer needs the person and has no pin record has no name here to give
+    const other = ownerName(owner, pass.last.items, (await storeGet<Record<string, Pin>>($, 'mm.pins', {}))[sid], pass.live.get(sid)?.title)
+    // a client whose name this session cannot read anywhere has no name here to give
     return other ? `That thread belongs to ${other}. Use Start thread for ${it.client}.` : THREAD_GONE
   }
   if (how.typed) {
@@ -907,10 +1018,25 @@ async function runCommand($: EngineInterface, args: string, by: By): Promise<str
   let named: QueueItem | undefined
   if (verb === 'link' || verb === 'start' || verb === 'update') {
     // The name is settled before anything is touched: no client, or more than one, does nothing at all.
-    const found = clientsNamed(arg, buildQueue(feed, await $.clock.now()))
+    const queue = buildQueue(feed, await $.clock.now())
+    const found = clientsNamed(arg, queue)
     if (found.length > 1) return severalClients(arg, found)
     named = found[0]
     if (!named) return noClient(arg)
+    // ⛔ Only the person moves a thread from one client to another. For anyone else (Claude through the
+    // tool, a /mm that is not the person's) `link` in a thread that is already another client's is refused
+    // here, before anything is written. A thread that is nobody's may still be linked.
+    if (verb === 'link' && by !== 'person') {
+      const me = await selfId($)
+      const owner = me && !(me in (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))) ? ownerOf(me, await storeGet<Record<string, string>>($, 'mm.links', {})) : undefined
+      if (owner !== undefined && owner !== named.projectId) {
+        const pin = (await storeGet<Record<string, Pin>>($, 'mm.pins', {}))[me]
+        const here = await desktopOnly(async () => asThread(await mcpJson($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' })), null)
+        // the client's name wherever it can still be read; failing all of that, the sentence names no one
+        const other = ownerName(owner, queue, pin, here?.title) || 'another client'
+        return `This thread is ${other}'s. Only the person can move it: they type /mm link ${named.client}.`
+      }
+    }
   }
   const pass = await reconcile($, feed)
   const { last, pairs } = pass
@@ -940,14 +1066,15 @@ async function runCommand($: EngineInterface, args: string, by: By): Promise<str
  * A prompt that begins `[mm-link <project id>]` links this thread to that client: a chip the person
  * started opens its new thread with exactly that.
  * ⛔ Only at the very start of the prompt, only for a project the person's last feed carried, and only
- * when the prompt is the person's own or another Claude session's message. A channel, a scheduled task, a
- * task notification or anything else is ignored, as is a marker anywhere else in the text.
+ * when the prompt is the person's own (`composer`, `bridge`, `sdk`). Another Claude session's message, a
+ * channel, a scheduled task, a task notification or anything else is ignored, as is a marker anywhere
+ * else in the text. (Update's kickoff needs no marker: the press that sent it wrote the link.)
  * ⛔ It never forgets an unlink record and never stamps: a thread the person unlinked stays unlinked, and a
  * thread that is another client's stays theirs.
  */
 async function linkFromMarker($: EngineInterface, text: string, origin: string | undefined): Promise<void> {
   const projectId = MARKER.exec(text)?.[1]
-  if (!projectId || !origin || !(PERSON_ORIGINS.has(origin) || origin === SESSION_ORIGIN)) return
+  if (!projectId || !origin || !PERSON_ORIGINS.has(origin)) return
   const last = await storeGet<Last | null>($, 'mm.last', null)
   const inFeed = Array.isArray(last?.projects) ? last.projects : (last?.items ?? []).map(i => i.projectId)
   if (!inFeed.includes(projectId)) return

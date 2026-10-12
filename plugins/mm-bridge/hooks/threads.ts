@@ -117,9 +117,28 @@ function matchedThreads(
 }
 
 /**
+ * The app threads reached by sessions of more than one client: one thread that ran a session for one
+ * client and, after a /clear or a resume, a session for another. ⛔ Such a thread is nobody's by itself: it
+ * is never linked automatically, to either. The person can still press Update on a row that shows it, or
+ * type /mm link in it.
+ */
+export function sharedThreads(feedThreads: readonly FeedThread[], pairs: Pairs): Set<string> {
+  const clients = new Map<string, Set<string>>()
+  for (const t of feedThreads) {
+    const app = pairs[t.session_id]?.app
+    if (!app) continue
+    const of = clients.get(app) ?? new Set<string>()
+    of.add(t.project_id)
+    clients.set(app, of)
+  }
+  return new Set([...clients].filter(([, of]) => of.size > 1).map(([app]) => app))
+}
+
+/**
  * R1: the thread a client links itself to when it has none: the most recently active thread whose Claude
  * Code session declared that client. A thread already linked to another client is left alone, a thread the
- * person unlinked is never linked again by itself (`unlinked`), and a title match is never enough.
+ * person unlinked is never linked again by itself (`unlinked`), a thread that ran sessions for more than
+ * one client is never linked by itself (`sharedThreads`), and a title match is never enough.
  */
 export function autoLinkFor(
   projectId: string,
@@ -131,7 +150,8 @@ export function autoLinkFor(
 ): string | undefined {
   if (links[projectId]) return undefined
   const taken = new Set(Object.values(links))
-  return matchedThreads(projectId, links, feedThreads, pairs, live).find(t => !taken.has(t.sid) && !(t.sid in unlinked))?.sid
+  const shared = sharedThreads(feedThreads, pairs)
+  return matchedThreads(projectId, links, feedThreads, pairs, live).find(t => !taken.has(t.sid) && !(t.sid in unlinked) && !shared.has(t.sid))?.sid
 }
 
 /**
