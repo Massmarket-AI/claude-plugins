@@ -12,6 +12,8 @@ export type MmRow = {
   reason: string
   /** False when the client has no thread of any kind: there is nothing for Update to act on. */
   canUpdate: boolean
+  /** The app thread Update acts on, as this row was drawn. A press acts on this thread or on none. */
+  target?: string
 }
 
 export type MmQueue = { header: string; rows: MmRow[]; note: string }

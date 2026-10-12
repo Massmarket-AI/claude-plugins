@@ -10,11 +10,15 @@
 //         the app's threads through the pairs each session records about itself
 //   (iii) a thread whose title merely looks like the client
 // (i) and (ii) link themselves. (iii) never does: it is only offered on the row as a suggestion.
+//
+// ⛔ A thread is one client's. A thread linked to one client is never another client's thread, whatever
+// session or title matched it: it is not linked to a second, and it is never the thread Update acts on
+// for a second (`ownerOf`).
 
 import { businessMsBetween } from './business-time'
 import type { MmRow } from '../types'
 
-import { titleFor, titleNames } from './queue'
+import { cleanTitle, titleFor, titleNames } from './queue'
 import type { FeedThread, QueueItem } from './queue'
 
 const HOUR = 3_600_000
@@ -23,6 +27,8 @@ const TZ = 'America/New_York'
 
 /** A thread counts as current for a client when its last activity is within this much business time. */
 export const RECENT_THREAD_MS = 7 * DAY
+/** Last activity further back than this is old, decided without counting business time (no calendar walk for a date years back). */
+export const OLD_THREAD_MS = 60 * DAY
 
 /** A thread as the desktop app lists it. */
 export type AppThread = { sessionId: string; title?: string; pinned?: boolean; isArchived?: boolean; lastActivityAt?: string }
@@ -40,6 +46,12 @@ export type Recommendation = {
   reason: string
   /** The thread Update acts on. Absent when the client has no thread of any kind. */
   target?: Target
+}
+
+/** The client a thread is linked to: the first project whose link is that thread. */
+export function ownerOf(sid: string, links: Readonly<Record<string, string>>): string | undefined {
+  for (const [projectId, linked] of Object.entries(links)) if (linked === sid) return projectId
+  return undefined
 }
 
 const ms = (iso: string | null | undefined): number => {
@@ -79,15 +91,25 @@ export function titleLooksLike(title: string, client: string): boolean {
 /**
  * The feed's threads for one client that are open in the app now, most recently active first.
  * A session the app does not know (another computer, a headless run, opened before this plugin) is skipped.
+ * ⛔ So is a thread linked to a different client: one app thread can have run sessions for two clients (a
+ * /clear, a resume), and it stays the client's it is linked to.
  * "Last activity" is the app's own for the thread; the feed's time stands in only when the app gives none.
  */
-function matchedThreads(projectId: string, feedThreads: readonly FeedThread[], pairs: Pairs, live: ReadonlyMap<string, AppThread>): ClientThread[] {
+function matchedThreads(
+  projectId: string,
+  links: Readonly<Record<string, string>>,
+  feedThreads: readonly FeedThread[],
+  pairs: Pairs,
+  live: ReadonlyMap<string, AppThread>,
+): ClientThread[] {
   const out: ClientThread[] = []
   for (const t of feedThreads) {
     if (t.project_id !== projectId) continue
     const app = pairs[t.session_id]?.app
     const s = app ? live.get(app) : undefined
     if (!s || s.isArchived || out.some(o => o.sid === s.sessionId)) continue
+    const owner = ownerOf(s.sessionId, links)
+    if (owner !== undefined && owner !== projectId) continue
     const at = ms(s.lastActivityAt)
     out.push({ sid: s.sessionId, title: s.title ?? '', lastAt: Number.isFinite(at) ? at : ms(t.last_activity_at), source: 'matched' })
   }
@@ -109,10 +131,13 @@ export function autoLinkFor(
 ): string | undefined {
   if (links[projectId]) return undefined
   const taken = new Set(Object.values(links))
-  return matchedThreads(projectId, feedThreads, pairs, live).find(t => !taken.has(t.sid) && !(t.sid in unlinked))?.sid
+  return matchedThreads(projectId, links, feedThreads, pairs, live).find(t => !taken.has(t.sid) && !(t.sid in unlinked))?.sid
 }
 
-/** A client's known threads: the linked one and every matched one, each once, newest first. */
+/**
+ * A client's known threads: the linked one and every matched one, each once, newest first.
+ * ⛔ Never a thread linked to a different client.
+ */
 export function clientThreads(
   projectId: string,
   links: Readonly<Record<string, string>>,
@@ -120,9 +145,9 @@ export function clientThreads(
   pairs: Pairs,
   live: ReadonlyMap<string, AppThread>,
 ): ClientThread[] {
-  const out = matchedThreads(projectId, feedThreads, pairs, live)
+  const out = matchedThreads(projectId, links, feedThreads, pairs, live)
   const linked = links[projectId] ? live.get(links[projectId] as string) : undefined
-  if (linked && !linked.isArchived) {
+  if (linked && !linked.isArchived && ownerOf(linked.sessionId, links) === projectId) {
     const same = out.find(t => t.sid === linked.sessionId)
     if (same) same.source = 'linked'
     else out.push({ sid: linked.sessionId, title: linked.title ?? '', lastAt: ms(linked.lastActivityAt), source: 'linked' })
@@ -152,11 +177,14 @@ export function recommend(threads: readonly ClientThread[], suggestion: Target |
   const newest = [...threads].sort((a, b) => b.lastAt - a.lastAt)[0]
   if (newest) {
     const target = { sid: newest.sid, title: newest.title, suggested: false }
-    return businessMsBetween(newest.lastAt, now) <= RECENT_THREAD_MS
+    // More than 60 days back is old whatever the weekends were: business time is only counted inside that.
+    const current = now - newest.lastAt <= OLD_THREAD_MS && businessMsBetween(newest.lastAt, now) <= RECENT_THREAD_MS
+    return current
       ? { action: 'update', reason: `thread from ${weekdayMonthDay(newest.lastAt)} exists`, target }
       : { action: 'start', reason: `last thread is from ${monthDay(newest.lastAt)}`, target }
   }
-  if (suggestion) return { action: 'update', reason: `"${suggestion.title}" looks like this client`, target: suggestion }
+  // the title is the thread's own text: cleaned and cut before it is shown
+  if (suggestion) return { action: 'update', reason: `"${cleanTitle(suggestion.title)}" looks like this client`, target: suggestion }
   return { action: 'start', reason: 'no thread yet' }
 }
 
@@ -195,7 +223,12 @@ export const PANE_SENTENCE =
 export type Row = MmRow
 
 export function rowFor(it: QueueItem, rec: Recommendation, now: number): Row {
-  return { projectId: it.projectId, client: it.client, title: titleFor(it, now), waiting: waitingText(it), action: rec.action, reason: rec.reason, canUpdate: Boolean(rec.target) }
+  return {
+    projectId: it.projectId, client: it.client, title: titleFor(it, now), waiting: waitingText(it), action: rec.action, reason: rec.reason,
+    canUpdate: Boolean(rec.target),
+    // the thread this row's Update button acts on: a press acts on this one or on none
+    ...(rec.target ? { target: rec.target.sid } : {}),
+  }
 }
 
 /** The buttons on a row: the recommended action first, the other one second, then Drafts. */
