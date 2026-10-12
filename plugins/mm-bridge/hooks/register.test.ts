@@ -42,9 +42,10 @@ const feed = (over: Partial<Feed> = {}): Feed => ({
   ...over,
 })
 
-function world(on: On, opts: { feed?: Feed; threads?: Thread[]; store?: Record<string, unknown>; self?: Thread; sendFails?: string } = {}) {
+function world(on: On, opts: { feed?: Feed; threads?: Thread[]; store?: Record<string, unknown>; self?: Thread; sendFails?: string; terminal?: boolean; files?: Record<string, { text: string; mtimeMs: number }>; env?: Record<string, string> } = {}) {
   const clock = mock.clock(on, { now: NOW })
-  mock.env(on, { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', HOME: '/home/someone' })
+  // A terminal session has no desktop app behind it: its session tools are not there to call.
+  mock.env(on, opts.env ?? { CLAUDE_CODE_ENTRYPOINT: opts.terminal ? 'cli' : 'claude-desktop', HOME: '/home/someone' })
   const stored: Record<string, unknown> = JSON.parse(JSON.stringify(opts.store ?? {}))
   on('store.get', (_$, e) => ({ value: stored[e.key] === undefined ? undefined : JSON.parse(JSON.stringify(stored[e.key])) }))
   on('store.set', (_$, e) => {
@@ -64,6 +65,7 @@ function world(on: On, opts: { feed?: Feed; threads?: Thread[]; store?: Record<s
 
   const text = (value: unknown) => ({ value: { content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value) }], isError: false } })
   on('mcp.call', (_$, e) => {
+    if (opts.terminal && e.server.startsWith('ccd_')) return { deny: `MCP server "${e.server}" is not connected` }
     calls.push({ server: e.server, tool: e.tool, args: e.args })
     const id = e.args.session_id === 'self' ? self.sessionId : String(e.args.session_id ?? '')
     const t = threads.get(id)
@@ -84,8 +86,38 @@ function world(on: On, opts: { feed?: Feed; threads?: Thread[]; store?: Record<s
     const body = e.url.includes('/reply-package') ? { markdown: '## Acme Roofing\n\n1. What the client sent' } : theFeed
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
-  on('fs.read', () => ({ value: 'fixture-token-not-a-real-one' }))
-  on('fs.write', () => ({ value: undefined }))
+  // A pretend disk: the tracker token, and whatever record files a test puts under the app's data folder.
+  const files = opts.files ?? {}
+  const reads: string[] = []
+  const lists: string[] = []
+  const written: Array<{ path: string; text: string }> = []
+  // These tests run on a POSIX host, where the engine reads `C:\\Users\\...` as a relative path and puts the
+  // working directory in front of it. On Windows it is absolute as written, so the pretend disk drops that.
+  const asGiven = (path: string) => path.replace(/^.*\/(?=[A-Za-z]:\\)/, '')
+  on('fs.read', (_$, e) => {
+    if (e.path.endsWith('/.claude/mm-hooks/token')) return { value: 'fixture-token-not-a-real-one' }
+    const path = asGiven(e.path)
+    reads.push(path)
+    const file = files[path]
+    return file ? { value: file.text } : { deny: `ENOENT: no such file or directory, open '${path}'` }
+  })
+  on('fs.list', (_$, e) => {
+    const dir = asGiven(e.path)
+    lists.push(dir)
+    const sep = dir.includes('\\') ? '\\' : '/'
+    const under = dir + sep
+    const entries = new Map<string, { name: string; kind: 'file' | 'dir' | 'other'; size: number; mtimeMs: number; isLink: boolean }>()
+    for (const [path, file] of Object.entries(files)) {
+      if (!path.startsWith(under)) continue
+      const [name = '', ...deeper] = path.slice(under.length).split(sep)
+      entries.set(name, deeper.length ? { name, kind: 'dir', size: 0, mtimeMs: 0, isLink: false } : { name, kind: 'file', size: file.text.length, mtimeMs: file.mtimeMs, isLink: false })
+    }
+    return entries.size ? { value: [...entries.values()] } : { deny: `ENOENT: no such file or directory, scandir '${dir}'` }
+  })
+  on('fs.write', (_$, e) => {
+    written.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
   on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('session.id', () => ({ value: SELF_CLI }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
@@ -114,7 +146,7 @@ function world(on: On, opts: { feed?: Feed; threads?: Thread[]; store?: Record<s
   /** What a sync must never call: a message into a thread, or a chip. */
   const acted = () => calls.filter(c => c.tool === 'send_message' || c.tool === 'spawn_task')
   return {
-    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted,
+    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, reads, lists, written,
     /** The app calls that change a thread: a rename, a pin, a message, a chip. */
     writes: () => calls.filter(c => !['get_session', 'list_sessions'].includes(c.tool)).map(c => [c.tool, c.args.session_id ?? '', c.args.title ?? c.args.pinned ?? ''].join(' | ')),
     setFeed: (f: Feed) => {
@@ -380,7 +412,10 @@ describe('R3: the buttons on each row', () => {
     expect(w.prompts).toEqual([
       { text: `New since this thread last worked on this client: drafts ready.\n${ACME_KICKOFF}`, origin: { kind: 'plugin', name: 'mm-bridge', asUser: true } },
     ])
-    expect(await lines(ui)).toContain(`Sent to Acme Roofing's thread: open "${ACME_TITLE}" under Pinned.`)
+    expect(await lines(ui)).toContain('Picking up Acme Roofing in this thread.')
+    expect(w.toasts).toEqual(['Picking up Acme Roofing in this thread.'])
+    // linked, pinned and named like any other Update
+    expect(w.threads.get(SELF)).toMatchObject({ title: ACME_TITLE, pinned: true })
     await ui.unmount()
   })
 
@@ -394,25 +429,55 @@ describe('R3: the buttons on each row', () => {
     await ui.unmount()
   })
 
-  test('Update thread pins the pressed client\'s thread even when eight others are ahead of it', async ($, on) => {
+  test('a thread the person acted on stays pinned: nine clients, Update on the ninth, and the cap unpins a thread that linked itself instead', async ($, on) => {
+    // Nine clients, each with a thread that links itself. Client n is due n hours from now, so the ninth is last in line.
     const ids = Array.from({ length: 9 }, (_, i) => `4444444${i}-4444-4444-4444-444444444444`)
     const w = world(on, {
       feed: feed({
         drafts: [],
         mail: [],
         tickets: { due_today: ids.map((id, i) => ({ ticket_id: `t${i}`, project_id: id, project_name: `Client ${i}`, title: 'Do it', due_at: new Date(NOW + (i + 1) * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME })) },
+        threads: ids.map((id, i) => declared(id, `cli-${i}`, 10 + i)),
       }),
       threads: ids.map((_, i) => thread(`local_${i}`, `Thread ${i}`, 10 + i)),
-      store: { 'mm.links': Object.fromEntries(ids.map((id, i) => [id, `local_${i}`])) },
+      store: { 'mm.threads': Object.fromEntries(ids.map((_, i) => [`cli-${i}`, { app: `local_${i}`, at: NOW }])) },
     })
+    const pinned = () => ids.map((_, i) => (w.threads.get(`local_${i}`)?.pinned ? i : -1)).filter(i => i >= 0)
+
     expect(await mm($, '')).toBe('9 clients need you; 8 threads pinned. The list is in the side pane.')
+    expect(Object.keys(w.stored['mm.links'] as object)).toHaveLength(9)
+    expect(pinned()).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
     expect(w.threads.get('local_8')).toMatchObject({ title: 'Thread 8', pinned: false })
+
     const ui = await pane($)
     expect((await lines(ui))[0]).toBe('Needs you now (9, the first 8 pin)')
     await ui.press({ key: `update:${ids[8]}` })
+    // the ninth is pinned and named; the eighth, which only linked itself, gave up its place
+    expect(pinned()).toEqual([0, 1, 2, 3, 4, 5, 6, 8])
     expect(w.threads.get('local_8')).toMatchObject({ title: '🔴 Client 8 · task due 8 PM', pinned: true })
     expect(w.acted().map(c => c.args.session_id)).toEqual(['local_8'])
+    expect(w.stored['mm.acted']).toEqual({ [ids[8] as string]: { sid: 'local_8', at: NOW } })
     await ui.unmount()
+
+    // the next sync keeps it that way
+    await w.clock.advance(6 * 60_000)
+    expect(await mm($, '')).toBe('9 clients need you; 8 threads pinned. The list is in the side pane.')
+    expect(pinned()).toEqual([0, 1, 2, 3, 4, 5, 6, 8])
+    // still its own name on the eighth: the bridge unpinned it, it did not unlink it
+    expect((w.stored['mm.links'] as Record<string, string>)[ids[7] as string]).toBe('local_7')
+
+    // a day later the press no longer holds the place: the cap goes back to the soonest eight
+    await w.clock.advance(24 * HOUR)
+    await mm($, '')
+    expect(pinned()).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
+  })
+
+  test('/mm link stamps this thread the same way, and a chip the person started stamps the thread it opens', async ($, on) => {
+    const w = world(on)
+    expect(await mm($, 'link Bolt Staffing')).toBe('This thread is now Bolt Staffing\'s. Showing Bolt Staffing in the side pane.')
+    expect(w.stored['mm.acted']).toEqual({ [BOLT]: { sid: SELF, at: NOW } })
+    await $.prompt.submit({ text: ACME_KICKOFF, wait: false, origin: { kind: 'composer' } })
+    expect(w.stored['mm.acted']).toEqual({ [BOLT]: { sid: SELF, at: NOW }, [ACME]: { sid: SELF, at: NOW } })
   })
 
   test('Start thread: a chip whose prompt is the kickoff, and the person clicks Start', async ($, on) => {
@@ -513,5 +578,157 @@ describe('R6: the commands', () => {
     expect(await mm($, 'resume')).toBe('Resumed.')
     expect(await mm($, 'status')).toContain(`this thread: ${SELF}`)
     expect(await mm($, 'view')).toBe('This thread is not linked to a client. Use /mm link <client>.')
+  })
+})
+
+describe('the app\'s own thread records: a thread links itself without being opened again first', () => {
+  const MARK = 'RECORD-FIELD-DO-NOT-KEEP'
+  /** A record as the app writes one: the two fields the bridge takes, among others it must never keep. */
+  const record = (app: string, cli: string, extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ sessionId: app, cliSessionId: cli, title: `${MARK} title`, cwd: `/${MARK}/path`, model: MARK, previousTitles: [MARK], ...extra })
+  const recent = NOW - HOUR
+
+  const PLATFORMS = [
+    ['macOS', { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', HOME: '/Users/someone' }, '/Users/someone/Library/Application Support/Claude/claude-code-sessions', '/'],
+    ['Windows', { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', USERPROFILE: 'C:\\Users\\someone', APPDATA: 'C:\\Users\\someone\\AppData\\Roaming' }, 'C:\\Users\\someone\\AppData\\Roaming\\Claude\\claude-code-sessions', '\\'],
+    ['Linux', { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', HOME: '/home/someone' }, '/home/someone/.config/Claude/claude-code-sessions', '/'],
+  ] as const
+
+  for (const [platform, env, root, sep] of PLATFORMS) {
+    test(`${platform}: the pair comes from ${root}, and only the thread id and the session id are taken`, async ($, on) => {
+      const path = [root, 'account-1', 'org-1', 'local_a.json'].join(sep)
+      const w = world(on, {
+        env,
+        feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }),
+        threads: [thread('local_a', 'Roof quote', 30)],
+        // ⛔ nothing in the store: this thread has not run since the plugin was installed
+        files: { [path]: { text: record('local_a', 'cli-acme'), mtimeMs: recent } },
+      })
+      await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+      await w.clock.advance(4_000)
+      expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a' })
+      expect(w.threads.get('local_a')).toMatchObject({ title: ACME_TITLE, pinned: true })
+      expect(w.reads).toEqual([path])
+      // nothing else of the record is kept, logged or sent anywhere
+      const everything = JSON.stringify([w.stored, w.calls, w.written, w.fetched, w.prompts, w.toasts])
+      expect(everything).not.toContain(MARK)
+      expect(w.fetched.every(u => u.startsWith('https://onboarding-wizard.massmarket.ai/api/ext/'))).toBe(true)
+      expect(w.fetched.join(' ')).not.toContain('cli-acme')
+      // the heartbeat says how many pairs the records gave: a number, nothing from them
+      expect(JSON.parse(w.written.at(-1)?.text ?? '{}')).toMatchObject({ appPairs: 1 })
+      expect(w.acted()).toEqual([])
+    })
+  }
+
+  const ROOT = '/home/someone/Library/Application Support/Claude/claude-code-sessions'
+  const at = (name: string) => `${ROOT}/account-1/org-1/${name}`
+
+  test('a record that cannot be read as one gives no pair, and the others still do', async ($, on) => {
+    const w = world(on, {
+      feed: feed({ threads: [declared(ACME, 'cli-acme', 30), declared(BOLT, 'cli-bolt', 20), declared(CEDAR, 'cli-cedar', 10)] }),
+      threads: [thread('local_a', 'Roof quote', 30), thread('local_b', 'Staffing plan', 20), thread('local_c', 'Intake', 10), thread('local_d', 'Other', 5)],
+      files: {
+        [at('local_a.json')]: { text: '{ this is not JSON', mtimeMs: recent },
+        // a different shape: the session id is not text
+        [at('local_b.json')]: { text: JSON.stringify({ sessionId: 'local_b', cliSessionId: 42 }), mtimeMs: recent },
+        // a record that says it is another thread's
+        [at('local_d.json')]: { text: record('local_zzz', 'cli-cedar'), mtimeMs: recent },
+        [at('local_c.json')]: { text: record('local_c', 'cli-cedar'), mtimeMs: recent },
+        [at('notes.txt')]: { text: 'not a record', mtimeMs: recent },
+      },
+    })
+    expect(await mm($, '')).toBe('3 clients need you; 1 thread pinned. The list is in the side pane.')
+    expect(w.stored['mm.links']).toEqual({ [CEDAR]: 'local_c' })
+    expect(w.reads).not.toContain(at('notes.txt'))
+    // a record that gave no pair is not opened again until it changes
+    const opened = w.reads.length
+    await mm($, '')
+    expect(w.reads.length).toBe(opened)
+  })
+
+  test('two records name one session: the more recently modified thread has it', async ($, on) => {
+    const w = world(on, {
+      feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }),
+      threads: [thread('local_a', 'Roof quote', 30), thread('local_b', 'A fork of it', 2)],
+      files: {
+        [at('local_b.json')]: { text: record('local_b', 'cli-acme'), mtimeMs: recent },
+        [at('local_a.json')]: { text: record('local_a', 'cli-acme'), mtimeMs: recent - 5 * HOUR },
+      },
+    })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_b' })
+  })
+
+  test('no such folder: what each session wrote down about itself is the only source, as before', async ($, on) => {
+    const w = world(on, { feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.threads': PAIRS } })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a' })
+    expect(w.reads).toEqual([])
+    expect(w.lists.length).toBeGreaterThan(0)
+  })
+
+  test('the app\'s record and a stored pair disagree: the app\'s record wins', async ($, on) => {
+    const w = world(on, {
+      feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }),
+      threads: [thread('local_a', 'Roof quote', 30), thread('local_b', 'Staffing plan', 20)],
+      // the store says this session runs in local_b; the app's own record says local_a
+      store: { 'mm.threads': { 'cli-acme': { app: 'local_b', at: NOW } } },
+      files: { [at('local_a.json')]: { text: record('local_a', 'cli-acme'), mtimeMs: recent } },
+    })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a' })
+    // the store's own copy is left as the session wrote it
+    expect(w.stored['mm.threads']).toEqual({ 'cli-acme': { app: 'local_b', at: NOW } })
+  })
+
+  test('a record not modified in 30 days is not opened', async ($, on) => {
+    const DAY = 24 * HOUR
+    const w = world(on, {
+      feed: feed({ threads: [declared(ACME, 'cli-acme', 30), declared(BOLT, 'cli-bolt', 20)] }),
+      threads: [thread('local_a', 'Roof quote', 30), thread('local_b', 'Staffing plan', 20)],
+      files: {
+        [at('local_a.json')]: { text: record('local_a', 'cli-acme'), mtimeMs: NOW - 31 * DAY },
+        [at('local_b.json')]: { text: record('local_b', 'cli-bolt'), mtimeMs: NOW - 29 * DAY },
+      },
+    })
+    await mm($, '')
+    expect(w.reads).toEqual([at('local_b.json')])
+    expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_b' })
+  })
+
+  test('one scan per sync, and a record that has not changed is not read again', async ($, on) => {
+    const w = world(on, {
+      feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }),
+      threads: [thread('local_a', 'Roof quote', 30)],
+      files: { [at('local_a.json')]: { text: record('local_a', 'cli-acme'), mtimeMs: recent } },
+    })
+    const scans = () => w.lists.filter(p => p === ROOT).length
+    await mm($, '')
+    expect(scans()).toBe(1)
+    expect(w.reads).toEqual([at('local_a.json')])
+    // Update runs two passes over the feed (before and after linking) and scans once
+    await mm($, 'update Acme Roofing')
+    expect(scans()).toBe(2)
+    expect(w.reads).toEqual([at('local_a.json')])
+    // nothing is ever written under the app's folder
+    expect(w.written.filter(f => f.path.includes('claude-code-sessions'))).toEqual([])
+  })
+})
+
+describe('/mm in a terminal session, where the app\'s thread list is not there', () => {
+  const STORE = {
+    'mm.links': { [ACME]: 'local_a', [BOLT]: 'local_b' },
+    'mm.pins': { local_a: { projectId: ACME, client: 'Acme Roofing', byUs: true } },
+    'mm.unlinked': { local_x: NOW - HOUR },
+    'mm.titles': { local_a: 'Roof quote' },
+    'mm.threads': PAIRS,
+  }
+
+  test('it shows the list and leaves every stored link, unlink record, pin and title as they were', async ($, on) => {
+    const w = world(on, { terminal: true, store: STORE, feed: feed({ threads: [declared(CEDAR, 'cli-acme', 3)] }) })
+    expect(await mm($, '')).toContain('3 clients need you')
+    for (const key of ['mm.links', 'mm.pins', 'mm.unlinked', 'mm.titles', 'mm.threads'] as const) expect(w.stored[key], key).toEqual(STORE[key])
+    expect(w.calls).toEqual([])
+    expect(await mm($, 'status')).toContain('linked threads: 2')
   })
 })

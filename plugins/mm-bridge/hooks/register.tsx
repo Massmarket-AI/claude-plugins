@@ -22,6 +22,9 @@ import type { AppThread, Pairs, Recommendation, Row } from './threads'
 // turn in the client's thread: the one paid moment the bridge causes, and the person asked for it.
 // ⛔ It only touches threads linked to a client, and only unpins a thread it pinned itself.
 // ⛔ A thread the person unlinked never links itself again, and gets its own name back.
+// ⛔ A thread the person acted on (Update, /mm link, a chip they started) stays pinned for a day, whatever
+//    the cap of 8 says: the cap is filled with those first, then with threads that linked themselves.
+// ⛔ Where the app's thread list is not there (a terminal session), nothing about threads is changed.
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
@@ -41,14 +44,27 @@ const DAY_MS = 24 * 3_600_000
 const PAIR_KEEP_MS = 30 * DAY_MS
 /** The most threads the store remembers an original title, or an unlink, for. */
 const REMEMBER_MAX = 300
+/** A link the person made or used stays pinned this long, ahead of the cap. Real hours: this is not a client's clock. */
+const ACTED_MS = DAY_MS
+/** The desktop app's own record of a thread is read only when it changed in this long. */
+const RECORD_MAX_AGE_MS = 30 * DAY_MS
+/** `local_<id>.json`: one record per thread, named by the app's thread id. */
+const RECORD_FILE = /^(local_[A-Za-z0-9_-]{1,100})\.json$/
+const SESSION_ID = /^[A-Za-z0-9_-]{1,100}$/
 
 type Mcp = { content?: Array<{ type: string; text?: string }>; isError?: boolean }
 type Pin = { projectId: string; client: string; byUs: boolean }
 type Last = { at: number; member: string; items: QueueItem[]; pinned: number; recs: Record<string, Recommendation>; error?: string }
 type Verb = 'update' | 'start' | 'drafts'
+/** A link the person made or used: which thread, and when. */
+type Acted = Record<string, { sid: string; at: number }>
 
 let selfCache: string | null = null
 let instanceCache: string | null = null
+/** The app's records already read, by path: a record is read again only when its modified time changes. */
+const recordCache = new Map<string, { mtimeMs: number; app: string; cli: string }>()
+/** How many pairs the last scan of the app's records gave (0: none readable). Written to the heartbeat. */
+let appPairCount = 0
 
 const textOf = (r: Mcp) => (r.content ?? []).filter(c => c.type === 'text').map(c => c.text ?? '').join('\n')
 const short = (s: string, n = 200) => s.replace(/\s+/g, ' ').slice(0, n)
@@ -105,12 +121,13 @@ async function instanceId($: EngineInterface): Promise<string> {
   return instanceCache
 }
 
-async function sessions($: EngineInterface): Promise<AppThread[]> {
-  return desktopOnly(async () => {
+/** The app's open threads, or null where there is no app to ask (a terminal session): unknown, not "none". */
+async function sessions($: EngineInterface): Promise<AppThread[] | null> {
+  return desktopOnly<AppThread[] | null>(async () => {
     const others = (await mcpJson($, 'ccd_session_mgmt', 'list_sessions', { limit: 60 })) as AppThread[]
     const me = (await mcpJson($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' })) as AppThread
     return [me, ...(Array.isArray(others) ? others : [])].filter(s => s && s.sessionId && !s.isArchived)
-  }, [] as AppThread[])
+  }, null)
 }
 
 async function fetchFeed($: EngineInterface): Promise<Feed> {
@@ -158,22 +175,128 @@ async function forgetUnlink($: EngineInterface, sid: string): Promise<void> {
   await $.store.set('mm.unlinked', unlinked)
 }
 
+/** Where the desktop app keeps its record of each thread, by platform. The first folder that lists is used. */
+async function recordRoots($: EngineInterface): Promise<string[]> {
+  const roots: string[] = []
+  const appData = await $.env.get('APPDATA')
+  if (appData) roots.push(`${appData.replace(/[\\/]+$/, '')}\\Claude\\claude-code-sessions`)
+  const h = await home($)
+  if (h) roots.push(`${h}/Library/Application Support/Claude/claude-code-sessions`, `${h}/.config/Claude/claude-code-sessions`)
+  return roots
+}
+
 /**
- * One pass over a feed: threads link themselves, the first MAX_PINS linked clients' threads are pinned and
- * named, the rest are let go, and every client gets its recommendation. `firstProjectId` is the client
- * whose button was just pressed: its thread is pinned and named in this pass whatever its place in line.
+ * The second source for "which Claude Code session runs in which thread": the desktop app's own records,
+ * the `local_<id>.json` files under its `claude-code-sessions` folder. They exist for every thread, so a thread links itself without
+ * having to be opened again first (Rob, 2026-10-12: "Why are none of them linked?").
+ *
+ * ⛔ READ-ONLY, through the plugin's own file access. From each record ONLY two things are taken: the
+ * thread id and `cliSessionId`. Nothing else in a record is kept, logged or sent anywhere, and nothing
+ * from these files leaves this computer: the pairs are only compared with the feed's session ids here.
+ * A record not modified in 30 days is not opened. Any error at all (no such folder, a file that cannot
+ * be read or parsed, a different shape) is swallowed: what each session wrote down about itself is then
+ * the only source.
+ */
+async function appRecordPairs($: EngineInterface, now: number): Promise<Pairs> {
+  const pairs: Pairs = {}
+  appPairCount = 0
+  try {
+    for (const root of await recordRoots($)) {
+      const sep = root.includes('\\') ? '\\' : '/'
+      const seen = new Set<string>()
+      const walk = async (dir: string, depth: number): Promise<void> => {
+        for (const entry of await $.fs.list(dir)) {
+          const path = `${dir}${sep}${entry.name}`
+          if (entry.kind === 'dir') {
+            // records sit two folders down today; one more level is allowed for
+            if (depth < 3) await walk(path, depth + 1).catch(() => {})
+            continue
+          }
+          const named = entry.kind === 'file' ? RECORD_FILE.exec(entry.name) : null
+          if (!named || now - entry.mtimeMs > RECORD_MAX_AGE_MS) continue
+          seen.add(path)
+          const cached = recordCache.get(path)
+          if (cached && cached.mtimeMs === entry.mtimeMs) continue
+          // Remembered either way, so a record that gives no pair is not opened again until it changes.
+          const app = named[1] as string
+          let cli = ''
+          try {
+            const record = JSON.parse(await $.fs.read(path)) as { sessionId?: unknown; cliSessionId?: unknown }
+            // the record must be this thread's own, and name a session id the hook could have sent
+            if ((record.sessionId === undefined || record.sessionId === app) && typeof record.cliSessionId === 'string' && SESSION_ID.test(record.cliSessionId)) {
+              cli = record.cliSessionId
+            }
+          } catch {
+            // unreadable, not JSON, too large: this record gives no pair
+          }
+          recordCache.set(path, { mtimeMs: entry.mtimeMs, app, cli })
+        }
+      }
+      try {
+        await walk(root, 0)
+      } catch {
+        continue // this platform's folder is not here: try the next
+      }
+      for (const path of [...recordCache.keys()]) if (path.startsWith(root) && !seen.has(path)) recordCache.delete(path)
+      // Oldest first, so where two records name one session the more recently modified thread has it.
+      const found = [...recordCache].filter(([path, r]) => path.startsWith(root) && r.cli).map(([, r]) => r)
+      for (const r of found.sort((a, b) => a.mtimeMs - b.mtimeMs)) pairs[r.cli] = { app: r.app, at: r.mtimeMs }
+      break
+    }
+  } catch {
+    // no pairs from the app: the pairs each session records are the only source
+  }
+  appPairCount = Object.keys(pairs).length
+  return pairs
+}
+
+/** Every known pair: what each session wrote down about itself, then the app's own records, which win. */
+async function allPairs($: EngineInterface, now: number): Promise<Pairs> {
+  return { ...(await storeGet<Pairs>($, 'mm.threads', {})), ...(await appRecordPairs($, now)) }
+}
+
+/** The person made or used this link (Update, /mm link, a chip they started): its thread stays pinned for a day. */
+async function stamp($: EngineInterface, projectId: string, sid: string): Promise<void> {
+  const now = await $.clock.now()
+  const acted = await storeGet<Acted>($, 'mm.acted', {})
+  for (const [pid, a] of Object.entries(acted)) if (now - a.at >= ACTED_MS) delete acted[pid]
+  acted[projectId] = { sid, at: now }
+  await $.store.set('mm.acted', acted)
+}
+
+/**
+ * One pass over a feed: threads link themselves, the linked clients' threads are pinned and named up to
+ * the cap (a thread the person acted on in the last day first, and never dropped by the cap), the rest
+ * are let go, and every client gets its recommendation. `known` carries the pairs of an earlier pass of
+ * the same sync, so the app's records are scanned once.
  * ⛔ Sends nothing and starts nothing.
  */
-async function reconcile($: EngineInterface, feed: Feed, firstProjectId?: string): Promise<{ last: Last; live: Map<string, AppThread> }> {
+async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise<{ last: Last; live: Map<string, AppThread>; pairs: Pairs }> {
   const now = await $.clock.now()
   const items = buildQueue(feed, now)
-  const live = new Map((await sessions($)).map(s => [s.sessionId, s] as const))
+  const listed = await sessions($)
+  const live = new Map((listed ?? []).map(s => [s.sessionId, s] as const))
   const links = await storeGet<Record<string, string>>($, 'mm.links', {})
   const pins = await storeGet<Record<string, Pin>>($, 'mm.pins', {})
-  const pairs = await storeGet<Pairs>($, 'mm.threads', {})
+  const feedThreads = Array.isArray(feed.threads) ? feed.threads : []
+
+  // No thread list here (a terminal session): the list of clients is shown, each with the recommendation
+  // the last sync in the app gave it, and nothing about threads is touched. Links, pins, unlink records
+  // and stored titles stay exactly as they are: an empty list would otherwise read as "every thread is gone".
+  if (listed === null) {
+    const before = await storeGet<Last | null>($, 'mm.last', null)
+    const recs: Record<string, Recommendation> = {}
+    for (const it of items) recs[it.projectId] = before?.recs?.[it.projectId] ?? recommend([], undefined, now)
+    const last: Last = { at: now, member: feed.member, items, pinned: before?.pinned ?? 0, recs }
+    await $.store.set('mm.last', last)
+    await showQueue($, feed, items, items.map(it => rowFor(it, recs[it.projectId] as Recommendation, now)), last.pinned, now)
+    return { last, live, pairs: known ?? {} }
+  }
+
+  const pairs = known ?? (await allPairs($, now))
   const unlinked = await storeGet<Record<string, number>>($, 'mm.unlinked', {})
   const titles = await storeGet<Record<string, string>>($, 'mm.titles', {})
-  const feedThreads = Array.isArray(feed.threads) ? feed.threads : []
+  const acted = await storeGet<Acted>($, 'mm.acted', {})
 
   // A link to a thread that is gone, or that the person unlinked (a sync in another thread may have written
   // an older copy of the links back after the unlink), is dropped.
@@ -184,10 +307,18 @@ async function reconcile($: EngineInterface, feed: Feed, firstProjectId?: string
     if (sid) links[it.projectId] = sid
   }
 
-  // The threads that should be pinned now: linked clients, soonest due first, at most MAX_PINS.
-  const inLine = firstProjectId ? [...items.filter(i => i.projectId === firstProjectId), ...items.filter(i => i.projectId !== firstProjectId)] : items
+  // The threads that should be pinned now. First every thread the person acted on in the last day, whatever
+  // the cap; then the other linked clients, soonest due first, while there is room under MAX_PINS.
+  const byHand = (it: QueueItem): boolean => {
+    const a = acted[it.projectId]
+    return Boolean(a && a.sid === links[it.projectId] && now - a.at < ACTED_MS)
+  }
   const want = new Map<string, QueueItem>()
-  for (const it of inLine) {
+  for (const it of items) {
+    const sid = links[it.projectId]
+    if (sid && byHand(it) && !want.has(sid)) want.set(sid, it)
+  }
+  for (const it of items) {
     const sid = links[it.projectId]
     if (sid && !want.has(sid) && want.size < MAX_PINS) want.set(sid, it)
   }
@@ -249,6 +380,12 @@ async function reconcile($: EngineInterface, feed: Feed, firstProjectId?: string
   await $.store.set('mm.pins', pins)
   await $.store.set('mm.titles', capped(titles))
   await $.store.set('mm.last', last)
+  await showQueue($, feed, items, rows, want.size, now)
+  return { last, live, pairs }
+}
+
+/** Puts the list in the Needs-you pane and on the status line. */
+async function showQueue($: EngineInterface, feed: Feed, items: QueueItem[], rows: Row[], pinned: number, now: number): Promise<void> {
   const queue: MmQueue = {
     header: items.length ? `Needs you now (${items.length}${items.length > MAX_PINS ? `, the first ${MAX_PINS} pin` : ''})` : 'Nothing needs you right now.',
     rows,
@@ -257,8 +394,7 @@ async function reconcile($: EngineInterface, feed: Feed, firstProjectId?: string
   await $.state.set(QUEUE, queue)
   const { value: notice } = await $.state.get(NOTICE)
   if (notice?.text && now - notice.at > SYNC_MS) await $.state.set(NOTICE, { text: '', at: now })
-  $.ui.status(items.length ? `MM: ${items.length} need you · ${want.size} pinned` : 'MM: clear')
-  return { last, live }
+  $.ui.status(items.length ? `MM: ${items.length} need you · ${pinned} pinned` : 'MM: clear')
 }
 
 async function sync($: EngineInterface): Promise<Last> {
@@ -323,7 +459,7 @@ async function beat($: EngineInterface, extra: Record<string, unknown>): Promise
     const last = await storeGet<Last | null>($, 'mm.last', null)
     await $.fs.write(
       `${await home($)}/.claude/mm-hooks/bridge-state.json`,
-      JSON.stringify({ version: VERSION, at: new Date(await $.clock.now()).toISOString(), session: await instanceId($), lastSync: last ? new Date(last.at).toISOString() : null, member: last?.member, need: last?.items.length ?? 0, pinned: last?.pinned ?? 0, error: last?.error ?? null, ...extra }, null, 1),
+      JSON.stringify({ version: VERSION, at: new Date(await $.clock.now()).toISOString(), session: await instanceId($), lastSync: last ? new Date(last.at).toISOString() : null, member: last?.member, need: last?.items.length ?? 0, pinned: last?.pinned ?? 0, appPairs: appPairCount, error: last?.error ?? null, ...extra }, null, 1),
     )
   } catch {
     // a heartbeat must never break the bridge
@@ -384,7 +520,7 @@ async function startThread($: EngineInterface, it: QueueItem): Promise<string> {
  * starts a model turn there. The app refuses to bring a thread forward unless this thread started it
  * (ccd_window.open_session_in), so the answer says which pinned thread to open.
  */
-async function updateThread($: EngineInterface, feed: Feed, it: QueueItem, rec: Recommendation | undefined): Promise<string> {
+async function updateThread($: EngineInterface, feed: Feed, it: QueueItem, rec: Recommendation | undefined, known: Pairs): Promise<string> {
   const target = rec?.target
   if (!target) return `No thread for ${it.client} yet: use /mm start ${it.client}.`
   const failed = (why: string) => `Could not send to ${it.client}'s thread: ${why}`
@@ -394,7 +530,9 @@ async function updateThread($: EngineInterface, feed: Feed, it: QueueItem, rec: 
     const links = await storeGet<Record<string, string>>($, 'mm.links', {})
     links[it.projectId] = target.sid
     await $.store.set('mm.links', links)
-    const { live } = await reconcile($, feed, it.projectId)
+    // The person acted on this thread: it is pinned first, and the cap of 8 does not unpin it for a day.
+    await stamp($, it.projectId, target.sid)
+    const { live } = await reconcile($, feed, known)
     title = live.get(target.sid)?.title ?? title
 
     const text = kickoffText(it, { update: true })
@@ -407,10 +545,10 @@ async function updateThread($: EngineInterface, feed: Feed, it: QueueItem, rec: 
           if (drop) await say($, failed(short(drop)))
         })
         .catch(async err => say($, failed(errorText(err))))
-    } else {
-      const r = (await $.mcp.call('ccd_session_mgmt', 'send_message', { session_id: target.sid, message: text })) as Mcp
-      if (r.isError) return failed(short(textOf(r)))
+      return `Picking up ${it.client} in this thread.`
     }
+    const r = (await $.mcp.call('ccd_session_mgmt', 'send_message', { session_id: target.sid, message: text })) as Mcp
+    if (r.isError) return failed(short(textOf(r)))
   } catch (err) {
     return failed(errorText(err))
   }
@@ -432,10 +570,10 @@ async function act($: EngineInterface, verb: Verb, projectId: string, client: st
     return it ? showDrafts($, it) : noClient(client)
   }
   const feed = await fetchFeed($)
-  const { last } = await reconcile($, feed)
+  const { last, pairs } = await reconcile($, feed)
   const it = last.items.find(i => i.projectId === projectId)
   if (!it) return noClient(client)
-  return verb === 'start' ? startThread($, it) : updateThread($, feed, it, last.recs[projectId])
+  return verb === 'start' ? startThread($, it) : updateThread($, feed, it, last.recs[projectId], pairs)
 }
 
 async function say($: EngineInterface, text: string): Promise<void> {
@@ -502,19 +640,20 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
   }
 
   const feed = await fetchFeed($)
-  const { last } = await reconcile($, feed)
+  const { last, pairs } = await reconcile($, feed)
   if (verb === 'link' || verb === 'start' || verb === 'update') {
     const it = matchProject(arg, last.items)
     if (!it) return noClient(arg)
     if (verb === 'start') return startThread($, it)
-    if (verb === 'update') return updateThread($, feed, it, last.recs[it.projectId])
+    if (verb === 'update') return updateThread($, feed, it, last.recs[it.projectId], pairs)
     const me = await selfId($)
     if (!me) return 'Linking a thread works in the desktop app\'s Code tab only.'
     await forgetUnlink($, me)
     const links = await storeGet<Record<string, string>>($, 'mm.links', {})
     links[it.projectId] = me
     await $.store.set('mm.links', links)
-    await reconcile($, feed)
+    await stamp($, it.projectId, me)
+    await reconcile($, feed, pairs)
     return `This thread is now ${it.client}'s. ${await refreshSelf($, true)}`
   }
   await $.ui.open({ id: PANE_QUEUE, title: 'Needs you' })
@@ -558,6 +697,8 @@ export const register: Register = on => {
       const links = await storeGet<Record<string, string>>($, 'mm.links', {})
       links[m[1] as string] = me
       await $.store.set('mm.links', links)
+      // A chip the person started (or a kickoff they sent here): this thread stays pinned for a day.
+      await stamp($, m[1] as string, me)
     }
     return next(e)
   })
