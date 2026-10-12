@@ -8,8 +8,8 @@
 // 1. Copies .claude/scripts/worklog-hook.js from the onboarding-wizard origin/main (OW_REPO, default
 //    ~/Projects/onboarding-wizard) into plugins/mm-hooks/scripts/. That is the same file GET
 //    /api/ext/hook-install?file=hook serves, so the plugin never carries a hook OW has not shipped.
-// 2. Bumps the patch version of every plugin whose files changed since the last commit and whose
-//    version was not bumped by hand. An unbumped plugin reaches nobody: auto-update keys on version.
+// 2. Bumps the patch version of every plugin whose files changed since its version was last set
+//    (uncommitted edits, or commits such as a merged pull request) and whose version was not bumped by hand. An unbumped plugin reaches nobody: auto-update keys on version.
 //    mm-bridge's VERSION constant is kept equal to its plugin.json.
 // 3. Validates with `claude plugin validate`, runs the bridge's tests, scans with gitleaks.
 // 4. Commits and pushes main.
@@ -63,7 +63,12 @@ const released = []
 for (const p of PLUGINS) {
   const dir = `plugins/${p}`
   const manifestPath = join(ROOT, dir, '.claude-plugin/plugin.json')
-  const changed = git('status', '--porcelain', '--', dir).trim() !== ''
+  // Changed = uncommitted edits (the hook copy above), OR commits to the plugin since its version was last
+  // set. A change merged through a pull request is committed, so the working tree alone would never see it
+  // and it would reach nobody.
+  const versionCommit = git('log', '-1', '--format=%H', '--', `${dir}/.claude-plugin/plugin.json`).trim()
+  const committedSince = versionCommit ? git('diff', '--name-only', versionCommit, 'HEAD', '--', dir).trim() !== '' : true
+  const changed = git('status', '--porcelain', '--', dir).trim() !== '' || committedSince
   if (!changed) continue
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   let headVersion = null
