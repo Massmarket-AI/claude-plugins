@@ -50,12 +50,19 @@ export type FeedTicket = {
   assignee_email?: string | null
 }
 
+/**
+ * One of the caller's own Claude Code sessions that declared a client: the feed's `threads` field. The
+ * session id is what `$.session.id()` answers in that thread. Absent on a server that does not send it yet.
+ */
+export type FeedThread = { project_id: string; session_id: string; last_activity_at: string }
+
 export type Feed = {
   member: string
   role: string
   mail?: FeedMail[]
   drafts?: FeedDraft[]
   tickets?: { overdue?: FeedTicket[]; due_today?: FeedTicket[]; due_soon?: FeedTicket[] }
+  threads?: FeedThread[]
 }
 
 export type QueueItem = {
@@ -231,18 +238,6 @@ export function titleNames(title: string, client: string): boolean {
   const bare = title.replace(/^[🔴🟡✓]\s*/u, '').replace(/^client:\s*/i, '').split(' · ')[0]?.trim().toLowerCase() ?? ''
   const c = client.toLowerCase().replace(/…$/, '')
   return bare.length > 0 && (bare === c || bare.startsWith(c) || (bare.length >= 6 && c.startsWith(bare)))
-}
-
-export function queueMarkdown(items: QueueItem[], linked: Record<string, string>, now: number, note: string): string {
-  if (items.length === 0) return `**Nothing needs you right now.**\n\n${note}`
-  const lines = items.map((it, i) => {
-    const link = linked[it.projectId] ? 'pinned thread' : 'no thread yet: `/mm start ' + it.client + '`'
-    const extra = [it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', it.tasks ? `${it.tasks} task${it.tasks > 1 ? 's' : ''} due` : '']
-      .filter(Boolean)
-      .join(', ')
-    return `${i + 1}. ${titleFor(it, now)}  \n   ${extra || 'drafts ready'} · ${link}`
-  })
-  return `**Needs you now** (${items.length}${items.length > MAX_PINS ? `, the first ${MAX_PINS} pin` : ''})\n\n${lines.join('\n')}\n\n${note}`
 }
 
 /** What a client's own thread shows when it has no prepared drafts: the messages waiting and the tasks due. */
