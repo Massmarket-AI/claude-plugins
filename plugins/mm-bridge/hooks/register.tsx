@@ -2,7 +2,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { MmNotice, MmQueue } from '../types'
 
-import { MAX_PINS, buildQueue, cleanName, cleanTitle, clearedTitle, clientMarkdown, isUuid, titleFor } from './queue'
+import { MAX_PINS, buildQueue, cleanName, cleanTitle, clearedTitle, clientMarkdown, holdBanner, isUuid, noteText, titleFor } from './queue'
 import type { Feed, FeedThread, QueueItem } from './queue'
 import { LABEL, PANE_SENTENCE, autoLinkFor, clientThreads, kickoffText, ownerOf, recommend, rowButtons, rowDetail, rowFor, sharedThreads, titleSuggestion } from './threads'
 import type { AppThread, Pairs, Recommendation, Row } from './threads'
@@ -711,6 +711,12 @@ async function renderPickup($: EngineInterface, it: QueueItem): Promise<string |
   return null
 }
 
+/** A client's pane: the pickup view (under a line saying the viewer holds it, when they do), or what is waiting. */
+async function paneMarkdown($: EngineInterface, it: QueueItem, now: number): Promise<string> {
+  const view = await renderPickup($, it)
+  return view ? [holdBanner(it), view].filter(Boolean).join('\n\n') : clientMarkdown(it, now)
+}
+
 /**
  * This thread's client in the side pane, with a short note for Claude. `force` is the person asking for it
  * (/mm view, /mm link); without it this is the timer.
@@ -729,17 +735,18 @@ async function refreshSelf($: EngineInterface, force: boolean): Promise<string> 
   const last = await storeGet<Last | null>($, 'mm.last', null)
   const it = last?.items.find(i => i.projectId === pid)
   if (!it) return 'Nothing needs you on this client right now.'
-  const sig = it.packageId ? `pkg:${it.packageId}:${it.coversThrough}` : `q:${it.messages}:${it.tasks}:${it.dueAt}`
+  const o = it.open ?? null
+  const sig = o
+    ? `open:${o.id}:${o.state}:${it.coversThrough ?? ''}:${o.unsent}:${o.newer}:${it.messages}:${it.tasks}`
+    : it.packageId ? `pkg:${it.packageId}:${it.coversThrough}` : `q:${it.messages}:${it.tasks}:${it.dueAt}`
   const noted = await storeGet<Record<string, string>>($, 'mm.noted', {})
   if (!force && noted[me] === sig) return 'Up to date.'
   const now = await $.clock.now()
-  const md = (await renderPickup($, it)) ?? clientMarkdown(it, now)
+  const md = await paneMarkdown($, it, now)
   await $.state.set(VIEW, md)
   void $.ui.open({ id: PANE_VIEW, title: it.client })
   if (noted[me] !== sig) {
-    const body = it.packageId
-      ? `Reply package ${it.packageId.slice(0, 8)} is prepared${it.flagged ? ' and flagged for approval' : ''}; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${it.packageId}.`
-      : `${it.messages} client message${it.messages === 1 ? '' : 's'} waiting on our reply and ${it.tasks} committed task${it.tasks === 1 ? '' : 's'} due; no reply drafts are prepared yet.`
+    const body = noteText(it, last?.member ?? '')
     await $.session.append({
       message: { type: 'user', content: [{ type: 'text', text: `[Massmarket bridge, no reply needed] ${it.projectName}: ${titleFor(it, now)}. ${body} Nothing has been sent.` }] },
     })
@@ -830,7 +837,7 @@ function ownerName(projectId: string, items: readonly QueueItem[], pin: Pin | un
 async function startThread($: EngineInterface, it: QueueItem): Promise<string> {
   const now = await $.clock.now()
   const r = (await $.mcp.call('ccd_session', 'spawn_task', {
-    title: `${it.client}: ${it.kind === 'ready' ? 'review the reply drafts' : 'reply to the client'}`,
+    title: `${it.client}: ${it.open?.state === 'held_by_other' ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : 'reply to the client'}`,
     tldr: `${it.client} needs you: ${titleFor(it, now).replace(/^\S+\s/, '')}. Start this to open a thread for that client with the drafts or the messages waiting.`,
     prompt: kickoffText(it),
   })) as Mcp
@@ -916,7 +923,7 @@ async function updateThread($: EngineInterface, feed: Feed, it: QueueItem, pass:
 
 /** Drafts: the client's five-part pickup view in the side pane. Links, pins and starts nothing. */
 async function showDrafts($: EngineInterface, it: QueueItem): Promise<string> {
-  const md = (await renderPickup($, it)) ?? clientMarkdown(it, await $.clock.now())
+  const md = await paneMarkdown($, it, await $.clock.now())
   await $.state.set(VIEW, md)
   await $.ui.open({ id: PANE_VIEW, title: it.client })
   return ''

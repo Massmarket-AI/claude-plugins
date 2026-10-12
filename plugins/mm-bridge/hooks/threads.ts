@@ -210,24 +210,44 @@ export function recommend(threads: readonly ClientThread[], suggestion: Target |
 
 /** What is waiting on a client, as its row shows it: `2 messages waiting, 1 task due`, or `drafts ready`. */
 export function waitingText(it: QueueItem): string {
-  const parts = [it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', it.tasks ? `${it.tasks} task${it.tasks > 1 ? 's' : ''} due` : '']
+  const o = it.open ?? null
+  const drafts = !o ? '' : o.state === 'held_by_me' ? `${o.unsent} draft${o.unsent === 1 ? '' : 's'} not sent` : o.state === 'held_by_other' ? `drafts with ${o.by}` : o.state === 'stale' ? 'drafts out of date' : 'drafts ready'
+  const parts = [it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', it.tasks ? `${it.tasks} task${it.tasks > 1 ? 's' : ''} due` : '', drafts]
   return parts.filter(Boolean).join(', ') || 'drafts ready'
 }
 
 /**
  * R5: the one message that starts a client's reply in a thread. The Start chip carries it as its prompt and
- * Update sends it into the existing thread, with a first line saying what is new. Three cases: a prepared
- * package, client messages with no package yet, and committed tasks only.
+ * Update sends it into the existing thread, with a first line saying what is new. Seven cases, the first
+ * that holds:
+ *   1. a package the person already picked up, with a draft not sent: carry on with it
+ *   2. a prepared package that is theirs to pick up
+ *   3. a package a teammate picked up: show what is waiting, run no prep, draft no second reply
+ *   4. client messages waiting and a package marked out of date: pick it up and rebuild the drafts
+ *   5. client messages waiting and a prepared package older than the window: pick it up
+ *   6. client messages with no package yet
+ *   7. committed tasks only (a package that is out of date, or another owner's, changes nothing here:
+ *      the client is in the list for the task)
  */
 export function kickoffText(it: QueueItem, opts: { update?: boolean } = {}): string {
   const id = it.projectId
   const who = `${it.projectName} (OW project ${id})`
   const due = dueText(it.dueAt)
-  const body = it.packageId
-    ? `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${it.packageId.slice(0, 8)} and wait for me. Send nothing without my go.`
-    : it.messages > 0
-      ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting, reply due ${due}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
-      : `[mm-link ${id}] ${who} has ${it.tasks} committed task(s) due ${due}. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`
+  const o = it.open ?? null
+  const body =
+    o?.state === 'held_by_me' && it.packageId
+      ? `[mm-link ${id}] Carry on with the reply drafts for ${who}. I already picked up package ${it.packageId.slice(0, 8)}: ${o.unsent} draft(s) not sent yet${o.newer > 0 ? `, and ${o.newer} client message(s) arrived since` : ''}. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the five-part pickup view and wait for me. Send nothing without my go.`
+      : it.packageId
+        ? `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${it.packageId.slice(0, 8)} and wait for me. Send nothing without my go.`
+        : o?.state === 'held_by_other'
+          ? `[mm-link ${id}] ${who}: ${o.by} picked up the reply drafts (package ${o.id.slice(0, 8)}) and has ${o.unsent} not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`
+          : o?.state === 'stale' && it.messages > 0
+            ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting, reply due ${due}. Load the client's project skill first, then follow client-reply-prep §9: package ${o.id.slice(0, 8)} exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.`
+            : o?.state === 'prepared' && it.messages > 0
+              ? `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${o.id.slice(0, 8)} and wait for me. Send nothing without my go.`
+              : it.messages > 0
+                ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting, reply due ${due}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
+                : `[mm-link ${id}] ${who} has ${it.tasks} committed task(s) due ${due}. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`
   return opts.update ? `New since this thread last worked on this client: ${waitingText(it)}.\n${body}` : body
 }
 
