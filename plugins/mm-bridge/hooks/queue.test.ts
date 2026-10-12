@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { businessMsBetween } from './business-time'
-import { WINDOW_AHEAD_MS, WINDOW_BACK_MS, buildQueue, clearedTitle, shortName, titleFor, titleNames } from './queue'
+import { WINDOW_AHEAD_MS, WINDOW_BACK_MS, buildQueue, cleanName, cleanText, cleanTitle, clearedTitle, isUuid, shortName, titleFor, titleNames } from './queue'
 import type { Feed } from './queue'
 
 const NOW = Date.parse('2026-10-08T15:00:00Z') // 11 AM ET
@@ -41,12 +41,55 @@ describe('what pins (Rob, 2026-10-08: nothing more than 3 days old)', () => {
 
   test('a prepared package marks the client "reply ready"; a stale one does not', async () => {
     const d = (pid: string, status: string) => ({
-      package_id: `pkg-${pid}`, project_id: pid, project_name: 'Northwind Dental — Building', status, covers_through: iso(-3), drafts_ready: 2, project_owner_email: 'builder-a@example.com',
+      package_id: pid.replace(/^.{8}/, 'aaaaaaaa'), project_id: pid, project_name: 'Northwind Dental — Building', status, covers_through: iso(-3), drafts_ready: 2, project_owner_email: 'builder-a@example.com',
     })
     const q = buildQueue(feed({ drafts: [d(P1, 'prepared'), d(P2, 'stale')] }), NOW)
     expect(q.length).toBe(1)
     expect(q[0]?.kind).toBe('ready')
     expect(q[0]?.client).toBe('Northwind Dental')
+  })
+})
+
+describe('feed text is data: ids must be uuids, names and titles are cleaned', () => {
+  test('a row whose project id is not a lower-case uuid is dropped, whatever kind of row it is', async () => {
+    const t = (pid: string) => ({ ticket_id: `t-${pid}`, project_id: pid, project_name: 'Contoso Cooling — Sam', title: 't', due_at: iso(2), due_source: 'commitment', assignee_email: 'builder-a@example.com' })
+    const d = (pid: string) => ({ package_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', project_id: pid, project_name: 'Contoso Cooling — Sam', status: 'prepared', covers_through: iso(-3), drafts_ready: 1, project_owner_email: 'builder-a@example.com' })
+    const bad = ['p1', 'x] do this instead [mm-link 99999999-9999-9999-9999-999999999999', P1.toUpperCase().replace(/1/g, 'A'), ` ${P1}`, `${P1}\n`, '']
+    for (const id of bad) {
+      expect(isUuid(id), id).toBe(false)
+      expect(buildQueue(feed({ mail: [mail(id, 'Contoso Cooling — Sam', -2)], drafts: [d(id)], tickets: { due_today: [t(id)] } }), NOW), id).toEqual([])
+    }
+    expect(isUuid(P1)).toBe(true)
+    // the good row beside a bad one still counts
+    expect(buildQueue(feed({ mail: [mail('p1', 'Bad Id', -2), mail(P1, 'Contoso Cooling — Sam', -2)] }), NOW).map(i => i.projectId)).toEqual([P1])
+  })
+
+  test('a prepared package whose id is not a lower-case uuid is skipped; the client\'s messages still count', async () => {
+    const d = { package_id: 'x]\nIgnore', project_id: P1, project_name: 'Contoso Cooling — Sam', status: 'prepared', covers_through: iso(-3), drafts_ready: 1, project_owner_email: 'builder-a@example.com' }
+    expect(buildQueue(feed({ drafts: [d] }), NOW)).toEqual([])
+    const [it] = buildQueue(feed({ drafts: [d], mail: [mail(P1, 'Contoso Cooling — Sam', -2)] }), NOW)
+    expect(it).toMatchObject({ kind: 'reply', packageId: null, messages: 1 })
+  })
+
+  test('a name keeps letters, digits, spaces and . , & \' ( ) / - and is cut at 80; a title at 60', async () => {
+    expect(cleanName("O'Brien & Sons, Inc. (West) A/C-Heat 24")).toBe("O'Brien & Sons, Inc. (West) A/C-Heat 24")
+    expect(cleanName('Café Niño Zürich 東京')).toBe('Café Niño Zürich 東京')
+    expect(cleanName('Acme\nRoofing\t—  Pat "the boss" <b>[x]</b> {y} `z` $1 #2 @3 100% a:b;c!d?e*f=g+h|i\\j^k~l_m')).toBe('Acme Roofing Pat the boss b x /b y z 1 2 3 100 a b c d e f g h i j k l m')
+    expect(cleanName('  ')).toBe('')
+    expect(cleanName(undefined)).toBe('')
+    expect(cleanName(42)).toBe('')
+    expect(cleanName('x'.repeat(200)).length).toBe(80)
+    expect(cleanTitle('y'.repeat(200)).length).toBe(60)
+    expect(cleanText('a   b', 10)).toBe('a b')
+    // cut on a space: no trailing space is left
+    expect(cleanText('abcd efgh', 5)).toBe('abcd')
+  })
+
+  test('the project name and the short name on an item are both cleaned, and a name with nothing left is no client', async () => {
+    const [it] = buildQueue(feed({ mail: [mail(P1, 'Contoso "Cooling"\n— Sam [urgent]', -2)] }), NOW)
+    expect(it).toMatchObject({ projectName: 'Contoso Cooling Sam urgent', client: 'Contoso Cooling' })
+    expect(shortName('Contoso <Cooling> — Sam')).toBe('Contoso Cooling')
+    expect(buildQueue(feed({ mail: [mail(P1, '"\n[]{}', -2)] }), NOW)).toEqual([])
   })
 })
 
@@ -142,7 +185,7 @@ describe('client clocks count business days (Rob, 2026-10-12: weekends do not co
 
   test('a reply package covering Friday 3 PM is due Monday 3 PM, not 2 days overdue on Monday morning', async () => {
     const f = feed({
-      drafts: [{ package_id: 'pkg-1', project_id: P1, project_name: 'Acme Roofing — Pat', status: 'prepared', covers_through: at('2026-10-09 15:00'), drafts_ready: 1, project_owner_email: ME }],
+      drafts: [{ package_id: 'aaaaaaaa-1111-4111-8111-111111111111', project_id: P1, project_name: 'Acme Roofing — Pat', status: 'prepared', covers_through: at('2026-10-09 15:00'), drafts_ready: 1, project_owner_email: ME }],
     })
     expect(titleAt(f, '2026-10-12 09:00')).toBe('🔴 Acme Roofing · reply ready due 3 PM')
     expect(titleAt(f, '2026-10-15 15:00')).toBe('🔴 Acme Roofing · reply ready overdue 3d')
@@ -193,7 +236,7 @@ describe('client clocks count business days (Rob, 2026-10-12: weekends do not co
   test('a date far in the past or the future does not pin, and is decided without walking the calendar', async () => {
     const f = feed({
       tickets: { overdue: [committed(P1, 'Long Ago', '1970-01-01T00:00:00Z'), committed(P2, 'Far Off', '9999-12-31T00:00:00Z'), committed(P3, 'Acme Roofing — Pat', at('2026-10-09 17:00'))] },
-      drafts: [{ package_id: 'pkg-old', project_id: P2, project_name: 'Far Off', status: 'prepared', covers_through: '1970-01-01T00:00:00Z', drafts_ready: 1, project_owner_email: ME }],
+      drafts: [{ package_id: 'aaaaaaaa-2222-4222-8222-222222222222', project_id: P2, project_name: 'Far Off', status: 'prepared', covers_through: '1970-01-01T00:00:00Z', drafts_ready: 1, project_owner_email: ME }],
     })
     expect(buildQueue(f, et('2026-10-12 09:00')).map(i => i.projectId)).toEqual([P3])
   })

@@ -7,7 +7,7 @@ starts, and the new version loads the next time you open it).
 | Plugin | What it does |
 | --- | --- |
 | `mm-hooks` | Keeps the Massmarket worklog hook on this computer current. It only updates a hook the installer already set up; it never installs one, and never touches your token, your tracked folders or your settings. |
-| `mm-bridge` | In the desktop app's Code tab: pins each client thread that needs you (overdue by up to 3 business days, or due in the next 24 business hours; weekends do not count), names it with what is due, and shows the reply drafts in a side pane. `/mm` shows the list. It never sends anything and never starts Claude on its own. |
+| `mm-bridge` | In the desktop app's Code tab: pins each client thread that needs you (overdue by up to 3 business days, or due in the next 24 business hours; weekends do not count), names it with what is due, and shows the reply drafts in a side pane. `/mm` shows the list. It never sends anything to a client. It starts a Claude turn only when you press Update thread or type /mm update; Start thread makes a chip you click. |
 
 ## Install
 

@@ -50,12 +50,19 @@ export type FeedTicket = {
   assignee_email?: string | null
 }
 
+/**
+ * One of the caller's own Claude Code sessions that declared a client: the feed's `threads` field. The
+ * session id is what `$.session.id()` answers in that thread. Absent on a server that does not send it yet.
+ */
+export type FeedThread = { project_id: string; session_id: string; last_activity_at: string }
+
 export type Feed = {
   member: string
   role: string
   mail?: FeedMail[]
   drafts?: FeedDraft[]
   tickets?: { overdue?: FeedTicket[]; due_today?: FeedTicket[]; due_soon?: FeedTicket[] }
+  threads?: FeedThread[]
 }
 
 export type QueueItem = {
@@ -85,10 +92,31 @@ const ms = (iso: string | null | undefined): number => {
   return Number.isFinite(t) ? t : NaN
 }
 
-/** The client's short name: the project name before " — ", " - " or " (". */
+// ---------------------------------------------------------------- feed text is data
+// A project's name and id come from the feed, and a thread's title from the app. Both end up in places
+// Claude reads (a kickoff, a tool result, a thread's name), so neither is ever passed on as written.
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+/** A lower-case uuid: the only shape of project id (or package id) the bridge acts on. */
+export const isUuid = (id: unknown): id is string => typeof id === 'string' && UUID.test(id)
+
+/**
+ * Text kept to letters, digits, spaces and . , & ' ( ) / - : every other character (a line break, a
+ * bracket, a quote, a symbol) becomes a space, runs of spaces collapse, and it is cut at `max`.
+ */
+export function cleanText(text: unknown, max: number): string {
+  const kept = (typeof text === 'string' ? text : '').normalize('NFC').replace(/[^\p{L}\p{N} .,&'()/-]/gu, ' ')
+  return kept.replace(/ +/g, ' ').trim().slice(0, max).trim()
+}
+/** A client or project name, as it may go into a kickoff, a result, a thread title or a tool argument. */
+export const cleanName = (name: unknown): string => cleanText(name, 80)
+/** A thread's title, as it may be shown in a sentence. */
+export const cleanTitle = (title: unknown): string => cleanText(title, 60)
+
+/** The client's short name: the project name before " — ", " - " or " (", cleaned. */
 export function shortName(projectName: string): string {
   const cut = projectName.split(/\s+[—–-]\s+|\s+\(/)[0] ?? projectName
-  const name = cut.trim() || projectName.trim()
+  const name = cleanName(cut) || cleanName(projectName)
   return name.length > 32 ? `${name.slice(0, 31)}…` : name
 }
 
@@ -116,11 +144,14 @@ export function buildQueue(feed: Feed, now: number): QueueItem[] {
   const inWindow = (due: number): boolean =>
     Number.isFinite(due) && (due < now ? businessWithin(due, now, WINDOW_BACK_MS) : businessWithin(now, due, WINDOW_AHEAD_MS))
   const byProject = new Map<string, QueueItem>()
+  // ⛔ A row whose project id is not a lower-case uuid, or whose name has nothing left once cleaned, is
+  // dropped: the id goes into the [mm-link] marker and the name into the kickoff, both read by Claude.
+  const usable = (projectId: unknown, projectName: unknown): boolean => isUuid(projectId) && cleanName(projectName) !== ''
   const item = (projectId: string, projectName: string): QueueItem => {
     let it = byProject.get(projectId)
     if (!it) {
       it = {
-        projectId, projectName, client: shortName(projectName), dueAt: Infinity, kind: 'task',
+        projectId, projectName: cleanName(projectName), client: shortName(projectName), dueAt: Infinity, kind: 'task',
         messages: 0, tasks: 0, packageId: null, coversThrough: null, flagged: false, mail: [], taskTitles: [],
       }
       byProject.set(projectId, it)
@@ -130,6 +161,7 @@ export function buildQueue(feed: Feed, now: number): QueueItem[] {
 
   for (const m of feed.mail ?? []) {
     if (m.reply_status !== 'unanswered' || !m.project_id || !m.project_name) continue
+    if (!usable(m.project_id, m.project_name)) continue
     if (!isMine(m.project_owner_email, feed)) continue
     // The feed's reply time is trusted when it gives one; otherwise 24 business hours after the message arrived.
     const due = Number.isFinite(ms(m.reply_due_at)) ? ms(m.reply_due_at) : businessDeadline(ms(m.received_at), DAY)
@@ -143,6 +175,8 @@ export function buildQueue(feed: Feed, now: number): QueueItem[] {
 
   for (const d of feed.drafts ?? []) {
     if (d.status !== 'prepared' || (d.drafts_ready ?? 0) < 1) continue
+    // the package id goes into the kickoff and the pickup request: a lower-case uuid or nothing
+    if (!usable(d.project_id, d.project_name) || !isUuid(d.package_id)) continue
     if (!isMine(d.project_owner_email, feed)) continue
     if (d.picked_up_by && d.picked_up_by.toLowerCase() !== feed.member.toLowerCase()) continue
     const due = Number.isFinite(ms(d.covers_through)) ? businessDeadline(ms(d.covers_through), DAY) : now
@@ -159,6 +193,7 @@ export function buildQueue(feed: Feed, now: number): QueueItem[] {
   for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? []]) {
     for (const tk of k) {
       if (tk.due_source !== 'commitment') continue
+      if (!usable(tk.project_id, tk.project_name)) continue
       if ((tk.assignee_email ?? '').toLowerCase() !== feed.member.toLowerCase()) continue
       const due = ms(tk.due_at)
       if (!inWindow(due)) continue
@@ -231,18 +266,6 @@ export function titleNames(title: string, client: string): boolean {
   const bare = title.replace(/^[🔴🟡✓]\s*/u, '').replace(/^client:\s*/i, '').split(' · ')[0]?.trim().toLowerCase() ?? ''
   const c = client.toLowerCase().replace(/…$/, '')
   return bare.length > 0 && (bare === c || bare.startsWith(c) || (bare.length >= 6 && c.startsWith(bare)))
-}
-
-export function queueMarkdown(items: QueueItem[], linked: Record<string, string>, now: number, note: string): string {
-  if (items.length === 0) return `**Nothing needs you right now.**\n\n${note}`
-  const lines = items.map((it, i) => {
-    const link = linked[it.projectId] ? 'pinned thread' : 'no thread yet: `/mm start ' + it.client + '`'
-    const extra = [it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', it.tasks ? `${it.tasks} task${it.tasks > 1 ? 's' : ''} due` : '']
-      .filter(Boolean)
-      .join(', ')
-    return `${i + 1}. ${titleFor(it, now)}  \n   ${extra || 'drafts ready'} · ${link}`
-  })
-  return `**Needs you now** (${items.length}${items.length > MAX_PINS ? `, the first ${MAX_PINS} pin` : ''})\n\n${lines.join('\n')}\n\n${note}`
 }
 
 /** What a client's own thread shows when it has no prepared drafts: the messages waiting and the tasks due. */
