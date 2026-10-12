@@ -4,7 +4,7 @@ import type { MmBand, MmNotice, MmQueue, MmView } from '../types'
 
 import { MAX_PINS, buildQueue, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, dueLine, isUuid, needsLine, titleFor } from './queue'
 import type { Feed, FeedThread, QueueItem } from './queue'
-import { LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFor, bandWords, clientThreads, kickoffText, ownerOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, threadLength, threadLink, threadRows, titleSuggestion } from './threads'
+import { LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFor, bandWords, clientThreads, kickoffText, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, threadLength, threadLink, threadRows, titleSuggestion } from './threads'
 import type { AppThread, ContextReading, Pairs, Recommendation, Replaced, Row, RowButton, RowState, Sent } from './threads'
 
 // The Massmarket bridge.
@@ -55,6 +55,9 @@ import type { AppThread, ContextReading, Pairs, Recommendation, Replaced, Row, R
 // ⛔ The band above the prompt draws from what is stored: it makes no feed call and no app call.
 // ⛔ The bridge reads nothing of a thread: no transcript, no events. A new thread that takes over from an
 //    old one is asked, in its kickoff, to read that thread's last three messages itself.
+// ⛔ To take the person to a thread, ONE program is started: the system's own opener, with the app's own
+//    link to that thread as its only argument besides the opener's own, and only because the person
+//    pressed Open thread or Update thread or typed /mm update (openThread).
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
@@ -100,6 +103,8 @@ const CHIPS_MAX = 100
 const DISMISS_TRIES = 5
 /** A press on a row's button is in flight no longer than this: after it, the row takes a press again. */
 const PRESS_HOLD_MS = 30_000
+/** The system's opener is given this long to take a thread's link. */
+const OPEN_WAIT_MS = 10_000
 /** The first line of the message Update sends: how a session knows an Update just arrived in its thread. */
 const UPDATE_OPENS_WITH = 'New since this thread last worked on this client: '
 /** `[mm-link <project id>]`, counted only at the very start of a prompt. */
@@ -1071,14 +1076,17 @@ function ownerName(projectId: string, items: readonly QueueItem[], pin: Pin | un
 /**
  * Start thread. The app gives a plugin no way to open a new thread with a first message (no start_session
  * tool on this build), so this mints a chip whose prompt is the kickoff, and the person clicks Start on it.
+ * `typed` is the person's own /mm start <client>: it always mints. The chip on record for this thread may
+ * be one the person dismissed, which the bridge cannot see; the new one supersedes it.
  */
-async function startThread($: EngineInterface, it: QueueItem, pass: Pass): Promise<string> {
+async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed: boolean): Promise<string> {
   const now = await $.clock.now()
   const me = await selfId($)
   const signature = signatureOf(it)
-  // ⛔ One chip per client. A chip for this client, carrying this, already in this thread: nothing is minted.
+  // ⛔ One chip per client. The button, with a chip for this client carrying this already in this thread:
+  //    nothing is minted.
   const before = await chipsOf($, now)
-  if (me && before.some(c => c.projectId === it.projectId && !c.superseded && c.threadId === me && c.signature === signature)) {
+  if (!typed && me && before.some(c => c.projectId === it.projectId && !c.superseded && c.threadId === me && c.signature === signature)) {
     return `A chip for ${it.client} is already here: click Start on it.`
   }
   // A client that already has a thread: the new one is asked to look at how the old one ended (handoverText).
@@ -1191,24 +1199,35 @@ async function replaced($: EngineInterface, it: QueueItem, pass: Pass): Promise<
 }
 
 /**
- * Opens a thread in the app, from a button press. ⛔ NOT BUILT YET: it answers false, and the caller says
- * where the thread is instead.
+ * Opens a thread in the app: true when the system's opener took the link. On false the caller says where
+ * the thread is instead.
  *
- * What this build's plugin API offers (checked 2026-10-12, claude-code.d.ts 2.1.293):
- *   - a `Link` element: on the desktop surface an href that is not `https:` is drawn as plain text, so the
- *     app's `claude://` link is no anchor there;
- *   - no open-URL call anywhere on `$`;
- *   - `ccd_window.open_session_in`: only for this thread, or one this thread started.
- * The one way left is to start the system's opener with `$.process.run`. That is a new process on every
- * teammate's computer, so it waits for an explicit yes.
+ * Why a program is started (checked 2026-10-12, claude-code.d.ts 2.1.293): the plugin API has no other
+ * way. A `Link` whose href is not `https:` is drawn as plain text on the desktop surface, so the app's
+ * `claude://` link is no anchor there; there is no open-URL call anywhere on `$`; and
+ * `ccd_window.open_session_in` takes only this thread, or one this thread started. Rob, 2026-10-12, asked
+ * for a button that takes him to the thread.
  *
- * ⛔ Whatever opens it, the only thing ever opened is `threadLink(thread)`: the app's own link for that
- *    thread, of exactly the shape `claude://claude.ai/epitaxy/<its id>`, for a thread the row showed.
- *    Never a URL from the feed, a title or a message.
+ * ⛔ ONLY FROM THE PERSON: reached from `showThread` (the Open thread button) and from `updateThread`
+ *    after its message went (the Update thread button, a typed /mm update). Never from a timer, a sync,
+ *    the band, or Claude's tool.
+ * ⛔ ONE COMMAND, and nothing else is ever started here: the platform's own opener (`open`, `rundll32
+ *    url.dll,FileProtocolHandler`, `xdg-open`) with the link as its last argument, as an argument array.
+ *    No shell, and nothing joined into an argument (`openCommand`).
+ * ⛔ ONE LINK: the app's own link for that thread, of exactly the shape `claude://claude.ai/epitaxy/<its
+ *    id>`, for a thread the app listed and the row showed (`threadLink`). Never a URL from the feed, a
+ *    title or a message.
+ * A platform that cannot be told, an opener that is not there, one that does not answer in OPEN_WAIT_MS,
+ * or one that exits with an error: false.
  */
-async function openThread(_$: EngineInterface, thread: AppThread | undefined): Promise<boolean> {
-  if (!threadLink(thread)) return false
-  return false
+async function openThread($: EngineInterface, thread: AppThread | undefined): Promise<boolean> {
+  const argv = openCommand(thread, platformOf({ OS: await $.env.get('OS'), HOME: await $.env.get('HOME') }))
+  if (!argv) return false
+  try {
+    return (await $.process.run(argv, { timeoutMs: OPEN_WAIT_MS })).exitCode === 0
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -1346,7 +1365,7 @@ async function act($: EngineInterface, verb: Verb, row: Row): Promise<Said> {
   const pass = await reconcile($, feed)
   const it = pass.last.items.find(i => i.projectId === row.projectId)
   if (!it) return noClient(row.client)
-  if (verb === 'start') return started($, feed, pass, await startThread($, it, pass))
+  if (verb === 'start') return started($, feed, pass, await startThread($, it, pass, false))
   if (verb === 'open') return showThread($, it, pass, row.target)
   return updateThread($, feed, it, pass, { typed: false, shown: row.target })
 }
@@ -1509,8 +1528,9 @@ async function runCommand($: EngineInterface, args: string, by: By): Promise<str
     const it = last.items.find(i => i.projectId === named.projectId)
     if (!it) return noClient(arg)
     // The person typed it: /mm start starts a new thread and /mm update updates the existing one, whatever
-    // the row recommends (only a thread that already has this is not sent it again).
-    if (verb === 'start') return started($, feed, pass, await startThread($, it, pass))
+    // the row recommends (only a thread that already has this is not sent it again). A typed /mm start
+    // always mints its chip.
+    if (verb === 'start') return started($, feed, pass, await startThread($, it, pass, true))
     if (verb === 'update') {
       const said = await updateThread($, feed, it, pass, { typed: true })
       return typeof said === 'string' ? said : said.text

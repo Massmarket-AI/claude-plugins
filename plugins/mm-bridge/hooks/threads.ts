@@ -335,6 +335,44 @@ export function threadLink(thread: { sessionId: string; link?: unknown } | undef
   return thread.link === `claude://claude.ai/epitaxy/${thread.sessionId}` ? thread.link : undefined
 }
 
+/**
+ * The system's own opener on each platform: the program, and what stands before the link. The app gives a
+ * plugin no call that opens a thread, so this is the one way a button can take the person to it.
+ * ⛔ These three programs and no other. `rundll32 url.dll,FileProtocolHandler` on Windows, not `cmd /c
+ *    start`: no shell reads the link.
+ */
+export const OPENERS = {
+  mac: ['open'],
+  windows: ['rundll32', 'url.dll,FileProtocolHandler'],
+  linux: ['xdg-open'],
+} as const
+export type Platform = keyof typeof OPENERS
+
+/**
+ * Which platform this computer is, from its environment: Windows sets `OS` to `Windows_NT`; a home folder
+ * under `/Users/` is a Mac's and one under `/home/` is Linux's. Undefined when it cannot be told: nothing
+ * is started then.
+ */
+export function platformOf(env: { OS?: string | null | undefined; HOME?: string | null | undefined }): Platform | undefined {
+  if (env.OS === 'Windows_NT') return 'windows'
+  const home = typeof env.HOME === 'string' ? env.HOME : ''
+  if (home.startsWith('/Users/')) return 'mac'
+  if (home.startsWith('/home/')) return 'linux'
+  return undefined
+}
+
+/**
+ * The one command that opens a thread, as an argument array: the platform's opener, then the thread's link
+ * as its last argument, alone. Undefined when the thread has no link that is exactly its own (threadLink),
+ * or the platform is not known: nothing is started then.
+ * ⛔ Never a string for a shell, and nothing is ever joined into an argument.
+ */
+export function openCommand(thread: { sessionId: string; link?: unknown } | undefined, platform: Platform | undefined): readonly string[] | undefined {
+  const link = threadLink(thread)
+  if (!link || !platform || !Object.hasOwn(OPENERS, platform)) return undefined
+  return [...OPENERS[platform], link]
+}
+
 // ---------------------------------------------------------------- the pane
 
 export const LABEL = { update: 'Update thread', start: 'Start thread', open: 'Open thread', drafts: 'Drafts' } as const

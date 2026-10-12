@@ -3,11 +3,11 @@ import { describe, expect, test } from 'claude-code/testing'
 import { buildQueue } from './queue'
 import type { Feed, FeedThread, QueueItem } from './queue'
 import {
-  CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, LONG_CONTEXT_TOKENS, LONG_THREAD_ROWS, NEW_MARK, OLD_THREAD_MS, PANE_SENTENCE, THREAD_ID,
-  autoLinkFor, bandWords, clientThreads, dueText, handoverText, isNewRow, kickoffText, ownerOf, paneText, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf,
-  threadLength, threadLink, threadRows, titleLooksLike, titleSuggestion, waitingText,
+  CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, LONG_CONTEXT_TOKENS, LONG_THREAD_ROWS, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
+  autoLinkFor, bandWords, clientThreads, dueText, handoverText, isNewRow, kickoffText, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups,
+  sharedThreads, signatureOf, threadLength, threadLink, threadRows, titleLooksLike, titleSuggestion, waitingText,
 } from './threads'
-import type { AppThread, ClientThread, Pairs } from './threads'
+import type { AppThread, ClientThread, Pairs, Platform } from './threads'
 
 // Every client and address below is made up.
 
@@ -552,5 +552,72 @@ describe('the link that opens a thread', () => {
     expect(threadLink(undefined)).toBeUndefined()
     // a thread whose id is not an app thread id has no link at all
     expect(threadLink({ sessionId: 'x', link: 'claude://claude.ai/epitaxy/x' })).toBeUndefined()
+  })
+})
+
+describe('the one command that opens a thread', () => {
+  const sid = 'local_0f1e2d3c-aaaa-4bbb-8ccc-000000000001'
+  const link = `claude://claude.ai/epitaxy/${sid}`
+  const PLATFORMS: Platform[] = ['mac', 'windows', 'linux']
+
+  test('the platform is told from the environment, or it is not told at all', async () => {
+    expect(platformOf({ OS: 'Windows_NT', HOME: undefined })).toBe('windows')
+    // Windows first: a shell there may set HOME to anything
+    expect(platformOf({ OS: 'Windows_NT', HOME: '/Users/someone' })).toBe('windows')
+    expect(platformOf({ HOME: '/Users/someone' })).toBe('mac')
+    expect(platformOf({ HOME: '/home/someone' })).toBe('linux')
+    for (const env of [{}, { HOME: '' }, { HOME: null }, { HOME: '/root' }, { HOME: '/Users' }, { HOME: 'C:\\Users\\someone' }, { OS: 'windows_nt' }, { OS: 'Linux', HOME: '/srv/someone' }]) {
+      expect(platformOf(env), JSON.stringify(env)).toBeUndefined()
+    }
+  })
+
+  test('each platform\'s own opener, then the thread\'s link as the last argument, alone', async () => {
+    expect(openCommand({ sessionId: sid, link }, 'mac')).toEqual(['open', link])
+    expect(openCommand({ sessionId: sid, link }, 'windows')).toEqual(['rundll32', 'url.dll,FileProtocolHandler', link])
+    expect(openCommand({ sessionId: sid, link }, 'linux')).toEqual(['xdg-open', link])
+    // the three programs, and no other
+    expect(Object.values(OPENERS).map(o => o[0]).sort()).toEqual(['open', 'rundll32', 'xdg-open'])
+  })
+
+  test('no platform, or one that is not in the table: no command', async () => {
+    expect(openCommand({ sessionId: sid, link }, undefined)).toBeUndefined()
+    for (const name of ['', 'darwin', 'toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+      expect(openCommand({ sessionId: sid, link }, name as Platform), name).toBeUndefined()
+    }
+  })
+
+  test('⛔ whatever the app, the feed or a title hands it: one of three programs, and a link that is exactly that thread\'s', async () => {
+    const hostile: unknown[] = [
+      undefined, null, '', 42, {}, [link],
+      'https://example.com/', 'file:///etc/hosts', 'javascript:alert(1)',
+      `https://claude.ai/epitaxy/${sid}`,
+      `claude://example.com/epitaxy/${sid}`,
+      'claude://claude.ai/epitaxy/local_another',
+      `${link}/`, `${link}?x=1`, `${link}#x`, ` ${link}`, `${link}\n`, `${link} --args -e x`,
+      `${link}; rm -rf ~`, `${link} && calc.exe`, `${link}" & calc.exe & "`, `$(${link})`, `\`${link}\``,
+      `-a Calculator ${link}`, '-a', '--help', `${link}\u0000`,
+    ]
+    const ids = [sid, 'local_a', 'x', '', '../local_a', 'local_a b', 'local_a;x', `local_${'a'.repeat(101)}`]
+    let commands = 0
+    for (const platform of [...PLATFORMS, undefined]) {
+      for (const sessionId of ids) {
+        for (const given of [...hostile, `claude://claude.ai/epitaxy/${sessionId}`]) {
+          const argv = openCommand({ sessionId, link: given }, platform)
+          if (!argv) continue
+          commands++
+          const what = JSON.stringify([platform, sessionId, given])
+          // one of the three programs, with that program's own fixed words before the link
+          const own = platform ? OPENERS[platform] : []
+          expect(['open', 'rundll32', 'xdg-open'], what).toContain(argv[0])
+          expect(argv.slice(0, -1), what).toEqual([...own])
+          // and the one other argument: the app's link for exactly this thread, nothing before or after it
+          expect(argv.at(-1), what).toBe(`claude://claude.ai/epitaxy/${sessionId}`)
+          expect(argv.at(-1), what).toMatch(/^claude:\/\/claude\.ai\/epitaxy\/local_[A-Za-z0-9_-]{1,100}$/)
+          expect(THREAD_ID.test(sessionId), what).toBe(true)
+        }
+      }
+    }
+    // only the well-formed ids with their own link got a command: two ids, three platforms
+    expect(commands).toBe(6)
   })
 })

@@ -22,7 +22,7 @@ const SELF = 'local_self'
 const SELF_CLI = 'cccccccc-0000-4000-8000-000000000000'
 const PKG = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 
-type Thread = { sessionId: string; title: string; pinned: boolean; isArchived: boolean; lastActivityAt: string }
+type Thread = { sessionId: string; title: string; pinned: boolean; isArchived: boolean; lastActivityAt: string; link?: string }
 type Call = { server: string; tool: string; args: Record<string, unknown> }
 
 const thread = (sessionId: string, title: string, hoursAgo: number, over: Partial<Thread> = {}): Thread => ({
@@ -66,6 +66,8 @@ type WorldOptions = {
   dismissFails?: boolean
   /** No tracker token on this computer. */
   noToken?: boolean
+  /** The system's opener: it takes the link (`works`), exits with an error (left out), or is not on this computer (`missing`). */
+  opener?: 'works' | 'missing'
   /** The feed's HTTP status for each fetch (200 when left out). */
   feedStatus?: () => number
   files?: Record<string, { text: string; mtimeMs: number }>
@@ -169,7 +171,8 @@ function world(on: On, opts: WorldOptions = {}) {
   const ran: string[] = []
   on('process.run', (_$, e) => {
     ran.push(JSON.stringify(e))
-    return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (opts.opener === 'missing') return { deny: `spawn ${String(e.argv[0])} ENOENT` }
+    return { value: { exitCode: opts.opener === 'works' ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('session.id', () => ({ value: SELF_CLI }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
@@ -209,6 +212,8 @@ function world(on: On, opts: WorldOptions = {}) {
     writes: () => calls.filter(c => !['get_session', 'list_sessions', 'get_usage', 'dismiss_task'].includes(c.tool)).map(c => [c.tool, c.args.session_id ?? '', c.args.title ?? c.args.pinned ?? ''].join(' | ')),
     /** The chips this session asked the app to withdraw, by their ids. */
     dismissed: () => calls.filter(c => c.tool === 'dismiss_task').map(c => String(c.args.task_id)),
+    /** The argument array of every program the bridge started. */
+    argvs: () => ran.map(r => (JSON.parse(r) as { argv: string[] }).argv),
     /** How often this session asked the app for its usage, and for whom. */
     usageAsked: () => calls.filter(c => c.tool === 'get_usage').map(c => String(c.args.session_id)),
     setFeed: (f: Feed) => {
@@ -2096,10 +2101,8 @@ describe('a row says Start, Update or Open: one action, chosen by what the threa
     await ui.unmount()
   })
 
-  test('Open thread says where the thread is: it sends nothing, starts no program and opens nothing, whatever link the app gave', async ($, on) => {
-    // one thread with the app's own link, as it lists it; the bridge has no way to open it on this build
-    const withLink = { ...thread('local_a', 'Roof quote', 30), link: 'claude://claude.ai/epitaxy/local_a' }
-    const w = acmeWorld(on, { threads: [withLink as never, thread('local_x', 'Unrelated notes', 5)] })
+  test('Open thread with no link from the app says where the thread is: it sends nothing, starts no program and opens no pane', async ($, on) => {
+    const w = acmeWorld(on, { threads: [thread('local_a', 'Roof quote', 30), thread('local_x', 'Unrelated notes', 5)], opener: 'works' })
     await mm($, '')
     const ui = await pane($)
     await ui.press({ key: `update:${ACME}` })
@@ -2124,6 +2127,185 @@ describe('a row says Start, Update or Open: one action, chosen by what the threa
     expect(w.ran).toEqual([])
     await ui.unmount()
   })
+})
+
+describe('starts a program: the system\'s opener takes the person to the thread', () => {
+  const LINK_A = 'claude://claude.ai/epitaxy/local_a'
+  const LINK_B = 'claude://claude.ai/epitaxy/local_b'
+  const DESKTOP = { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' }
+  const ENV = {
+    mac: { ...DESKTOP, HOME: '/Users/someone' },
+    windows: { ...DESKTOP, OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\someone', APPDATA: 'C:\\Users\\someone\\AppData\\Roaming' },
+    linux: { ...DESKTOP, HOME: '/home/someone' },
+  }
+  /** What each platform's opener is started with, before the link. */
+  const BEFORE_LINK = { mac: ['open'], windows: ['rundll32', 'url.dll,FileProtocolHandler'], linux: ['xdg-open'] }
+  const PROGRAMS = ['open', 'rundll32', 'xdg-open']
+  const PLATFORMS = ['mac', 'windows', 'linux'] as const
+  /** Acme's thread as the app lists it, with the link the app gives for it. */
+  const acmeLinked = (on: On, over: WorldOptions = {}, link: unknown = LINK_A) =>
+    acmeWorld(on, { threads: [{ ...thread('local_a', 'Roof quote', 30), link } as never, thread('local_x', 'Unrelated notes', 5)], ...over })
+  const LONG = `Sent to Acme Roofing's thread: open "${ACME_SHOWN}" under Pinned.`
+  const SHORT = 'Sent to Acme Roofing\'s thread.'
+  const WHERE = `Open "${ACME_SHOWN}" under Pinned.`
+
+  for (const platform of PLATFORMS) {
+    test(`${platform}: Update thread sends, then opens the thread; Open thread opens it and says nothing`, async ($, on) => {
+      const w = acmeLinked(on, { env: ENV[platform], opener: 'works' })
+      await mm($, '')
+      const ui = await pane($)
+      await ui.press({ key: `update:${ACME}` })
+      // the message went, and then the one command
+      expect(w.acted().map(c => [c.tool, c.args.session_id])).toEqual([['send_message', 'local_a']])
+      expect(w.argvs()).toEqual([[...BEFORE_LINK[platform], LINK_A]])
+      expect(w.toasts).toEqual([SHORT])
+      expect(await lines(ui)).toContain(SHORT)
+      // Open thread: the same command; nothing said, nothing sent
+      await ui.press({ key: `open:${ACME}` })
+      expect(w.argvs()).toEqual([[...BEFORE_LINK[platform], LINK_A], [...BEFORE_LINK[platform], LINK_A]])
+      expect(w.toasts).toEqual([SHORT])
+      expect((await lines(ui)).filter(l => l.includes('under Pinned') || l.includes('Sent to'))).toEqual([])
+      expect(w.acted().length).toBe(1)
+      // started with a time limit and nothing else: no input, no environment of its own, no folder
+      expect(w.ran.map(r => (JSON.parse(r) as { init?: unknown }).init)).toEqual([{ timeoutMs: 10_000 }, { timeoutMs: 10_000 }])
+      await ui.unmount()
+    })
+  }
+
+  test('/mm update <client>, typed by the person: sends, opens, and answers the short sentence', async ($, on) => {
+    const w = acmeLinked(on, { env: ENV.mac, opener: 'works' })
+    expect(await mm($, 'update acme roofing')).toBe(SHORT)
+    expect(w.argvs()).toEqual([['open', LINK_A]])
+    // a thread that already has this is not sent it again, and nothing is opened for that answer
+    expect(await mm($, 'update acme roofing')).toBe(`Acme Roofing's thread already has this. Open "${ACME_SHOWN}" under Pinned.`)
+    expect(w.argvs().length).toBe(1)
+  })
+
+  const FALLBACKS: Array<[string, WorldOptions, number]> = [
+    ['the opener exits with an error', { env: ENV.mac }, 1],
+    ['the opener is not on this computer', { env: ENV.linux, opener: 'missing' }, 1],
+    ['the platform cannot be told', { env: { ...DESKTOP, HOME: '/srv/someone' }, opener: 'works' }, 0],
+  ]
+  for (const [name, over, tries] of FALLBACKS) {
+    test(`${name}: the sentences that say where the thread is, and nothing else is tried`, async ($, on) => {
+      const w = acmeLinked(on, over)
+      await mm($, '')
+      const ui = await pane($)
+      await ui.press({ key: `update:${ACME}` })
+      expect(await lines(ui)).toContain(LONG)
+      expect(w.toasts).toEqual([SHORT])
+      // the message went all the same, and the thread has it
+      expect(await buttonsOf(ui, ACME)).toEqual(['Open thread', 'Drafts'])
+      await ui.press({ key: `open:${ACME}` })
+      expect(w.toasts).toEqual([SHORT, WHERE])
+      expect(await lines(ui)).toContain(WHERE)
+      // one try per press at most, each the platform's opener with the link, and no second program after it
+      expect(w.argvs().length).toBe(tries * 2)
+      for (const argv of w.argvs()) {
+        expect(PROGRAMS).toContain(argv[0])
+        expect(argv.at(-1)).toBe(LINK_A)
+      }
+      await ui.unmount()
+    })
+  }
+
+  const CRAFTED: Array<[string, unknown]> = [
+    ['a web address', 'https://example.com/claude'],
+    ['another thread\'s link', 'claude://claude.ai/epitaxy/local_x'],
+    ['the link with a command after it', `${LINK_A}; open -a Calculator`],
+    ['the link with an option before it', `-a Calculator ${LINK_A}`],
+    ['the link with a query', `${LINK_A}?then=x`],
+    ['a file', 'file:///etc/hosts'],
+    ['not text', { href: LINK_A }],
+  ]
+  for (const [name, link] of CRAFTED) {
+    test(`⛔ the app gives ${name} for the thread: no program is started, on Update or on Open`, async ($, on) => {
+      const w = acmeLinked(on, { env: ENV.mac, opener: 'works' }, link)
+      await mm($, '')
+      const ui = await pane($)
+      await ui.press({ key: `update:${ACME}` })
+      expect(await lines(ui)).toContain(LONG)
+      await ui.press({ key: `open:${ACME}` })
+      expect(await lines(ui)).toContain(WHERE)
+      expect(w.ran).toEqual([])
+      await ui.unmount()
+    })
+  }
+
+  test('⛔ only the person: not Claude\'s tool, not the timer, not a sync, not the band, not Drafts, not Start', async ($, on) => {
+    const w = acmeLinked(on, { env: ENV.mac, opener: 'works' })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    for (let i = 0; i < 30; i++) await w.clock.advance(60_000)
+    expect(await tool($, 'update Acme Roofing')).toContain('Only the person can do this')
+    await tool($, '')
+    await tool($, 'view')
+    await mm($, '')
+    await mm($, 'status')
+    await mm($, 'view')
+    const ui = await pane($)
+    await ui.press({ key: `drafts:${ACME}` })
+    await ui.press({ key: `start:${CEDAR}` })
+    const band = await bandOf($)
+    await band.press({ key: 'mm-open-list' })
+    await band.unmount()
+    await ui.unmount()
+    expect(w.ran).toEqual([])
+    expect(w.acted().map(c => c.tool)).toEqual(['spawn_task'])
+  })
+
+  test('Update pressed inside the client\'s own thread: the person is already there, and nothing is opened', async ($, on) => {
+    const w = world(on, {
+      feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }),
+      store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } },
+      self: { ...thread(SELF, 'Morning hub', 0), link: `claude://claude.ai/epitaxy/${SELF}` },
+      env: ENV.mac,
+      opener: 'works',
+    })
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: `update:${ACME}` })
+    expect(await lines(ui)).toContain('Picking up Acme Roofing in this thread.')
+    expect(w.ran).toEqual([])
+    await ui.unmount()
+  })
+
+  for (const platform of PLATFORMS) {
+    test(`⛔ ${platform}: every press and command together start only that platform's opener, each time with one link the app listed for that thread`, async ($, on) => {
+      // Acme's and Bolt's threads carry the app's own links; the thread that looks like Cedar's carries a web address
+      const w = world(on, {
+        feed: feed({ threads: [declared(ACME, 'cli-acme', 30), declared(BOLT, 'cli-bolt', 20)] }),
+        threads: [
+          { ...thread('local_a', 'Roof quote', 30), link: LINK_A },
+          { ...thread('local_b', 'Staffing plan', 20), link: LINK_B },
+          { ...thread('local_x', 'Cedar Dental notes', 5), link: 'https://example.com/cedar' },
+        ],
+        store: { 'mm.threads': PAIRS },
+        env: ENV[platform],
+        opener: 'works',
+      })
+      await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+      await w.clock.advance(4_000)
+      await mm($, '')
+      const ui = await pane($)
+      for (const id of [ACME, BOLT, CEDAR]) await ui.press({ key: `update:${id}` })
+      for (const id of [ACME, BOLT, CEDAR]) await ui.press({ key: `open:${id}` })
+      for (const id of [ACME, BOLT, CEDAR]) await ui.press({ key: `drafts:${id}` })
+      await mm($, 'update bolt staffing')
+      await mm($, 'start cedar dental')
+      await mm($, 'view')
+      await tool($, 'update Acme Roofing')
+      for (let i = 0; i < 10; i++) await w.clock.advance(60_000)
+      await ui.unmount()
+      // three messages went, one to each thread, and the two threads with a link of their own were opened: after Update, and on Open
+      expect(w.acted().filter(c => c.tool === 'send_message').map(c => c.args.session_id)).toEqual(['local_a', 'local_b', 'local_x'])
+      expect(w.argvs().map(a => a.at(-1))).toEqual([LINK_A, LINK_B, LINK_A, LINK_B])
+      for (const argv of w.argvs()) {
+        expect(argv.slice(0, -1)).toEqual(BEFORE_LINK[platform])
+        expect(argv.at(-1)).toMatch(/^claude:\/\/claude\.ai\/epitaxy\/local_[ab]$/)
+      }
+    })
+  }
 })
 
 describe('a press shows that it worked, and cannot fire twice', () => {
@@ -2459,7 +2641,7 @@ describe('a new thread takes over from an old one', () => {
 describe('chips: one per client, in the thread where the person pressed, cleaned up everywhere', () => {
   const chip = (projectId: string, n: number, threadId: string, over: Record<string, unknown> = {}) => ({ projectId, signature: `sig-${n}`, taskId: chipId(n), threadId, at: NOW - HOUR, prompt: `prompt-${n}`, ...over })
 
-  test('Start thread again in the same thread mints nothing; the row says the chip is ready here', async ($, on) => {
+  test('the Start thread button again in the same thread mints nothing; the row says the chip is ready here', async ($, on) => {
     const w = world(on)
     await mm($, '')
     const ui = await pane($)
@@ -2469,7 +2651,6 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
     expect(await buttonsOf(ui, CEDAR)).toEqual(['Start thread', 'Drafts'])
     await ui.press({ key: `start:${CEDAR}` })
     expect(w.toasts).toEqual(['A chip for Cedar Dental is ready here: click Start on it.', 'A chip for Cedar Dental is already here: click Start on it.'])
-    expect(await mm($, 'start cedar dental')).toBe('A chip for Cedar Dental is already here: click Start on it.')
     expect(w.acted().map(c => c.tool)).toEqual(['spawn_task'])
     expect((w.stored['mm.chips'] as unknown[]).length).toBe(1)
     // something new for the client: the chip here carries the old kickoff, so a new one is minted and the old one superseded
@@ -2481,6 +2662,39 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
     expect(w.acted().map(c => c.tool)).toEqual(['spawn_task', 'spawn_task'])
     expect((w.stored['mm.chips'] as Array<{ taskId: string; superseded?: boolean }>).map(c => [c.taskId, Boolean(c.superseded)])).toEqual([[chipId(1), true], [chipId(2), false]])
     await ui.unmount()
+  })
+
+  test('a typed /mm start <client> always mints: the chip on record here may be one the person dismissed', async ($, on) => {
+    const w = world(on)
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: `start:${CEDAR}` })
+    // the person dismissed that chip by hand, which the bridge cannot see: the button still says it is here
+    await ui.press({ key: `start:${CEDAR}` })
+    expect(w.toasts.at(-1)).toBe('A chip for Cedar Dental is already here: click Start on it.')
+    expect(w.acted().map(c => c.tool)).toEqual(['spawn_task'])
+    // typed, it mints another, and the one on record is superseded
+    expect(await mm($, 'start cedar dental')).toBe('A chip for Cedar Dental is ready here: click Start on it.')
+    expect(w.acted().map(c => c.tool)).toEqual(['spawn_task', 'spawn_task'])
+    expect((w.stored['mm.chips'] as Array<{ taskId: string; superseded?: boolean }>).map(c => [c.taskId, Boolean(c.superseded)])).toEqual([[chipId(1), true], [chipId(2), false]])
+    // typed again: another, every time
+    expect(await mm($, 'start cedar dental')).toBe('A chip for Cedar Dental is ready here: click Start on it.')
+    expect(w.acted().length).toBe(3)
+    // the button, now: the newest chip is here
+    await ui.press({ key: `start:${CEDAR}` })
+    expect(w.toasts.at(-1)).toBe('A chip for Cedar Dental is already here: click Start on it.')
+    expect(w.acted().length).toBe(3)
+    expect(await lines(ui)).toContain('1 task due · Start thread: the chip is ready here')
+    await ui.unmount()
+    // this session withdraws the two that were superseded on its next tick, and keeps the live one
+    await w.clock.advance(60_000)
+    expect(w.dismissed()).toEqual([chipId(1), chipId(2)])
+    expect((w.stored['mm.chips'] as Array<{ taskId: string }>).map(c => c.taskId)).toEqual([chipId(3)])
+    // Claude's tool still cannot start one
+    expect(await tool($, 'start cedar dental')).toContain('Only the person can do this')
+    expect(w.acted().length).toBe(3)
   })
 
   test('a chip waiting in another thread: the row says where; Start here mints one here and supersedes it; this session never withdraws the other\'s', async ($, on) => {
