@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { businessMsBetween } from './business-time'
-import { WINDOW_AHEAD_MS, WINDOW_BACK_MS, buildQueue, cleanName, cleanText, cleanTitle, clearedTitle, isUuid, shortName, titleFor, titleNames } from './queue'
+import { WINDOW_AHEAD_MS, WINDOW_BACK_MS, buildQueue, cleanName, cleanText, cleanTitle, clearedTitle, clientInTitle, clockLead, clockText, dueLine, isUuid, needsLine, shortName, titleFor, titleNames } from './queue'
 import type { Feed } from './queue'
 
 const NOW = Date.parse('2026-10-08T15:00:00Z') // 11 AM ET
@@ -96,12 +96,12 @@ describe('feed text is data: ids must be uuids, names and titles are cleaned', (
 describe('thread names', () => {
   test('overdue is red and says how late', async () => {
     const [it] = buildQueue(feed({ mail: [mail(P1, 'Contoso Cooling — Sam', -30), mail(P1, 'Contoso Cooling — Sam', -2)] }), NOW)
-    expect(it && titleFor(it, NOW)).toBe('🔴 Contoso Cooling · reply overdue 6h · 2 new')
+    expect(it && titleFor(it, NOW)).toBe('🔴 6h late · Contoso Cooling · reply · 2 new')
   })
 
   test('due tomorrow is yellow', async () => {
     const [it] = buildQueue(feed({ mail: [mail(P1, 'Acme Legal (Pat)', -2)] }), NOW + 0)
-    expect(it && titleFor(it, NOW)).toBe('🟡 Acme Legal · reply due tomorrow 9 AM')
+    expect(it && titleFor(it, NOW)).toBe('🟡 22h left · Acme Legal · reply')
   })
 
   test('short names and matching an existing thread title', async () => {
@@ -110,6 +110,89 @@ describe('thread names', () => {
     expect(titleNames('Contoso Cooling: auto-assign fix', 'Contoso Cooling')).toBe(true)
     expect(titleNames('Answer the 7 Meta ad decisions', 'Contoso Cooling')).toBe(false)
     expect(clearedTitle('Contoso Cooling', NOW)).toMatch(/^✓ Contoso Cooling · clear 11/)
+  })
+})
+
+describe('the name leads with the hours (Rob, 2026-10-12)', () => {
+  /** A New York wall time in October 2026 (daylight time, UTC-4) as an instant. */
+  const t = (s: string) => Date.parse(`${s.replace(' ', 'T')}:00-04:00`)
+
+  test('late: hours under 24 business hours, whole business days from there, and a weekend adds nothing', async () => {
+    const due = t('2026-10-09 15:00') // Friday 3 PM
+    expect(clockLead(due, t('2026-10-09 15:20'))).toBe('1h late') // never 0h
+    expect(clockLead(due, t('2026-10-09 20:00'))).toBe('5h late')
+    expect(clockLead(due, t('2026-10-10 12:00'))).toBe('9h late') // Saturday noon: only Friday evening counted
+    expect(clockLead(due, t('2026-10-11 23:00'))).toBe('9h late') // Sunday night: still nine
+    expect(clockLead(due, t('2026-10-12 09:00'))).toBe('18h late')
+    expect(clockLead(due, t('2026-10-12 14:40'))).toBe('23h late') // 23 h 40 min: not "24h"
+    expect(clockLead(due, t('2026-10-12 15:00'))).toBe('1d late')
+    expect(clockLead(due, t('2026-10-13 15:00'))).toBe('2d late')
+    expect(clockLead(due, t('2026-10-14 15:00'))).toBe('3d late')
+  })
+
+  test('left: hours under 24 business hours, whole business days beyond, and a weekend adds nothing', async () => {
+    const due = t('2026-10-12 15:00') // Monday 3 PM
+    expect(clockLead(due, t('2026-10-12 14:50'))).toBe('1h left')
+    expect(clockLead(due, t('2026-10-12 12:00'))).toBe('3h left')
+    expect(clockLead(due, t('2026-10-11 09:00'))).toBe('15h left') // Sunday: Monday's fifteen hours
+    expect(clockLead(due, t('2026-10-10 09:00'))).toBe('15h left') // Saturday: the same
+    expect(clockLead(due, t('2026-10-09 16:00'))).toBe('23h left')
+    expect(clockLead(due, t('2026-10-09 15:00'))).toBe('1d left')
+    expect(clockLead(due, t('2026-10-07 15:00'))).toBe('3d left')
+  })
+
+  test('the name: the mark, the clock, the client, what is due, how many are new, and whether it is flagged', async () => {
+    const at = (s: string) => new Date(t(s)).toISOString()
+    const many = feed({ mail: Array.from({ length: 17 }, (_, i) => ({ ...mail(P1, 'Cedar Dental — Pat', 0), message_id_key: `m${i}`, received_at: at('2026-10-06 15:00'), reply_due_at: at('2026-10-07 15:00') })) })
+    const [reply] = buildQueue(many, t('2026-10-12 15:00'))
+    expect(reply && titleFor(reply, t('2026-10-12 15:00'))).toBe('🔴 3d late · Cedar Dental · reply · 17 new')
+    const ready = feed({ drafts: [{ package_id: 'aaaaaaaa-1111-4111-8111-111111111111', project_id: P1, project_name: 'Acme Roofing — Pat', status: 'prepared', covers_through: at('2026-10-09 15:00'), drafts_ready: 1, flagged_for_rob: true, project_owner_email: 'builder-a@example.com' }] })
+    const [pkg] = buildQueue(ready, t('2026-10-12 20:00'))
+    expect(pkg && titleFor(pkg, t('2026-10-12 20:00'))).toBe('🔴 5h late · Acme Roofing · reply ready · flagged')
+    const task = feed({ tickets: { due_today: [{ ticket_id: 't', project_id: P2, project_name: 'Bolt Staffing (Sam)', title: 'x', due_at: at('2026-10-13 12:00'), due_source: 'commitment', assignee_email: 'builder-a@example.com' }] } })
+    const [due] = buildQueue(task, t('2026-10-13 09:00'))
+    expect(due && titleFor(due, t('2026-10-13 09:00'))).toBe('🔴 3h left · Bolt Staffing · task')
+    // not due today: yellow
+    expect(due && titleFor(due, t('2026-10-12 15:00'))).toBe('🟡 21h left · Bolt Staffing · task')
+    // the cleared name is as it was
+    expect(clearedTitle('Cedar Dental', t('2026-10-12 11:00'))).toBe('✓ Cedar Dental · clear 11 AM')
+    // and a chip still says it in words
+    expect(due && needsLine(due, t('2026-10-13 09:00'))).toBe('Bolt Staffing · task due 12 PM')
+    expect(due && dueLine(due, t('2026-10-12 15:00'))).toBe('task due tomorrow 12 PM')
+  })
+
+  test('the client is recognised in today\'s shape of the name and in the one before it', async () => {
+    const names: Array<[string, string]> = [
+      ['🔴 3d late · Cedar Dental · reply · 17 new', 'Cedar Dental'],
+      ['🔴 5h late · Acme Roofing · reply ready', 'Acme Roofing'],
+      ['🟡 3h left · Bolt Staffing · task', 'Bolt Staffing'],
+      ['🟡 2d left · Bolt Staffing · reply ready · flagged', 'Bolt Staffing'],
+      // a two-digit rank in front, should the app ever sort pins by name
+      ['01 🔴 3d late · Cedar Dental · reply', 'Cedar Dental'],
+      // the shape 0.4.0 wrote
+      ['🔴 Cedar Dental · reply overdue 6h', 'Cedar Dental'],
+      ['🟡 Acme Roofing · reply ready due tomorrow 8 AM', 'Acme Roofing'],
+      ['🔴 Bolt Staffing · task due 4 PM · 2 new', 'Bolt Staffing'],
+      // cleared, in both
+      ['✓ Cedar Dental · clear 11 AM', 'Cedar Dental'],
+      // a title that is not ours: what stands before its first separator
+      ['Cedar Dental: intake question', 'Cedar Dental: intake question'],
+      ['client: cedar-dental', 'cedar-dental'],
+    ]
+    for (const [title, client] of names) expect(clientInTitle(title), title).toBe(client)
+    for (const [title, client] of names.slice(0, 9)) expect(titleNames(title, client), title).toBe(true)
+    expect(titleNames('🔴 3d late · Cedar Dental · reply', 'Acme Roofing')).toBe(false)
+    // a client whose own name looks like a clock is still a name where no clock leads
+    expect(clientInTitle('🔴 3h left · 2d left · reply')).toBe('2d left')
+    expect(clientInTitle('3h left of the day')).toBe('3h left of the day')
+  })
+
+  test('a time as the pane writes it: alone when it is today, with the weekday when it is not', async () => {
+    const now = t('2026-10-12 11:00')
+    expect(clockText(t('2026-10-12 09:30'), now)).toBe('9:30 AM')
+    expect(clockText(t('2026-10-12 15:00'), now)).toBe('3 PM')
+    expect(clockText(t('2026-10-09 16:00'), now)).toBe('Fri 4 PM')
+    expect(clockText(t('2026-10-11 23:59'), now)).toBe('Sun 11:59 PM')
   })
 })
 
@@ -142,22 +225,22 @@ describe('client clocks count business days (Rob, 2026-10-12: weekends do not co
   test('a message that arrived Friday 3 PM is due Monday 3 PM, and is pinned Friday 4 PM', async () => {
     const [it] = buildQueue(friday, et('2026-10-09 16:00'))
     expect(it?.dueAt).toBe(et('2026-10-12 15:00'))
-    expect(titleAt(friday, '2026-10-09 16:00')).toBe('🟡 Acme Roofing · reply due Mon 3 PM')
+    expect(titleAt(friday, '2026-10-09 16:00')).toBe('🟡 23h left · Acme Roofing · reply')
   })
 
   test('it stays pinned over the weekend and Monday 9 AM reads due today at 3 PM', async () => {
-    expect(titleAt(friday, '2026-10-10 15:01')).toBe('🟡 Acme Roofing · reply due Mon 3 PM')
-    expect(titleAt(friday, '2026-10-11 12:00')).toBe('🟡 Acme Roofing · reply due tomorrow 3 PM')
-    expect(titleAt(friday, '2026-10-12 09:00')).toBe('🔴 Acme Roofing · reply due 3 PM')
+    expect(titleAt(friday, '2026-10-10 15:01')).toBe('🟡 15h left · Acme Roofing · reply')
+    expect(titleAt(friday, '2026-10-11 12:00')).toBe('🟡 15h left · Acme Roofing · reply')
+    expect(titleAt(friday, '2026-10-12 09:00')).toBe('🔴 6h left · Acme Roofing · reply')
   })
 
   test('Tuesday 3 PM it reads overdue 1d', async () => {
-    expect(titleAt(friday, '2026-10-12 16:00')).toBe('🔴 Acme Roofing · reply overdue 1h')
-    expect(titleAt(friday, '2026-10-13 15:00')).toBe('🔴 Acme Roofing · reply overdue 1d')
+    expect(titleAt(friday, '2026-10-12 16:00')).toBe('🔴 1h late · Acme Roofing · reply')
+    expect(titleAt(friday, '2026-10-13 15:00')).toBe('🔴 1d late · Acme Roofing · reply')
   })
 
   test('it is pinned through Thursday 3 PM (3 business days late) and gone at 3:01 PM', async () => {
-    expect(titleAt(friday, '2026-10-15 15:00')).toBe('🔴 Acme Roofing · reply overdue 3d')
+    expect(titleAt(friday, '2026-10-15 15:00')).toBe('🔴 3d late · Acme Roofing · reply')
     expect(buildQueue(friday, et('2026-10-15 15:01'))).toEqual([])
   })
 
@@ -165,21 +248,21 @@ describe('client clocks count business days (Rob, 2026-10-12: weekends do not co
     const saturday = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-10 10:00')] })
     const [it] = buildQueue(saturday, et('2026-10-10 11:00'))
     expect(it?.dueAt).toBe(et('2026-10-12 23:59'))
-    expect(titleAt(saturday, '2026-10-10 11:00')).toBe('🟡 Acme Roofing · reply due Mon 11:59 PM')
-    expect(titleAt(saturday, '2026-10-12 09:00')).toBe('🔴 Acme Roofing · reply due 11:59 PM')
+    expect(titleAt(saturday, '2026-10-10 11:00')).toBe('🟡 23h left · Acme Roofing · reply')
+    expect(titleAt(saturday, '2026-10-12 09:00')).toBe('🔴 15h left · Acme Roofing · reply')
   })
 
   test('a message that arrived Thursday 3 PM is still pinned Monday 3:01 PM', async () => {
     const thursday = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-08 15:00')] })
     expect(buildQueue(thursday, et('2026-10-12 15:01'))[0]?.dueAt).toBe(et('2026-10-09 15:00'))
-    expect(titleAt(thursday, '2026-10-12 15:01')).toBe('🔴 Acme Roofing · reply overdue 1d')
+    expect(titleAt(thursday, '2026-10-12 15:01')).toBe('🔴 1d late · Acme Roofing · reply')
   })
 
   test('a ticket we committed for Friday 5 PM reads overdue 16h Monday 9 AM, and pins until Wednesday 5 PM', async () => {
     const f = feed({ tickets: { overdue: [committed(P1, 'Acme Roofing — Pat', at('2026-10-09 17:00'))] } })
-    expect(titleAt(f, '2026-10-12 09:00')).toBe('🔴 Acme Roofing · task overdue 16h')
-    expect(titleAt(f, '2026-10-12 17:01')).toBe('🔴 Acme Roofing · task overdue 1d')
-    expect(titleAt(f, '2026-10-14 17:00')).toBe('🔴 Acme Roofing · task overdue 3d')
+    expect(titleAt(f, '2026-10-12 09:00')).toBe('🔴 16h late · Acme Roofing · task')
+    expect(titleAt(f, '2026-10-12 17:01')).toBe('🔴 1d late · Acme Roofing · task')
+    expect(titleAt(f, '2026-10-14 17:00')).toBe('🔴 3d late · Acme Roofing · task')
     expect(buildQueue(f, et('2026-10-14 17:01'))).toEqual([])
   })
 
@@ -187,19 +270,19 @@ describe('client clocks count business days (Rob, 2026-10-12: weekends do not co
     const f = feed({
       drafts: [{ package_id: 'aaaaaaaa-1111-4111-8111-111111111111', project_id: P1, project_name: 'Acme Roofing — Pat', status: 'prepared', covers_through: at('2026-10-09 15:00'), drafts_ready: 1, project_owner_email: ME }],
     })
-    expect(titleAt(f, '2026-10-12 09:00')).toBe('🔴 Acme Roofing · reply ready due 3 PM')
-    expect(titleAt(f, '2026-10-15 15:00')).toBe('🔴 Acme Roofing · reply ready overdue 3d')
+    expect(titleAt(f, '2026-10-12 09:00')).toBe('🔴 6h left · Acme Roofing · reply ready')
+    expect(titleAt(f, '2026-10-15 15:00')).toBe('🔴 3d late · Acme Roofing · reply ready')
     expect(buildQueue(f, et('2026-10-15 15:01'))).toEqual([])
   })
 
   test('a reply time from the feed is used as given, whichever way the server counted it', async () => {
     // a server that counts business time says Monday 3 PM: pinned from Friday, not from Sunday
     const counted = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-09 15:00', '2026-10-12 15:00')] })
-    expect(titleAt(counted, '2026-10-09 16:00')).toBe('🟡 Acme Roofing · reply due Mon 3 PM')
+    expect(titleAt(counted, '2026-10-09 16:00')).toBe('🟡 23h left · Acme Roofing · reply')
     // a server that still counts real hours says Saturday 3 PM: pinned all the same, and the weekend adds no lateness
     const real = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-09 15:00', '2026-10-10 15:00')] })
-    expect(titleAt(real, '2026-10-09 16:00')).toBe('🟡 Acme Roofing · reply due tomorrow 3 PM')
-    expect(titleAt(real, '2026-10-12 09:00')).toBe('🔴 Acme Roofing · reply overdue 9h')
+    expect(titleAt(real, '2026-10-09 16:00')).toBe('🟡 8h left · Acme Roofing · reply')
+    expect(titleAt(real, '2026-10-12 09:00')).toBe('🔴 9h late · Acme Roofing · reply')
   })
 
   test('a message with no usable date is skipped and does not hide the client\'s other message', async () => {

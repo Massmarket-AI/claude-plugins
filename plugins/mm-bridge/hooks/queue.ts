@@ -34,6 +34,8 @@ export type FeedDraft = {
   project_name: string
   status: string
   covers_through?: string
+  /** When the package was last changed, when the feed gives it: part of what tells a thread it has the latest. */
+  updated_at?: string
   drafts_ready?: number
   flagged_for_rob?: boolean
   picked_up_by?: string | null
@@ -53,8 +55,10 @@ export type FeedTicket = {
 /**
  * One of the caller's own Claude Code sessions that declared a client: the feed's `threads` field. The
  * session id is what `$.session.id()` answers in that thread. Absent on a server that does not send it yet.
+ * `rows` is how many worklog rows that session wrote for that project in the feed's window: the thread's
+ * length when nothing better is known. Absent on a server that does not send it yet.
  */
-export type FeedThread = { project_id: string; session_id: string; last_activity_at: string }
+export type FeedThread = { project_id: string; session_id: string; last_activity_at: string; rows?: number }
 
 export type Feed = {
   member: string
@@ -75,6 +79,8 @@ export type QueueItem = {
   tasks: number
   packageId: string | null
   coversThrough: string | null
+  /** The package's `updated_at` as the feed gave it, or null. Compared, never shown. */
+  packageUpdatedAt: string | null
   flagged: boolean
   mail: Array<{ at: string; sender: string; subject: string; snippet: string }>
   taskTitles: string[]
@@ -152,7 +158,7 @@ export function buildQueue(feed: Feed, now: number): QueueItem[] {
     if (!it) {
       it = {
         projectId, projectName: cleanName(projectName), client: shortName(projectName), dueAt: Infinity, kind: 'task',
-        messages: 0, tasks: 0, packageId: null, coversThrough: null, flagged: false, mail: [], taskTitles: [],
+        messages: 0, tasks: 0, packageId: null, coversThrough: null, packageUpdatedAt: null, flagged: false, mail: [], taskTitles: [],
       }
       byProject.set(projectId, it)
     }
@@ -185,6 +191,7 @@ export function buildQueue(feed: Feed, now: number): QueueItem[] {
     it.kind = 'ready'
     it.packageId = d.package_id
     it.coversThrough = d.covers_through ?? null
+    it.packageUpdatedAt = typeof d.updated_at === 'string' ? d.updated_at : null
     it.flagged = Boolean(d.flagged_for_rob)
     it.dueAt = Math.min(it.dueAt, due)
   }
@@ -247,11 +254,45 @@ export function isRed(it: QueueItem, now: number): boolean {
   return it.dueAt < now || etParts(it.dueAt).date === etParts(now).date
 }
 
-/** The pinned thread's name: `🔴 Acme Legal · reply ready · due 7 PM · 3 new`. */
+/** A moment as the pane writes times: `3 PM` when it is today in New York, `Fri 3 PM` when it is not. */
+export function clockText(t: number, now: number): string {
+  const a = etParts(t)
+  return a.date === etParts(now).date ? a.time : `${a.day} ${a.time}`
+}
+
+const whatOf = (it: QueueItem): string => (it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : 'task')
+
+/** What is due for a client and when, in words: `reply ready due tomorrow 8 AM`. */
+export function dueLine(it: QueueItem, now: number): string {
+  return `${whatOf(it)} ${whenText(it.dueAt, now)}`
+}
+
+/** A client and what is due, as a chip says it: `Acme Legal · reply ready due 7 PM · 3 new`. */
+export function needsLine(it: QueueItem, now: number): string {
+  const parts = [it.client, dueLine(it, now)]
+  if (it.messages > 1) parts.push(`${it.messages} new`)
+  if (it.flagged) parts.push('flagged')
+  return parts.join(' · ')
+}
+
+/**
+ * The business-time distance to a due instant, as a thread's name leads with it: `5h late`, `3d late`,
+ * `3h left`, `2d left`. Hours under 24 business hours, whole business days from there. Weekends do not count.
+ */
+export function clockLead(due: number, now: number): string {
+  const late = due < now
+  const span = late ? businessMsBetween(due, now) : businessMsBetween(now, due)
+  // under a business day: 1 to 23 hours (59 minutes short of a day is 23h, not 24h); from there, whole days
+  const n = span < DAY ? `${Math.min(23, Math.max(1, Math.round(span / HOUR)))}h` : `${Math.round(span / DAY)}d`
+  return `${n} ${late ? 'late' : 'left'}`
+}
+
+/**
+ * The pinned thread's name: `🔴 3d late · Acme Legal · reply · 17 new`. It leads with the hours (Rob,
+ * 2026-10-12: "hours before overdue or something like that, as the first part of the message").
+ */
 export function titleFor(it: QueueItem, now: number): string {
-  const what = it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : 'task'
-  const when = whenText(it.dueAt, now)
-  const parts = [`${isRed(it, now) ? '🔴' : '🟡'} ${it.client}`, `${what} ${when}`.replace('reply due', 'reply due')]
+  const parts = [`${isRed(it, now) ? '🔴' : '🟡'} ${clockLead(it.dueAt, now)}`, it.client, whatOf(it)]
   if (it.messages > 1) parts.push(`${it.messages} new`)
   if (it.flagged) parts.push('flagged')
   return parts.join(' · ')
@@ -261,9 +302,21 @@ export function clearedTitle(client: string, now: number): string {
   return `✓ ${client} · clear ${etParts(now).time}`
 }
 
+/**
+ * The client a thread name of the bridge's names, whichever shape it has: today's
+ * (`🔴 3d late · Acme Legal · reply`), the one before it (`🔴 Acme Legal · reply overdue 6h`), the cleared
+ * one (`✓ Acme Legal · clear 11 AM`), with or without a two-digit rank in front. For any other title,
+ * what stands before its first ` · `.
+ */
+export function clientInTitle(title: string): string {
+  const parts = title.replace(/^\d{2}\s+/, '').replace(/^[🔴🟡✓]\s*/u, '').replace(/^client:\s*/i, '').split(' · ')
+  const first = parts[0]?.trim() ?? ''
+  return /^\d+[hd] (?:late|left)$/.test(first) ? (parts[1]?.trim() ?? '') : first
+}
+
 /** A session title names this client when, stripped of our marks, it starts with the client's name. */
 export function titleNames(title: string, client: string): boolean {
-  const bare = title.replace(/^[🔴🟡✓]\s*/u, '').replace(/^client:\s*/i, '').split(' · ')[0]?.trim().toLowerCase() ?? ''
+  const bare = clientInTitle(title).toLowerCase()
   const c = client.toLowerCase().replace(/…$/, '')
   return bare.length > 0 && (bare === c || bare.startsWith(c) || (bare.length >= 6 && c.startsWith(bare)))
 }

@@ -18,7 +18,7 @@
 import { businessMsBetween } from './business-time'
 import type { MmRow } from '../types'
 
-import { cleanTitle, titleFor, titleNames } from './queue'
+import { cleanTitle, clockText, titleFor, titleNames } from './queue'
 import type { FeedThread, QueueItem } from './queue'
 
 const HOUR = 3_600_000
@@ -30,8 +30,17 @@ export const RECENT_THREAD_MS = 7 * DAY
 /** Last activity further back than this is old, decided without counting business time (no calendar walk for a date years back). */
 export const OLD_THREAD_MS = 60 * DAY
 
-/** A thread as the desktop app lists it. */
-export type AppThread = { sessionId: string; title?: string; pinned?: boolean; isArchived?: boolean; lastActivityAt?: string }
+/** A thread's own reading of its context window at or past this percent makes it long. */
+export const LONG_CONTEXT_PERCENT = 60
+/** And so does this many tokens used, whatever the percent (a 1M window at 30% is still a costly thread). */
+export const LONG_CONTEXT_TOKENS = 300_000
+/** With no reading fresh enough, this many worklog rows in the feed's window make a thread long. */
+export const LONG_THREAD_ROWS = 1500
+/** A reading older than this says nothing: the row count decides. */
+export const CONTEXT_READING_MAX_AGE_MS = 7 * DAY
+
+/** A thread as the desktop app lists it. `link` is the app's own link to it, kept only when it is that thread's. */
+export type AppThread = { sessionId: string; title?: string; pinned?: boolean; isArchived?: boolean; lastActivityAt?: string; link?: string }
 
 /** Claude Code session id → the app thread it runs in, as each session records about itself. */
 export type Pairs = Record<string, { app: string; at: number }>
@@ -40,13 +49,27 @@ export type ClientThread = { sid: string; title: string; lastAt: number; source:
 
 export type Target = { sid: string; title: string; suggested: boolean }
 
+/** `start`: a new thread. `update`: the thread exists and lacks what is waiting. `current`: it has it. */
+export type RowState = 'start' | 'update' | 'current'
+
 export type Recommendation = {
-  action: 'update' | 'start'
-  /** Why, in a few words: shown on the row beside the action. */
+  state: RowState
+  /** Why, in a few words: shown on the row beside the action. For `current`, the whole phrase: `Thread updated 3 PM`. */
   reason: string
-  /** The thread Update acts on. Absent when the client has no thread of any kind. */
+  /** The client's thread: what Update or Open acts on, and what a new thread takes over from. Absent when there is none. */
   target?: Target
+  /** True when the client has no thread of any kind: the rows to notice first. (Kept when the thread is merely not visible now.) */
+  fresh?: true
 }
+
+/** What Update last put into a client's thread: which thread, the signature of what it carried, and when. */
+export type Sent = { sid: string; sig: string; at: number }
+
+/** A session's reading of its own context window: four numbers, nothing else. */
+export type ContextReading = { tokensUsed: number; contextWindow: number; percentUsed: number; at: number }
+
+/** Why a thread is long: by its own context reading (with the percent used), or by the feed's row count. */
+export type Length = { by: 'context'; percent: number } | { by: 'rows' } | null
 
 /** The client a thread is linked to: the first project whose link is that thread. */
 export function ownerOf(sid: string, links: Readonly<Record<string, string>>): string | undefined {
@@ -187,25 +210,76 @@ export function titleSuggestion(client: string, links: Readonly<Record<string, s
 }
 
 /**
- * R2: what to do about a client's thread, and why.
- *   Update thread · thread from Mon, Oct 12 exists     a known thread was active in the last 7 business days
- *   Start thread  · last thread is from Oct 2          the newest known thread is older than that
- *   Update thread · "<title>" looks like this client   no known thread, but a title matches
- *   Start thread  · no thread yet                      nothing at all
+ * How a thread is judged long, and by what.
+ *   context  the thread's own reading of its context window (what its session recorded about itself)
+ *   rows     the feed's row count for it, used only when there is no reading fresh enough
+ * A fresh reading under both limits is NOT long, whatever the row count.
  */
-export function recommend(threads: readonly ClientThread[], suggestion: Target | undefined, now: number): Recommendation {
-  const newest = [...threads].sort((a, b) => b.lastAt - a.lastAt)[0]
-  if (newest) {
-    const target = { sid: newest.sid, title: newest.title, suggested: false }
+export function threadLength(reading: ContextReading | undefined, rows: number | undefined, now: number): Length {
+  if (reading && Number.isFinite(reading.at) && now - reading.at <= CONTEXT_READING_MAX_AGE_MS) {
+    const long = reading.percentUsed >= LONG_CONTEXT_PERCENT || reading.tokensUsed >= LONG_CONTEXT_TOKENS
+    return long ? { by: 'context', percent: Math.round(reading.percentUsed) } : null
+  }
+  return typeof rows === 'number' && rows >= LONG_THREAD_ROWS ? { by: 'rows' } : null
+}
+
+/**
+ * The feed's row count for a thread and a client: that of the newest of the client's sessions that ran in
+ * the thread (the feed lists newest first). Undefined when the feed carries none: a server that does not
+ * send `rows` yet never makes a thread long.
+ */
+export function threadRows(sid: string, projectId: string, feedThreads: readonly FeedThread[], pairs: Pairs): number | undefined {
+  const entry = feedThreads.find(t => t.project_id === projectId && pairs[t.session_id]?.app === sid)
+  return entry && typeof entry.rows === 'number' && Number.isFinite(entry.rows) ? entry.rows : undefined
+}
+
+/**
+ * What a thread must already hold to be up to date: the kickoff that would be sent now (without Update's
+ * first line), and the package's `covers_through` and `updated_at` when the feed gives them. A new client
+ * message, another package, a package that changed: each makes it a different text.
+ */
+export function signatureOf(it: QueueItem): string {
+  return [kickoffText(it), it.coversThrough ?? '', it.packageUpdatedAt ?? ''].join('\n')
+}
+
+/**
+ * What to do about a client's thread, and why. ONE action per client:
+ *
+ *   start    Start thread  · no thread yet
+ *            Start thread  · last thread is from Oct 2                the thread is older than 7 business days
+ *            Start thread  · the existing thread has used 61% of its context, a new one is cheaper and cleaner
+ *            Start thread  · the existing thread is long, a new one keeps the context clean
+ *   update   Update thread · thread from Mon, Oct 12 exists           a thread exists and has not been given this
+ *            Update thread · new since this thread was updated        the bridge updated it before, with less
+ *            Update thread · "<title>" looks like this client         no known thread, but a title matches
+ *   current  Thread updated 3 PM                                      the thread already has what is waiting now
+ *
+ * The thread is the client's linked one when it has one, else the most recently active matched one.
+ * `current` is decided by `sent`: the thread and the signature the bridge stored when Update last went.
+ */
+export function recommend(
+  threads: readonly ClientThread[],
+  suggestion: Target | undefined,
+  now: number,
+  known: { sent?: Sent | undefined; signature?: string; length?: (sid: string) => Length } = {},
+): Recommendation {
+  const own = threads.filter(t => t.source === 'linked')
+  const thread = [...(own.length ? own : threads)].sort((a, b) => b.lastAt - a.lastAt)[0]
+  if (thread) {
+    const target = { sid: thread.sid, title: thread.title, suggested: false }
     // More than 60 days back is old whatever the weekends were: business time is only counted inside that.
-    const current = now - newest.lastAt <= OLD_THREAD_MS && businessMsBetween(newest.lastAt, now) <= RECENT_THREAD_MS
-    return current
-      ? { action: 'update', reason: `thread from ${weekdayMonthDay(newest.lastAt)} exists`, target }
-      : { action: 'start', reason: `last thread is from ${monthDay(newest.lastAt)}`, target }
+    const recent = now - thread.lastAt <= OLD_THREAD_MS && businessMsBetween(thread.lastAt, now) <= RECENT_THREAD_MS
+    if (!recent) return { state: 'start', reason: `last thread is from ${monthDay(thread.lastAt)}`, target }
+    const length = known.length?.(thread.sid) ?? null
+    if (length?.by === 'context') return { state: 'start', reason: `the existing thread has used ${length.percent}% of its context, a new one is cheaper and cleaner`, target }
+    if (length?.by === 'rows') return { state: 'start', reason: 'the existing thread is long, a new one keeps the context clean', target }
+    const sent = known.sent && known.sent.sid === thread.sid ? known.sent : undefined
+    if (sent && known.signature !== undefined && sent.sig === known.signature) return { state: 'current', reason: `Thread updated ${clockText(sent.at, now)}`, target }
+    return { state: 'update', reason: sent ? 'new since this thread was updated' : `thread from ${weekdayMonthDay(thread.lastAt)} exists`, target }
   }
   // the title is the thread's own text: cleaned and cut before it is shown
-  if (suggestion) return { action: 'update', reason: `"${cleanTitle(suggestion.title)}" looks like this client`, target: suggestion }
-  return { action: 'start', reason: 'no thread yet' }
+  if (suggestion) return { state: 'update', reason: `"${cleanTitle(suggestion.title)}" looks like this client`, target: suggestion }
+  return { state: 'start', reason: 'no thread yet', fresh: true }
 }
 
 /** What is waiting on a client, as its row shows it: `2 messages waiting, 1 task due`, or `drafts ready`. */
@@ -219,7 +293,7 @@ export function waitingText(it: QueueItem): string {
  * Update sends it into the existing thread, with a first line saying what is new. Three cases: a prepared
  * package, client messages with no package yet, and committed tasks only.
  */
-export function kickoffText(it: QueueItem, opts: { update?: boolean } = {}): string {
+export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: Replaced | undefined } = {}): string {
   const id = it.projectId
   const who = `${it.projectName} (OW project ${id})`
   const due = dueText(it.dueAt)
@@ -228,12 +302,43 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean } = {}): str
     : it.messages > 0
       ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting, reply due ${due}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
       : `[mm-link ${id}] ${who} has ${it.tasks} committed task(s) due ${due}. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`
-  return opts.update ? `New since this thread last worked on this client: ${waitingText(it)}.\n${body}` : body
+  if (opts.update) return `New since this thread last worked on this client: ${waitingText(it)}.\n${body}`
+  const handover = opts.replaces ? handoverText(it, opts.replaces) : ''
+  return handover ? `${body}\n\n${handover}` : body
+}
+
+/** The thread a new one takes over from: the app's id for it and its own title. */
+export type Replaced = { sid: string; title: string }
+
+/** `local_<id>`: the app's id for a thread, which is what the session tools take. */
+export const THREAD_ID = /^local_[A-Za-z0-9_-]{1,100}$/
+
+/**
+ * The second paragraph of a kickoff that starts a new thread while the client already has one (Rob,
+ * 2026-10-12: "inspect the recent context of an existing thread for anything unreconciled before creating
+ * the new one"). The NEW thread's Claude reads the old thread's last three messages; the bridge reads
+ * nothing of it. '' when the old thread's id is not an app thread id.
+ * ⛔ The title is the thread's own text: cleaned to one line and cut at 60 before it goes in.
+ */
+export function handoverText(it: QueueItem, old: Replaced): string {
+  if (!THREAD_ID.test(old.sid)) return ''
+  const before = it.packageId || it.messages > 0 ? 'Before the pickup view' : 'Before showing me what is due'
+  return `This thread replaces "${cleanTitle(old.title)}" (thread ${old.sid}) for ${it.projectName}. ${before}, and without reading that thread in full: read only its last three messages with the session tools (list_events, a small limit) and list anything left open in it: a question waiting on me, something promised and not done, a draft that was not sent. Keep that list to ten lines, then carry on.`
+}
+
+/**
+ * The link that opens a thread in the app, as the app's own list gives it. ⛔ Only this exact shape, and
+ * only for the thread it names: `claude://claude.ai/epitaxy/<that thread's id>`. Anything else is no link.
+ */
+export function threadLink(thread: { sessionId: string; link?: unknown } | undefined): string | undefined {
+  if (!thread || typeof thread.link !== 'string' || !THREAD_ID.test(thread.sessionId)) return undefined
+  return thread.link === `claude://claude.ai/epitaxy/${thread.sessionId}` ? thread.link : undefined
 }
 
 // ---------------------------------------------------------------- the pane
 
-export const LABEL = { update: 'Update thread', start: 'Start thread', drafts: 'Drafts' } as const
+export const LABEL = { update: 'Update thread', start: 'Start thread', open: 'Open thread', drafts: 'Drafts' } as const
+export type RowButton = keyof typeof LABEL
 
 /** R8: the sentence under the list. */
 export const PANE_SENTENCE =
@@ -242,28 +347,73 @@ export const PANE_SENTENCE =
 /** A row of the Needs-you pane (the plugin's state contract holds the shape). */
 export type Row = MmRow
 
+/** A row's state, also for a row an older version of the bridge drew (it called it `action`). */
+export const rowState = (row: Row): RowState => {
+  const state = row.state ?? (row as { action?: unknown }).action
+  return state === 'update' || state === 'current' ? state : 'start'
+}
+
 export function rowFor(it: QueueItem, rec: Recommendation, now: number): Row {
   return {
-    projectId: it.projectId, client: it.client, title: titleFor(it, now), waiting: waitingText(it), action: rec.action, reason: rec.reason,
-    canUpdate: Boolean(rec.target),
-    // the thread this row's Update button acts on: a press acts on this one or on none
+    projectId: it.projectId, client: it.client, title: titleFor(it, now), waiting: waitingText(it), state: rec.state, reason: rec.reason,
+    // no thread of any kind: the row goes in the first group, marked
+    fresh: rec.fresh === true,
+    // the thread this row's button acts on: a press acts on this one or on none
     ...(rec.target ? { target: rec.target.sid } : {}),
   }
 }
 
-/** The buttons on a row: the recommended action first, the other one second, then Drafts. */
-export function rowButtons(row: Row): Array<'update' | 'start' | 'drafts'> {
-  const other = row.action === 'update' ? 'start' : 'update'
-  return [row.action, ...(other === 'update' && !row.canUpdate ? [] : [other]), 'drafts'] as Array<'update' | 'start' | 'drafts'>
+/**
+ * The buttons on a row: ONE action, chosen by its state, then Drafts (Rob, 2026-10-12: "it should be
+ * 'update thread', 'open thread', or 'start thread'... depending on whether you know what we should do").
+ */
+export function rowButtons(row: Row): RowButton[] {
+  const state = rowState(row)
+  return [state === 'current' ? 'open' : state, 'drafts']
 }
 
-/** The second line of a row: what is waiting, then the recommendation and its reason. */
-export const rowDetail = (row: Row): string => `${row.waiting} · ${LABEL[row.action]}: ${row.reason}`
+/** The second line of a row: what is waiting, then the action and its reason, or when the thread was updated. */
+export function rowDetail(row: Row): string {
+  const state = rowState(row)
+  return state === 'current' ? `${row.waiting} · ${row.reason}` : `${row.waiting} · ${LABEL[state]}: ${row.reason}`
+}
+
+/**
+ * The band's line as it is drawn: as it is beside its button, and with how to open the list where the
+ * band can carry no button. (On this build the band is raised on the terminal and desktop surfaces only,
+ * and both draw a Button.)
+ */
+export const bandWords = (text: string, hasButton: boolean): string => (hasButton ? text : `${text} · type /mm to open the list`)
+
+/** A row for a client that has no thread at all: the ones to notice first (not a client whose thread is old or long). */
+export const isNewRow = (row: Row): boolean => row.fresh ?? (rowState(row) === 'start' && !row.target)
+
+/** The mark before the number of a row with no thread yet. */
+export const NEW_MARK = '◆ '
+
+/**
+ * The list in the two groups it is drawn in (Rob, 2026-10-12: clients "that have sent a message and don't
+ * have a thread yet should be highlighted somehow in the list"): first the clients with no thread yet,
+ * then the ones in a thread. Each keeps the order it came in (soonest due first), and a group with nobody
+ * in it is not drawn. `n` is the row's number in the whole list.
+ */
+export function rowGroups(rows: readonly Row[]): Array<{ heading: string; rows: Array<{ row: Row; n: number; mark: string }> }> {
+  const fresh = rows.filter(isNewRow)
+  const threaded = rows.filter(r => !isNewRow(r))
+  const numbered = (group: readonly Row[], from: number, mark: string) => group.map((row, i) => ({ row, n: from + i + 1, mark }))
+  return [
+    { heading: `New: no thread yet (${fresh.length})`, rows: numbered(fresh, 0, NEW_MARK) },
+    { heading: `In a thread (${threaded.length})`, rows: numbered(threaded, fresh.length, '') },
+  ].filter(g => g.rows.length > 0)
+}
 
 /** The pane as plain text, one line per thing drawn: for tests and for a surface that draws no buttons. */
 export function paneText(rows: readonly Row[], header: string, note: string): string {
   const out = [header]
-  rows.forEach((r, i) => out.push('', `${i + 1}. ${r.title}`, `   ${rowDetail(r)}`, `   ${rowButtons(r).map(b => `[ ${LABEL[b]} ]`).join(' ')}`))
+  for (const group of rowGroups(rows)) {
+    out.push('', group.heading)
+    for (const { row, n, mark } of group.rows) out.push('', `${mark}${n}. ${row.title}`, `   ${rowDetail(row)}`, `   ${rowButtons(row).map(b => `[ ${LABEL[b]} ]`).join(' ')}`)
+  }
   out.push('', note)
   return out.join('\n')
 }
