@@ -662,6 +662,65 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
   })
 })
 
+describe('B4: a package flagged for the founder lists for him whoever owns the client', () => {
+  // Rob is told apart as the code already tells him apart: the feed's `role` is `founder` (OW answers it for
+  // his address alone). Nothing here depends on an address.
+  const flagged = (over: Record<string, unknown> = {}) => draft(P1, 'Acme Roofing — Pat', { flagged_for_rob: true, project_owner_email: TEAMMATE_B, ...over })
+  const lists = (f: Feed) => buildLists(f, MON)
+  const where = (f: Feed) => {
+    const l = lists(f)
+    return { queue: ids(l.queue), teammate: ids(l.teammate), older: ids(l.older) }
+  }
+
+  test('flagged, on a client a teammate owns: in his Needs-you list, never under With a teammate, however the package stands', async () => {
+    for (const [name, over] of [
+      ['nobody holds it', {}],
+      ['the owner holds it', pickedUp(TEAMMATE_B)],
+      ['another teammate holds it', pickedUp('J.Smith@example.com')],
+      ['it is out of date', { status: 'stale' }],
+    ] as const) {
+      const f = asFounder({ drafts: [flagged(over)] })
+      expect(where(f), name).toEqual({ queue: [P1], teammate: [], older: [] })
+      expect(lists(f).queue[0], name).toMatchObject({ kind: 'ok', ok: { sends: 'Builder B' } })
+    }
+    // with mail of the teammate's own waiting there too (not his to answer), it is still his OK row
+    const withMail = asFounder({ drafts: [flagged(pickedUp(TEAMMATE_B))], mail: [{ ...mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 10:30'), project_owner_email: TEAMMATE_B }] })
+    expect(where(withMail)).toEqual({ queue: [P1], teammate: [], older: [] })
+  })
+
+  test('the 3-business-day cut stays as it is: one further past its reply time is listed under Older, never dropped', async () => {
+    const f = asFounder({ drafts: [flagged({ covers_through: at('2026-10-01 09:52') })] })
+    expect(where(f)).toEqual({ queue: [], teammate: [], older: [P1] })
+    expect(lists(f).older[0]?.kind).toBe('ok')
+  })
+
+  test('the same package in a teammate\'s pane is as it was: the owner\'s to send, flagged; nobody else\'s', async () => {
+    const owner = { member: TEAMMATE_B, role: 'builder' }
+    const [mine] = lists({ ...owner, drafts: [flagged()] }).queue
+    expect(mine).toMatchObject({ projectId: P1, kind: 'ready', packageId: PKG_A, flagged: true, ok: null })
+    const [held] = lists({ ...owner, drafts: [flagged(pickedUp(TEAMMATE_B))] }).queue
+    expect(held).toMatchObject({ kind: 'ready', flagged: true, ok: null })
+    expect(held?.open?.state).toBe('held_by_me')
+    // a third teammate, and a pm, see no row for it
+    for (const role of ['builder', 'pm']) expect(where({ member: 'someone-else@example.com', role, drafts: [flagged()] }), role).toEqual({ queue: [], teammate: [], older: [] })
+  })
+
+  test('not flagged, on a client a teammate owns: for him as it was, nothing listed; a hold by the owner is not his either', async () => {
+    expect(where(asFounder({ drafts: [flagged({ flagged_for_rob: false })] }))).toEqual({ queue: [], teammate: [], older: [] })
+    expect(where(asFounder({ drafts: [flagged({ flagged_for_rob: false, ...pickedUp(TEAMMATE_B) })] }))).toEqual({ queue: [], teammate: [], older: [] })
+  })
+
+  test('two packages on the client: the one that waits for his OK stays the row\'s package, whichever comes later', async () => {
+    const other = draft(P1, 'Acme Roofing — Pat', { package_id: PKG_B, ...pickedUp(TEAMMATE_B), project_owner_email: TEAMMATE_B, covers_through: at('2026-10-12 11:00') })
+    for (const drafts of [[flagged(), other], [other, flagged()]]) {
+      const [it] = lists(asFounder({ drafts })).queue
+      expect(it).toMatchObject({ projectId: P1, kind: 'ok' })
+      expect(it?.open).toMatchObject({ id: PKG_A, state: 'prepared' })
+      expect(kickoffText(it as QueueItem)).toContain('reply package aaaaaaaa is flagged for my OK')
+    }
+  })
+})
+
 describe('(s) nothing drops off silently: a client whose only items are more than 3 business days overdue', () => {
   test('unanswered mail from ten and six days ago: not in the list that pins, and listed under Older, most overdue first', async () => {
     const f = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-06 10:00'), mailAt(P2, 'Bolt Staffing', '2026-10-02 10:00')] })

@@ -339,6 +339,10 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     }
     // Any other open package never pins by itself: it only changes what the client's row, pane and note say.
     if (it.packageId) continue
+    // ⛔ (the founder) A client listed for a package that waits for his OK keeps that package as its own: a
+    // later package of the client's that is not flagged does not take its place on the row, in the pane or
+    // in the kickoff (B4, 2026-10-13).
+    if (it.kind === 'ok' && !(founder && d.flagged_for_rob === true)) continue
     it.open = open(held ? 'held_by_other' : d.status === 'stale' ? 'stale' : 'prepared')
     // ⛔ With one exception, for the founder alone: a package flagged for his OK is listed whoever owns the
     // client, as its own kind (Rob, 2026-10-12: six such packages were missing from his panel). It is due
