@@ -3845,10 +3845,13 @@ describe('(v) /mm link takes any client the feed knows, by name or by project id
     expect(await mm($, 'view')).toBe(NOTHING)
   })
 
-  test('[1] [2] the three lists first, then any client the feed names: an exact name, else every name that contains it', async ($, on) => {
+  test('[1] [2] the three lists and every client the feed names, together: an exact name, else every name that contains it', async ($, on) => {
     const w = linkWorld(on)
-    // "acme" is Acme Roofing on the list and Acme Glass in the feed: the list wins, and it is stamped as before
-    expect(await mm($, 'link acme')).toBe('This thread is now Acme Roofing\'s. Showing Acme Roofing in the side pane.')
+    // (F3) "acme" is in Acme Roofing on the list and Acme Glass in the feed: a question, nothing written
+    const before = snapshot(w)
+    expect(await mm($, 'link acme')).toBe('More than one client matches "acme": Acme Roofing, Acme Glass. Type more of the name.')
+    expect(snapshot(w)).toBe(before)
+    expect(await mm($, 'link acme roofing')).toBe('This thread is now Acme Roofing\'s. Showing Acme Roofing in the side pane.')
     expect(w.stored['mm.acted']).toEqual({ [ACME]: { sid: SELF, at: NOW } })
     expect(await mm($, 'link acme glass')).toBe(`This thread is now Acme Glass's. ${NOTHING}`)
     expect(w.stored['mm.links']).toEqual({ [ACME_GLASS]: SELF })

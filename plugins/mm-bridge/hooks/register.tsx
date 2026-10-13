@@ -1356,9 +1356,16 @@ async function syncAsked($: EngineInterface): Promise<void> {
 function clientsNamed<T extends KnownClient>(name: string, items: readonly T[]): T[] {
   const q = cleanName(name).toLowerCase()
   if (!q) return []
-  const short = (i: T) => i.client.replace(/…$/, '').toLowerCase()
-  const exact = items.filter(i => short(i) === q || i.projectName.toLowerCase() === q)
-  return exact.length ? exact : items.filter(i => i.projectName.toLowerCase().includes(q) || short(i).includes(q))
+  const exact = items.filter(i => nameMatch(q, i) === 'exact')
+  return exact.length ? exact : items.filter(i => nameMatch(q, i) === 'contains')
+}
+
+/** How a typed name (cleaned, lower case) meets a client's: its short name or full name `exact`ly, or one of them `contains` it. */
+function nameMatch(q: string, i: KnownClient): 'exact' | 'contains' | undefined {
+  const short = i.client.replace(/…$/, '').toLowerCase()
+  const full = i.projectName.toLowerCase()
+  if (short === q || full === q) return 'exact'
+  return short.includes(q) || full.includes(q) ? 'contains' : undefined
 }
 
 // What the person typed is echoed cleaned, like any other text that did not come from this file.
@@ -1371,19 +1378,31 @@ const ID_TYPED = /^(?:client\s+)?([0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 
 /**
  * The clients `/mm link <x>` could mean (Rob, 2026-10-13: a client with nothing waiting could not be
- * linked). The first of these that finds any:
- *   1. a client on the pane's three lists, by name, exactly as `start` and `update` resolve one
- *   2. any client the feed names (its mail, reply packages and tickets), by name, the same way
+ * linked), among every client the pane's three lists hold and every client the feed names (its mail,
+ * reply packages and tickets), together. The first of these that finds any:
+ *   1. the clients whose short name or full name it is exactly
+ *   2. the clients whose name contains it
  *   3. a project id: the whole uuid, or its first 8 characters when only one project the feed carries
  *      starts with them (the feed's `threads` included, which carry an id and no name)
+ * ⛔ Never a guess (review of 79cbc596, F3: "Acme" linked "Acme Legal Group" on the list though the feed
+ * named a client "Acme"). More than one at a stage is a question for the person; so is an exact name off
+ * the lists beside a client on them whose name contains it: both come back, and the caller asks.
  * A client known only by its id comes back with no name: the caller names it (`nameOfId`).
  */
 function linkable(arg: string, listed: readonly QueueItem[], feed: Feed): KnownClient[] {
-  const onLists = clientsNamed(arg, listed)
-  if (onLists.length) return onLists
   const named = feedClients(feed)
-  const byName = clientsNamed(arg, named)
-  if (byName.length) return byName
+  /** Every client either knows, each once: the lists' own item for a client on them. */
+  const pool: KnownClient[] = [...listed, ...named.filter(n => !listed.some(l => l.projectId === n.projectId))]
+  const q = cleanName(arg).toLowerCase()
+  if (q) {
+    const exact = pool.filter(i => nameMatch(q, i) === 'exact')
+    if (exact.length) {
+      const onLists = exact.some(e => listed.some(l => l.projectId === e.projectId))
+      return onLists ? exact : [...exact, ...listed.filter(i => nameMatch(q, i) === 'contains')]
+    }
+    const contains = pool.filter(i => nameMatch(q, i) === 'contains')
+    if (contains.length) return contains
+  }
   const typed = ID_TYPED.exec(arg.trim().toLowerCase())?.[1]
   if (!typed) return []
   const ids = feedProjects(feed).filter(id => (typed.length === 8 ? id.startsWith(typed) : id === typed))

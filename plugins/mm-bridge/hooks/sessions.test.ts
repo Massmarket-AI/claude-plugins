@@ -33,3 +33,48 @@ describe('F1: the feed is asked for mail far enough back for Older to hold any',
     expect(last.older?.map(i => i.projectId)).toEqual([pid(1)])
   })
 })
+
+/** A client the feed knows with nothing waiting: its mail was answered. */
+const answered = (n: number, name: string) => ({ ...mail(n, name, 30), reply_status: 'replied' })
+/** A client the feed knows only by a ticket with no date we committed to. */
+const ticketOnly = (n: number, name: string) => ({ ticket_id: `t${n}`, project_id: pid(n), project_name: name, title: 'Follow up', due_at: ago(-5), due_source: 'phase', assignee_email: ME })
+const linksOf = (w: ReturnType<typeof fakeApp>) => (w.stored('mm.links') ?? {}) as Record<string, string>
+
+describe('F3: /mm link never picks one client of several the name could mean', () => {
+  test('an exact name off the lists beside a listed client whose name contains it: the question, and nothing is written', async () => {
+    // the reviewer's P1: "Acme Legal Group" needs the person; the feed also names a client "Acme"
+    const feed: Feed = { member: ME, role: 'builder', mail: [mail(1, 'Acme Legal Group')], tickets: { due_soon: [ticketOnly(2, 'Acme')] }, threads: [] }
+    const w = fakeApp(feed, [{ sessionId: 'local_t1' }, { sessionId: 'local_other' }])
+    const t1 = w.session('local_t1')
+    expect(await mm(t1, 'link Acme')).toBe('More than one client matches "Acme": Acme, Acme Legal Group. Type more of the name.')
+    expect(w.stored('mm.links')).toBeUndefined()
+    // the whole name settles it, either way
+    expect(await mm(t1, 'link Acme Legal Group')).toBe('This thread is now Acme Legal Group\'s. Showing Acme Legal Group in the side pane.')
+    expect(linksOf(w)).toEqual({ [pid(1)]: 'local_t1' })
+  })
+
+  test('an exact name beats a name that contains it: on the lists over the feed, on the lists over the lists, in the feed over the feed', async () => {
+    const feed: Feed = {
+      member: ME, role: 'builder', tickets: {}, threads: [],
+      mail: [mail(1, 'Acme'), mail(2, 'Acme Legal Group'), answered(3, 'Acme Glass'), answered(4, 'Zen'), answered(5, 'Zen Garden Spa')],
+    }
+    const w = fakeApp(feed, [{ sessionId: 'local_t1' }])
+    const t1 = w.session('local_t1')
+    // "acme": exactly Acme on the list; Acme Legal Group (list) and Acme Glass (feed) only contain it
+    expect(await mm(t1, 'link acme')).toBe('This thread is now Acme\'s. Showing Acme in the side pane.')
+    expect(linksOf(w)).toEqual({ [pid(1)]: 'local_t1' })
+    // "zen": exactly Zen in the feed; Zen Garden Spa only contains it
+    expect(await mm(t1, 'link zen')).toBe('This thread is now Zen\'s. Nothing needs you on this client right now.')
+    expect(linksOf(w)).toEqual({ [pid(4)]: 'local_t1' })
+  })
+
+  test('more than one at a stage is a question: two exact names, or two that contain it', async () => {
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], mail: [mail(1, 'Acme'), answered(2, 'Acme — North'), answered(3, 'Bolt Glass'), answered(4, 'Bolt Steel')] }
+    const w = fakeApp(feed, [{ sessionId: 'local_t1' }])
+    const t1 = w.session('local_t1')
+    // the listed Acme and the feed's "Acme — North" (short name Acme): told apart by their full names
+    expect(await mm(t1, 'link acme')).toBe('More than one client matches "acme": Acme, Acme North. Type more of the name.')
+    expect(await mm(t1, 'link bolt')).toBe('More than one client matches "bolt": Bolt Glass, Bolt Steel. Type more of the name.')
+    expect(w.stored('mm.links')).toBeUndefined()
+  })
+})
