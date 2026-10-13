@@ -3405,7 +3405,7 @@ describe('(r) for the founder: a package that waits for his OK', () => {
   /** Tuesday 9 AM: an hour past the reply time of a package covering Monday 8 AM. */
   const PAST_DUE = 22 * HOUR
 
-  test('R2: a teammate sends it, so it is theirs to decide until its reply is due: under With a teammate, its sentence "may need your OK", Drafts shows him the package', async ($, on) => {
+  test('R2: a teammate sends it, so it is theirs to decide until its reply is due: under With a teammate, "may need your OK · Builder B decides", Drafts shows him the package', async ($, on) => {
     const w = flaggedWorld(on)
     expect(await mm($, '')).toBe('Nothing needs you right now.')
     const ui = await pane($)
@@ -3414,7 +3414,9 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     await ui.press({ key: 'mm-fold:teammate' })
     const all = await lines(ui)
     const from = all.indexOf('1. 🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides')
-    expect(all.slice(from, from + 3)).toEqual(['1. 🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides', 'may need your OK · Builder B decides, drafts ready', 'may need your OK'])
+    expect(all.slice(from, from + 2)).toEqual(['1. 🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides', 'may need your OK · Builder B decides, drafts ready'])
+    // no line of its own under them: the title and the waiting text already say it
+    expect(all).not.toContain('may need your OK')
     // not his to act on: Drafts alone
     expect(await buttonsOf(ui, ACME)).toEqual(['Drafts'])
     // he reads the package: one read, of that package, and nothing is picked up

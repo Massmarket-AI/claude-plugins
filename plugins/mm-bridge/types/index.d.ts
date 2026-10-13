@@ -29,8 +29,8 @@ export type MmRow = {
   /**
    * Set on a row under `With a teammate`: who holds the client's reply drafts, and to ask them before
    * writing a second reply. Such a row is not the viewer's to act on: it carries this sentence and the
-   * Drafts button, and no action. For the founder, on a package flagged for his OK that a teammate sends,
-   * the sentence is followed by ` · may need your OK` (or is that alone, where there is no such sentence).
+   * Drafts button, and no action. For the founder, on a package flagged for his OK that a teammate holds,
+   * the sentence is followed by ` · may need your OK`.
    */
   note?: string
   /**

@@ -514,10 +514,11 @@ export const rowState = (row: Row): RowState => {
 export function rowFor(it: QueueItem, rec: Recommendation, now: number): Row {
   // a client whose drafts a teammate holds, and that is not the viewer's to act on: who to ask, and no action
   const withMate = withTeammate(it)
-  // (the founder) a package flagged for his OK that a teammate sends, theirs to decide until its reply is due:
-  // the row's sentence is followed by Opus's words, R2
-  const may = withMate && it.theirs && it.kind === 'ok' ? MAY_NEED_OK : ''
-  const note = withMate ? [holdSentence(it), may].filter(Boolean).join(' · ') : ''
+  // (the founder) a package flagged for his OK that a teammate has, theirs to decide until its reply is due:
+  // the row's sentence is followed by Opus's words, R2. A row with no sentence (a prepared package) gets no
+  // line of them alone: its title and waiting text already say it (Opus, 10-13).
+  const hold = withMate ? holdSentence(it) : ''
+  const note = hold && it.theirs && it.kind === 'ok' ? `${hold} · ${MAY_NEED_OK}` : hold
   return {
     projectId: it.projectId, client: it.client, title: titleFor(it, now), waiting: waitingText(it), state: rec.state, reason: rec.reason,
     // no thread of any kind: the row goes in the first group, marked

@@ -968,11 +968,12 @@ describe('R1 and R2: a row under With a teammate, for the founder', () => {
     return rowFor(it, recommend([], undefined, now), now)
   }
 
-  test('R2, prepared and flagged: the sentence is Opus\'s words alone, and the row has Drafts and no action', async () => {
+  test('R2, prepared and flagged: no line of its own under the title (title and waiting text say it), Drafts and no action', async () => {
     const row = rowOf(founderFeed([pkgOf()]), 'teammate')
     expect(row).toMatchObject({
-      title: '🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides', waiting: 'may need your OK · Builder B decides, drafts ready', note: 'may need your OK', theirs: true,
+      title: '🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides', waiting: 'may need your OK · Builder B decides, drafts ready', theirs: true,
     })
+    expect(row.note).toBeUndefined()
     expect(rowButtons(row)).toEqual(['drafts'])
     expect(rowDetail(row)).toBe('may need your OK · Builder B decides, drafts ready')
   })
@@ -1018,7 +1019,6 @@ describe('R1 and R2: a row under With a teammate, for the founder', () => {
       '',
       '1. 🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides',
       '   may need your OK · Builder B decides, drafts ready',
-      '   may need your OK',
       '   [ Drafts ]',
       '',
       'note',
