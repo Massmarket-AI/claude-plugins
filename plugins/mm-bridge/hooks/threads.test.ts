@@ -236,6 +236,7 @@ describe('R1: which threads are a client\'s', () => {
     const p = pairsOf({ 'cli-p': 'local_p' })
     const ways = {
       'a row for another project': [declared(ACME, 'cli-p', '2026-10-12 09:00'), declared(INTERNAL, 'cli-p', '2026-10-12 10:00')],
+      'a row OW marks sole false': [{ ...declared(ACME, 'cli-p', '2026-10-12 09:00'), sole: false }],
     }
     for (const [name, rows] of Object.entries(ways)) {
       expect(clientThreads(ACME, {}, rows, p, one), name).toEqual([])
@@ -253,6 +254,28 @@ describe('R1: which threads are a client\'s', () => {
     // the feed lists none of its sessions: a miss, and still a title suggestion as before
     expect(autoLinkFate(ACME, 'local_p', [declared(BOLT, 'cli-other', '2026-10-12 09:00')], p)).toBe('unlisted')
     expect(titleSuggestion('Acme Roofing', {}, one, sid => declaredOther(ACME, sid, [], p))?.sid).toBe('local_p')
+  })
+
+  test('[sole] OW\'s `sole: false` blocks linking by itself and lets an automatic link go; a row with no `sole` reads as before', async () => {
+    const one = liveOf(app('local_p', 'Pipeline speed', '2026-10-12 10:00'))
+    const p = pairsOf({ 'cli-p': 'local_p' })
+    const row = declared(ACME, 'cli-p', '2026-10-12 09:00')
+    // sole false: the session declared some other project the feed does not list
+    expect(soleClient('local_p', [{ ...row, sole: false }], p)).toBeUndefined()
+    expect(autoLinkFor(ACME, {}, [{ ...row, sole: false }], p, one)).toBeUndefined()
+    expect(autoLinkFate(ACME, 'local_p', [{ ...row, sole: false }], p)).toBe('goes')
+    // one row sole false among others of the same thread is enough
+    const p2 = pairsOf({ 'cli-p': 'local_p', 'cli-p2': 'local_p' })
+    expect(autoLinkFor(ACME, {}, [row, { ...declared(ACME, 'cli-p2', '2026-10-12 10:00'), sole: false }], p2, one)).toBeUndefined()
+    // sole true, and no sole at all (an older OW): as before
+    for (const r of [{ ...row, sole: true }, row]) {
+      expect(soleClient('local_p', [r], p)).toBe(ACME)
+      expect(autoLinkFor(ACME, {}, [r], p, one)).toBe('local_p')
+      expect(autoLinkFate(ACME, 'local_p', [r], p)).toBe('stays')
+      expect(clientThreads(ACME, {}, [r], p, one).map(t => t.sid)).toEqual(['local_p'])
+    }
+    // ⛔ a link the person made is the linked thread whatever the rows say: still offered
+    expect(clientThreads(ACME, { [ACME]: 'local_p' }, [{ ...row, sole: false }], p, one).map(t => [t.sid, t.source])).toEqual([['local_p', 'linked']])
   })
 
   test('two clients linked to one thread (an older version allowed it): it is the first one\'s', async () => {

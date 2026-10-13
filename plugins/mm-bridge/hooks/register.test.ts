@@ -4149,6 +4149,51 @@ describe('B3: a thread is linked by itself only to the one client its sessions d
     await ui.unmount()
   })
 
+  test('[sole] `sole: false` blocks linking by itself, and lets go a link the bridge made itself on the next sync; a row with no `sole` reads as before', async ($, on) => {
+    // sole false from the start: never linked by itself
+    const w = pipeline(on)
+    w.setFeed(feed({ threads: [{ ...declared(ACME, 'cli-pipe', 2), sole: false }] }))
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.threads.get('local_pipe')).toMatchObject({ title: 'Pipeline speed', pinned: false })
+    // sole true, and sole missing (an older OW): linked by itself as before
+    for (const row of [{ ...declared(ACME, 'cli-pipe', 2), sole: true }, declared(ACME, 'cli-pipe', 2)]) {
+      w.setFeed(feed({ threads: [row] }))
+      await w.clock.advance(6 * 60_000)
+      await mm($, '')
+      expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_pipe' })
+      expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { sid: 'local_pipe', miss: 0 } })
+    }
+    // the row turns sole false: let go on the next sync, its name back and our pin off
+    w.setFeed(feed({ threads: [{ ...declared(ACME, 'cli-pipe', 2), sole: false }] }))
+    await w.clock.advance(6 * 60_000)
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.stored['mm.auto']).toEqual({})
+    expect(w.threads.get('local_pipe')).toMatchObject({ title: 'Pipeline speed', pinned: false })
+    expect(w.acted()).toEqual([])
+  })
+
+  test('[sole] a link the person made is never let go by `sole: false`', async ($, on) => {
+    const w = world(on, {
+      feed: feed({ threads: [declared(ACME, SELF_CLI, 2)] }),
+      self: thread(SELF, 'Pipeline speed', 2),
+      store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } },
+    })
+    await mm($, '')
+    await mm($, 'link Acme Roofing')
+    w.setFeed(feed({ threads: [{ ...declared(ACME, SELF_CLI, 2), sole: false }] }))
+    for (let i = 0; i < 3; i++) {
+      await w.clock.advance(6 * 60_000)
+      await mm($, '')
+    }
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+    // and its row still offers it: it is the client's linked thread
+    const ui = await pane($)
+    expect(await buttonsOf(ui, ACME)).not.toContain('Start thread')
+    await ui.unmount()
+  })
+
   test('[3] a link the person made is never let go by it: /mm link, then the same rows', async ($, on) => {
     const w = world(on, {
       feed: feed({ threads: [declared(ACME, SELF_CLI, 2)] }),

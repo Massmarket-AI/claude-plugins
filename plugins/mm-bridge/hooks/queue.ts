@@ -68,8 +68,13 @@ export type FeedTicket = {
  * session id is what `$.session.id()` answers in that thread. Absent on a server that does not send it yet.
  * `rows` is how many worklog rows that session wrote for that project in the feed's window: the thread's
  * length when nothing better is known. Absent on a server that does not send it yet.
+ * `sole` is OW's word on whether the session declared no other project of any kind in the window: OW lists
+ * a session under one project at most, and only a project in the feed, so a session that also declared the
+ * internal-ops project, or a client outside the feed, shows here as that one row alone. `false`: it did
+ * (2026-10-13, the Pipeline-speed thread). Absent on a server that does not send it yet: the row is read
+ * as it always was.
  */
-export type FeedThread = { project_id: string; session_id: string; last_activity_at: string; rows?: number }
+export type FeedThread = { project_id: string; session_id: string; last_activity_at: string; rows?: number; sole?: boolean }
 
 export type Feed = {
   member: string

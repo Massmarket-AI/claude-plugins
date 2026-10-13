@@ -808,8 +808,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   for (const [pid, a] of Object.entries(auto)) if (!a || typeof a.sid !== 'string' || links[pid] !== a.sid || acted[pid]?.sid === a.sid) delete auto[pid]
   // ⛔ And it is undone when it stops being true. At once, on this sync (B3, 2026-10-13), when it no longer
   // qualifies: the feed's rows for its thread's sessions name another client (alone, or beside this one;
-  // the internal-ops project counts like any other), or the thread opened with an [mm-link] marker for
-  // another client. More quietly, when the feed stops listing its thread's sessions at all, AUTO_MISSES
+  // the internal-ops project counts like any other), OW marks such a row `sole: false` (the session declared
+  // another project the feed does not list), or the thread opened with an [mm-link] marker for another
+  // client. More quietly, when the feed stops listing its thread's sessions at all, AUTO_MISSES
   // syncs in a row: those misses are counted once per feed, and only when the feed's list has entries (a
   // feed with no `threads`, or an empty one, says nothing either way and changes no count), and a miss
   // counts only when the one before it is MISS_GAP_MS old (three /mm in a row are one sync). A thread that

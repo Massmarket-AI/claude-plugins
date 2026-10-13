@@ -160,15 +160,17 @@ export function sharedThreads(feedThreads: readonly FeedThread[], pairs: Pairs):
 
 /**
  * The one client a thread's sessions declared in the feed's window: the project EVERY feed row of every
- * session that runs in the thread names. Undefined when there is no such row, or when the rows name two or
- * more projects, whichever they are (the internal-ops project counts like any other). B3, 2026-10-13: a
- * pipeline thread that loaded one client's skill for reference was linked to that client, pinned and named
- * as its thread, so that client's Update would have sent into it.
+ * session that runs in the thread names. Undefined when there is no such row, when the rows name two or
+ * more projects, whichever they are (the internal-ops project counts like any other), or when OW says one
+ * of those sessions declared another project too, one the feed does not list (`sole: false`). B3,
+ * 2026-10-13: a pipeline thread that loaded one client's skill for reference was linked to that client,
+ * pinned and named as its thread, so that client's Update would have sent into it.
  */
 export function soleClient(sid: string, feedThreads: readonly FeedThread[], pairs: Pairs): string | undefined {
   let only: string | undefined
   for (const t of feedThreads) {
     if (pairs[t.session_id]?.app !== sid) continue
+    if (t.sole === false) return undefined
     if (only !== undefined && only !== t.project_id) return undefined
     only = t.project_id
   }
@@ -177,12 +179,13 @@ export function soleClient(sid: string, feedThreads: readonly FeedThread[], pair
 
 /**
  * Whether a thread is, by the feed or by its own marker, another client's as well as or instead of this
- * one's: a row of its sessions names another project, or the thread opened with an [mm-link] marker for
- * another client (`marked`: the project each thread's marker named).
+ * one's: a row of its sessions names another project, OW says such a session declared another project too
+ * (`sole: false`), or the thread opened with an [mm-link] marker for another client (`marked`: the project
+ * each thread's marker named). A row with no `sole` (an older OW) is read as it always was.
  */
 export function declaredOther(projectId: string, sid: string, feedThreads: readonly FeedThread[], pairs: Pairs, marked: Readonly<Record<string, string>> = {}): boolean {
   if (marked[sid] !== undefined && marked[sid] !== projectId) return true
-  return feedThreads.some(t => pairs[t.session_id]?.app === sid && t.project_id !== projectId)
+  return feedThreads.some(t => pairs[t.session_id]?.app === sid && (t.project_id !== projectId || t.sole === false))
 }
 
 /**
@@ -199,7 +202,7 @@ export function onlyClients(projectId: string, sid: string, feedThreads: readonl
  * What becomes of a link the bridge made by itself, by this sync's feed:
  *   stays     its thread's sessions declared this client alone (`onlyClients`)
  *   goes      something makes the thread another client's too (`declaredOther`: a row for another project,
- *             a marker for another client): let go on this sync (B3)
+ *             a row OW marks `sole: false`, a marker for another client): let go on this sync (B3)
  *   unlisted  the feed lists none of its sessions: the sync counts a miss
  */
 export function autoLinkFate(projectId: string, sid: string, feedThreads: readonly FeedThread[], pairs: Pairs, marked: Readonly<Record<string, string>> = {}): 'stays' | 'goes' | 'unlisted' {
