@@ -68,11 +68,13 @@ import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, 
 // its answer AT ONCE from what the row was drawn from: the last sync stored, the store, and the row's own
 // thread. The feed and the app are asked AFTER that, and the list is drawn again when they answer. A press
 // may take a feed this session read less than FEED_REUSE_MS ago. Update and Open ask the app one thing
-// first: whether the row's thread is still there (`storedPass`). Update on a thread the bridge linked by
-// itself, or one its row offered with no link, also reads the feed before it sends, because only the feed
-// says whether B3 has let that thread go (`updateThread`). ⛔ Nothing that guards a send moved: a press acts
-// on the thread its row showed or on none, B3 and the second-send guards are asked before the send as
-// before, and every write is made over a fresh copy and checked again.
+// first: whether the row's thread is still there (`storedPass`). Update refuses when the client's link, read
+// from the store, is now another thread. Update on a thread the bridge linked by itself, or one its row
+// offered with no link, also reads the feed before it sends, because only the feed says whether B3 has let
+// that thread go, or a newer thread of the client's has taken it (`updateThread`, `takenOver`). ⛔ Nothing
+// that guards a send moved: a press acts on the thread its row showed or on none, B3, a thread taken over
+// and the second-send guards are asked before the send as before, and every write is made over a fresh copy
+// and checked again.
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
@@ -1907,6 +1909,52 @@ async function openThread($: EngineInterface, thread: AppThread | undefined): Pr
 }
 
 /**
+ * (S2) Whether another thread has taken the client from a thread its row offered with no link: refused, as the
+ * pass before the press refused it in 0.5.0 (Opus, 2026-10-13: "restore the refusal"). By the feed Update has
+ * just read, another open thread whose sessions declared that client alone, and that is no other client's,
+ * is the client's thread now: one more recently active than the row's thread (each dated as the row's
+ * recommendation dates it: the app's last activity, else the feed's), or any at all where the row offered
+ * only a title look-alike. (A link moves only through mm.links, which the press has read already.)
+ * The app is asked for each such thread by id, at most LOOKUPS_PER_SYNC: local calls, no network.
+ */
+async function takenOver(
+  $: EngineInterface,
+  projectId: string,
+  target: { sid: string; suggested: boolean },
+  links: Readonly<Record<string, string>>,
+  rows: readonly FeedThread[],
+  pairs: Pairs,
+  marked: Readonly<Record<string, string>>,
+  shown: AppThread | undefined,
+): Promise<boolean> {
+  /** The newest the feed has for each thread of the client's: the row's own, and every other. */
+  const feedAt = new Map<string, number>()
+  for (const t of rows) {
+    const sid = t.project_id === projectId ? pairs[t.session_id]?.app : undefined
+    if (!sid) continue
+    const at = Date.parse(t.last_activity_at)
+    feedAt.set(sid, Math.max(feedAt.get(sid) ?? -Infinity, Number.isFinite(at) ? at : -Infinity))
+  }
+  const dated = (t: AppThread | undefined, sid: string): number => {
+    const at = t?.lastActivityAt ? Date.parse(t.lastActivityAt) : NaN
+    return Number.isFinite(at) ? at : (feedAt.get(sid) ?? -Infinity)
+  }
+  const mine = dated(shown, target.sid)
+  const others = [...feedAt.keys()].filter(sid => {
+    if (sid === target.sid) return false
+    const owner = ownerOf(sid, links)
+    return (owner === undefined || owner === projectId) && onlyClients(projectId, sid, rows, pairs, marked)
+  })
+  for (const sid of others.slice(0, LOOKUPS_PER_SYNC)) {
+    const found = await lookup($, sid)
+    if (found === 'gone' || found === 'unknown') continue
+    const at = dated(found, sid)
+    if (Number.isFinite(at) && (target.suggested || !Number.isFinite(mine) || at > mine)) return true
+  }
+  return false
+}
+
+/**
  * Update thread: the client's thread gets the kickoff as a message, which starts a model turn there, and
  * is then linked, pinned and named. The app refuses to bring a thread forward unless this thread started
  * it (ccd_window.open_session_in), so the answer says which pinned thread to open.
@@ -1957,8 +2005,9 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
   // ⛔ (S2) B3 guards a send, and only the feed can answer it: a thread the bridge linked by itself, or one
   // the row offered with no link, is this client's only while the feed's rows for its sessions say so (the
   // Pipeline speed thread, 2026-10-13). So for such a thread the feed is read before anything is sent: the one
-  // call besides the thread's own lookup, never a feed kept from before. The pass after the answer is made
-  // over it. A link the person made is never let go by B3, and needs no such read.
+  // network call, never a feed kept from before. The pass after the answer is made over it. A link the person
+  // made is never let go by B3, and needs no such read. And a row's thread with no link is no longer the
+  // client's once a newer thread of the client's has taken it (`takenOver`): refused, as in 0.5.0.
   let guard: Feed | null = null
   if (pass.stored) {
     const auto = await storeGet<Auto>($, 'mm.auto', {})
@@ -1972,9 +2021,8 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
       const still =
         linked === target.sid
           ? autoLinkFate(it.projectId, target.sid, rows, pairs, marked) !== 'goes'
-          : target.suggested
-            ? !declaredOther(it.projectId, target.sid, rows, pairs, marked)
-            : onlyClients(it.projectId, target.sid, rows, pairs, marked)
+          : (target.suggested ? !declaredOther(it.projectId, target.sid, rows, pairs, marked) : onlyClients(it.projectId, target.sid, rows, pairs, marked)) &&
+            !(await takenOver($, it.projectId, target, links, rows, pairs, marked, pass.live.get(target.sid)))
       if (!still) return { said: THREAD_GONE, after: async () => void (await reconcile($, read)) }
     }
   }

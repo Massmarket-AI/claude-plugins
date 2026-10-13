@@ -91,7 +91,8 @@ export type Feed = {
  * held the drafts was told none were prepared).
  *   held_by_me     the viewer picked it up and a draft is not sent yet
  *   held_by_other  a teammate picked it up; `by` is their name
- *   stale          drafts exist but are marked out of date, and nobody holds it
+ *   stale          drafts exist but are marked out of date, and nobody holds it; for the founder, `by` is the
+ *                  teammate it is with when it is a teammate's (R1, 0.5.1), else ''
  *   prepared       drafts are ready, but the client does not pin for the viewer on them (another owner's
  *                  client, or a package older than the window)
  * `unsent` is the drafts not sent on a held package, the drafts ready otherwise. `newer` is the client
@@ -147,6 +148,9 @@ export type QueueItem = {
  * OK (R2, Opus's words): the teammate decides whether it needs him (client-reply-prep §1 rule 13, §5.2).
  */
 export const MAY_NEED_OK = 'may need your OK'
+
+/** (the founder, R2) What such a row's title and waiting text say in place of `needs your OK · <X> sends`, before its reply is due (Opus's words). */
+export const decidesText = (who: string): string => `${MAY_NEED_OK} · ${who} decides`
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
@@ -352,13 +356,15 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     const unsent = d.drafts_unsent ?? ready
     // What counts: a held package with a draft not sent, or a prepared or stale one with a draft ready.
     if (held ? unsent < 1 || holder === '' : (d.status !== 'prepared' && d.status !== 'stale') || ready < 1) continue
-    // (the founder) A teammate sends this package: the owner on record, set and not the viewer. ⛔ A client
-    // with no owner on record is not a teammate's: it stays the founder's (R3).
+    // (the founder) A teammate has this package to see through (Opus, 10-13): the teammate who holds it, whoever
+    // owns the client; with nobody holding it, the owner on record when that is a teammate. ⛔ A package he
+    // holds is his, and so is one with no holder on a client with no owner on record (R3).
     const sender = typeof d.project_owner_email === 'string' ? d.project_owner_email.toLowerCase() : ''
-    const mates = founder && sender !== '' && sender !== me
-    // ⛔ R1 (0.5.1): a stale package a teammate sends never puts a row on the founder's list, flagged or not
+    const mates = founder && (held ? holder !== me : sender !== '' && sender !== me)
+    // ⛔ R1 (0.5.1): a stale package a teammate has never puts a row on the founder's list, flagged or not
     // (Rob's 16 rows, 10-13: Mugen, ReGen, Remver and Talon were answered by hand; the owner's stale reminder
-    // carries what is still open). So it is never a package that waits for his OK.
+    // carries what is still open). So it is never a package that waits for his OK. (A stale package is held
+    // by nobody: it is the owner's on record.)
     const staleTheirsHere = mates && d.status === 'stale'
     const forOk = founder && d.flagged_for_rob === true && !staleTheirsHere
     const heldByMe = held && holder === me
@@ -366,9 +372,11 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     const due = Number.isFinite(ms(d.covers_through)) ? businessDeadline(ms(d.covers_through), DAY) : now
     // (this pass's side of the window: not yet 3 business days past its reply time, or only what is past that)
     const inReach = older ? tooOld(due) : !tooOld(due)
+    // `by`: the teammate who holds it; for the founder, also the teammate a stale package is with (R1), so
+    // that its pane names them instead of inviting him to pick it up
     const open = (state: OpenPackage['state']): OpenPackage => ({
-      id: d.package_id, state, by: state === 'held_by_other' ? holderName(holder) : '', at: held ? d.picked_up_at ?? null : null,
-      unsent: held ? unsent : ready, newer: 0,
+      id: d.package_id, state, by: state === 'held_by_other' ? holderName(holder) : state === 'stale' && staleTheirsHere ? holderName(sender) : '',
+      at: held ? d.picked_up_at ?? null : null, unsent: held ? unsent : ready, newer: 0,
     })
     // ⛔ The holder is asked first, the owner second: a package the viewer holds is theirs to finish whoever
     // owns the client (Rob, 2026-10-12: a client owned by a teammate, picked up and sent by the founder,
@@ -522,9 +530,15 @@ export function clockText(t: number, now: number): string {
   return a.date === etParts(now).date ? a.time : `${a.day} ${a.time}`
 }
 
-/** What is due, in a word or two: a package the viewer picked up is `your draft`, one that waits for the founder's OK `needs your OK`. */
+/**
+ * What is due, in a word or two: a package the viewer picked up is `your draft`, one that waits for the
+ * founder's OK `needs your OK`; one a teammate decides on before its reply is due `may need your OK ·
+ * <teammate> decides` (R2).
+ */
 const whatOf = (it: QueueItem): string =>
-  it.open?.state === 'held_by_me' ? 'your draft' : it.kind === 'ok' ? 'needs your OK' : it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : 'task'
+  it.open?.state === 'held_by_me'
+    ? 'your draft'
+    : it.kind === 'ok' ? (it.theirs ? decidesText(it.theirs) : 'needs your OK') : it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : 'task'
 
 /** What is due for a client and when, in words: `reply ready due tomorrow 8 AM`. */
 export function dueLine(it: QueueItem, now: number): string {
@@ -617,6 +631,8 @@ export function draftsLine(it: QueueItem): string {
   if (o?.state === 'held_by_me') return `_You picked up the reply drafts for this client: ${draftCount(o.unsent)} not sent yet. ${ask('Show me')}._`
   if (it.packageId) return `_Reply drafts are prepared for this client, but the pickup view could not be loaded here. ${ask('Show me')}._`
   if (o?.state === 'held_by_other') return `_${o.by} picked up the reply drafts for this client${pickedAt(o.at)} and has ${draftCount(o.unsent)} not sent yet. Ask ${o.by} before writing a second reply._`
+  // (the founder) a stale package a teammate has: not his to pick up (R1, Opus's words)
+  if (o?.state === 'stale' && o.by) return `_${o.by} has these drafts. Their reminder lists what is still open._`
   if (o?.state === 'stale') return `_Reply drafts exist for this client but are marked out of date. ${ask('Pick up')} and it will rebuild them first._`
   if (o?.state === 'prepared') return `_Reply drafts are prepared for this client. ${ask('Pick up')}._`
   return `_No reply drafts are prepared yet. ${ask('Pick up')}._`

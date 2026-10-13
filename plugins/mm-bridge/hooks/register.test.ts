@@ -1195,10 +1195,26 @@ describe('F3: a press acts on the thread its row showed; a typed name is never g
     const n = w.threads.get('local_n')
     if (n) n.lastActivityAt = ago(0)
     await ui.press({ key: `update:${BOLT}` })
-    // 0.5.1 (S2): the press acts on what its row was drawn from. The thread it showed is still Bolt's alone by
-    // the feed (B3, asked before the send), so the kickoff goes there; never into the newer one it did not show.
-    expect(w.acted().map(c => c.args.session_id)).toEqual(['local_b'])
-    expect(w.calls.some(c => c.tool === 'send_message' && c.args.session_id === 'local_n')).toBe(false)
+    expect(w.acted()).toEqual([])
+    expect(await lines(ui)).toContain(GONE)
+    await ui.unmount()
+  })
+
+  test('a row drawn before the client\'s link moved to another thread (the store says so): refused, nothing sent, the list drawn again', async ($, on) => {
+    const w = world(on, { feed: feed({ threads: [declared(BOLT, 'cli-bolt', 20)] }), threads: [thread('local_b', 'Staffing plan', 20), thread('local_n', 'A newer one', 1)], store: { 'mm.threads': PAIRS, 'mm.links': { [BOLT]: 'local_b' } } })
+    await mm($, '')
+    const ui = await pane($)
+    expect(await lines(ui)).toContain('2 messages waiting · Update thread: thread from Sun, Oct 11 exists')
+    // in the newer thread the person typed /mm link Bolt: the store now gives Bolt to it
+    w.stored['mm.links'] = { [BOLT]: 'local_n' }
+    const before = w.fetched.length
+    await ui.press({ key: `update:${BOLT}` })
+    expect(w.acted()).toEqual([])
+    expect(await lines(ui)).toContain(GONE)
+    expect(w.toasts).toEqual([GONE])
+    // refused from the store alone: the feed was asked only after, to draw the list again
+    expect(w.fetched.slice(before).filter(u => u.includes('/closeout')).length).toBeLessThanOrEqual(1)
+    expect(await buttonsOf(ui, BOLT)).toEqual(['Update thread', 'Drafts'])
     await ui.unmount()
   })
 
@@ -3397,8 +3413,8 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([['mm-fold:teammate', 'With a teammate (1)']])
     await ui.press({ key: 'mm-fold:teammate' })
     const all = await lines(ui)
-    const from = all.indexOf('1. 🟡 with Builder B · Acme Roofing · needs your OK')
-    expect(all.slice(from, from + 3)).toEqual(['1. 🟡 with Builder B · Acme Roofing · needs your OK', 'needs your OK · Builder B sends, drafts ready', 'may need your OK'])
+    const from = all.indexOf('1. 🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides')
+    expect(all.slice(from, from + 3)).toEqual(['1. 🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides', 'may need your OK · Builder B decides, drafts ready', 'may need your OK'])
     // not his to act on: Drafts alone
     expect(await buttonsOf(ui, ACME)).toEqual(['Drafts'])
     // he reads the package: one read, of that package, and nothing is picked up
@@ -3431,16 +3447,16 @@ describe('(r) for the founder: a package that waits for his OK', () => {
   })
 
   for (const flagged of [true, false]) {
-    test(`R1: a stale one a teammate sends is not his (${flagged ? 'flagged' : 'not flagged'}); one a teammate holds on a client with no owner is still his (R3)`, async ($, on) => {
+    test(`R1: a stale one a teammate sends is not his (${flagged ? 'flagged' : 'not flagged'}); one with no owner and no holder is still his (R3)`, async ($, on) => {
       const stale = packageFor(ACME, 'Acme Roofing — Pat', { flagged_for_rob: flagged, project_owner_email: TEAMMATE_B, status: 'stale' })
-      const nobodys = packageFor(BOLT, 'Bolt Staffing (Sam)', { package_id: 'bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee', flagged_for_rob: true, project_owner_email: null, ...heldBy('J.Smith@example.com'), covers_through: ago(2) })
+      const nobodys = packageFor(BOLT, 'Bolt Staffing (Sam)', { package_id: 'bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee', flagged_for_rob: true, project_owner_email: null, covers_through: ago(2) })
       const w = world(on, { feed: { member: FOUNDER, role: 'founder', mail: [], tickets: {}, drafts: [stale, nobodys] } })
       await mm($, '')
       const ui = await pane($)
       const all = await lines(ui)
       // only Bolt's, his to act on, with its one action; Acme's stale package is listed nowhere
       expect(all[0]).toBe('Needs you now (1)')
-      expect(all).toContain('needs your OK · nobody on record sends, drafts with J Smith · Start thread: no thread yet')
+      expect(all).toContain('drafts ready · Start thread: no thread yet')
       expect(all.some(l => l.includes('Acme Roofing'))).toBe(false)
       expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([])
       expect(await buttonsOf(ui, BOLT)).toEqual(['Start thread', 'Drafts'])
@@ -3448,6 +3464,34 @@ describe('(r) for the founder: a package that waits for his OK', () => {
       expect(w.acted()).toEqual([])
     })
   }
+
+  test('the holder counts (Opus, 10-13): a flagged package a teammate picked up on a client with no owner is theirs to decide until its reply is due', async ($, on) => {
+    const w = world(on, {
+      feed: {
+        member: FOUNDER, role: 'founder', mail: [], tickets: {},
+        drafts: [packageFor(BOLT, 'Bolt Staffing (Sam)', { flagged_for_rob: true, project_owner_email: null, ...heldBy('J.Smith@example.com'), covers_through: ago(2) })],
+      },
+    })
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    const ui = await pane($)
+    await ui.press({ key: 'mm-fold:teammate' })
+    const all = await lines(ui)
+    const from = all.indexOf('1. 🟡 with J Smith · Bolt Staffing · may need your OK · J Smith decides')
+    expect(all.slice(from, from + 3)).toEqual([
+      '1. 🟡 with J Smith · Bolt Staffing · may need your OK · J Smith decides',
+      'may need your OK · J Smith decides, drafts with J Smith',
+      'J Smith picked up the reply drafts for this client (Mon 10 AM) and has 1 draft not sent yet. Ask J Smith before writing a second reply. · may need your OK',
+    ])
+    expect(await buttonsOf(ui, BOLT)).toEqual(['Drafts'])
+    await ui.unmount()
+    // once its reply is due it is his, worded as before: who sends it (nobody on record), and who has the drafts
+    await w.clock.advance(PAST_DUE)
+    expect(await mm($, '')).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
+    const later = await pane($)
+    expect(await lines(later)).toContain('needs your OK · nobody on record sends, drafts with J Smith · Start thread: no thread yet')
+    await later.unmount()
+    expect(w.acted()).toEqual([])
+  })
 
   test('R1: with a client message waiting after its drafts, the client is under With a teammate, like any reply a teammate holds', async ($, on) => {
     const w = world(on, {
@@ -3465,6 +3509,11 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     const from = all.indexOf('1. 🟡 with Builder B · Acme Roofing · reply')
     expect(all.slice(from, from + 2)).toEqual(['1. 🟡 with Builder B · Acme Roofing · reply', '1 message waiting, drafts out of date'])
     expect(await buttonsOf(ui, ACME)).toEqual(['Drafts'])
+    // its Drafts: what is waiting, and who has the drafts; nothing invites him to pick them up (Opus, 10-13)
+    await ui.press({ key: `drafts:${ACME}` })
+    const part = (await ui.find({ type: 'Markdown' }))?.text ?? ''
+    expect(part.split('\n').at(-1)).toBe('_Builder B has these drafts. Their reminder lists what is still open._')
+    expect(part).not.toContain('Pick up')
     await ui.unmount()
     expect(w.acted()).toEqual([])
   })
@@ -3472,7 +3521,7 @@ describe('(r) for the founder: a package that waits for his OK', () => {
   test('it counts toward the pin cap like any other row once it is his: before that its linked thread is named for who has it, and not pinned', async ($, on) => {
     const w = flaggedWorld(on, {}, { threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.links': { [ACME]: 'local_a' } } })
     expect(await mm($, '')).toBe('Nothing needs you right now.')
-    expect(w.threads.get('local_a')).toMatchObject({ title: '🟡 with Builder B · Acme Roofing · needs your OK', pinned: false })
+    expect(w.threads.get('local_a')).toMatchObject({ title: '🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides', pinned: false })
     await w.clock.advance(PAST_DUE)
     expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
     expect(w.threads.get('local_a')).toMatchObject({ title: '🔴 1h late · Acme Roofing · needs your OK', pinned: true })

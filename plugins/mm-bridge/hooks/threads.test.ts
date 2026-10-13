@@ -970,24 +970,30 @@ describe('R1 and R2: a row under With a teammate, for the founder', () => {
 
   test('R2, prepared and flagged: the sentence is Opus\'s words alone, and the row has Drafts and no action', async () => {
     const row = rowOf(founderFeed([pkgOf()]), 'teammate')
-    expect(row).toMatchObject({ title: '🟡 with Builder B · Acme Roofing · needs your OK', waiting: 'needs your OK · Builder B sends, drafts ready', note: 'may need your OK', theirs: true })
+    expect(row).toMatchObject({
+      title: '🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides', waiting: 'may need your OK · Builder B decides, drafts ready', note: 'may need your OK', theirs: true,
+    })
     expect(rowButtons(row)).toEqual(['drafts'])
-    expect(rowDetail(row)).toBe('needs your OK · Builder B sends, drafts ready')
+    expect(rowDetail(row)).toBe('may need your OK · Builder B decides, drafts ready')
   })
 
-  test('R2, picked up by a teammate: the row\'s sentence, then " · may need your OK"', async () => {
-    const row = rowOf(founderFeed([pkgOf({ status: 'picked_up', picked_up_by: 'j.smith@example.com', picked_up_at: at('2026-10-12 09:30') })]), 'teammate')
-    expect(row.note).toBe('J Smith picked up the reply drafts for this client (Mon 9:30 AM) and has 1 draft not sent yet. Ask J Smith before writing a second reply. · may need your OK')
-    expect(row.title).toBe('🟡 with J Smith · Acme Roofing · needs your OK')
-    expect(rowButtons(row)).toEqual(['drafts'])
+  test('R2, picked up by a teammate: the row\'s sentence, then " · may need your OK"; the holder decides, whoever owns the client', async () => {
+    for (const owner of [SENDS, FOUNDER, null]) {
+      const row = rowOf(founderFeed([pkgOf({ status: 'picked_up', picked_up_by: 'j.smith@example.com', picked_up_at: at('2026-10-12 09:30'), project_owner_email: owner })]), 'teammate')
+      expect(row.note, String(owner)).toBe('J Smith picked up the reply drafts for this client (Mon 9:30 AM) and has 1 draft not sent yet. Ask J Smith before writing a second reply. · may need your OK')
+      expect(row.title).toBe('🟡 with J Smith · Acme Roofing · may need your OK · J Smith decides')
+      expect(row.waiting).toBe('may need your OK · J Smith decides, drafts with J Smith')
+      expect(rowButtons(row)).toEqual(['drafts'])
+    }
   })
 
-  test('R2, once its reply is due: an ordinary row of his, with its one action and no sentence', async () => {
+  test('R2, once its reply is due: an ordinary row of his, with its one action, no sentence, and today\'s words', async () => {
     const due = et('2026-10-13 09:00')
     const row = rowOf(founderFeed([pkgOf()]), 'queue', due)
     expect(row.note).toBeUndefined()
     expect(row.theirs).toBeUndefined()
     expect(row.title).toBe('🔴 1h late · Acme Roofing · needs your OK')
+    expect(row.waiting).toBe('needs your OK · Builder B sends, drafts ready')
     expect(rowButtons(row)).toEqual(['start', 'drafts'])
   })
 
@@ -1010,8 +1016,8 @@ describe('R1 and R2: a row under With a teammate, for the founder', () => {
       '',
       'With a teammate (1)',
       '',
-      '1. 🟡 with Builder B · Acme Roofing · needs your OK',
-      '   needs your OK · Builder B sends, drafts ready',
+      '1. 🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides',
+      '   may need your OK · Builder B decides, drafts ready',
       '   may need your OK',
       '   [ Drafts ]',
       '',

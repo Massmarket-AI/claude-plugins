@@ -19,7 +19,7 @@
 import { businessMsBetween } from './business-time'
 import type { MmRow } from '../types'
 
-import { MAY_NEED_OK, NOBODY, cleanTitle, clockText, holdSentence, titleFor, titleNames, withTeammate } from './queue'
+import { MAY_NEED_OK, NOBODY, cleanTitle, clockText, decidesText, holdSentence, titleFor, titleNames, withTeammate } from './queue'
 import type { FeedThread, QueueItem } from './queue'
 
 const HOUR = 3_600_000
@@ -369,8 +369,9 @@ export function recommend(
 export function waitingText(it: QueueItem): string {
   const o = it.open ?? null
   const drafts = !o ? '' : o.state === 'held_by_me' ? `${o.unsent} draft${o.unsent === 1 ? '' : 's'} not sent` : o.state === 'held_by_other' ? `drafts with ${o.by}` : o.state === 'stale' ? 'drafts out of date' : 'drafts ready'
-  // for the founder, a package that waits for his OK: that first, and who sends it once he has given it
-  const ok = it.kind === 'ok' ? `needs your OK · ${(it.ok ?? null)?.sends ?? NOBODY} sends` : ''
+  // for the founder, a package that waits for his OK: that first, and who sends it once he has given it; one a
+  // teammate decides on, before its reply is due, says so instead (R2)
+  const ok = it.kind === 'ok' ? (it.theirs ? decidesText(it.theirs) : `needs your OK · ${(it.ok ?? null)?.sends ?? NOBODY} sends`) : ''
   const parts = [ok, it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', it.tasks ? `${it.tasks} task${it.tasks > 1 ? 's' : ''} due` : '', drafts]
   return parts.filter(Boolean).join(', ') || 'drafts ready'
 }
