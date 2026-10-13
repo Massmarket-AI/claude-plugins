@@ -4,7 +4,7 @@ import { buildLists, buildQueue } from './queue'
 import type { Feed, FeedThread, QueueItem } from './queue'
 import {
   CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, LONG_CONTEXT_TOKENS, LONG_THREAD_ROWS, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
-  autoLinkFor, bandWords, clientThreads, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
+  autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLength, threadLink, threadRows, titleLooksLike, titleSuggestion, waitingText,
 } from './threads'
 import type { AppThread, ClientThread, Pairs, Platform } from './threads'
@@ -165,14 +165,15 @@ describe('R1: which threads are a client\'s', () => {
     expect(clientThreads(BOLT, links, feedThreads, both, live).map(t => t.sid)).toEqual(['local_b'])
     expect(autoLinkFor(BOLT, links, feedThreads, both, live)).toBe('local_b')
     expect(clientThreads(ACME, links, feedThreads, both, live).map(t => t.sid)).toEqual(['local_a'])
-    // linked to nobody, it is a thread of both: the first to link it has it
-    expect(clientThreads(BOLT, {}, feedThreads, both, live).map(t => t.sid)).toEqual(['local_a', 'local_b'])
+    // linked to nobody, it is neither's: its sessions declared both (Opus, 2026-10-13), and Bolt's row offers its own thread alone
+    expect(clientThreads(BOLT, {}, feedThreads, both, live).map(t => t.sid)).toEqual(['local_b'])
+    expect(clientThreads(ACME, {}, feedThreads, both, live)).toEqual([])
     // and with nothing else of Bolt's open, Bolt has no thread at all
     expect(clientThreads(BOLT, links, feedThreads.slice(0, 2), both, live)).toEqual([])
     expect(recommend(clientThreads(BOLT, links, feedThreads.slice(0, 2), both, live), titleSuggestion('Bolt Staffing', links, live), NOW)).toEqual({ state: 'start', reason: 'no thread yet', fresh: true })
   })
 
-  test('a thread reached by sessions of more than one client is never linked by itself, to either; it is still a thread of both for the person to choose', async () => {
+  test('a thread reached by sessions of more than one client is never linked by itself, to either, and neither row offers it', async () => {
     // a session for Acme 200 hours ago and, after a /clear, one for Bolt today, in the same app thread
     const one = liveOf(app('local_a', 'One reused thread', '2026-10-12 10:00'), app('local_b', 'Bolt only', '2026-10-08 10:00'))
     const both = pairsOf({ 'cli-old': 'local_a', 'cli-new': 'local_a', 'cli-b': 'local_b' })
@@ -184,9 +185,14 @@ describe('R1: which threads are a client\'s', () => {
     const withOther = [...feedThreads, declared(BOLT, 'cli-b', '2026-10-08 10:00')]
     expect(autoLinkFor(BOLT, {}, withOther, both, one)).toBe('local_b')
     expect(autoLinkFor(ACME, {}, withOther, both, one)).toBeUndefined()
-    // the row of each client can still show it, for Update
-    expect(clientThreads(ACME, {}, feedThreads, both, one).map(t => t.sid)).toEqual(['local_a'])
-    expect(clientThreads(BOLT, {}, feedThreads, both, one).map(t => t.sid)).toEqual(['local_a'])
+    // ⛔ and neither client's row offers it for Update (Opus, 2026-10-13): only a linked thread, or one whose
+    // sessions declared that client alone. The person can still type /mm link in it.
+    expect(clientThreads(ACME, {}, feedThreads, both, one)).toEqual([])
+    expect(clientThreads(BOLT, {}, feedThreads, both, one)).toEqual([])
+    expect(clientThreads(BOLT, {}, withOther, both, one).map(t => t.sid)).toEqual(['local_b'])
+    expect(recommend(clientThreads(ACME, {}, feedThreads, both, one), undefined, NOW)).toEqual({ state: 'start', reason: 'no thread yet', fresh: true })
+    // once the person links it to one of them, it is that one's linked thread
+    expect(clientThreads(ACME, { [ACME]: 'local_a' }, feedThreads, both, one).map(t => [t.sid, t.source])).toEqual([['local_a', 'linked']])
     // two sessions of ONE client in a thread do not make it shared, and a session the app cannot place counts for nothing
     expect([...sharedThreads([declared(ACME, 'cli-old', '2026-10-04 03:00'), declared(ACME, 'cli-new', '2026-10-12 10:00'), declared(BOLT, 'cli-elsewhere', '2026-10-12 10:00')], both)]).toEqual([])
   })
@@ -221,6 +227,32 @@ describe('R1: which threads are a client\'s', () => {
     // a marker for that same client is no bar
     expect(autoLinkFor(ACME, {}, rows, p, one, {}, { local_p: ACME })).toBe('local_p')
     expect(autoLinkFor(ACME, {}, rows, p, one, {}, { local_other: BOLT })).toBe('local_p')
+  })
+
+  test('[Q1] a client\'s row offers only its linked thread or one its sessions declared alone: never one the B3 rule lets go, not even by its title', async () => {
+    const INTERNAL = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
+    // the Pipeline-speed thread, named like the client: its session declared Acme, and internal ops too
+    const one = liveOf(app('local_p', 'Acme Roofing pipeline speed', '2026-10-12 10:00'))
+    const p = pairsOf({ 'cli-p': 'local_p' })
+    const ways = {
+      'a row for another project': [declared(ACME, 'cli-p', '2026-10-12 09:00'), declared(INTERNAL, 'cli-p', '2026-10-12 10:00')],
+    }
+    for (const [name, rows] of Object.entries(ways)) {
+      expect(clientThreads(ACME, {}, rows, p, one), name).toEqual([])
+      expect(autoLinkFate(ACME, 'local_p', rows, p), name).toBe('goes')
+      expect(titleSuggestion('Acme Roofing', {}, one, sid => declaredOther(ACME, sid, rows, p)), name).toBeUndefined()
+      expect(recommend(clientThreads(ACME, {}, rows, p, one), titleSuggestion('Acme Roofing', {}, one, sid => declaredOther(ACME, sid, rows, p)), NOW), name).toEqual({ state: 'start', reason: 'no thread yet', fresh: true })
+    }
+    // a marker for another client does the same
+    const alone = [declared(ACME, 'cli-p', '2026-10-12 09:00')]
+    expect(clientThreads(ACME, {}, alone, p, one, { local_p: BOLT })).toEqual([])
+    expect(autoLinkFate(ACME, 'local_p', alone, p, { local_p: BOLT })).toBe('goes')
+    // its sessions declared Acme alone: it is Acme's, offered and kept
+    expect(clientThreads(ACME, {}, alone, p, one).map(t => t.sid)).toEqual(['local_p'])
+    expect(autoLinkFate(ACME, 'local_p', alone, p)).toBe('stays')
+    // the feed lists none of its sessions: a miss, and still a title suggestion as before
+    expect(autoLinkFate(ACME, 'local_p', [declared(BOLT, 'cli-other', '2026-10-12 09:00')], p)).toBe('unlisted')
+    expect(titleSuggestion('Acme Roofing', {}, one, sid => declaredOther(ACME, sid, [], p))?.sid).toBe('local_p')
   })
 
   test('two clients linked to one thread (an older version allowed it): it is the first one\'s', async () => {

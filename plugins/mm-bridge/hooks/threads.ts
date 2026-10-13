@@ -6,10 +6,11 @@
 //
 // A client's threads are found three ways:
 //   (i)   a thread already linked to the client (by hand, from a chip, or by an earlier sync)
-//   (ii)  a thread whose Claude Code session declared the client: the feed's `threads` rows, matched to
-//         the app's threads through the pairs each session records about itself
+//   (ii)  a thread whose Claude Code sessions declared the client and no other project: the feed's
+//         `threads` rows, matched to the app's threads through the pairs each session records about itself
 //   (iii) a thread whose title merely looks like the client
-// (i) and (ii) link themselves. (iii) never does: it is only offered on the row as a suggestion.
+// (i) and (ii) link themselves. (iii) never does: it is only offered on the row as a suggestion. A thread
+// whose sessions also declared another project is none of these, for either client (`onlyClients`).
 //
 // ⛔ A thread is one client's. A thread linked to one client is never another client's thread, whatever
 // session or title matched it: it is not linked to a second, and it is never the thread Update acts on
@@ -142,8 +143,8 @@ function matchedThreads(
 /**
  * The app threads reached by sessions of more than one client: one thread that ran a session for one
  * client and, after a /clear or a resume, a session for another. ⛔ Such a thread is nobody's by itself: it
- * is never linked automatically, to either. The person can still press Update on a row that shows it, or
- * type /mm link in it.
+ * is never linked automatically, to either, and neither client's row offers it (`clientThreads`). The person
+ * can still type /mm link in it.
  */
 export function sharedThreads(feedThreads: readonly FeedThread[], pairs: Pairs): Set<string> {
   const clients = new Map<string, Set<string>>()
@@ -159,10 +160,10 @@ export function sharedThreads(feedThreads: readonly FeedThread[], pairs: Pairs):
 
 /**
  * The one client a thread's sessions declared in the feed's window: the project EVERY feed row of every
- * session that runs in the thread names. Undefined when there is no such row, or when the rows name two
- * or more projects, whichever they are: the internal-ops project counts like any other (B3, 2026-10-13: a
+ * session that runs in the thread names. Undefined when there is no such row, or when the rows name two or
+ * more projects, whichever they are (the internal-ops project counts like any other). B3, 2026-10-13: a
  * pipeline thread that loaded one client's skill for reference was linked to that client, pinned and named
- * as its thread, so that client's Update would have sent into it).
+ * as its thread, so that client's Update would have sent into it.
  */
 export function soleClient(sid: string, feedThreads: readonly FeedThread[], pairs: Pairs): string | undefined {
   let only: string | undefined
@@ -175,14 +176,35 @@ export function soleClient(sid: string, feedThreads: readonly FeedThread[], pair
 }
 
 /**
- * Whether a thread may be, or stay, linked to a client by the bridge itself: every feed row of its
- * sessions names that client (`soleClient`), and it did not open with an [mm-link] marker for another one
- * (`marked`: the project each thread's marker named). A thread the feed lists for nobody does not qualify
- * here; whether such a link is undone is the sync's count of misses.
+ * Whether a thread is, by the feed or by its own marker, another client's as well as or instead of this
+ * one's: a row of its sessions names another project, or the thread opened with an [mm-link] marker for
+ * another client (`marked`: the project each thread's marker named).
+ */
+export function declaredOther(projectId: string, sid: string, feedThreads: readonly FeedThread[], pairs: Pairs, marked: Readonly<Record<string, string>> = {}): boolean {
+  if (marked[sid] !== undefined && marked[sid] !== projectId) return true
+  return feedThreads.some(t => pairs[t.session_id]?.app === sid && t.project_id !== projectId)
+}
+
+/**
+ * Whether a thread is this client's alone: what the bridge may link by itself, keep linked by itself, and
+ * offer on the client's row. Every feed row of its sessions names that client (`soleClient`), and nothing
+ * makes it another's (`declaredOther`). A thread the feed lists for nobody is not; whether a link the
+ * bridge made to such a thread is undone is the sync's count of misses.
  */
 export function onlyClients(projectId: string, sid: string, feedThreads: readonly FeedThread[], pairs: Pairs, marked: Readonly<Record<string, string>> = {}): boolean {
-  if (marked[sid] !== undefined && marked[sid] !== projectId) return false
-  return soleClient(sid, feedThreads, pairs) === projectId
+  return !declaredOther(projectId, sid, feedThreads, pairs, marked) && soleClient(sid, feedThreads, pairs) === projectId
+}
+
+/**
+ * What becomes of a link the bridge made by itself, by this sync's feed:
+ *   stays     its thread's sessions declared this client alone (`onlyClients`)
+ *   goes      something makes the thread another client's too (`declaredOther`: a row for another project,
+ *             a marker for another client): let go on this sync (B3)
+ *   unlisted  the feed lists none of its sessions: the sync counts a miss
+ */
+export function autoLinkFate(projectId: string, sid: string, feedThreads: readonly FeedThread[], pairs: Pairs, marked: Readonly<Record<string, string>> = {}): 'stays' | 'goes' | 'unlisted' {
+  if (declaredOther(projectId, sid, feedThreads, pairs, marked)) return 'goes'
+  return feedThreads.some(t => pairs[t.session_id]?.app === sid) ? 'stays' : 'unlisted'
 }
 
 /**
@@ -207,8 +229,12 @@ export function autoLinkFor(
 }
 
 /**
- * A client's known threads: the linked one and every matched one, each once, newest first.
- * ⛔ Never a thread linked to a different client.
+ * A client's known threads, what its row may offer (Open, Update, the thread a new one takes over from):
+ * the thread linked to it, and every thread whose sessions declared that client alone (`onlyClients`), each
+ * once, newest first.
+ * ⛔ Never a thread linked to a different client, and never one whose sessions also declared another
+ * project or that opened with a marker for another client (Opus, 2026-10-13: the Pipeline-speed thread, once
+ * its link was let go, was still offered for Update on that client's row).
  */
 export function clientThreads(
   projectId: string,
@@ -216,8 +242,9 @@ export function clientThreads(
   feedThreads: readonly FeedThread[],
   pairs: Pairs,
   live: ReadonlyMap<string, AppThread>,
+  marked: Readonly<Record<string, string>> = {},
 ): ClientThread[] {
-  const out = matchedThreads(projectId, links, feedThreads, pairs, live)
+  const out = matchedThreads(projectId, links, feedThreads, pairs, live).filter(t => onlyClients(projectId, t.sid, feedThreads, pairs, marked))
   const linked = links[projectId] ? live.get(links[projectId] as string) : undefined
   if (linked && !linked.isArchived && ownerOf(linked.sessionId, links) === projectId) {
     const same = out.find(t => t.sid === linked.sessionId)
@@ -227,12 +254,16 @@ export function clientThreads(
   return out.filter(t => Number.isFinite(t.lastAt)).sort((a, b) => b.lastAt - a.lastAt)
 }
 
-/** R1 (iii): the most recently active open thread, linked to nobody, whose title looks like this client. */
-export function titleSuggestion(client: string, links: Readonly<Record<string, string>>, live: ReadonlyMap<string, AppThread>): Target | undefined {
+/**
+ * R1 (iii): the most recently active open thread, linked to nobody, whose title looks like this client.
+ * ⛔ Not one `other` says is another client's (`declaredOther`): a title never brings back a thread the feed
+ * or its marker gives to another client.
+ */
+export function titleSuggestion(client: string, links: Readonly<Record<string, string>>, live: ReadonlyMap<string, AppThread>, other: (sid: string) => boolean = () => false): Target | undefined {
   const taken = new Set(Object.values(links))
   let best: AppThread | undefined
   for (const s of live.values()) {
-    if (s.isArchived || taken.has(s.sessionId) || !s.title || !titleLooksLike(s.title, client)) continue
+    if (s.isArchived || taken.has(s.sessionId) || !s.title || !titleLooksLike(s.title, client) || other(s.sessionId)) continue
     if (!best || (ms(s.lastActivityAt) || 0) > (ms(best.lastActivityAt) || 0)) best = s
   }
   return best ? { sid: best.sessionId, title: best.title ?? '', suggested: true } : undefined

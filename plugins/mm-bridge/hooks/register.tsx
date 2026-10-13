@@ -5,7 +5,7 @@ import type { MmBand, MmFolds, MmNotice, MmQueue, MmView } from '../types'
 import { MAX_PINS, buildLists, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, dueLine, feedClients, holdBanner, isDraftDone, isUuid, needsLine, noteText, titleFor } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
-  LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFor, bandWords, clientThreads, foldGroups, hasWaiting, kickoffText, onlyClients, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor,
+  LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, foldGroups, hasWaiting, kickoffText, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor,
   rowGroups, signatureOf, threadLength, threadLink, threadRows, titleSuggestion,
 } from './threads'
 import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, Row, RowButton, RowState, Sent } from './threads'
@@ -818,14 +818,13 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   if (!known) {
     for (const [pid, a] of Object.entries(auto)) {
       if (unseen.has(a.sid)) continue
-      const declared = feedThreads.some(t => pairs[t.session_id]?.app === a.sid)
-      const markedOther = marked[a.sid] !== undefined && marked[a.sid] !== pid
-      if (!markedOther && declared && onlyClients(pid, a.sid, feedThreads, pairs, marked)) {
+      const fate = autoLinkFate(pid, a.sid, feedThreads, pairs, marked)
+      if (fate === 'stays') {
         a.miss = 0
         delete a.at
         continue
       }
-      if (!markedOther && !declared) {
+      if (fate === 'unlisted') {
         if (!feedThreads.length) continue
         if (typeof a.at === 'number' && now - a.at < MISS_GAP_MS) continue
         a.miss = (Number(a.miss) || 0) + 1
@@ -1020,11 +1019,14 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   }
 
   // R2: each client's recommendation. A title that merely looks like the client is offered only when the
-  // client has no known thread at all. ⛔ Never a thread linked to another client (clientThreads, titleSuggestion).
+  // client has no known thread at all. ⛔ Never a thread linked to another client, and never one whose
+  // sessions also declared another project, or that opened with a marker for another client: a thread the
+  // B3 rule let go is not offered for Update either (clientThreads, titleSuggestion).
   const recs: Record<string, Recommendation> = {}
   const rowOf = (it: QueueItem): Row => {
     const linked = links[it.projectId]
-    const threads = clientThreads(it.projectId, links, feedThreads, pairs, live)
+    const threads = clientThreads(it.projectId, links, feedThreads, pairs, live, marked)
+    const elsewhere = (sid: string) => declaredOther(it.projectId, sid, feedThreads, pairs, marked)
     const had = sent[it.projectId]
     // A client whose linked thread cannot be seen keeps the last recommendation's words, and no thread to act on.
     // Otherwise ONE of three: Start (no thread, or the thread is old or long), Update (the thread has not
@@ -1032,7 +1034,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const rec =
       linked && unseen.has(linked)
         ? carried(it)
-        : recommend(threads, threads.length ? undefined : titleSuggestion(it.client, links, live), now, {
+        : recommend(threads, threads.length ? undefined : titleSuggestion(it.client, links, live, elsewhere), now, {
             sent: had,
             // (a package the person holds, in the thread that was given it, is not new for that thread: hasWaiting)
             signature: had && hasWaiting(had.sig, it) ? had.sig : signatureOf(it),

@@ -1004,12 +1004,12 @@ describe('B1: Claude cannot start or update a thread (the mm tool, and a /mm tha
 })
 
 describe('B2: one client\'s kickoff never goes into another client\'s thread', () => {
-  test('[C1] [2.6] one app thread with a session for one client 200 hours ago and one for another today links to neither by itself; the person\'s press makes it one client\'s, and then it is never the other\'s', async ($, on) => {
+  test('[C1] [2.6] one app thread with a session for one client 200 hours ago and one for another today links to neither by itself, and neither row offers it; the person\'s /mm link makes it one client\'s, and then it is never the other\'s', async ($, on) => {
     const w = world(on, {
       feed: feed({ threads: [declared(ACME, 'cli-old', 200), declared(BOLT, 'cli-new', 1)] }),
-      threads: [thread('local_a', 'One reused thread', 1)],
-      // the same app thread ran two Claude Code sessions (a /clear, a resume): both pairs are in the store
-      store: { 'mm.threads': { 'cli-old': { app: 'local_a', at: NOW - 200 * HOUR }, 'cli-new': { app: 'local_a', at: NOW } } },
+      self: thread(SELF, 'One reused thread', 1),
+      // this app thread ran two Claude Code sessions (a /clear, a resume): both pairs are in the store
+      store: { 'mm.threads': { 'cli-old': { app: SELF, at: NOW - 200 * HOUR }, 'cli-new': { app: SELF, at: NOW } } },
     })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
@@ -1017,23 +1017,27 @@ describe('B2: one client\'s kickoff never goes into another client\'s thread', (
     // ⛔ nobody's by itself: not linked, not pinned, not renamed, however many syncs pass
     expect(w.stored['mm.links']).toEqual({})
     expect(w.stored['mm.auto']).toEqual({})
-    expect(w.threads.get('local_a')).toMatchObject({ title: 'One reused thread', pinned: false })
+    expect(w.threads.get(SELF)).toMatchObject({ title: 'One reused thread', pinned: false })
     expect(w.writes()).toEqual([])
-    // both rows show it: the person may take it for either
-    const ui = await pane($)
-    expect(await lines(ui)).toContain('drafts ready · Update thread: thread from Mon, Oct 12 exists')
-    expect(await lines(ui)).toContain('2 messages waiting · Update thread: thread from Mon, Oct 12 exists')
-    await ui.press({ key: `update:${BOLT}` })
-    expect(w.acted().map(c => [c.args.session_id, String(c.args.message).includes(`[mm-link ${BOLT}]`), String(c.args.message).includes(ACME)])).toEqual([['local_a', true, false]])
-    expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_a' })
-    expect(w.threads.get('local_a')).toMatchObject({ title: BOLT_TITLE, pinned: true })
+    // ⛔ and neither row offers it for Update (Opus, 2026-10-13): its sessions declared two clients
+    let ui = await pane($)
+    expect(await lines(ui)).toContain('drafts ready · Start thread: no thread yet')
+    expect(await lines(ui)).toContain('2 messages waiting · Start thread: no thread yet')
+    expect((await buttons(ui)).map(b => b[0]).filter(k => k.startsWith('update:'))).toEqual([])
+    await ui.unmount()
+    // the person makes it Bolt's, typing /mm link in it: nothing is sent
+    expect(await mm($, 'link Bolt Staffing')).toBe('This thread is now Bolt Staffing\'s. Showing Bolt Staffing in the side pane.')
+    expect(w.stored['mm.links']).toEqual({ [BOLT]: SELF })
+    expect(w.threads.get(SELF)?.title).toMatch(/^🟡 \d+h left · Bolt Staffing · reply · 2 new$/)
+    expect(w.threads.get(SELF)?.pinned).toBe(true)
     // it is Bolt's now: Acme has no thread, no Update button, and nothing of Acme's goes into it
+    ui = await pane($)
     expect(await lines(ui)).toContain('drafts ready · Start thread: no thread yet')
     expect((await buttons(ui)).map(b => b[0])).not.toContain(`update:${ACME}`)
-    expect(await mm($, 'update acme roofing')).toBe('No thread for Acme Roofing yet: use /mm start Acme Roofing.')
-    expect(w.acted().length).toBe(1)
-    expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_a' })
     await ui.unmount()
+    expect(await mm($, 'update acme roofing')).toBe('No thread for Acme Roofing yet: use /mm start Acme Roofing.')
+    expect(w.acted()).toEqual([])
+    expect(w.stored['mm.links']).toEqual({ [BOLT]: SELF })
   })
 
   test('a thread that linked itself and is then reached by a second client\'s session stops being the first one\'s: undone on the next sync (B3)', async ($, on) => {
@@ -4111,16 +4115,38 @@ describe('B3: a thread is linked by itself only to the one client its sessions d
     expect(w.threads.get('local_pipe')).toMatchObject({ title: 'Pipeline speed', pinned: false })
     // not the person's unlink: no record of one
     expect(w.stored['mm.unlinked']).toBeUndefined()
-    // (the row still offers it, as it offers any thread a client's session ran in, for the person to choose:
-    // nothing goes into it unless they press)
+    // ⛔ and Acme's row no longer offers it (Opus, 2026-10-13): no thread for Update to send into
     const ui = await pane($)
-    expect(await lines(ui)).toContain('drafts ready · Update thread: thread from Mon, Oct 12 exists')
+    expect(await lines(ui)).toContain('drafts ready · Start thread: no thread yet')
+    expect(await buttonsOf(ui, ACME)).toEqual(['Start thread', 'Drafts'])
     await ui.unmount()
+    expect(await mm($, 'update acme roofing')).toBe('No thread for Acme Roofing yet: use /mm start Acme Roofing.')
     // nor does it link itself again while the feed shows both
     await w.clock.advance(6 * 60_000)
     await mm($, '')
     expect(w.stored['mm.links']).toEqual({})
     expect(w.acted()).toEqual([])
+  })
+
+  test('[Q1] the Pipeline speed case, pressed: Update on Acme\'s row, drawn while the thread was linked by itself, does not send into it once it is let go', async ($, on) => {
+    const w = pipeline(on)
+    await mm($, '')
+    const ui = await pane($)
+    // drawn while the bridge's own link stood: the row's one action acts on that thread
+    expect(await buttonsOf(ui, ACME)).toEqual(['Update thread', 'Drafts'])
+    // the feed now shows the session declared internal ops too
+    w.setFeed(feed({ threads: [declared(ACME, 'cli-pipe', 2), declared(INTERNAL, 'cli-pipe', 1)] }))
+    await ui.press({ key: `update:${ACME}` })
+    // the press synced first: the link is let go, the row it showed is gone, and nothing was sent anywhere
+    expect(await lines(ui)).toContain('That thread is no longer available. The list has been refreshed.')
+    expect(w.acted()).toEqual([])
+    expect(w.calls.filter(c => c.tool === 'send_message')).toEqual([])
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.threads.get('local_pipe')).toMatchObject({ title: 'Pipeline speed', pinned: false })
+    // and the row drawn again has no Update to press
+    expect(await lines(ui)).toContain('drafts ready · Start thread: no thread yet')
+    expect((await buttons(ui)).map(b => b[0])).not.toContain(`update:${ACME}`)
+    await ui.unmount()
   })
 
   test('[3] a link the person made is never let go by it: /mm link, then the same rows', async ($, on) => {
@@ -4150,9 +4176,10 @@ describe('B3: a thread is linked by itself only to the one client its sessions d
     await mm($, '')
     expect(w.stored['mm.links']).toEqual({})
     expect(w.threads.get('local_x')).toMatchObject({ title: 'Hub thread', pinned: false })
-    // the person may still take it for either: both rows show it
+    // ⛔ and neither row offers it (Opus, 2026-10-13); the person can still type /mm link in it
     const ui = await pane($)
-    expect(await lines(ui)).toContain('drafts ready · Update thread: thread from Mon, Oct 12 exists')
+    expect(await lines(ui)).toContain('drafts ready · Start thread: no thread yet')
+    expect(await lines(ui)).toContain('2 messages waiting · Start thread: no thread yet')
     await ui.unmount()
   })
 
