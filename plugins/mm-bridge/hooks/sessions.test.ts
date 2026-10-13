@@ -282,3 +282,47 @@ describe('F2: a write the engine refuses midway leaves nothing half done', () =>
     expect(w.calls.filter(c => c.tool === 'spawn_task').length).toBe(1)
   })
 })
+
+describe('re-review of a446f5ab: Start after a chip was spent, a re-check after a move, a refused pin, the same name twice', () => {
+  /**
+   * Start pressed in a hub thread mints a chip; the person starts a thread from it, which takes the client;
+   * later that thread is long, so the row offers Start again. `usedAfterCheck`: the chip is used after Start's
+   * 1-to-3-second check, else before it.
+   */
+  async function chipSpentThenStartAgain(usedAfterCheck: boolean, tag: string) {
+    const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], mail: [mail(1, 'Client One')] }
+    const hubId = `local_${tag}hub`
+    const freshId = `local_${tag}new`
+    const w = fakeApp(feed, [{ sessionId: hubId }, { sessionId: freshId, title: 'Fresh thread', lastActivityAt: ago(0) }])
+    const hub = w.session(hubId)
+    await mm(hub, '')
+    const spawns = () => w.calls.filter(c => c.tool === 'spawn_task')
+    expect(await press(hub, `start:${pid(1)}`)).toBe(true)
+    expect(spawns().length).toBe(1)
+    const prompt = String(spawns()[0]?.args.prompt)
+    if (usedAfterCheck) await w.advance(3_100)
+    // the person clicks Start on the chip: the new thread opens with its prompt and takes the client
+    await hooks['prompt.submit']?.(w.session(freshId), { text: prompt, origin: { kind: 'sdk' } }, next)
+    if (!usedAfterCheck) await w.advance(3_100)
+    expect(linksOf(w)).toEqual({ [pid(1)]: freshId })
+    // ⛔ the spent chip is not written back by Start's check: no chip waits for the client anywhere
+    const waiting = ((w.stored('mm.chips') ?? []) as Array<{ projectId: string; superseded?: boolean }>).filter(c => c.projectId === pid(1) && !c.superseded)
+    expect(waiting).toEqual([])
+    // later that day the new thread is long, and nothing new came from the client: the row offers Start again
+    w.put('mm.ctx', { [freshId]: { tokensUsed: 700_000, contextWindow: 1_000_000, percentUsed: 70, at: NOW } })
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect([...(await paneButtons(hub)).keys()]).toContain(`start:${pid(1)}`)
+    expect(await press(hub, `start:${pid(1)}`)).toBe(true)
+    // ⛔ and it mints: the spent chip is no reason to refuse it
+    expect(spawns().length).toBe(2)
+  }
+
+  test('M1: the chip used within Start\'s 1-to-3-second check is not written back, and a later Start in the same thread mints (P8)', async () => {
+    await chipSpentThenStartAgain(false, 'm1a')
+  })
+
+  test('M1: the chip used after that check: a later Start in the same thread mints (P8b)', async () => {
+    await chipSpentThenStartAgain(true, 'm1b')
+  })
+})

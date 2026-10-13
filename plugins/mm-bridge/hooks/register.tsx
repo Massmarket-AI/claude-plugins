@@ -226,7 +226,11 @@ let askTimer: { cancel: () => void } | null = null
  * even when the store refused every write after the first went (review of 79cbc596, F2).
  */
 const sentHere = new Map<string, string>()
-/** The chips this session minted from a press, by client and what they carry: a second press mints none, whatever the store kept. */
+/**
+ * The chips this session minted whose record the store refused, by client, thread and what they carry: a
+ * second press mints none while the store cannot say the chip is there. Forgotten once the record is written,
+ * or the client has moved on (M1).
+ */
 const mintedHere = new Set<string>()
 
 /**
@@ -1537,13 +1541,15 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
     prompt,
   })) as Mcp
   if (r.isError) return `Could not create the chip: ${short(textOf(r))}`
-  mintedHere.add(minted)
   // The chip shows in this thread only, so the record says which thread: the person is told where it is from
   // any other, and this thread's session withdraws it once it is no longer wanted. Any earlier chip for the
   // client, here or in another thread, is superseded by this one.
   // ⛔ The chip's record FIRST, then the rest, each on its own: a write the engine refuses is noted where the
   // bridge's errors go and written again by the check 1 to 3 seconds later (review of 79cbc596, F2). The chip
   // is there either way; with no record its thread links like one started by hand.
+  // ⛔ This session remembers the chip (`mintedHere`) ONLY while its record is not written: once the record is
+  // there, it alone says whether the chip is still waiting, and a chip spent, withdrawn or superseded is no
+  // longer the reason to refuse a Start (re-review of a446f5ab, M1).
   const answer = textOf(r)
   const taskId = /\btask_id:\s*(task_[A-Za-z0-9]{1,40})/.exec(answer)?.[1] ?? /\b(task_[0-9a-f]{6,40})\b/.exec(answer)?.[1] ?? ''
   const had = (await storeGet<Record<string, string>>($, 'mm.links', {}).catch(() => ({}) as Record<string, string>))[it.projectId]
@@ -1560,12 +1566,30 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
       await noteFailure($, `start: ${what}`, err)
     }
   }
-  await step('the chip record', record)
+  let recorded = false
+  await step('the chip record', async () => {
+    await record()
+    recorded = true
+  })
+  if (!recorded) mintedHere.add(minted)
   // The person asked for this client: a pin they took off its thread may come back.
   await step('the pin coming back', () => pinAgain($, had))
-  settleLater($, me || it.projectId, async () => {
-    if (!(await chipsOf($, now)).some(c => sameChip(c, chip))) await step('the chip record, again', record)
-  })
+  // Checked again 1 to 3 seconds later, and written again ONLY when the first write failed: a record that
+  // was written and is gone now was spent (a thread started from the chip took the client), withdrawn or
+  // superseded, and is never written back. Nor is one whose client has since moved to another thread.
+  if (!recorded) {
+    settleLater($, me || it.projectId, async () => {
+      const linked = (await storeGet<Record<string, string>>($, 'mm.links', {}))[it.projectId]
+      if ((linked !== undefined && linked !== had) || (await chipsOf($, now)).some(c => sameChip(c, chip))) {
+        mintedHere.delete(minted)
+        return
+      }
+      await step('the chip record, again', async () => {
+        await record()
+        mintedHere.delete(minted)
+      })
+    })
+  }
   return `A chip for ${it.client} is ready here: click Start on it.`
 }
 
