@@ -29,6 +29,14 @@
  * most once every 10 minutes, so the extension can tell a member's sessions
  * apart. Display text only.
  *
+ * Turn origin (0.11.5, 2026-10-12): every worklog POST also says who started the
+ * work it belongs to, `person` or `auto`, read from the stamp Claude Code writes
+ * on the turn's opening entry in the session's transcript. A turn the system
+ * started (another session's message, a scheduled trigger, a bridge kickoff) is
+ * `auto`; a background task reporting back takes the origin of the turn that
+ * dispatched it; when the hook cannot tell, it sends nothing. See the TURN
+ * ORIGIN block.
+ *
  * Identity: reuses the SAME per-member `team_auth_tokens` UUID already handed
  * out for the Chrome extension (rollout/slips/), via env var MM_TRACKER_TOKEN.
  * No new credential to mint or distribute.
@@ -401,6 +409,18 @@ function loadSessionState(sessionId) {
       // most once every 10 minutes. See sessionTitleFor.
       session_title: stateString(parsed.session_title),
       session_title_read_at: stateString(parsed.session_title_read_at),
+      // ⛔ Turn origin (0.11.5) — who started the turn this session is in, the
+      // id of that turn's prompt, who started the chain of work it belongs to,
+      // and who started each agent and background task of the session. The
+      // same round-trip rule applies: a key missing here is erased by the next
+      // save, and every later row of a long turn, whose opening entry is by
+      // then further back than the tail that is read, would be sent with no
+      // origin — and an agent's rows would take the origin of whatever prompt
+      // is current when each is written. See turnOriginFor and rowOriginFor.
+      turn_origin: turnOriginKept(parsed.turn_origin),
+      turn_origin_prompt_id: stateString(parsed.turn_origin_prompt_id),
+      turn_chain_origin: turnOriginKept(parsed.turn_chain_origin),
+      turn_task_origins: taskOriginsKept(parsed.turn_task_origins),
     };
   } catch {
     return {
@@ -415,6 +435,10 @@ function loadSessionState(sessionId) {
       declared_task_at: null,
       session_title: null,
       session_title_read_at: null,
+      turn_origin: null,
+      turn_origin_prompt_id: null,
+      turn_chain_origin: null,
+      turn_task_origins: Object.create(null),
     };
   }
 }
@@ -465,12 +489,43 @@ function keepNewerDeclarations(file, state) {
   });
 }
 
+/**
+ * ⛔ AN AGENT'S ORIGIN IS NEVER ERASED BY A PROCESS THAT DID NOT KNOW IT (0.11.5).
+ * The same race as the declarations above, and a surer one: a turn that
+ * dispatches five agents has five of them making tool calls at once, each
+ * hook process loading the state, fixing the origin of ITS agent and saving the
+ * whole object. The last save would drop the other four, and each of those
+ * agents' next rows would be fixed again from whatever prompt is current by
+ * then — the very thing a kept origin exists to prevent.
+ *
+ * So right before a save the file is read again and the two lists are joined:
+ * for a task both hold, the one fixed LATER is kept (a resume re-fixes a task).
+ * The caller's object is updated too. Bounded by trimTaskOrigins.
+ */
+function keepNewerTaskOrigins(file, state) {
+  let disk = null;
+  try {
+    disk = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return;
+  }
+  if (!disk || typeof disk !== "object") return;
+  const onDisk = taskOriginsKept(disk.turn_task_origins);
+  const own = taskOriginsKept(state.turn_task_origins);
+  Object.keys(onDisk).forEach((id) => {
+    if (!own[id] || onDisk[id][1] > own[id][1]) own[id] = onDisk[id];
+  });
+  state.turn_task_origins = own;
+  trimTaskOrigins(state);
+}
+
 function saveSessionState(sessionId, state) {
   const file = stateFilePath(sessionId);
   if (!file) return;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     keepNewerDeclarations(file, state);
+    keepNewerTaskOrigins(file, state);
     fs.writeFileSync(file, JSON.stringify(state), "utf8");
   } catch {
     /* best-effort */
@@ -584,6 +639,13 @@ async function postWorklog({ contentMd, title, source, declarations }, deadlineA
           // left out of the body altogether. The server stores it in its own
           // column and derives no client and no task from it.
           session_title: SESSION_TITLE || undefined,
+          // ⛔ TURN ORIGIN (0.11.5) — who started the turn this row belongs to:
+          // "person" or "auto", as turnOriginFor() read it from the stamp on the
+          // turn's opening entry. One of those two words and nothing else: no
+          // prompt text is sent for it. When the hook cannot tell, the key is
+          // left out of the body altogether; the server then stores NULL, which
+          // every reader counts as the person's.
+          turn_origin: TURN_ORIGIN || undefined,
         },
         homedirReplacer,
       ),
@@ -5301,21 +5363,82 @@ function cleanSessionTitle(raw) {
   return s;
 }
 
+/** True when `file` is inside `root`: below it, by path segment, and not the folder itself. */
+function pathInside(root, file) {
+  const rel = path.relative(root, file);
+  return Boolean(rel) && !path.isAbsolute(rel) && rel.split(path.sep)[0] !== "..";
+}
+
+/**
+ * The folders a transcript may be read from: `<home>/.claude`, and the folder
+ * CLAUDE_CONFIG_DIR names when that is an absolute path (Claude Code keeps a
+ * profile's transcripts under it). A relative or empty value names nothing.
+ */
+function transcriptRoots() {
+  const roots = [];
+  const claude = homeClaudeDir();
+  if (claude) roots.push(claude);
+  const configured =
+    typeof process.env.CLAUDE_CONFIG_DIR === "string" ? process.env.CLAUDE_CONFIG_DIR.trim() : "";
+  if (configured && path.isAbsolute(configured)) roots.push(path.resolve(configured));
+  return roots;
+}
+
+/**
+ * `transcriptPath` as a file this hook may read, or null. The one path rule of
+ * both transcript reads (the title and the turn's origin).
+ *
+ * Read: a non-empty absolute path to a regular file that is inside one of the
+ * transcriptRoots() — as the path is WRITTEN (after any `..` is resolved), or,
+ * failing that, by REAL path: the file's real path inside the real path of one
+ * of them. Refused: everything else, and that is the point of the rule — the
+ * hook reads a transcript, never whatever file a payload names.
+ *
+ * ⛔ LINKS. The LAST path component is never followed: when the transcript's
+ * own name is a link, it is not read (lstat, not stat). A linked PARENT
+ * directory IS followed, both ways round:
+ *   - the path as written is under a root and a folder on the way is a link
+ *     to somewhere else (a member whose `projects` folder lives on another
+ *     disk): read, as it always was;
+ *   - the path as written is under NEITHER root, and its real path is under one
+ *     (0.11.5: a second profile folder whose `projects` is a link into
+ *     `<home>/.claude/projects`, with CLAUDE_CONFIG_DIR not in the hook's
+ *     environment): read. Until 0.11.5 such a profile got no title and no
+ *     origin on any row.
+ *
+ * May throw (a missing file): both callers catch, and answer null.
+ */
+function transcriptFileAllowed(transcriptPath) {
+  if (typeof transcriptPath !== "string" || !transcriptPath) return null;
+  if (!path.isAbsolute(transcriptPath)) return null;
+  const roots = transcriptRoots();
+  if (roots.length === 0) return null;
+  const file = path.resolve(transcriptPath);
+  let allowed = roots.some((root) => pathInside(root, file));
+  if (!allowed) {
+    const real = fs.realpathSync(file);
+    allowed = roots.some((root) => {
+      try {
+        return pathInside(fs.realpathSync(root), real);
+      } catch {
+        return false; // a root that does not exist holds nothing
+      }
+    });
+  }
+  if (!allowed) return null;
+  if (!fs.lstatSync(file).isFile()) return null;
+  return file;
+}
+
 /**
  * The thread's title from its transcript, or null. Reads at most the last
  * SESSION_TITLE_READ_BYTES of the file, and nothing else. Never throws.
  *
- * null — no title — for: a path that is not a non-empty absolute string; a path
- * outside `<home>/.claude/` (compared by path segment, after any `..` is
- * resolved); anything that is not a regular file (opening a pipe would wait); a
- * file that cannot be read; and a tail that holds no usable title line.
- *
- * ⛔ LINKS (corrected 2026-10-02 — this used to say "a link is never followed").
- * The LAST path component is never followed: when the transcript's own name is
- * a link, there is no title (lstat, not stat). A linked PARENT directory IS
- * followed: the `<home>/.claude/` check compares the path as it is written, so
- * a member whose `projects` folder is itself a link — to another disk, say —
- * still gets a title.
+ * null — no title — for: a path transcriptFileAllowed() refuses (not a
+ * non-empty absolute string; outside `<home>/.claude/` and the folder
+ * CLAUDE_CONFIG_DIR names; not a regular file — opening a pipe would wait; its
+ * own name a link); a file that cannot be read; and a tail that holds no usable
+ * title line.
  *
  * A line counts only when it parses as JSON and its title field is a string
  * with something left after cleanSessionTitle. The lines are read from the end,
@@ -5325,14 +5448,8 @@ function cleanSessionTitle(raw) {
 function readTranscriptTitle(transcriptPath) {
   let fd = null;
   try {
-    if (typeof transcriptPath !== "string" || !transcriptPath) return null;
-    if (!path.isAbsolute(transcriptPath)) return null;
-    const claude = homeClaudeDir();
-    if (!claude) return null;
-    const file = path.resolve(transcriptPath);
-    const rel = path.relative(claude, file);
-    if (!rel || path.isAbsolute(rel) || rel.split(path.sep)[0] === "..") return null;
-    if (!fs.lstatSync(file).isFile()) return null;
+    const file = transcriptFileAllowed(transcriptPath);
+    if (!file) return null;
 
     fd = fs.openSync(file, "r");
     const size = fs.fstatSync(fd).size;
@@ -5436,6 +5553,625 @@ function sessionTitleFor(payload, state) {
   }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// TURN ORIGIN — who started the turn a row belongs to (0.11.5).
+//
+// Rob, 2026-10-12: "It's also important that the time tracking doesn't start
+// whenever you update or open or create a session for a client. It needs to be
+// when the team member picks it up and starts working in the thread."
+//
+// A thread can be started or continued with nobody in it: another Claude
+// session sends it a message (the bridge's kickoff arrives that way), a chip
+// starts it with a kickoff, a scheduled trigger fires. Each starts a turn that
+// makes tool calls, and each tool call is a worklog row under the member. So
+// every row says who started the work it belongs to — `turn_origin`, "person"
+// or "auto" — and the server keeps the two apart.
+//
+// ⛔ THE RULE IS ABOUT WHO STARTED THE WORK (Opus, 2026-10-12). A turn the
+// SYSTEM started is not the person's active time. A background task the
+// person's own turn dispatched, reporting back into that thread, is still the
+// person's work: on Rob's Mac that day half of all rows were written in such
+// turns. So a turn has one of three roles:
+//
+//   it STARTS a chain    a prompt somebody or something sent: the person, or
+//                        the system
+//   it CONTINUES one     a background task reporting back, or the app resuming
+//                        the turn by itself: it takes the origin of the chain
+//                        it belongs to, which is the nearest earlier turn of
+//                        the session that started one
+//   cannot tell          no origin declared
+//
+// ⛔ WHERE IT COMES FROM. Claude Code 2.1.280 and later stamp the user entry
+// that opens a turn, in the session's transcript, with `turnOrigin`: its own
+// answer to "who started this turn". Read from 2.1.293's code and from the
+// transcripts on Rob's Mac (2026-10-12):
+//
+//   human               typed by the person, here or on their phone   starts: person
+//   peer                another Claude session, a channel, a
+//                       coordinator, an observer                      starts: auto
+//   scheduled           a scheduled trigger or a wake-up              starts: auto
+//   host_synthetic      the app wrote the prompt                      starts: auto
+//   system              a plugin's prompt, or a system one            starts: auto
+//   task_notification   a background task reporting back              continues
+//   auto_continuation   the app resumed the turn by itself            continues
+//   sdk, unknown        Claude Code itself does not know who          starts: (nothing)
+//
+// `sdk` is a prompt that arrived with no origin declared: a headless `-p` run,
+// and also a person typing into a host that does not say so. `unknown` is what
+// Claude Code writes when it has no origin and no source it recognises. Neither
+// is "auto": calling a person's turn automatic would lose real time, so both are
+// "cannot tell" — and so is a background task that reports back into a chain
+// one of them started.
+//
+// So: the person types, their turn dispatches three background agents, and each
+// one reporting back is "person". The bridge kicks a thread off, its turn
+// dispatches agents, and each one reporting back is "auto". Another session's
+// message, then a task reporting back, then the person typing: "auto", "auto",
+// "person". A task reporting back takes the NEAREST earlier start, so once the
+// person types again the chain is theirs, and once the system sends a prompt it
+// is the system's.
+//
+// ⛔ AN AGENT KEEPS THE ORIGIN IT STARTED WITH, and so does every background
+// task (review R2). The prompt id in a hook payload is the session's, so an
+// agent still working when a newer prompt arrives would take that prompt's
+// origin for the rest of its rows, and so would its report. Each agent's
+// origin is therefore fixed once — by the row that started it, or by its own
+// first row — and kept by the agent's id (`agent_id` in the hook's input); a
+// task notification is read as the origin of the task it reports. See
+// rowOriginFor.
+//
+// ⛔ THE BRIDGE'S MARKER. A prompt that begins `[mm-link <project id>]` is a
+// kickoff the mm-bridge plugin wrote (a chip's first prompt, or its Update), and
+// the app can stamp a chip's first prompt as the person's. So a stamped entry
+// whose text begins with that marker is "auto" whatever its stamp says. The
+// pattern is the plugin's own (hooks/register.tsx MARKER): the very start of the
+// text, a lower-case uuid.
+//
+// ⛔ THE SCHEDULED-TASK WRAPPER (review R4). `human` does not always mean typed:
+// the app starts a scheduled task's session with the task's prompt wrapped in
+// `<scheduled-task name="…" file="…">`, and stamps it `human` more often than
+// `scheduled` (7 of 10 on Rob's Mac over 14 days; every one the first entry of
+// its session, the tag at the very start). So a stamped entry whose text begins
+// with that tag is "auto" whatever its stamp says, like the marker.
+//
+// ⛔ PER TURN. Every hook payload carries `prompt_id`, and Claude Code writes the
+// same id (`promptId`) on every user entry of that prompt, so "this row's turn"
+// is exact: the newest stamped entry in the tail whose `promptId` is the
+// payload's. A stamped entry of another prompt is not this row's turn (it may be
+// the start of its chain). The first row after the person types is "person"
+// again: their message is the newest stamped entry of its prompt. (A payload
+// with no `prompt_id` takes the newest stamped entry in the tail, whatever its
+// prompt.)
+//
+// ⛔ BOUNDED AND FAIL-OPEN, like the session title:
+//   - at most the last 2,097,152 bytes of the transcript are read, once per run
+//     (measured on Rob's Mac over 7 days: a turn's opening entry was inside that
+//     many bytes at its first tool call in 1,514 of 1,514 turns; inside 262,144
+//     in 87%);
+//   - a long turn outgrows any tail (over 3 days there, the opening entry was
+//     further back than that for 520 of 6,457 tool calls), so the answer is kept
+//     in the session's state file with the id of its prompt, and used for as
+//     long as the payload names that same prompt;
+//   - a chain outlives its first turn by hours, so the origin of the chain is
+//     kept in the state file too, set each time a turn that starts one is read.
+//     A background task reporting back takes the start the tail shows; when the
+//     tail shows none, the one that was kept; with neither, "cannot tell";
+//   - a new prompt whose opening entry the tail does not hold is a turn
+//     nothing is known of: what was kept for the turn AND for the chain is
+//     cleared, so an older chain's answer is not handed to this turn's tasks
+//     (review R3);
+//   - the state holds those words ("person", "auto", or "none" for a start that
+//     was read and says nothing), the prompt's id, and one word per agent or
+//     background task under Claude Code's own id for it (the newest 400), and
+//     nothing else: no prompt text is kept and none is sent;
+//   - a missing path, a path outside both `<home>/.claude/` and the folder
+//     CLAUDE_CONFIG_DIR names (review R6: by the path as written, or by real
+//     path), a file that cannot be read, a tail with no stamped entry for this
+//     prompt and nothing kept for it, an older Claude Code that writes no
+//     stamp, or any other error is "cannot tell": nothing is sent, and the hook
+//     is never delayed or failed.
+//
+// ⛔ NEVER LOGGED. Nothing below writes a line of the transcript, or the answer,
+// to the debug log or to stderr.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** At most this many bytes, from the END of the transcript, are read for the turn's origin. */
+const TURN_ORIGIN_READ_BYTES = 2097152;
+
+/** The `turnOrigin` stamp that means the person typed the prompt: it starts a person's chain. */
+const TURN_ORIGIN_PERSON_KINDS = ["human"];
+
+/**
+ * The `turnOrigin` stamps of a turn the SYSTEM started: each starts an automatic
+ * chain. `sdk`, `unknown` and any value in none of these three lists start a
+ * chain too, of which nothing can be said: "cannot tell".
+ */
+const TURN_ORIGIN_AUTO_KINDS = ["peer", "scheduled", "host_synthetic", "system"];
+
+/**
+ * The `turnOrigin` stamps of a turn that starts nothing: a background task
+ * reporting back, and the app resuming the turn by itself. Each takes the
+ * origin of the chain it belongs to — the nearest earlier turn of the session
+ * that started one.
+ */
+const TURN_ORIGIN_CONTINUES_KINDS = ["task_notification", "auto_continuation"];
+
+/** The key as Claude Code writes it on a transcript line. Only a line holding it is parsed. */
+const TURN_ORIGIN_STAMP_KEY = '"turnOrigin"';
+
+/** The mm-bridge kickoff marker, at the very start of a prompt (the plugin's own pattern). */
+const TURN_ORIGIN_MARKER_RE =
+  /^\[mm-link [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\]/;
+
+/**
+ * The wrapper the app puts around a scheduled task's prompt, at the very start
+ * of the text: `<scheduled-task name="…" file="…">`. The tag's name and what
+ * follows it (a space or `>`), so `<scheduled-tasks>` is not it.
+ */
+const TURN_ORIGIN_SCHEDULED_TASK_RE = /^<scheduled-task[\s>]/;
+
+/**
+ * The id of an agent or of a background task, as Claude Code writes one: a
+ * short token of letters, digits, dot, dash and underscore that begins with a
+ * letter or a digit. Anything else is not an id and names no task.
+ */
+const TURN_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+
+/**
+ * How a task notification opens, as Claude Code writes it: the tag, then the
+ * id of the task it reports — which for an agent is the agent's id (the
+ * build's own words: "The <task-id> value is the agent ID").
+ */
+const TURN_TASK_NOTIFICATION_RE =
+  /^\s*<task-notification>\s*<task-id>([A-Za-z0-9][A-Za-z0-9._-]{0,79})<\/task-id>/;
+
+/** At most this many tasks' origins are kept for a session: the ones fixed last. */
+const TURN_TASK_ORIGINS_MAX = 400;
+
+/**
+ * This run's turn origin for the worklog body: "person", "auto", or null when
+ * the hook cannot tell. The event handlers set it (turnOriginFor) before they
+ * post; postWorklog is its only reader.
+ */
+let TURN_ORIGIN = null;
+
+/** "person" or "auto" as given, or null for anything else. What is SENT. */
+function turnOriginValue(value) {
+  return value === "person" || value === "auto" ? value : null;
+}
+
+/**
+ * An origin as it is KEPT in the session state: "person", "auto", "none", or
+ * null for anything else.
+ *
+ *   "none"  it was read, and it says nothing either way (a prompt with no
+ *           origin declared started this). Sent as nothing, like null.
+ *   null    it could not be read at all.
+ *
+ * The two are kept apart because an agent's origin is fixed by its first row:
+ * "none" fixes it (its rows then send nothing, whatever prompt comes later),
+ * and null fixes nothing (its next row is asked again).
+ */
+function turnOriginKept(value) {
+  return value === "person" || value === "auto" || value === "none" ? value : null;
+}
+
+/** A value as the id of an agent or a background task, or null. */
+function taskIdOf(value) {
+  return typeof value === "string" && TURN_TASK_ID_RE.test(value) ? value : null;
+}
+
+/**
+ * The session's kept task origins, cleaned: `{ <task id>: [<origin>, <fixed at,
+ * epoch ms>] }` with nothing in it but well-formed entries. An object with no
+ * prototype, so no task id can be mistaken for something every object has.
+ */
+function taskOriginsKept(value) {
+  const out = Object.create(null);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return out;
+  Object.keys(value).forEach((id) => {
+    if (!TURN_TASK_ID_RE.test(id)) return;
+    const entry = value[id];
+    if (!Array.isArray(entry)) return;
+    const origin = turnOriginKept(entry[0]);
+    const at = Number(entry[1]);
+    if (!origin || !Number.isFinite(at)) return;
+    out[id] = [origin, at];
+  });
+  return out;
+}
+
+/** The newest TURN_TASK_ORIGINS_MAX entries are kept; a long session forgets its oldest tasks. */
+function trimTaskOrigins(state) {
+  const map = state.turn_task_origins;
+  const ids = Object.keys(map);
+  if (ids.length <= TURN_TASK_ORIGINS_MAX) return;
+  ids.sort((a, b) => map[b][1] - map[a][1]);
+  const kept = Object.create(null);
+  for (let i = 0; i < TURN_TASK_ORIGINS_MAX; i++) kept[ids[i]] = map[ids[i]];
+  state.turn_task_origins = kept;
+}
+
+/** The kept origin of a task ("person", "auto" or "none"), or null when none is kept for it. */
+function taskOriginGet(state, id) {
+  const map = state && state.turn_task_origins;
+  const entry = id && map && typeof map === "object" ? map[id] : null;
+  return Array.isArray(entry) ? turnOriginKept(entry[0]) : null;
+}
+
+/** Fix a task's origin, as of now. A value that is not a kept origin fixes nothing. */
+function taskOriginSet(state, id, origin) {
+  const kept = turnOriginKept(origin);
+  if (!id || !kept) return;
+  state.turn_task_origins = taskOriginsKept(state.turn_task_origins);
+  state.turn_task_origins[id] = [kept, Date.now()];
+  trimTaskOrigins(state);
+}
+
+/**
+ * The tasks THIS tool call started or resumed, by id, read from the tool's own
+ * result (`tool_response`, the object Claude Code also writes to the transcript
+ * as `toolUseResult`). Measured on Rob's Mac over 3 days, the task a later
+ * notification reports was named by one of these in 315 of 317 cases:
+ *
+ *   Agent, Task      `agentId`, when `status` is "async_launched": an agent sent
+ *                    to work in the background. (A foreground agent's result
+ *                    arrives when it has finished, and starts nothing.)
+ *   SendMessage      `resumedAgentId`: an agent set to work again
+ *   Bash, PowerShell `backgroundTaskId`: a command left running
+ *   Monitor          `taskId`: a watch left running
+ *
+ * Ids only. A result of another shape names nothing: never throws.
+ */
+function dispatchedTaskIds(payload) {
+  const out = [];
+  try {
+    const res = payload && payload.tool_response;
+    if (!res || typeof res !== "object" || Array.isArray(res)) return out;
+    const tool = payload.tool_name;
+    const push = (value) => {
+      const id = taskIdOf(value);
+      if (id && out.indexOf(id) === -1) out.push(id);
+    };
+    if ((tool === "Agent" || tool === "Task") && res.status === "async_launched") push(res.agentId);
+    if (tool === "SendMessage") push(res.resumedAgentId);
+    if (tool === "Bash" || tool === "PowerShell") push(res.backgroundTaskId);
+    if (tool === "Monitor") push(res.taskId);
+  } catch {
+    /* nothing started */
+  }
+  return out;
+}
+
+/**
+ * The text a transcript user entry opens with: its content when that is a
+ * string, else its first text block. "" when it has none. Used for the marker
+ * test and nothing else; it is never kept, sent or logged.
+ */
+function turnEntryText(row) {
+  const message = row && row.message;
+  const content = message && typeof message === "object" ? message.content : null;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  for (let i = 0; i < content.length; i++) {
+    const block = content[i];
+    if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
+      return block.text;
+    }
+  }
+  return "";
+}
+
+/**
+ * True when a prompt's own opening words say the SYSTEM wrote it, whatever its
+ * stamp says: the bridge's kickoff marker, or the app's scheduled-task wrapper.
+ * Both are tested at the very start of the text and nowhere else.
+ */
+function turnEntryAutoByText(row) {
+  const text = turnEntryText(row);
+  return TURN_ORIGIN_MARKER_RE.test(text) || TURN_ORIGIN_SCHEDULED_TASK_RE.test(text);
+}
+
+/**
+ * True when a stamped transcript entry STARTS nothing: a background task
+ * reporting back, or the app resuming the turn. ⛔ A prompt that opens with the
+ * bridge's marker or the scheduled-task wrapper always starts a chain, whatever
+ * its stamp says.
+ */
+function turnEntryContinues(row) {
+  if (turnEntryAutoByText(row)) return false;
+  return TURN_ORIGIN_CONTINUES_KINDS.indexOf(row.turnOrigin) !== -1;
+}
+
+/**
+ * A stamped transcript entry that starts a chain, as "person", "auto" or null
+ * (cannot tell). The opening words are tested first: a bridge kickoff and a
+ * scheduled task are "auto" whatever their stamp says. (Asked only of an entry
+ * turnEntryContinues() answered false for.)
+ */
+function classifyTurnEntry(row) {
+  if (turnEntryAutoByText(row)) return "auto";
+  const kind = row.turnOrigin;
+  if (TURN_ORIGIN_PERSON_KINDS.indexOf(kind) !== -1) return "person";
+  if (TURN_ORIGIN_AUTO_KINDS.indexOf(kind) !== -1) return "auto";
+  return null;
+}
+
+/**
+ * The id of the task a task notification reports, or null: the `<task-id>` its
+ * text opens with. The id only; nothing else of the text is read, kept or sent.
+ */
+function turnEntryTaskId(row) {
+  const m = TURN_TASK_NOTIFICATION_RE.exec(turnEntryText(row));
+  return m ? m[1] : null;
+}
+
+/**
+ * The origin of the turn `promptId` names, from the tail of the transcript, or
+ * null when the tail holds no stamped user entry of that prompt (of any prompt
+ * when `promptId` is null). Reads at most the last TURN_ORIGIN_READ_BYTES of the
+ * file, and nothing else. Never throws.
+ *
+ * The newest stamped entry of the prompt is THE TURN. What comes back:
+ *
+ *   it starts a chain             { promptId, continues: false, value }
+ *   it continues one, and the     { promptId, taskId, continues: true,
+ *   tail shows where it started     chainInTail: true, value }: `value` is that
+ *                                   start's
+ *   it continues one, and the     { promptId, taskId, continues: true,
+ *   tail does not show the start    chainInTail: false }: the caller has what
+ *                                   was kept
+ *
+ * `value` is "person", "auto" or null (a start that says nothing either way).
+ * The start of a chain is the nearest EARLIER stamped entry, of any prompt, that
+ * is not itself a continuation. `taskId` is the task a notification reports, or
+ * null (the app resuming a turn reports none).
+ *
+ * The path rule is transcriptFileAllowed(), the title read's: a non-empty
+ * absolute path to a regular file, inside `<home>/.claude/` or the folder
+ * CLAUDE_CONFIG_DIR names (as written, or by real path), whose own name is not
+ * a link.
+ *
+ * ⛔ ONLY A LINE THAT HOLDS THE STAMP IS PARSED. The tail is searched from the
+ * end, as bytes, for the key as Claude Code writes it; the one line around each
+ * hit is decoded and parsed, and nothing else is. A tool result that quotes a
+ * transcript holds the key with its quotes escaped, which is not a hit. A hit
+ * counts only when its line is a whole line of the file (the piece a window
+ * begins inside is not), parses as JSON, is a main-thread `user` entry and
+ * carries `turnOrigin` as a string at its top level.
+ *
+ * ⛔ A COMPACT SUMMARY IS NOT A PROMPT. When Claude Code compacts a long turn it
+ * writes a summary entry that repeats the running turn's stamp and prompt id
+ * (35 of 35 on Rob's Mac). Its text is the summary, not what opened the turn, so
+ * a kickoff that was "auto" by its marker would read as the person's from there
+ * on. It is passed over: the turn's own opening entry, or what was kept for the
+ * prompt, still answers.
+ */
+function readTurnOrigin(transcriptPath, promptId) {
+  let fd = null;
+  try {
+    const file = transcriptFileAllowed(transcriptPath);
+    if (!file) return null;
+
+    fd = fs.openSync(file, "r");
+    const size = fs.fstatSync(fd).size;
+    const length = Math.min(size, TURN_ORIGIN_READ_BYTES);
+    if (length <= 0) return null;
+    const start = size - length;
+    const buf = Buffer.alloc(length);
+    let got = 0;
+    while (got < length) {
+      const n = fs.readSync(fd, buf, got, length - got, start + got);
+      if (n <= 0) break;
+      got += n;
+    }
+
+    /** The newest stamped entry of this prompt, once found to continue a chain. */
+    let turn = null;
+    let from = got;
+    while (from > 0) {
+      const hit = buf.lastIndexOf(TURN_ORIGIN_STAMP_KEY, from - 1, "utf8");
+      if (hit === -1) break;
+      const lineBreakBefore = hit === 0 ? -1 : buf.lastIndexOf(10, hit - 1);
+      const lineStart = lineBreakBefore + 1;
+      // Everything before this line is searched next, whatever this line is.
+      from = lineStart;
+      // A window that begins inside the file begins inside a line. That first
+      // piece is not a line, so a hit in it is not read.
+      if (lineBreakBefore === -1 && start > 0) break;
+      let lineEnd = buf.indexOf(10, hit);
+      if (lineEnd === -1 || lineEnd > got) lineEnd = got;
+      let row = null;
+      try {
+        row = JSON.parse(buf.toString("utf8", lineStart, lineEnd));
+      } catch {
+        continue; // a half-written last line, or not JSON at all
+      }
+      if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+      if (row.type !== "user" || row.isSidechain === true) continue;
+      if (row.isCompactSummary === true) continue;
+      if (typeof row.turnOrigin !== "string") continue;
+      const rowPromptId = stateString(row.promptId);
+      if (turn === null) {
+        // Another prompt's opening entry is not this row's turn.
+        if (promptId && rowPromptId && rowPromptId !== promptId) continue;
+        if (!turnEntryContinues(row)) {
+          return { promptId: rowPromptId, continues: false, value: classifyTurnEntry(row) };
+        }
+        // A background task reporting back, or the app resuming: it takes the
+        // origin of its chain. Keep looking, further back, for where that began.
+        turn = { promptId: rowPromptId, taskId: turnEntryTaskId(row) };
+        continue;
+      }
+      // Looking for the chain's start: the nearest earlier entry, of any prompt,
+      // that is not itself a continuation.
+      if (turnEntryContinues(row)) continue;
+      return {
+        promptId: turn.promptId,
+        taskId: turn.taskId,
+        continues: true,
+        chainInTail: true,
+        value: classifyTurnEntry(row),
+      };
+    }
+    // The turn continues a chain whose start is further back than the tail.
+    if (turn !== null) {
+      return { promptId: turn.promptId, taskId: turn.taskId, continues: true, chainInTail: false };
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* nothing to close */
+      }
+    }
+  }
+}
+
+/**
+ * Who started the turn this payload's prompt belongs to, as it is KEPT —
+ * "person", "auto", "none" (read, and it says nothing) or null (could not be
+ * read) — and what is kept of it in `state`. The caller saves the state.
+ *
+ *   the tail holds a stamped entry of this prompt…
+ *     …that starts a chain                          its answer; kept as the
+ *                                                   turn's AND as the chain's
+ *     …that is a task reporting back, and the       that task's origin; kept
+ *       task's origin is kept (rowOriginFor)        as the turn's
+ *     …that continues a chain whose start the       that start's answer; kept
+ *       tail shows                                  as the turn's and the chain's
+ *     …that continues one whose start the tail      the chain's answer that was
+ *       does not show                               kept; kept as the turn's
+ *   it holds none, and `state` holds an answer      that answer
+ *   for this same prompt id
+ *   it holds none, and the prompt is not the one    null, and what was kept for
+ *   `state` holds an answer for                     the turn AND for the chain
+ *                                                   is cleared; the new prompt's
+ *                                                   id is kept
+ *   anything else (no prompt id, no transcript)     null: `state` is left as it
+ *                                                   was
+ *
+ * ⛔ ONE PROMPT DOES NOT MARK THE NEXT. The turn's answer is used only while the
+ * payload's `prompt_id` is the id it was kept under. A new prompt has a new id,
+ * so its rows are read from its own opening entry or are "cannot tell".
+ *
+ * ⛔ NOR DOES AN OLDER CHAIN (0.11.5, review R3). A new prompt whose opening
+ * entry cannot be read — it has already left the tail: 3 MiB of pasted images,
+ * or 2.2 MB of output before the first tool call — is a turn nothing is known
+ * of. Leaving the kept chain in force would hand an OLDER chain's answer to the
+ * background tasks this turn dispatches: a person's own task sent as "auto"
+ * because the bridge had the thread before them. So the kept chain is cleared
+ * with the kept turn: those tasks are "cannot tell" until a turn that can be
+ * read starts a chain again.
+ *
+ * ⛔ THE CHAIN'S ANSWER IS REPLACED BY EVERY TURN THAT STARTS ONE, a "cannot
+ * tell" start included: a task that reports back into a chain nothing can be
+ * said of is "cannot tell" too, never the answer of an older chain.
+ *
+ * Never throws: any failure is null.
+ */
+function turnOriginFor(payload, state) {
+  try {
+    const transcriptPath = payload && payload.transcript_path;
+    if (typeof transcriptPath !== "string" || !transcriptPath) return null;
+    const promptId = stateString(payload.prompt_id);
+    const found = readTurnOrigin(transcriptPath, promptId);
+    if (found) {
+      if (!found.continues || found.chainInTail) {
+        state.turn_chain_origin = turnOriginValue(found.value) || "none";
+      }
+      // A task reporting back takes the origin of the task itself when that
+      // was fixed (an agent's first row, or the row that started it): the
+      // prompt that is current when it reports may be somebody else's. With
+      // none kept for it, and for the app resuming a turn, the chain answers —
+      // what the tail shows, or what was kept when its start was read.
+      const reported = found.continues ? taskOriginGet(state, found.taskId) : null;
+      state.turn_origin = reported || turnOriginKept(state.turn_chain_origin);
+      state.turn_origin_prompt_id = found.promptId || promptId;
+      return state.turn_origin;
+    }
+    if (!promptId) return null;
+    if (stateString(state.turn_origin_prompt_id) === promptId) {
+      return turnOriginKept(state.turn_origin);
+    }
+    // A prompt nothing is kept for, whose opening entry the tail does not hold.
+    state.turn_chain_origin = null;
+    state.turn_origin = null;
+    state.turn_origin_prompt_id = promptId;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The origin THIS ROW is sent with — "person", "auto" or null — and what is
+ * kept of it in `state`. The caller saves the state.
+ *
+ * ⛔ AN AGENT'S ROWS KEEP THE ORIGIN THE AGENT STARTED WITH (0.11.5, review R2).
+ * `prompt_id` is the SESSION's current prompt, not the agent's: when a newer
+ * prompt arrives while a background agent is still working, every later row of
+ * that agent names the new prompt. Read by prompt, an agent a person's turn
+ * dispatched turned "auto" the moment the bridge sent the thread a message, and
+ * the other way round (measured over 14 days on one machine: 3,435 of 74,510
+ * tool calls by agents a person's chain dispatched were sent "auto", and 1,201
+ * of 7,530 the other way).
+ *
+ * What identifies the agent: `agent_id` in the hook's input. Claude Code's own
+ * description of the field (2.1.280 to 2.1.295): "Subagent identifier. Present
+ * only when the hook fires from within a subagent [...] Absent for the main
+ * thread". So:
+ *
+ *   a row with an `agent_id`   the origin kept for that agent. With none kept,
+ *                              this is the agent's FIRST row: the origin of the
+ *                              turn current now (turnOriginFor) is its origin
+ *                              from here on — "none" included, so an agent a
+ *                              chain nothing is known of dispatched does not
+ *                              pick up whichever prompt comes next. A turn that
+ *                              could not be read fixes nothing: the agent's
+ *                              next row is asked again.
+ *   a row with none            the origin of its turn (turnOriginFor), which
+ *                              for a task reporting back is the origin of the
+ *                              task it reports
+ *
+ * ⛔ A TASK IS ALSO FIXED BY THE ROW THAT STARTS IT (dispatchedTaskIds): the
+ * agent sent to the background, the agent set to work again, the command or
+ * watch left running. Each takes the origin of the row whose tool call started
+ * it — and that is what its notification is then read as, hours later, under
+ * whatever prompt. A task started again is fixed again: an agent the bridge
+ * started and the person later resumes is the person's from the resume on. When
+ * the starting row's own origin could not be read, a task that had an origin
+ * loses it ("none") rather than keep an answer from before.
+ *
+ * The ids are Claude Code's own random ones. They are kept in the session's
+ * state file with one word each, are never sent, and name nothing outside this
+ * machine.
+ *
+ * Never throws: any failure is null.
+ */
+function rowOriginFor(payload, state) {
+  try {
+    const agent = taskIdOf(payload && payload.agent_id);
+    let kept = agent ? taskOriginGet(state, agent) : null;
+    if (!kept) {
+      kept = turnOriginFor(payload, state);
+      if (agent && kept) taskOriginSet(state, agent, kept);
+    }
+    const started = dispatchedTaskIds(payload);
+    for (let i = 0; i < started.length; i++) {
+      if (kept) taskOriginSet(state, started[i], kept);
+      else if (taskOriginGet(state, started[i])) taskOriginSet(state, started[i], "none");
+    }
+    return turnOriginValue(kept);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The PostToolUse run's shared network deadline (epoch ms):
  * POST_TOOL_USE_SAVE_MARGIN_MS before the hard exit main() armed. SessionStart
@@ -5472,6 +6208,13 @@ async function handlePostToolUse(payload) {
   // transcript when the cache is older than 10 minutes; the save at the end of
   // this run keeps whatever that read found.
   SESSION_TITLE = sessionTitleFor(payload, state);
+
+  // ⛔ TURN ORIGIN (0.11.5). Every POST this run makes says who started the work
+  // this tool call belongs to: its turn, or, for an agent's call, the agent.
+  // At most one bounded read of the transcript's tail per run (none for an
+  // agent whose origin is already kept); the save at the end of this run keeps
+  // the answer for the rest of the turn, and for the agent.
+  TURN_ORIGIN = rowOriginFor(payload, state);
 
   // ⛔ TASK ANNOUNCING (SPEC v2 §2.3). A declaration made by THIS call is taken
   // into the state before anything is posted, so this call's own row already
@@ -6209,11 +6952,26 @@ async function handleStop(payload) {
   const titleReadAtBefore = state.session_title_read_at;
   SESSION_TITLE = sessionTitleFor(payload, state);
   const titleWasRead = state.session_title_read_at !== titleReadAtBefore;
+  // ⛔ TURN ORIGIN (0.11.5). The Stop line says who started the turn that just
+  // ended. A turn with no tool call reaches Stop with nothing kept for it, so
+  // what this read finds is saved (below) like a newly read title.
+  const turnOriginBefore = state.turn_origin;
+  const turnPromptBefore = state.turn_origin_prompt_id;
+  const turnChainBefore = state.turn_chain_origin;
+  TURN_ORIGIN = rowOriginFor(payload, state);
+  const turnOriginChanged =
+    state.turn_origin !== turnOriginBefore ||
+    state.turn_origin_prompt_id !== turnPromptBefore ||
+    state.turn_chain_origin !== turnChainBefore;
   // ⛔ Move a pre-upgrade session's state home the first time Stop falls back
   // to it. Stop changes nothing else, so it used never to save — and a session
   // that only stopped went back to the old file on every run. Saved BEFORE the
   // POST: the hard exit can end this run while the POST is still waiting.
-  if (titleWasRead || (usedOlderSessionState(sessionId) && !homeSessionStateExists(sessionId))) {
+  if (
+    titleWasRead ||
+    turnOriginChanged ||
+    (usedOlderSessionState(sessionId) && !homeSessionStateExists(sessionId))
+  ) {
     saveSessionState(sessionId, state);
   }
   // ⛔ The skill top-up runs BESIDE the Stop line, not after it: the Stop POST
