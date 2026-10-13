@@ -1450,8 +1450,11 @@ const noClient = (name: string) => `No client matching "${cleanName(name)}" need
 /** /mm link's answer when nothing anywhere in the feed is that client: not a name, not an id. */
 const noFeedClient = (name: string) => `No client named "${cleanName(name)}" is in your feed. /mm link takes a client's name or project id.`
 
-/** A project id as the person may type it: the whole uuid, or its first 8 characters (`client 1a08666a` too, as a sentence names one). */
-const ID_TYPED = /^(?:client\s+)?([0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)$/
+/**
+ * A project id as the person may type it: the whole uuid, or its first 8 characters; also as a sentence
+ * names one, `client 1a08666a`, or after a name, `Acme (1a08666a)` (severalClients).
+ */
+const ID_TYPED = /^(?:client\s+|.*\(\s*)?([0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)\s*\)?$/
 
 /**
  * The clients `/mm link <x>` could mean (Rob, 2026-10-13: a client with nothing waiting could not be
@@ -1502,8 +1505,11 @@ async function nameOfId($: EngineInterface, projectId: string): Promise<string> 
 
 function severalClients(name: string, found: readonly KnownClient[]): string {
   const short = found.map(i => i.client)
-  // two clients with the same short name are told apart by their full names
-  const names = new Set(short).size === short.length ? short : found.map(i => i.projectName)
+  const full = found.map(i => i.projectName)
+  const distinct = (names: readonly string[]) => new Set(names).size === names.length
+  // two clients with the same short name are told apart by their full names; with the same full name too, by
+  // the first 8 characters of their project ids, which /mm link takes (L4)
+  const names = distinct(short) ? short : distinct(full) ? full : found.map(i => `${i.projectName} (${i.projectId.slice(0, 8)})`)
   return `More than one client matches "${cleanName(name)}": ${names.join(', ')}. Type more of the name.`
 }
 

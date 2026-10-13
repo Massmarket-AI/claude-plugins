@@ -358,4 +358,16 @@ describe('re-review of a446f5ab: Start after a chip was spent, a re-check after 
     expect(w.app.get('local_l3a')?.pinned).toBe(true)
     expect(w.stored('mm.unpinned') ?? {}).toEqual({})
   })
+
+  test('L4: two clients with the same full name are told apart by their ids, and /mm link takes either form', async () => {
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], mail: [mail(1, 'Acme'), answered(2, 'Acme')] }
+    const w = fakeApp(feed, [{ sessionId: 'local_l4' }])
+    const t = w.session('local_l4')
+    expect(await mm(t, 'link acme')).toBe('More than one client matches "acme": Acme (00000001), Acme (00000002). Type more of the name.')
+    expect(w.stored('mm.links')).toBeUndefined()
+    expect(await mm(t, 'link 00000002')).toBe('This thread is now Acme\'s. Nothing needs you on this client right now.')
+    expect(linksOf(w)).toEqual({ [pid(2)]: 'local_l4' })
+    expect(await mm(t, 'link Acme (00000001)')).toBe('This thread is now Acme\'s. Showing Acme in the side pane.')
+    expect(linksOf(w)).toEqual({ [pid(1)]: 'local_l4' })
+  })
 })
