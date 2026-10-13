@@ -3001,3 +3001,126 @@ describe('one pane: this thread\'s client on top, the list under it', () => {
     expect(w.prompts).toEqual([])
   })
 })
+
+// Rob, 2026-10-12: a thread that held the drafts was told none were prepared.
+describe('F10: a reply package someone picked up stays in the panel, with who holds it', () => {
+  /** A package picked up an hour ago, one draft not sent. */
+  const picked = (projectId: string, name: string, by: string) => ({
+    package_id: PKG, project_id: projectId, project_name: name, status: 'picked_up', covers_through: ago(3), drafts_ready: 1, drafts_unsent: 1,
+    flagged_for_rob: false, picked_up_by: by, picked_up_at: ago(1), project_owner_email: ME,
+  })
+  const viewText = async ($: Engine, title: string) => {
+    const view = await $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'Pane', requestId: 'mm-view', props: { ...PANE, title } })
+    const text = (await view.find({ type: 'Markdown' }))?.text ?? ''
+    await view.unmount()
+    return text
+  }
+  const HELD_TITLE = '🟡 21h left · Acme Roofing · your draft'
+  const HELD_VIEW = '> **You picked this up** (Mon 10 AM). 1 draft not sent yet.\n\n## Acme Roofing\n\n1. What the client sent'
+
+  test('a package I picked up: my thread keeps its pin and its pickup view, and the note says the drafts are being worked', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [picked(ACME, 'Acme Roofing — Pat', ME)] }), store: { 'mm.links': { [ACME]: SELF } } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    expect(w.threads.get(SELF)).toMatchObject({ title: HELD_TITLE, pinned: true })
+    // (the timer opens no pane any more: the client's part is kept current for the pane the person opens)
+    expect(w.opened).toEqual([])
+    expect(w.fetched.at(-1)).toBe(`https://onboarding-wizard.massmarket.ai/api/ext/reply-package?package_id=${PKG}&format=pickup`)
+    expect(w.appended.length).toBe(1)
+    expect(w.appended[0]).toContain('already picked up by')
+    expect(w.appended[0]).toContain(
+      `[Massmarket bridge, no reply needed] Acme Roofing Pat: ${HELD_TITLE}. Reply package aaaaaaaa is already picked up by Builder A, the person in this session, with 1 draft not sent yet; the five-part pickup view is in the side pane. The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${PKG}. Nothing has been sent.`,
+    )
+    expect(w.appended[0]).not.toContain('no reply drafts are prepared yet')
+    expect(await viewText($, 'Acme Roofing')).toBe(HELD_VIEW)
+
+    // the row says what is left to send, and Drafts on it shows the same view under the same line
+    const ui = await pane($)
+    // (Cedar and Bolt have no thread yet and are listed first, so Acme is the third row)
+    expect(await lines(ui)).toContain(`3. ${HELD_TITLE}`)
+    expect(await lines(ui)).toContain('1 draft not sent · Update thread: thread from Mon, Oct 12 exists')
+    await ui.press({ key: `drafts:${ACME}` })
+    await ui.unmount()
+    expect(await viewText($, 'Acme Roofing')).toBe(HELD_VIEW)
+
+    // the same package on the syncs that follow adds no second note
+    for (let i = 0; i < 12; i++) await w.clock.advance(60_000)
+    expect(w.appended.length).toBe(1)
+
+    // a client message that arrives after the drafts were written is a new note, once
+    w.setFeed(feed({
+      drafts: [picked(ACME, 'Acme Roofing — Pat', ME)],
+      mail: [{
+        message_id_key: 'acme-1', received_at: ago(2), reply_due_at: new Date(NOW + 22 * HOUR).toISOString(), sender: 'client@example.com', subject: 'One more thing',
+        snippet: 'hello', project_id: ACME, project_name: 'Acme Roofing — Pat', reply_status: 'unanswered', project_owner_email: ME,
+      }],
+    }))
+    for (let i = 0; i < 12; i++) await w.clock.advance(60_000)
+    expect(w.appended.length).toBe(2)
+    expect(w.appended[1]).toContain('with 1 draft not sent yet; the five-part pickup view is in the side pane. 1 client message arrived after that draft was written: read the package again and revise the open draft, never write a second email.')
+    expect(await viewText($, 'Acme Roofing')).toBe(`> **You picked this up** (Mon 10 AM). 1 draft not sent yet. 1 client message arrived after it was written.\n\n## Acme Roofing\n\n1. What the client sent`)
+    // and through all of it nothing was sent, started or submitted
+    expect(w.acted()).toEqual([])
+    expect(w.prompts).toEqual([])
+  })
+
+  test('a package a teammate picked up on my client: the thread, the pane, the note and the chip all say who has the drafts', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [picked(BOLT, 'Bolt Staffing (Sam)', 'J.Smith@example.com')] }), store: { 'mm.links': { [BOLT]: SELF } } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    expect(w.threads.get(SELF)).toMatchObject({ title: `${BOLT_TITLE} · with J Smith`, pinned: true })
+    expect(w.appended.length).toBe(1)
+    expect(w.appended[0]).toContain(
+      `[Massmarket bridge, no reply needed] Bolt Staffing (Sam): ${BOLT_TITLE} · with J Smith. 2 client messages waiting on our reply and 0 committed tasks due; J Smith picked up the reply drafts for this client (package aaaaaaaa) and has 1 draft not sent yet. Do not write a second reply: ask J Smith. Nothing has been sent.`,
+    )
+    expect(w.appended[0]).not.toContain('no reply drafts are prepared yet')
+    // the package is not this person's to open: no pickup view is asked for, and the pane says who to ask
+    expect(w.fetched.filter(u => u.includes('/reply-package'))).toEqual([])
+    const shown = await viewText($, 'Bolt Staffing')
+    expect(shown).toContain('### Waiting on our reply')
+    expect(shown.split('\n').at(-1)).toBe('_J Smith picked up the reply drafts for this client (Mon 10 AM) and has 1 draft not sent yet. Ask J Smith before writing a second reply._')
+    expect(shown).not.toContain('No reply drafts are prepared yet')
+
+    const ui = await pane($)
+    expect(await lines(ui)).toContain('2 messages waiting, drafts with J Smith · Update thread: thread from Mon, Oct 12 exists')
+    // (a row has one action now, and this one's is Update: a new thread for it is the typed command)
+    await mm($, 'start bolt staffing')
+    await ui.unmount()
+    expect(w.acted()).toEqual([
+      {
+        server: 'ccd_session', tool: 'spawn_task',
+        args: {
+          title: 'Bolt Staffing: reply drafts are with J Smith',
+          tldr: 'Bolt Staffing needs you: Bolt Staffing · reply due tomorrow 9 AM · 2 new · with J Smith. Start this to open a thread for that client with the drafts or the messages waiting.',
+          // (the client has a thread, this one, so the new thread is asked to look at how it ended)
+          prompt: `[mm-link ${BOLT}] Bolt Staffing (Sam) (OW project ${BOLT}): J Smith picked up the reply drafts (package aaaaaaaa) and has 1 not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.\n\n${HANDOVER('Morning hub', SELF, 'Bolt Staffing (Sam)', 'Before showing me what is due')}`,
+        },
+      },
+    ])
+    expect(w.prompts).toEqual([])
+  })
+
+  test('on upgrade: a queue the last version stored reads as it did, and a thread that already has its note gets no second one', async ($, on) => {
+    /** The Acme item as 0.4.0 wrote it to the store: no `open` on it. */
+    const stored = {
+      projectId: ACME, projectName: 'Acme Roofing Pat', client: 'Acme Roofing', dueAt: NOW + 21 * HOUR, kind: 'ready', messages: 0, tasks: 0,
+      packageId: PKG, coversThrough: ago(3), flagged: false, mail: [], taskTitles: [],
+    }
+    const last = { at: NOW, member: ME, items: [stored], pinned: 1, recs: {}, projects: [ACME] }
+    // synced a moment ago by the last version: this thread's first tick reads that queue as it is
+    const w = world(on, { store: { 'mm.links': { [ACME]: SELF }, 'mm.last': last } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    expect(w.fetched.filter(u => u.includes('/closeout'))).toEqual([])
+    expect(w.appended.length).toBe(1)
+    expect(w.appended[0]).toContain(
+      `[Massmarket bridge, no reply needed] Acme Roofing Pat: ${ACME_TITLE}. Reply package aaaaaaaa is prepared; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${PKG}. Nothing has been sent.`,
+    )
+    expect(await viewText($, 'Acme Roofing')).toBe('## Acme Roofing\n\n1. What the client sent')
+    // the note the last version left is recorded under the same key this version works out: no repeat, before or after a sync
+    expect(w.stored['mm.noted']).toEqual({ [SELF]: `pkg:${PKG}:${ago(3)}` })
+    for (let i = 0; i < 12; i++) await w.clock.advance(60_000)
+    expect(w.fetched.filter(u => u.includes('/closeout')).length).toBeGreaterThan(0)
+    expect(w.appended.length).toBe(1)
+  })
+})

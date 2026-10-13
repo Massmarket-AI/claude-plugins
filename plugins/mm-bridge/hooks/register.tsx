@@ -2,7 +2,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { MmBand, MmNotice, MmQueue, MmView } from '../types'
 
-import { MAX_PINS, buildQueue, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, dueLine, isUuid, needsLine, titleFor } from './queue'
+import { MAX_PINS, buildQueue, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, dueLine, holdBanner, isUuid, needsLine, noteText, titleFor } from './queue'
 import type { Feed, FeedThread, QueueItem } from './queue'
 import { LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFor, bandWords, clientThreads, kickoffText, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, threadLength, threadLink, threadRows, titleSuggestion } from './threads'
 import type { AppThread, ContextReading, Pairs, Recommendation, Replaced, Row, RowButton, RowState, Sent } from './threads'
@@ -61,7 +61,7 @@ import type { AppThread, ContextReading, Pairs, Recommendation, Replaced, Row, R
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.4.0'
+const VERSION = '0.4.1'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
 const VIEW = { plugin: 'mm-bridge', key: 'view' } as const
 const QUEUE = { plugin: 'mm-bridge', key: 'queue' } as const
@@ -866,13 +866,20 @@ async function renderPickup($: EngineInterface, it: QueueItem): Promise<string |
   return null
 }
 
+/** A client's pane: the pickup view (under a line saying the viewer holds it, when they do), or what is waiting. */
+async function paneMarkdown($: EngineInterface, it: QueueItem, now: number): Promise<string> {
+  const view = await renderPickup($, it)
+  return view ? [holdBanner(it), view].filter(Boolean).join('\n\n') : clientMarkdown(it, now)
+}
+
 /**
- * The client part of the pane: a client's prepared drafts when there is a package, else the messages
- * waiting on our reply and the tasks due. `own` is the client of the thread the pane is in: its part is
- * headed `This thread: <client>`. One package read (the pickup view), in this thread's own session.
+ * The client part of the pane: a client's prepared drafts when there is a package (under a line saying the
+ * viewer holds it, when they do), else the messages waiting on our reply, the tasks due and what is true of
+ * its reply drafts (paneMarkdown). `own` is the client of the thread the pane is in: its part is headed
+ * `This thread: <client>`. One package read (the pickup view), in this thread's own session.
  */
 async function showClient($: EngineInterface, it: QueueItem, own: boolean): Promise<void> {
-  const text = (await renderPickup($, it)) ?? clientMarkdown(it, await $.clock.now())
+  const text = await paneMarkdown($, it, await $.clock.now())
   await $.state.set(VIEW, { text, heading: own ? `This thread: ${it.client}` : '' } satisfies MmView)
 }
 
@@ -925,16 +932,17 @@ async function refreshSelf($: EngineInterface, force: boolean): Promise<string> 
   const last = await storeGet<Last | null>($, 'mm.last', null)
   const it = last?.items.find(i => i.projectId === pid)
   if (!it) return 'Nothing needs you on this client right now.'
-  const sig = it.packageId ? `pkg:${it.packageId}:${it.coversThrough}` : `q:${it.messages}:${it.tasks}:${it.dueAt}`
+  const o = it.open ?? null
+  const sig = o
+    ? `open:${o.id}:${o.state}:${it.coversThrough ?? ''}:${o.unsent}:${o.newer}:${it.messages}:${it.tasks}`
+    : it.packageId ? `pkg:${it.packageId}:${it.coversThrough}` : `q:${it.messages}:${it.tasks}:${it.dueAt}`
   const noted = await storeGet<Record<string, string>>($, 'mm.noted', {})
   if (!force && noted[me] === sig) return 'Up to date.'
   const now = await $.clock.now()
   await showClient($, it, true)
   if (force) await $.ui.open({ id: PANE_QUEUE, title: 'Needs you' })
   if (noted[me] !== sig) {
-    const body = it.packageId
-      ? `Reply package ${it.packageId.slice(0, 8)} is prepared${it.flagged ? ' and flagged for approval' : ''}; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${it.packageId}.`
-      : `${it.messages} client message${it.messages === 1 ? '' : 's'} waiting on our reply and ${it.tasks} committed task${it.tasks === 1 ? '' : 's'} due; no reply drafts are prepared yet.`
+    const body = noteText(it, last?.member ?? '')
     await $.session.append({
       message: { type: 'user', content: [{ type: 'text', text: `[Massmarket bridge, no reply needed] ${it.projectName}: ${titleFor(it, now)}. ${body} Nothing has been sent.` }] },
     })
@@ -1092,7 +1100,7 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
   // A client that already has a thread: the new one is asked to look at how the old one ended (handoverText).
   const prompt = kickoffText(it, { replaces: await replaced($, it, pass) })
   const r = (await $.mcp.call('ccd_session', 'spawn_task', {
-    title: `${it.client}: ${it.kind === 'ready' ? 'review the reply drafts' : 'reply to the client'}`,
+    title: `${it.client}: ${it.open?.state === 'held_by_other' ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : 'reply to the client'}`,
     tldr: `${it.client} needs you: ${needsLine(it, now)}. Start this to open a thread for that client with the drafts or the messages waiting.`,
     prompt,
   })) as Mcp

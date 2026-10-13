@@ -7,7 +7,7 @@ starts, and the new version loads the next time you open it).
 | Plugin | What it does |
 | --- | --- |
 | `mm-hooks` | Keeps the Massmarket worklog hook on this computer current. It only updates a hook the installer already set up; it never installs one, and never touches your token, your tracked folders or your settings. |
-| `mm-bridge` | It shows who needs you in a strip above the prompt in every thread and in a side pane, names and pins each client's thread, and never sends anything to a client. It starts a Claude turn only when you press Update thread or type /mm update; Start thread makes a chip you click. |
+| `mm-bridge` | It shows who needs you in a strip above the prompt in every thread and in a side pane (and says who holds a client's reply drafts once someone has picked them up), names and pins each client's thread, and never sends anything to a client. It starts a Claude turn only when you press Update thread or type /mm update; Start thread makes a chip you click. |
 
 ## Install
 
