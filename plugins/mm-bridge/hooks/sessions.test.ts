@@ -325,4 +325,20 @@ describe('re-review of a446f5ab: Start after a chip was spent, a re-check after 
   test('M1: the chip used after that check: a later Start in the same thread mints (P8b)', async () => {
     await chipSpentThenStartAgain(true, 'm1b')
   })
+
+  test('L2: Update, then the person makes that thread another client\'s within the check: it is not linked back to the first (P9)', async () => {
+    const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], mail: [mail(1, 'Client One'), mail(2, 'Client Two')] }
+    const w = fakeApp(feed, [{ sessionId: 'local_l2hub' }, { sessionId: 'local_l2a', title: 'A work', lastActivityAt: ago(1) }])
+    w.put('mm.links', { [pid(1)]: 'local_l2a' })
+    const hub = w.session('local_l2hub')
+    await mm(hub, '')
+    expect(await press(hub, `update:${pid(1)}`)).toBe(true)
+    expect(w.sends().length).toBe(1)
+    // within a second, in that thread, the person makes it Client Two's
+    expect(await mm(w.session('local_l2a'), 'link Client Two')).toBe('This thread is now Client Two\'s. Showing Client Two in the side pane.')
+    await w.advance(3_100)
+    const links = linksOf(w)
+    expect(Object.values(links).filter(s => s === 'local_l2a').length).toBe(1)
+    expect(links).toEqual({ [pid(2)]: 'local_l2a' })
+  })
 })

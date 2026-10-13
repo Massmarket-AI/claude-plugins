@@ -1831,7 +1831,11 @@ async function updateThread($: EngineInterface, feed: Feed, it: QueueItem, pass:
       if (unlinkedAt > at) return
       await step('the unlink record, again', () => forgetUnlink($, sid))
     }
-    const holder = (await storeGet<Record<string, string>>($, 'mm.links', {}))[pid]
+    const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+    // ⛔ a thread is one client's: one the person has made another client's since is left as it is (L2)
+    const owner = ownerOf(sid, links)
+    if (owner !== undefined && owner !== pid) return
+    const holder = links[pid]
     const auto = await storeGet<Auto>($, 'mm.auto', {})
     if (holder !== sid && (holder === undefined || auto[pid]?.sid === holder)) await step('the link, again', linkIt)
     if ((await storeGet<Record<string, string>>($, 'mm.links', {}))[pid] !== sid) return
