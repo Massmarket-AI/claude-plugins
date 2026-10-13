@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { ME, ago, fakeApp, mm, pid, tool } from './fake-app'
+import { ME, NOW, ago, fakeApp, hooks, mm, next, paneButtons, pid, press, tool } from './fake-app.test-helper'
 import type { Feed } from './queue'
 
-// The bridge's own hooks in a pretend desktop app (fake-app.ts): one store and one app shared by the threads
+// The bridge's own hooks in a pretend desktop app (fake-app.test-helper.ts): one store and one app shared by the threads
 // that run them, as each desktop thread is a process of its own. Round 3's review (79cbc596) found these.
 
 /** An unanswered client message, received so many hours ago, on a client the viewer owns. */

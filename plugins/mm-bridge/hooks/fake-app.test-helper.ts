@@ -1,6 +1,7 @@
+// TESTS ONLY: imported by sessions.test.ts, never by the hooks module (hooks.json loads register.tsx alone).
 // A pretend desktop app for tests of the bridge's own hooks, without the engine's `$`: one app, one store,
 // one clock, and a `$` for each thread, as each desktop thread is a process of its own with its own copy of
-// the bridge (sessions.test.ts). The store keeps what the engine keeps: a get reads it as it is now, and a
+// the bridge. The store keeps what the engine keeps: a get reads it as it is now, and a
 // set writes one key whole; a set can be refused, as the engine refuses one it cannot lock in time. Nothing
 // here reaches a real thread, the feed or the store on disk, and every client is made up.
 
@@ -55,6 +56,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   /** Every file the bridge wrote (its heartbeat: where its errors go). */
   const written: Array<{ path: string; text: string }> = []
   const fetched: string[] = []
+  /** Threads the app refuses to pin. */
+  const failPins = new Set<string>()
   const text = (value: unknown): Mcp => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }], isError: false })
   const views = new Map<string, Map<string, unknown>>()
 
@@ -83,6 +86,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           if (tool === 'get_session') return t ? text(t) : { content: [{ type: 'text', text: `Session ${id} not found.` }], isError: true }
           if (tool === 'list_sessions') return text([...app.values()].filter(x => x.sessionId !== self && !x.isArchived && !unlisted.includes(x.sessionId)))
           if (tool === 'set_session_title' && t) t.title = String(args.title)
+          if (tool === 'set_pinned' && failPins.has(id)) return { content: [{ type: 'text', text: 'set_pinned failed' }], isError: true }
           if (tool === 'set_pinned' && t) t.pinned = Boolean(args.pinned)
           if (tool === 'get_usage') return text({ context: { status: 'unavailable' } })
           if (tool === 'spawn_task') return text(`Noted (task_id: task_${String(calls.filter(c => c.tool === 'spawn_task').length).padStart(8, '0')}).`)
@@ -130,7 +134,13 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           return { isSet: true, version: 2 }
         },
       },
-      ui: { status: () => undefined, toast: () => undefined, open: async () => ({ isPlaced: true }), scroll: async () => undefined },
+      ui: {
+        resolve: () => ({ Box: 'Box', Button: 'Button', Markdown: 'Markdown', Text: 'Text' }),
+        status: () => undefined,
+        toast: () => undefined,
+        open: async () => ({ isPlaced: true }),
+        scroll: async () => undefined,
+      },
       process: { run: async () => ({ exitCode: 1, stdout: '', stderr: '' }) },
       command: { register: async () => ({ command: 'mm' }) },
       tool: { register: async () => ({ tool: 'mcp__mm-bridge__mm' }) },
@@ -144,6 +154,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
     appends,
     written,
     fetched,
+    failPins,
     session,
     /** What a thread's pane holds: its Needs-you rows, by the state key the bridge writes. */
     view: (self: string, key: string) => views.get(self)?.get(key),
@@ -173,6 +184,40 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
 /** /mm as the person types it (or, with another `kind`, as anything else sends it). */
 export const mm = async ($: unknown, args: string, kind = 'composer'): Promise<string> =>
   String(((await hooks['command.run:mm']?.($, { command: 'mm', args, origin: { kind } }, next)) as { text?: unknown } | undefined)?.text ?? '')
+/**
+ * The buttons a thread's Needs-you pane draws, by key, each with its own handler: the pane is drawn through
+ * the bridge's own render hook. (The engine's elements carry the handler beside `props`, a plain JSX
+ * factory inside them: both are read.)
+ */
+export async function paneButtons($: unknown): Promise<Map<string, () => void>> {
+  const tree = await hooks['ui.render:{"component":"Pane","requestId":"mm-queue"}']?.($, { props: {} }, next)
+  const found = new Map<string, () => void>()
+  const walk = (node: unknown, depth: number): void => {
+    if (!node || typeof node !== 'object' || depth > 40) return
+    if (Array.isArray(node)) {
+      for (const n of node) walk(n, depth + 1)
+      return
+    }
+    const o = node as { key?: unknown; props?: Record<string, unknown>; children?: unknown; onPress?: unknown }
+    const key = o.props?.key ?? o.key
+    const onPress = o.onPress ?? o.props?.onPress
+    if (typeof key === 'string' && typeof onPress === 'function') found.set(key, onPress as () => void)
+    walk(o.props?.children, depth + 1)
+    walk(o.children, depth + 1)
+  }
+  walk(tree, 0)
+  return found
+}
+
+/** Presses the pane's button with this key as the person does, then lets what it set going finish. False when the pane draws no such button. */
+export async function press($: unknown, key: string): Promise<boolean> {
+  const onPress = (await paneButtons($)).get(key)
+  if (!onPress) return false
+  onPress()
+  for (let i = 0; i < 20_000; i++) await Promise.resolve()
+  return true
+}
+
 /** The `mm` tool, as Claude calls it. */
 export const tool = async ($: unknown, args: string): Promise<string> =>
   String(((await hooks['tool.call:mcp__mm-bridge__mm']?.($, { tool: 'mcp__mm-bridge__mm', args }, next)) as { result?: unknown } | undefined)?.result ?? '')
