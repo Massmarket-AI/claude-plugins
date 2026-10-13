@@ -68,6 +68,8 @@ type WorldOptions = {
   noToken?: boolean
   /** The system's opener: it takes the link (`works`), exits with an error (left out), or is not on this computer (`missing`). */
   opener?: 'works' | 'missing'
+  /** A shell command in this thread: it runs (left out), it runs and fails (`error`), or it is refused before it runs (`deny`). */
+  bash?: 'error' | 'deny'
   /** The feed's HTTP status for each fetch (200 when left out). */
   feedStatus?: () => number
   files?: Record<string, { text: string; mtimeMs: number }>
@@ -174,6 +176,13 @@ function world(on: On, opts: WorldOptions = {}) {
     if (opts.opener === 'missing') return { deny: `spawn ${String(e.argv[0])} ENOENT` }
     return { value: { exitCode: opts.opener === 'works' ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
+  /** Every shell command that reached the tool itself, as it reached it. */
+  const shell: string[] = []
+  on('tool.call', { tool: 'Bash' }, (_$, e) => {
+    if (opts.bash === 'deny') return { deny: 'not allowed here' }
+    shell.push(String((e as { command?: unknown }).command ?? ''))
+    return { result: { stdout: SHELL_OUT, stderr: '', interrupted: false }, ...(opts.bash === 'error' ? { isError: true as const } : {}) } as never
+  })
   on('session.id', () => ({ value: SELF_CLI }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('command.register', (_$, e) => {
@@ -207,7 +216,7 @@ function world(on: On, opts: WorldOptions = {}) {
   /** What a sync must never call: a message into a thread, or a chip. */
   const acted = () => calls.filter(c => c.tool === 'send_message' || c.tool === 'spawn_task')
   return {
-    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, reads, lists, written, appended, ran,
+    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, reads, lists, written, appended, ran, shell,
     /** The app calls that change a thread: a rename, a pin, a message, a chip. (Reading this session's own usage, and withdrawing a chip, change none.) */
     writes: () => calls.filter(c => !['get_session', 'list_sessions', 'get_usage', 'dismiss_task'].includes(c.tool)).map(c => [c.tool, c.args.session_id ?? '', c.args.title ?? c.args.pinned ?? ''].join(' | ')),
     /** The chips this session asked the app to withdraw, by their ids. */
@@ -224,6 +233,8 @@ function world(on: On, opts: WorldOptions = {}) {
 
 /** In the app's usage answer, beside the context: what the bridge must never read or keep. */
 const PLAN_MARK = 'PLAN-DO-NOT-KEEP'
+/** What a shell command answers in these tests: a mark the bridge must never read or keep. */
+const SHELL_OUT = 'SHELL-OUTPUT-DO-NOT-KEEP'
 /** A chip's id as the app answers a mint: the n-th one minted in a test. */
 const chipId = (n: number) => `task_${String(n).padStart(8, '0')}`
 
@@ -2362,6 +2373,10 @@ describe('a press shows that it worked, and cannot fire twice', () => {
     await ui.press({ key: `update:${ACME}` })
     await w.clock.advance(100)
     expect(w.acted().filter(c => c.tool === 'send_message').length).toBe(2)
+    // both deliveries land before the test ends, so no press is left running when its world is taken down
+    await w.clock.advance(121_000)
+    expect(w.acted().filter(c => c.tool === 'send_message').length).toBe(2)
+    expect(w.toasts.filter(t => t === 'Sent to Acme Roofing\'s thread.').length).toBeGreaterThan(0)
     await ui.unmount()
   })
 })
@@ -3016,6 +3031,7 @@ describe('F10: a reply package someone picked up stays in the panel, with who ho
     return text
   }
   const HELD_TITLE = '🟡 21h left · Acme Roofing · your draft'
+  const WITH_TITLE = '🟡 with J Smith · Bolt Staffing · reply · 2 new'
   const HELD_VIEW = '> **You picked this up** (Mon 10 AM). 1 draft not sent yet.\n\n## Acme Roofing\n\n1. What the client sent'
 
   test('a package I picked up: my thread keeps its pin and its pickup view, and the note says the drafts are being worked', async ($, on) => {
@@ -3068,10 +3084,11 @@ describe('F10: a reply package someone picked up stays in the panel, with who ho
     const w = world(on, { feed: feed({ drafts: [picked(BOLT, 'Bolt Staffing (Sam)', 'J.Smith@example.com')] }), store: { 'mm.links': { [BOLT]: SELF } } })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
-    expect(w.threads.get(SELF)).toMatchObject({ title: `${BOLT_TITLE} · with J Smith`, pinned: true })
+    // (u) not this person's to act on: the thread is named with who has the drafts, and is not pinned
+    expect(w.threads.get(SELF)).toMatchObject({ title: WITH_TITLE, pinned: false })
     expect(w.appended.length).toBe(1)
     expect(w.appended[0]).toContain(
-      `[Massmarket bridge, no reply needed] Bolt Staffing (Sam): ${BOLT_TITLE} · with J Smith. 2 client messages waiting on our reply and 0 committed tasks due; J Smith picked up the reply drafts for this client (package aaaaaaaa) and has 1 draft not sent yet. Do not write a second reply: ask J Smith. Nothing has been sent.`,
+      `[Massmarket bridge, no reply needed] Bolt Staffing (Sam): ${WITH_TITLE}. 2 client messages waiting on our reply and 0 committed tasks due; J Smith picked up the reply drafts for this client (package aaaaaaaa) and has 1 draft not sent yet. Do not write a second reply: ask J Smith. Nothing has been sent.`,
     )
     expect(w.appended[0]).not.toContain('no reply drafts are prepared yet')
     // the package is not this person's to open: no pickup view is asked for, and the pane says who to ask
@@ -3082,8 +3099,11 @@ describe('F10: a reply package someone picked up stays in the panel, with who ho
     expect(shown).not.toContain('No reply drafts are prepared yet')
 
     const ui = await pane($)
-    expect(await lines(ui)).toContain('2 messages waiting, drafts with J Smith · Update thread: thread from Mon, Oct 12 exists')
-    // (a row has one action now, and this one's is Update: a new thread for it is the typed command)
+    // (u) its row is under `With a teammate`, closed until opened: who to ask, and no action on it
+    await ui.press({ key: 'mm-fold:teammate' })
+    expect(await lines(ui)).toContain('2 messages waiting, drafts with J Smith')
+    expect(await lines(ui)).toContain('J Smith picked up the reply drafts for this client (Mon 10 AM) and has 1 draft not sent yet. Ask J Smith before writing a second reply.')
+    // (a new thread for it is the typed command)
     await mm($, 'start bolt staffing')
     await ui.unmount()
     expect(w.acted()).toEqual([
@@ -3122,5 +3142,651 @@ describe('F10: a reply package someone picked up stays in the panel, with who ho
     for (let i = 0; i < 12; i++) await w.clock.advance(60_000)
     expect(w.fetched.filter(u => u.includes('/closeout')).length).toBeGreaterThan(0)
     expect(w.appended.length).toBe(1)
+  })
+})
+
+// ======================================================================== the close-out list (Rob, 2026-10-12)
+// (m) to (u): a package the caller holds is theirs; its thread links, is named, pinned and ticked like any
+// other; a sync follows a draft that was sent or discarded; the founder sees what waits for his OK; nothing
+// drops off silently; a pin taken off by hand stays off; a client whose drafts a teammate holds is not the
+// viewer's.
+
+const FOUNDER = 'owner@example.com'
+const TEAMMATE_B = 'builder-b@example.com'
+/** A reply package for a client, covering its mail through three hours ago: prepared, one draft ready. */
+const packageFor = (projectId: string, name: string, over: Record<string, unknown> = {}) => ({
+  package_id: PKG, project_id: projectId, project_name: name, status: 'prepared', covers_through: ago(3), drafts_ready: 1, drafts_unsent: 1,
+  flagged_for_rob: false, picked_up_by: null, picked_up_at: null, project_owner_email: ME, ...over,
+})
+const heldBy = (by: string, over: Record<string, unknown> = {}) => ({ status: 'picked_up', picked_up_by: by, picked_up_at: ago(1), ...over })
+/** An unanswered client message, received so many hours ago. */
+const mailFor = (projectId: string, name: string, hoursAgo: number, over: Record<string, unknown> = {}) => ({
+  message_id_key: `${projectId}-${hoursAgo}`, received_at: ago(hoursAgo), sender: 'client@example.com', subject: 'Question', snippet: 'hello',
+  project_id: projectId, project_name: name, reply_status: 'unanswered', project_owner_email: ME, ...over,
+})
+/** Our own pin on a client's thread, as an earlier sync left it on record. */
+const ourPin = (projectId: string, client: string) => ({ projectId, client, byUs: true })
+const tickOnce = async ($: Engine, w: { clock: { advance: (ms: number) => Promise<void> } }) => {
+  await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+  await w.clock.advance(4_000)
+}
+const closeouts = (w: { fetched: string[] }) => w.fetched.filter(u => u.includes('/closeout')).length
+
+describe('(m)(n)(o) a package the caller holds: its thread links itself, is named, pinned and ticked like any other', () => {
+  /** The founder picked up Acme's package. Acme's owner on record is a teammate, and one of the founder's sessions declared Acme. */
+  const founderHolds = (on: On, over: Record<string, unknown> = {}, more: WorldOptions = {}) =>
+    world(on, {
+      feed: { member: FOUNDER, role: 'founder', drafts: [packageFor(ACME, 'Acme Roofing — Pat', { ...heldBy(FOUNDER), project_owner_email: TEAMMATE_B, ...over })], mail: [], tickets: {}, threads: [declared(ACME, 'cli-acme', 30)] },
+      threads: [thread('local_a', 'Roof quote', 30), thread('local_x', 'Unrelated notes', 5)],
+      store: { 'mm.threads': PAIRS },
+      ...more,
+    })
+  const nothingLeft = { member: FOUNDER, role: 'founder', drafts: [], mail: [], tickets: {}, threads: [declared(ACME, 'cli-acme', 30)] }
+
+  test('the client is on the caller\'s list whoever owns it, and the thread that declared it links itself, is named and pinned', async ($, on) => {
+    const w = founderHolds(on)
+    expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a' })
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: 'local_a', miss: 0 } })
+    expect(w.threads.get('local_a')).toMatchObject({ title: '🟡 21h left · Acme Roofing · your draft', pinned: true })
+    expect((w.stored['mm.pins'] as Record<string, unknown>).local_a).toEqual(ourPin(ACME, 'Acme Roofing'))
+    // nothing was sent or started by it
+    expect(w.acted()).toEqual([])
+    expect(w.prompts).toEqual([])
+  })
+
+  test('(o) one draft not sent: not clear. Every draft sent or discarded: the tick, and our pin comes off', async ($, on) => {
+    const w = founderHolds(on)
+    await mm($, '')
+    // a draft that failed, or is being sent, is still a draft not sent: no draft ready, one unsent
+    w.setFeed({ ...nothingLeft, drafts: [packageFor(ACME, 'Acme Roofing — Pat', { ...heldBy(FOUNDER, { drafts_ready: 0, drafts_unsent: 1 }), project_owner_email: TEAMMATE_B })] })
+    await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: '🟡 21h left · Acme Roofing · your draft', pinned: true })
+    // the last one is sent: the feed lists the package no more
+    w.setFeed(nothingLeft)
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    expect(w.threads.get('local_a')).toMatchObject({ title: '✓ Acme Roofing · clear 11 AM', pinned: false })
+    expect((w.stored['mm.pins'] as Record<string, unknown>).local_a).toBeUndefined()
+  })
+
+  test('(o) a held row with no draft left to send is clear too', async ($, on) => {
+    const w = founderHolds(on)
+    await mm($, '')
+    w.setFeed({ ...nothingLeft, drafts: [packageFor(ACME, 'Acme Roofing — Pat', { ...heldBy(FOUNDER, { drafts_ready: 0, drafts_unsent: 0 }), project_owner_email: TEAMMATE_B })] })
+    await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: '✓ Acme Roofing · clear 11 AM', pinned: false })
+  })
+
+  test('only what we pinned is unpinned: a thread the person had pinned keeps their pin when its client is clear', async ($, on) => {
+    const w = founderHolds(on, {}, { threads: [thread('local_a', 'Roof quote', 30, { pinned: true }), thread('local_x', 'Unrelated notes', 5)] })
+    await mm($, '')
+    expect((w.stored['mm.pins'] as Record<string, { byUs: boolean }>).local_a?.byUs).toBe(false)
+    w.setFeed(nothingLeft)
+    await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: '✓ Acme Roofing · clear 11 AM', pinned: true })
+    expect(w.writes().filter(c => c.startsWith('set_pinned'))).toEqual([])
+  })
+
+  test('the same cap: with eight threads pinned already, a ninth client\'s thread is named and not pinned', async ($, on) => {
+    const ids = Array.from({ length: 9 }, (_, i) => `${String(i + 1).repeat(8)}-0000-4000-8000-000000000000`)
+    const w = world(on, {
+      feed: {
+        member: FOUNDER, role: 'founder', mail: [], tickets: {},
+        drafts: ids.map((id, i) => packageFor(id, `Client ${i + 1}`, { package_id: id.replace(/-0000-/, '-1111-'), ...heldBy(FOUNDER), project_owner_email: TEAMMATE_B, covers_through: ago(3 + i) })),
+        threads: ids.map((id, i) => declared(id, `cli-${i + 1}`, 30)),
+      },
+      threads: ids.map((_, i) => thread(`local_${i + 1}`, `Thread ${i + 1}`, 30)),
+      store: { 'mm.threads': Object.fromEntries(ids.map((_, i) => [`cli-${i + 1}`, { app: `local_${i + 1}`, at: NOW }])) },
+    })
+    expect(await mm($, '')).toBe('9 clients need you; 8 threads pinned. The list is in the side pane.')
+    expect([...w.threads.values()].filter(t => t.pinned).length).toBe(8)
+  })
+})
+
+describe('(p) a reply draft is sent or discarded in a thread: one sync follows, without waiting for the five-minute tick', () => {
+  const SENT = `node ~/.claude/skills/team-api-gateway/scripts/mm-api.mjs ext POST /reply-draft/sent --body '{"draft_id":"d1","sent_ref":"gmail:abc","final_body":"BODY-DO-NOT-KEEP"}'`
+  const DISCARD = 'node ~/.claude/skills/team-api-gateway/scripts/mm-api.mjs ext POST /reply-draft/discard --body \'{"draft_id":"d2","reason":"read, nothing to confirm"}\''
+  const bash = ($: Engine, command: string) => $.tool.call({ tool: 'Bash', command } as never) as Promise<{ result?: unknown; deny?: string; isError?: boolean }>
+  /** Another thread polls: this one's timer never syncs. */
+  const notThePoller = { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR } }
+
+  test('ten seconds after the call, one sync, in the thread it was made in; the command and its answer pass through untouched', async ($, on) => {
+    const w = world(on, { store: notThePoller })
+    await tickOnce($, w)
+    expect(closeouts(w)).toBe(0)
+    const answer = await bash($, SENT)
+    // the tool ran the command as it was given, and its answer came back as it was
+    expect(w.shell).toEqual([SENT])
+    expect(answer).toMatchObject({ result: { stdout: SHELL_OUT, stderr: '', interrupted: false } })
+    // not yet: the request is in the store, for the thread that polls
+    expect(closeouts(w)).toBe(0)
+    expect(w.stored['mm.ask']).toBe(NOW + 4_000)
+    await w.clock.advance(9_000)
+    expect(closeouts(w)).toBe(0)
+    await w.clock.advance(1_000)
+    expect(closeouts(w)).toBe(1)
+    expect((w.stored['mm.last'] as { at: number }).at).toBe(NOW + 14_000)
+    // and no more than that one
+    for (let i = 0; i < 4; i++) await w.clock.advance(60_000)
+    expect(closeouts(w)).toBe(1)
+    // it sent nothing and started nothing
+    expect(w.acted()).toEqual([])
+    expect(w.prompts).toEqual([])
+  })
+
+  test('three drafts sent and discarded in a row: one sync, ten seconds after the last', async ($, on) => {
+    const w = world(on, { store: notThePoller })
+    await tickOnce($, w)
+    await bash($, SENT)
+    await w.clock.advance(6_000)
+    await bash($, DISCARD)
+    await w.clock.advance(6_000)
+    await bash($, SENT)
+    await w.clock.advance(9_000)
+    expect(closeouts(w)).toBe(0)
+    await w.clock.advance(1_000)
+    expect(closeouts(w)).toBe(1)
+    expect(w.shell.length).toBe(3)
+  })
+
+  test('⛔ nothing of the command or of its output is read further or kept: not in the store, a file, a note, a toast or a request', async ($, on) => {
+    const w = world(on, { store: notThePoller })
+    await tickOnce($, w)
+    await bash($, SENT)
+    await w.clock.advance(15_000)
+    const kept = JSON.stringify([w.stored, w.written, w.appended, w.toasts, w.fetched, w.calls, w.prompts])
+    for (const mark of ['BODY-DO-NOT-KEEP', SHELL_OUT, 'reply-draft', 'gmail:abc', 'd1']) expect(kept.includes(mark), mark).toBe(false)
+  })
+
+  for (const [name, more, command] of [
+    ['the call failed', { bash: 'error' }, SENT],
+    ['the call was refused before it ran', { bash: 'deny' }, SENT],
+    ['another reply-draft route (revise)', {}, SENT.replace('/reply-draft/sent', '/reply-draft/revise')],
+    ['a read of the same path', {}, SENT.replace('ext POST', 'ext GET')],
+    ['a command that only talks about it', {}, 'git commit -m "the draft was sent and one was discarded"'],
+  ] as Array<[string, WorldOptions, string]>) {
+    test(`${name}: no request and no sync, and the command's own answer is what comes back`, async ($, on) => {
+      const w = world(on, { store: notThePoller, ...more })
+      await tickOnce($, w)
+      const answer = await bash($, command)
+      if (more.bash === 'deny') expect(answer).toMatchObject({ deny: 'not allowed here' })
+      else expect(answer).toMatchObject({ result: { stdout: SHELL_OUT }, ...(more.bash === 'error' ? { isError: true } : {}) })
+      await w.clock.advance(30_000)
+      expect(closeouts(w)).toBe(0)
+      expect(w.stored['mm.ask']).toBeUndefined()
+    })
+  }
+
+  test('the thread that polls picks the request up on its next tick, though its last sync is seconds old', async ($, on) => {
+    const w = world(on)
+    await tickOnce($, w)
+    expect(closeouts(w)).toBe(1)
+    // a terminal session, or another thread, left a request since
+    w.stored['mm.ask'] = NOW + 30_000
+    await w.clock.advance(60_000)
+    expect(closeouts(w)).toBe(2)
+    // one request is one sync
+    await w.clock.advance(60_000)
+    await w.clock.advance(60_000)
+    expect(closeouts(w)).toBe(2)
+  })
+
+  test('in a terminal session the request is left for the poller, and nothing is synced there', async ($, on) => {
+    const w = world(on, { terminal: true })
+    await bash($, SENT)
+    expect(w.stored['mm.ask']).toBe(NOW)
+    await w.clock.advance(30_000)
+    expect(closeouts(w)).toBe(0)
+    expect(w.stored['mm.last']).toBeUndefined()
+  })
+
+  test('a sync newer than the request is already on record (the poller got there first): no second one', async ($, on) => {
+    const w = world(on, { store: notThePoller })
+    await tickOnce($, w)
+    await bash($, SENT)
+    await w.clock.advance(5_000)
+    // the poller's own sync, in another thread
+    w.stored['mm.last'] = { at: NOW + 9_000, member: ME, items: [], pinned: 0, recs: {} }
+    await w.clock.advance(20_000)
+    expect(closeouts(w)).toBe(0)
+  })
+
+  test('while the bridge is paused the call syncs nothing; the request waits for resume', async ($, on) => {
+    const w = world(on)
+    await tickOnce($, w)
+    await mm($, 'pause')
+    const before = closeouts(w)
+    await w.clock.advance(1_000)
+    await bash($, SENT)
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(closeouts(w)).toBe(before)
+    await mm($, 'resume')
+    await w.clock.advance(60_000)
+    expect(closeouts(w)).toBe(before + 1)
+  })
+})
+
+describe('(r) for the founder: a package that waits for his OK is in his list', () => {
+  const flaggedWorld = (on: On, over: Record<string, unknown> = {}, more: WorldOptions = {}) =>
+    world(on, { feed: { member: FOUNDER, role: 'founder', drafts: [packageFor(ACME, 'Acme Roofing — Pat', { flagged_for_rob: true, project_owner_email: TEAMMATE_B, ...over })], mail: [], tickets: {} }, ...more })
+
+  test('its row says it needs his OK and who sends it; Drafts shows him the package; Start makes its chip', async ($, on) => {
+    const w = flaggedWorld(on)
+    expect(await mm($, '')).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
+    const ui = await pane($)
+    expect(await lines(ui)).toEqual([
+      'Needs you now (1)',
+      'New: no thread yet (1)',
+      '◆ 1. 🟡 21h left · Acme Roofing · needs your OK',
+      'needs your OK · Builder B sends, drafts ready · Start thread: no thread yet',
+      `Updated 15:00 UTC for ${FOUNDER}. ${PANE_SENTENCE}`,
+    ])
+    expect(await buttonsOf(ui, ACME)).toEqual(['Start thread', 'Drafts'])
+    // he reads the package that waits for him: one read, of that package, and nothing is picked up
+    await ui.press({ key: `drafts:${ACME}` })
+    expect(w.fetched.at(-1)).toBe(`https://onboarding-wizard.massmarket.ai/api/ext/reply-package?package_id=${PKG}&format=pickup`)
+    expect((await ui.find({ type: 'Markdown' }))?.text).toBe('## Acme Roofing\n\n1. What the client sent')
+    await ui.press({ key: `start:${ACME}` })
+    await ui.unmount()
+    expect(w.acted().map(c => [c.tool, c.args.title])).toEqual([['spawn_task', 'Acme Roofing: needs your OK']])
+    expect(String(w.acted()[0]?.args.prompt)).toContain('reply package aaaaaaaa is flagged for my OK, and Builder B sends it.')
+    expect(String(w.acted()[0]?.args.prompt)).toContain('Do not pick the package up and do not draft a second reply. Send nothing without my go.')
+    expect(String(w.acted()[0]?.args.tldr)).toBe('Acme Roofing needs you: Acme Roofing · needs your OK due tomorrow 8 AM. Start this to open a thread for that client with the drafts or the messages waiting.')
+  })
+
+  test('a stale one says so; one a teammate holds on a client with no owner says nobody on record sends it', async ($, on) => {
+    const w = world(on, {
+      feed: {
+        member: FOUNDER, role: 'founder', mail: [], tickets: {},
+        drafts: [
+          packageFor(ACME, 'Acme Roofing — Pat', { flagged_for_rob: true, project_owner_email: TEAMMATE_B, status: 'stale' }),
+          packageFor(BOLT, 'Bolt Staffing (Sam)', { package_id: 'bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee', flagged_for_rob: true, project_owner_email: null, ...heldBy('J.Smith@example.com'), covers_through: ago(2) }),
+        ],
+      },
+    })
+    await mm($, '')
+    const ui = await pane($)
+    const all = await lines(ui)
+    expect(all).toContain('needs your OK · Builder B sends, drafts out of date · Start thread: no thread yet')
+    expect(all).toContain('needs your OK · nobody on record sends, drafts with J Smith · Start thread: no thread yet')
+    // both are his to act on: in the list that is counted, each with its one action
+    expect(all[0]).toBe('Needs you now (2)')
+    expect(await buttonsOf(ui, BOLT)).toEqual(['Start thread', 'Drafts'])
+    await ui.unmount()
+    expect(w.acted()).toEqual([])
+  })
+
+  test('it counts toward the pin cap like any other row: its linked thread is named and pinned', async ($, on) => {
+    const w = flaggedWorld(on, {}, { threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.links': { [ACME]: 'local_a' } } })
+    expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
+    expect(w.threads.get('local_a')).toMatchObject({ title: '🟡 21h left · Acme Roofing · needs your OK', pinned: true })
+  })
+
+  test('a builder with the same feed sees no such row', async ($, on) => {
+    world(on, { feed: { member: ME, role: 'builder', drafts: [packageFor(ACME, 'Acme Roofing — Pat', { flagged_for_rob: true, project_owner_email: TEAMMATE_B })], mail: [], tickets: {} } })
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+  })
+})
+
+describe('(s) nothing drops off silently: Older', () => {
+  /** Acme wrote ten days ago and nobody answered; Bolt wrote this morning. Acme's thread was pinned by us while its mail was in the window. */
+  const olderWorld = (on: On, more: WorldOptions = {}) =>
+    world(on, {
+      feed: feed({ drafts: [], tickets: {}, mail: [mailFor(ACME, 'Acme Roofing — Pat', 10 * 24), mailFor(BOLT, 'Bolt Staffing (Sam)', 2)] }),
+      threads: [thread('local_a', '🔴 3d late · Acme Roofing · reply', 30, { pinned: true }), thread('local_x', 'Unrelated notes', 5)],
+      store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.pins': { local_a: ourPin(ACME, 'Acme Roofing') }, 'mm.titles': { local_a: 'Roof quote' } },
+      ...more,
+    })
+  // (it arrived on Friday Oct 2, was due Monday Oct 5, and this is Monday Oct 12: five business days)
+  const OLD_TITLE = '🔴 5d late · Acme Roofing · reply'
+
+  test('the client is listed under Older, closed, never counted; its row has the one action', async ($, on) => {
+    const w = olderWorld(on)
+    expect(await mm($, '')).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
+    const ui = await pane($)
+    // closed: the heading is there as a button, the row is not drawn
+    expect(await lines(ui)).toEqual([
+      'Needs you now (1)',
+      'New: no thread yet (1)',
+      `◆ 1. 🟡 22h left · Bolt Staffing · reply`,
+      '1 message waiting · Start thread: no thread yet',
+      `Updated 15:00 UTC for ${ME}. ${PANE_SENTENCE}`,
+    ])
+    expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([['mm-fold:older', 'Older (1)']])
+    expect(await buttonsOf(ui, ACME)).toEqual([])
+    await ui.press({ key: 'mm-fold:older' })
+    expect((await lines(ui)).slice(4, 6)).toEqual([`2. ${OLD_TITLE}`, '1 message waiting · Update thread: thread from Sun, Oct 11 exists'])
+    expect(await buttonsOf(ui, ACME)).toEqual(['Update thread', 'Drafts'])
+    // pressed again it closes; opening it called nothing
+    const calls = w.calls.length
+    await ui.press({ key: 'mm-fold:older' })
+    expect(await buttonsOf(ui, ACME)).toEqual([])
+    expect(w.calls.length).toBe(calls)
+    await ui.unmount()
+    // the band counts the one that needs the person now
+    await tickOnce($, w)
+    const band = await bandOf($)
+    expect(await lines(band)).toEqual(['Needs you: 1 client · 1 with no thread yet'])
+    await band.unmount()
+  })
+
+  test('never pinned and never ticked while it is unanswered: our pin comes off, and the name says how late it is', async ($, on) => {
+    const w = olderWorld(on)
+    await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: OLD_TITLE, pinned: false })
+    // the record is kept, as not ours: it is what gives the thread its tick later
+    expect((w.stored['mm.pins'] as Record<string, unknown>).local_a).toEqual({ projectId: ACME, client: 'Acme Roofing', byUs: false })
+    expect(w.stored['mm.unpinned']).toEqual({})
+    for (let i = 0; i < 3; i++) await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: OLD_TITLE, pinned: false })
+    // answered at last: nothing is left in play for that client, and only now is it clear
+    w.setFeed(feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 2)] }))
+    await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: '✓ Acme Roofing · clear 11 AM', pinned: false })
+  })
+
+  test('a pin the person put on that thread themselves is left alone', async ($, on) => {
+    const w = olderWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.pins': { local_a: { projectId: ACME, client: 'Acme Roofing', byUs: false } } } })
+    await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: OLD_TITLE, pinned: true })
+    expect(w.writes().filter(c => c.startsWith('set_pinned'))).toEqual([])
+  })
+
+  test('the row\'s button works: Update sends into its thread, and /mm update <client> finds it', async ($, on) => {
+    const w = olderWorld(on)
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: 'mm-fold:older' })
+    await ui.press({ key: `update:${ACME}` })
+    expect(w.acted().map(c => [c.tool, c.args.session_id])).toEqual([['send_message', 'local_a']])
+    expect(w.toasts).toEqual(['Sent to Acme Roofing\'s thread.'])
+    expect(await buttonsOf(ui, ACME)).toEqual(['Open thread', 'Drafts'])
+    await ui.unmount()
+    expect(await mm($, 'update acme roofing')).toContain('Acme Roofing\'s thread already has this.')
+    // the person acted on it, and it is still not pinned: an older client never is
+    expect(w.threads.get('local_a')?.pinned).toBe(false)
+  })
+
+  test('an older client with no thread: its row is Start, and its chip is not withdrawn for being off the list that pins', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], tickets: {}, mail: [mailFor(ACME, 'Acme Roofing — Pat', 10 * 24)] }) })
+    await tickOnce($, w)
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    const ui = await pane($)
+    expect((await lines(ui))[0]).toBe('Nothing needs you right now.')
+    await ui.press({ key: 'mm-fold:older' })
+    expect(await buttonsOf(ui, ACME)).toEqual(['Start thread', 'Drafts'])
+    await ui.press({ key: `start:${ACME}` })
+    await ui.unmount()
+    expect(w.acted().map(c => c.tool)).toEqual(['spawn_task'])
+    for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
+    expect(w.dismissed()).toEqual([])
+  })
+})
+
+describe('(t) a pin the person took off by hand stays off', () => {
+  /** Bolt wrote twice this morning; its thread is linked and was pinned by us. */
+  const pinned = (on: On, more: WorldOptions = {}) =>
+    world(on, {
+      feed: feed({ drafts: [], tickets: {} }),
+      threads: [thread('local_b', BOLT_TITLE, 20, { pinned: true }), thread('local_x', 'Unrelated notes', 5)],
+      store: { 'mm.links': { [BOLT]: 'local_b' }, 'mm.pins': { local_b: ourPin(BOLT, 'Bolt Staffing') }, 'mm.titles': { local_b: 'Staffing plan' } },
+      ...more,
+    })
+  const takeOff = (w: { threads: Map<string, Thread> }) => {
+    const t = w.threads.get('local_b')
+    if (t) t.pinned = false
+  }
+  const pinCalls = (w: { writes: () => string[] }) => w.writes().filter(c => c.startsWith('set_pinned'))
+  const off = (w: { stored: Record<string, unknown> }) => Object.keys((w.stored['mm.unpinned'] ?? {}) as Record<string, unknown>)
+
+  test('we pinned it, it is not pinned now, and we did not unpin it: it is not pinned again, sync after sync', async ($, on) => {
+    const w = pinned(on)
+    await tickOnce($, w)
+    expect(w.threads.get('local_b')?.pinned).toBe(true)
+    expect(off(w)).toEqual([])
+    takeOff(w)
+    for (let i = 0; i < 12; i++) await w.clock.advance(60_000)
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(false)
+    expect(pinCalls(w)).toEqual([])
+    // remembered with when, and the newest of each kind of thing the client had then
+    // (the first sync after the pin came off: the timer's, six minutes in)
+    expect(w.stored['mm.unpinned']).toEqual({ local_b: { at: NOW + 360_000, mail: NOW - HOUR, pkg: 0, task: 0 } })
+    // it is still linked, it is not counted as pinned, and its record is no longer ours
+    expect((w.stored['mm.last'] as { pinned: number }).pinned).toBe(0)
+    expect((w.stored['mm.pins'] as Record<string, unknown>).local_b).toEqual({ projectId: BOLT, client: 'Bolt Staffing', byUs: false })
+    expect(await mm($, 'status')).toContain('pins you took off: 1')
+  })
+
+  test('its name keeps updating while it is off', async ($, on) => {
+    const w = pinned(on)
+    await tickOnce($, w)
+    takeOff(w)
+    await mm($, '')
+    expect(w.threads.get('local_b')?.title).toBe(BOLT_TITLE)
+    await w.clock.advance(3 * HOUR)
+    await mm($, '')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 19h left · Bolt Staffing · reply · 2 new', pinned: false })
+  })
+
+  test('something new arrives for the client: it is pinned again, and the record is gone', async ($, on) => {
+    const w = pinned(on)
+    await tickOnce($, w)
+    takeOff(w)
+    await mm($, '')
+    expect(off(w)).toEqual(['local_b'])
+    // the same two messages, sync after sync: nothing new
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(false)
+    // a third message from the client
+    const more = feed({ drafts: [], tickets: {} })
+    more.mail = [...(more.mail ?? []), mailFor(BOLT, 'Bolt Staffing (Sam)', 0)]
+    w.setFeed(more)
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(true)
+    expect(off(w)).toEqual([])
+    expect((w.stored['mm.pins'] as Record<string, { byUs: boolean }>).local_b?.byUs).toBe(true)
+    expect(await mm($, 'status')).toContain('pins you took off: 0')
+  })
+
+  for (const [name, newer] of [
+    ['a package that covers more mail', { drafts: [packageFor(BOLT, 'Bolt Staffing (Sam)', { covers_through: ago(0.5) })], tickets: {} }],
+    ['a task we committed to, created since', { drafts: [], tickets: { due_today: [{ ticket_id: 't9', project_id: BOLT, project_name: 'Bolt Staffing (Sam)', title: 'Send the rate card', due_at: new Date(NOW + 4 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME, created_at: ago(0.25) }] } }],
+  ] as Array<[string, Partial<Feed>]>) {
+    test(`new of another kind (${name}): pinned again`, async ($, on) => {
+      const w = pinned(on)
+      await tickOnce($, w)
+      takeOff(w)
+      await mm($, '')
+      expect(w.threads.get('local_b')?.pinned).toBe(false)
+      w.setFeed(feed(newer))
+      await mm($, '')
+      expect(w.threads.get('local_b')?.pinned).toBe(true)
+      expect(off(w)).toEqual([])
+    })
+  }
+
+  test('the person presses Update for it: pinned again', async ($, on) => {
+    const w = pinned(on)
+    await tickOnce($, w)
+    takeOff(w)
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: `update:${BOLT}` })
+    await ui.unmount()
+    expect(w.threads.get('local_b')?.pinned).toBe(true)
+    expect(off(w)).toEqual([])
+  })
+
+  test('the person starts a new thread for it (Start, /mm start): the pin comes back on the thread it still has', async ($, on) => {
+    const w = pinned(on)
+    await tickOnce($, w)
+    takeOff(w)
+    await mm($, '')
+    expect(off(w)).toEqual(['local_b'])
+    await mm($, 'start bolt staffing')
+    expect(off(w)).toEqual([])
+    expect(w.threads.get('local_b')?.pinned).toBe(true)
+  })
+
+  test('/mm link typed in the thread whose pin was taken off: pinned again', async ($, on) => {
+    const w = world(on, {
+      feed: feed({ drafts: [], tickets: {} }),
+      self: thread(SELF, BOLT_TITLE, 0, { pinned: false }),
+      store: { 'mm.links': { [BOLT]: SELF }, 'mm.pins': { [SELF]: { projectId: BOLT, client: 'Bolt Staffing', byUs: false } }, 'mm.unpinned': { [SELF]: { at: NOW - HOUR, mail: NOW, pkg: 0, task: 0 } } },
+    })
+    await mm($, '')
+    expect(w.threads.get(SELF)?.pinned).toBe(false)
+    await mm($, 'link bolt staffing')
+    expect(w.threads.get(SELF)?.pinned).toBe(true)
+    expect(off(w)).toEqual([])
+  })
+
+  test('the person pins it again themselves: the record goes, and the pin is theirs', async ($, on) => {
+    const w = pinned(on)
+    await tickOnce($, w)
+    takeOff(w)
+    await mm($, '')
+    expect(off(w)).toEqual(['local_b'])
+    const t = w.threads.get('local_b')
+    if (t) t.pinned = true
+    await mm($, '')
+    expect(off(w)).toEqual([])
+    expect((w.stored['mm.pins'] as Record<string, { byUs: boolean }>).local_b?.byUs).toBe(false)
+    expect(pinCalls(w)).toEqual([])
+  })
+
+  test('⛔ a pin the bridge took off itself is not the person\'s doing: when the client is back, it is pinned again', async ($, on) => {
+    const w = pinned(on)
+    await tickOnce($, w)
+    // nothing waits on Bolt any more: we unpin it and tick it
+    w.setFeed(feed({ drafts: [], tickets: {}, mail: [] }))
+    await mm($, '')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '✓ Bolt Staffing · clear 11 AM', pinned: false })
+    expect(off(w)).toEqual([])
+    // the same two messages are back (a reply was undone): it pins as it did
+    w.setFeed(feed({ drafts: [], tickets: {} }))
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(true)
+    expect(off(w)).toEqual([])
+  })
+
+  test('it takes no place under the cap, and when the client is clear the thread still gets its tick', async ($, on) => {
+    const w = pinned(on)
+    await tickOnce($, w)
+    takeOff(w)
+    await mm($, '')
+    expect((w.stored['mm.last'] as { pinned: number }).pinned).toBe(0)
+    w.setFeed(feed({ drafts: [], tickets: {}, mail: [] }))
+    await mm($, '')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '✓ Bolt Staffing · clear 11 AM', pinned: false })
+    // back with the same two messages and nothing newer: the person's unpin still stands
+    w.setFeed(feed({ drafts: [], tickets: {} }))
+    await mm($, '')
+    expect(w.threads.get('local_b')).toMatchObject({ title: BOLT_TITLE, pinned: false })
+    expect(pinCalls(w).filter(c => c.endsWith('true'))).toEqual([])
+  })
+})
+
+describe('(u) a client whose reply drafts a teammate holds: not pinned, not counted, under With a teammate', () => {
+  /** Bolt wrote twice this morning and its thread was pinned by us. A teammate then picked up its reply drafts. */
+  const handedOver = (on: On, more: WorldOptions = {}, feedOver: Partial<Feed> = {}) =>
+    world(on, {
+      feed: feed({ drafts: [packageFor(BOLT, 'Bolt Staffing (Sam)', heldBy('J.Smith@example.com'))], tickets: {}, ...feedOver }),
+      threads: [thread('local_b', BOLT_TITLE, 20, { pinned: true }), thread('local_x', 'Unrelated notes', 5)],
+      store: { 'mm.links': { [BOLT]: 'local_b' }, 'mm.pins': { local_b: ourPin(BOLT, 'Bolt Staffing') }, 'mm.titles': { local_b: 'Staffing plan' } },
+      ...more,
+    })
+  const WITH = '🟡 with J Smith · Bolt Staffing · reply · 2 new'
+  const ASK = 'J Smith picked up the reply drafts for this client (Mon 10 AM) and has 1 draft not sent yet. Ask J Smith before writing a second reply.'
+
+  test('our pin comes off its thread, its name says who has it, and the header, the status line and the band do not count it', async ($, on) => {
+    const w = handedOver(on, {}, { tickets: { due_today: [{ ticket_id: 't1', project_id: CEDAR, project_name: 'Cedar Dental', title: 'Send the intake form', due_at: new Date(NOW + 5 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME }] } })
+    await tickOnce($, w)
+    expect(w.threads.get('local_b')).toMatchObject({ title: WITH, pinned: false })
+    expect((w.stored['mm.pins'] as Record<string, unknown>).local_b).toEqual({ projectId: BOLT, client: 'Bolt Staffing', byUs: false })
+    // taken off by the bridge, so it is not remembered as the person's unpin
+    expect(w.stored['mm.unpinned']).toEqual({})
+    expect(await mm($, '')).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
+    const band = await bandOf($)
+    expect(await lines(band)).toEqual(['Needs you: 1 client · 1 with no thread yet'])
+    await band.unmount()
+    const ui = await pane($)
+    expect((await lines(ui))[0]).toBe('Needs you now (1)')
+    // closed until opened; then the row, who to ask, and Drafts alone
+    expect(await lines(ui)).not.toContain(`2. ${WITH}`)
+    expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([['mm-fold:teammate', 'With a teammate (1)']])
+    await ui.press({ key: 'mm-fold:teammate' })
+    const all = await lines(ui)
+    const from = all.indexOf(`2. ${WITH}`)
+    expect(all.slice(from, from + 3)).toEqual([`2. ${WITH}`, '2 messages waiting, drafts with J Smith', ASK])
+    expect(await buttonsOf(ui, BOLT)).toEqual(['Drafts'])
+    // Drafts shows what is waiting and who to ask: no pickup view is read for a package that is not the viewer's
+    const reads = w.fetched.filter(u => u.includes('/reply-package')).length
+    await ui.press({ key: `drafts:${BOLT}` })
+    expect(w.fetched.filter(u => u.includes('/reply-package')).length).toBe(reads)
+    expect((await ui.find({ type: 'Markdown' }))?.text.split('\n').at(-1)).toBe(`_${ASK}_`)
+    await ui.unmount()
+    expect(w.acted()).toEqual([])
+    expect(w.prompts).toEqual([])
+  })
+
+  test('a pin the person put on that thread themselves stays', async ($, on) => {
+    const w = handedOver(on, { store: { 'mm.links': { [BOLT]: 'local_b' }, 'mm.pins': { local_b: { projectId: BOLT, client: 'Bolt Staffing', byUs: false } } } })
+    await mm($, '')
+    expect(w.threads.get('local_b')).toMatchObject({ title: WITH, pinned: true })
+    expect(w.writes().filter(c => c.startsWith('set_pinned'))).toEqual([])
+  })
+
+  test('the exception: a committed task of my own due there keeps it in the list and pinned, with who has the drafts at the end of its name', async ($, on) => {
+    const mine = { ticket_id: 't9', project_id: BOLT, project_name: 'Bolt Staffing (Sam)', title: 'Send the rate card', due_at: new Date(NOW + 5 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME }
+    const w = handedOver(on, {}, { tickets: { due_today: [mine] } })
+    expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 5h left · Bolt Staffing · reply · 2 new · with J Smith', pinned: true })
+    const ui = await pane($)
+    expect(await lines(ui)).toContain('2 messages waiting, 1 task due, drafts with J Smith · Update thread: thread from Sun, Oct 11 exists')
+    expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([])
+    expect(await buttonsOf(ui, BOLT)).toEqual(['Update thread', 'Drafts'])
+    await ui.unmount()
+  })
+
+  test('when the hold ends the client is back where the feed puts it, and its thread is pinned again', async ($, on) => {
+    const w = handedOver(on)
+    await mm($, '')
+    expect(w.threads.get('local_b')).toMatchObject({ title: WITH, pinned: false })
+    // released: the package is prepared again, and mine
+    w.setFeed(feed({ drafts: [packageFor(BOLT, 'Bolt Staffing (Sam)')], tickets: {} }))
+    expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 21h left · Bolt Staffing · reply ready · 2 new', pinned: true })
+    expect((w.stored['mm.pins'] as Record<string, { byUs: boolean }>).local_b?.byUs).toBe(true)
+    // handed over again, then sent: the client's two messages are answered and nothing is left
+    w.setFeed(feed({ drafts: [packageFor(BOLT, 'Bolt Staffing (Sam)', heldBy('J.Smith@example.com'))], tickets: {} }))
+    await mm($, '')
+    expect(w.threads.get('local_b')).toMatchObject({ title: WITH, pinned: false })
+    w.setFeed(feed({ drafts: [], tickets: {}, mail: [] }))
+    await mm($, '')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '✓ Bolt Staffing · clear 11 AM', pinned: false })
+  })
+
+  test('the two groups under the list are drawn in this order: With a teammate, then Older', async ($, on) => {
+    const w = handedOver(on, {}, { mail: [...(feed().mail ?? []), mailFor(ACME, 'Acme Roofing — Pat', 10 * 24)] })
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    const ui = await pane($)
+    expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([['mm-fold:teammate', 'With a teammate (1)'], ['mm-fold:older', 'Older (1)']])
+    await ui.press({ key: 'mm-fold:older' })
+    await ui.press({ key: 'mm-fold:teammate' })
+    const all = await lines(ui)
+    expect(all.filter(l => /^\d+\. /.test(l))).toEqual([`1. ${WITH}`, '2. 🔴 5d late · Acme Roofing · reply'])
+    await ui.unmount()
+    expect(w.acted()).toEqual([])
+  })
+
+  test('a typed /mm update <client> still reaches it, with the kickoff that says not to draft a second reply', async ($, on) => {
+    const w = handedOver(on)
+    await mm($, '')
+    expect(await mm($, 'update bolt staffing')).toContain('Sent to Bolt Staffing\'s thread')
+    expect(String(w.acted()[0]?.args.message ?? w.acted()[0]?.args.text ?? JSON.stringify(w.acted()[0]?.args))).toContain('Do not run prep and do not draft a second reply.')
+    // and it is still not pinned: it is not the viewer's to act on
+    expect(w.threads.get('local_b')?.pinned).toBe(false)
   })
 })

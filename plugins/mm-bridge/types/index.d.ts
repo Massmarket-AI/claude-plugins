@@ -26,9 +26,23 @@ export type MmRow = {
   fresh?: boolean
   /** The app thread the row's button acts on, as this row was drawn. A press acts on this thread or on none. */
   target?: string
+  /**
+   * Set on a row under `With a teammate`: who holds the client's reply drafts, and to ask them before
+   * writing a second reply. Such a row is not the viewer's to act on: it carries this sentence and the
+   * Drafts button, and no action.
+   */
+  note?: string
 }
 
-export type MmQueue = { header: string; rows: MmRow[]; note: string }
+/**
+ * `rows` are the clients that need the viewer now. `teammate` and `older` are the two groups under them,
+ * closed until the person opens one: clients whose drafts a teammate holds, and clients whose only items
+ * are more than 3 business days overdue. Neither is pinned or counted in the header.
+ */
+export type MmQueue = { header: string; rows: MmRow[]; note: string; teammate?: MmRow[]; older?: MmRow[] }
+
+/** Which of the two groups under the list the person has opened. */
+export type MmFolds = { teammate?: boolean; older?: boolean }
 
 /** What the last button press did, shown above the list. */
 export type MmNotice = { text: string; at: number }
@@ -42,6 +56,6 @@ export type MmBand = { text: string; drafts?: boolean }
 
 declare module 'claude-code' {
   interface PluginState {
-    'mm-bridge': { view: MmView; queue: MmQueue; notice: MmNotice; band: MmBand }
+    'mm-bridge': { view: MmView; queue: MmQueue; notice: MmNotice; band: MmBand; folds: MmFolds }
   }
 }

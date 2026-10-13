@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { buildQueue } from './queue'
+import { buildLists, buildQueue } from './queue'
 import type { Feed, FeedThread, QueueItem } from './queue'
 import {
   CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, LONG_CONTEXT_TOKENS, LONG_THREAD_ROWS, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
-  autoLinkFor, bandWords, clientThreads, dueText, handoverText, isNewRow, kickoffText, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups,
-  sharedThreads, signatureOf, threadLength, threadLink, threadRows, titleLooksLike, titleSuggestion, waitingText,
+  autoLinkFor, bandWords, clientThreads, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail, rowFor,
+  rowGroups, sharedThreads, signatureOf, threadLength, threadLink, threadRows, titleLooksLike, titleSuggestion, waitingText,
 } from './threads'
 import type { AppThread, ClientThread, Pairs, Platform } from './threads'
 
@@ -284,7 +284,9 @@ describe('R5: the kickoff and the row for a package that is not simply ready', (
     package_id: PKG, project_id: projectId, project_name: name, status: 'prepared', covers_through: at('2026-10-12 08:00'), drafts_ready: 1, project_owner_email: ME, ...over,
   })
   const itemOf = (f: Feed, projectId: string): QueueItem => {
-    const it = buildQueue(f, NOW).find(i => i.projectId === projectId)
+    // (u) wherever the pane lists the client: a client whose drafts a teammate holds is under `With a teammate`
+    const lists = buildLists(f, NOW)
+    const it = [...lists.queue, ...lists.teammate, ...lists.older].find(i => i.projectId === projectId)
     if (!it) throw new Error(`no item for ${projectId}`)
     return it
   }
@@ -314,7 +316,7 @@ describe('R5: the kickoff and the row for a package that is not simply ready', (
       `[mm-link ${BOLT}] Bolt Staffing (Sam) (OW project ${BOLT}): J Smith picked up the reply drafts (package aaaaaaaa) and has 1 not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`,
     )
     expect(waitingText(it)).toBe('2 messages waiting, drafts with J Smith')
-    expect(rowFor(it, recommend([], undefined, NOW), NOW)).toMatchObject({ title: '🟡 22h left · Bolt Staffing · reply · 2 new · with J Smith', waiting: '2 messages waiting, drafts with J Smith' })
+    expect(rowFor(it, recommend([], undefined, NOW), NOW)).toMatchObject({ title: '🟡 with J Smith · Bolt Staffing · reply · 2 new', waiting: '2 messages waiting, drafts with J Smith' })
   })
 
   test('the holder\'s address is feed text: only a cleaned name reaches the kickoff, on one line, with one marker', async () => {
@@ -719,5 +721,142 @@ describe('the one command that opens a thread', () => {
     }
     // only the well-formed ids with their own link got a command: two ids, three platforms
     expect(commands).toBe(6)
+  })
+})
+
+describe('a package the person picked up, in the thread that was given it: nothing new for that thread', () => {
+  const draftOf = (over: Record<string, unknown> = {}) => ({ ...(FEED.drafts ?? [])[0], ...over }) as NonNullable<Feed['drafts']>[number]
+  const acme = (over: Record<string, unknown> = {}, mail: NonNullable<Feed['mail']> = []): QueueItem => {
+    const it = buildQueue({ ...FEED, drafts: [draftOf(over)], mail: [...(FEED.mail ?? []), ...mail] }, NOW).find(i => i.projectId === ACME)
+    if (!it) throw new Error('no Acme item')
+    return it
+  }
+  const pickedUp = { status: 'picked_up', picked_up_by: ME, picked_up_at: at('2026-10-12 10:30'), drafts_unsent: 2 }
+  const later = (received: string) => ({
+    message_id_key: `acme-${received}`, received_at: at(received), sender: 'client@example.com', subject: 'Question', snippet: 'hello',
+    project_id: ACME, project_name: 'Acme Roofing — Pat', reply_status: 'unanswered', project_owner_email: ME,
+  })
+
+  test('the thread was given the prepared package, and the person then picked it up there: it already has it', async () => {
+    const given = signatureOf(acme({ updated_at: at('2026-10-12 08:05') }))
+    // picking it up changes the package's own record, and so does sending one of its two drafts
+    for (const now of [acme({ ...pickedUp, updated_at: at('2026-10-12 10:30') }), acme({ ...pickedUp, drafts_unsent: 1, drafts_ready: 1, updated_at: at('2026-10-12 10:45') })]) {
+      expect(now.open?.state).toBe('held_by_me')
+      expect(hasWaiting(given, now)).toBe(true)
+      const thread = [known('local_a', 'Acme', '2026-10-12 10:00')]
+      const sent = { sid: 'local_a', sig: given, at: et('2026-10-12 10:00') }
+      // as the bridge asks it: the row reads Open thread, not Update
+      expect(recommend(thread, undefined, NOW, { sent, signature: hasWaiting(sent.sig, now) ? sent.sig : signatureOf(now) }).state).toBe('current')
+    }
+  })
+
+  test('how many of its drafts are left is not part of what a thread has: sending one changes nothing', async () => {
+    expect(signatureOf(acme({ ...pickedUp, drafts_unsent: 2 }))).toBe(signatureOf(acme({ ...pickedUp, drafts_unsent: 1 })))
+    // nor for a package a teammate holds
+    const theirs = (unsent: number) => buildLists({ ...FEED, drafts: [{ ...draftOf({ ...pickedUp, picked_up_by: 'j.smith@example.com', drafts_unsent: unsent }), project_id: BOLT, project_name: 'Bolt Staffing (Sam)' }] }, NOW).teammate[0] as QueueItem
+    expect(signatureOf(theirs(2))).toBe(signatureOf(theirs(1)))
+  })
+
+  test('a client message that arrives after its drafts were written IS new, until the thread is updated with it', async () => {
+    const given = signatureOf(acme())
+    const since = acme(pickedUp, [later('2026-10-12 09:30')])
+    expect(since.open?.newer).toBe(1)
+    expect(hasWaiting(given, since)).toBe(false)
+    // updated with that, it has it; and a second message is new again
+    expect(hasWaiting(signatureOf(since), since)).toBe(true)
+    expect(hasWaiting(signatureOf(since), acme(pickedUp, [later('2026-10-12 09:30'), later('2026-10-12 09:45')]))).toBe(false)
+  })
+
+  test('another package, or one that covers more mail, is new whoever holds it', async () => {
+    const given = signatureOf(acme())
+    expect(hasWaiting(given, acme({ ...pickedUp, package_id: 'bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee' }))).toBe(false)
+    expect(hasWaiting(given, acme({ ...pickedUp, covers_through: at('2026-10-12 09:00') }))).toBe(false)
+  })
+
+  test('a prepared package nobody holds: a change to it is still new, as before', async () => {
+    const given = signatureOf(acme({ updated_at: at('2026-10-12 08:05') }))
+    expect(hasWaiting(given, acme({ updated_at: at('2026-10-12 08:05') }))).toBe(true)
+    expect(hasWaiting(given, acme({ updated_at: at('2026-10-12 10:00') }))).toBe(false)
+  })
+})
+
+describe('the two groups under the list: With a teammate, then Older', () => {
+  const row = (client: string, over: Partial<ReturnType<typeof rowFor>> = {}) => ({ ...rowFor(item(CEDAR), recommend([], undefined, NOW), NOW), client, title: `🟡 2h left · ${client} · task`, ...over })
+  const theirs = row('Dune Freight', { title: '🟡 with J Smith · Dune Freight · reply', waiting: '1 message waiting, drafts with J Smith', note: 'J Smith picked up the reply drafts for this client and has 1 draft not sent yet. Ask J Smith before writing a second reply.' })
+  const old = row('Elm Travel', { title: '🔴 5d late · Elm Travel · reply', waiting: '1 message waiting', state: 'update', reason: 'thread from Fri, Oct 9 exists', fresh: false, target: 'local_e' })
+
+  test('in that order, numbered on from the list, and one with nobody in it is not drawn', async () => {
+    const rows = [row('Cedar Dental'), row('Acme Roofing')]
+    expect(foldGroups({ rows, teammate: [theirs], older: [old] }).map(g => [g.key, g.heading, g.rows.map(r => r.n)])).toEqual([['teammate', 'With a teammate (1)', [3]], ['older', 'Older (1)', [4]]])
+    expect(foldGroups({ rows, older: [old, old] }).map(g => [g.heading, g.rows.map(r => r.n)])).toEqual([['Older (2)', [3, 4]]])
+    expect(foldGroups({ rows, teammate: [theirs] }).map(g => g.heading)).toEqual(['With a teammate (1)'])
+    expect(foldGroups({ rows })).toEqual([])
+    // a queue an older version stored has neither
+    expect(foldGroups({ rows, teammate: undefined, older: 'x' as never })).toEqual([])
+  })
+
+  test('a row under With a teammate: who has the drafts, the sentence, and Drafts alone; a row under Older keeps its one action', async () => {
+    expect(rowButtons(theirs)).toEqual(['drafts'])
+    expect(rowDetail(theirs)).toBe('1 message waiting, drafts with J Smith')
+    expect(rowButtons(old)).toEqual(['update', 'drafts'])
+    expect(rowDetail(old)).toBe('1 message waiting · Update thread: thread from Fri, Oct 9 exists')
+    expect(paneText([row('Cedar Dental')], 'Needs you now (1)', 'note', { teammate: [theirs], older: [old] }).split('\n')).toEqual([
+      'Needs you now (1)',
+      '',
+      'New: no thread yet (1)',
+      '',
+      '◆ 1. 🟡 2h left · Cedar Dental · task',
+      '   1 task due · Start thread: no thread yet',
+      '   [ Start thread ] [ Drafts ]',
+      '',
+      'With a teammate (1)',
+      '',
+      '2. 🟡 with J Smith · Dune Freight · reply',
+      '   1 message waiting, drafts with J Smith',
+      '   J Smith picked up the reply drafts for this client and has 1 draft not sent yet. Ask J Smith before writing a second reply.',
+      '   [ Drafts ]',
+      '',
+      'Older (1)',
+      '',
+      '3. 🔴 5d late · Elm Travel · reply',
+      '   1 message waiting · Update thread: thread from Fri, Oct 9 exists',
+      '   [ Update thread ] [ Drafts ]',
+      '',
+      'note',
+    ])
+  })
+
+  test('the row of a client whose drafts a teammate holds carries the sentence; with a task of my own due there it is an ordinary row', async () => {
+    const held = { package_id: PKG, project_id: BOLT, project_name: 'Bolt Staffing (Sam)', status: 'picked_up', covers_through: at('2026-10-12 08:00'), drafts_ready: 1, drafts_unsent: 1, picked_up_by: 'j.smith@example.com', picked_up_at: at('2026-10-12 10:30'), project_owner_email: ME }
+    const lists = buildLists({ ...FEED, drafts: [held] }, NOW)
+    const bolt = lists.teammate.find(i => i.projectId === BOLT) as QueueItem
+    expect(rowFor(bolt, recommend([], undefined, NOW), NOW)).toMatchObject({
+      title: '🟡 with J Smith · Bolt Staffing · reply · 2 new', waiting: '2 messages waiting, drafts with J Smith',
+      note: 'J Smith picked up the reply drafts for this client (Mon 10:30 AM) and has 1 draft not sent yet. Ask J Smith before writing a second reply.',
+    })
+    const mine = buildLists({ ...FEED, drafts: [held], tickets: { due_today: [{ ticket_id: 't9', project_id: BOLT, project_name: 'Bolt Staffing (Sam)', title: 'Send the rate card', due_at: at('2026-10-12 16:00'), due_source: 'commitment', assignee_email: ME }] } }, NOW)
+    const stays = mine.queue.find(i => i.projectId === BOLT) as QueueItem
+    const ordinary = rowFor(stays, recommend([], undefined, NOW), NOW)
+    expect(ordinary.note).toBeUndefined()
+    expect(ordinary).toMatchObject({ title: '🔴 5h left · Bolt Staffing · reply · 2 new · with J Smith', waiting: '2 messages waiting, 1 task due, drafts with J Smith' })
+    expect(rowButtons(ordinary)).toEqual(['start', 'drafts'])
+  })
+})
+
+describe('a new thread for a client whose package waits for the founder\'s OK, or that a teammate holds', () => {
+  const old = { sid: 'local_0f1e2d3c-aaaa-4bbb-8ccc-000000000001', title: 'Roof quote' }
+  const founder = { member: 'owner@example.com', role: 'founder' }
+  const flagged = { package_id: PKG, project_id: ACME, project_name: 'Acme Roofing — Pat', status: 'prepared', covers_through: at('2026-10-12 08:00'), drafts_ready: 1, flagged_for_rob: true, project_owner_email: 'builder-b@example.com' }
+
+  test('needs his OK: the handover paragraph reads "Before the pickup view", as for any kickoff that shows one', async () => {
+    const [it] = buildQueue({ ...founder, drafts: [flagged] }, NOW)
+    expect(it?.kind).toBe('ok')
+    expect(handoverText(it as QueueItem, old).startsWith('This thread replaces "Roof quote" (thread local_0f1e2d3c-aaaa-4bbb-8ccc-000000000001) for Acme Roofing Pat. Before the pickup view, and without reading that thread in full:')).toBe(true)
+  })
+
+  test('a teammate holds the drafts: no pickup view is shown, so it reads "Before showing me what is due"', async () => {
+    const held = { ...flagged, flagged_for_rob: false, status: 'picked_up', drafts_unsent: 1, picked_up_by: 'j.smith@example.com', project_id: BOLT, project_name: 'Bolt Staffing (Sam)', project_owner_email: ME }
+    const it = buildLists({ ...FEED, drafts: [held] }, NOW).teammate[0] as QueueItem
+    expect(handoverText(it, old)).toContain('for Bolt Staffing (Sam). Before showing me what is due, and without reading that thread in full:')
   })
 })

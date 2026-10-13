@@ -18,7 +18,7 @@
 import { businessMsBetween } from './business-time'
 import type { MmRow } from '../types'
 
-import { cleanTitle, clockText, titleFor, titleNames } from './queue'
+import { NOBODY, cleanTitle, clockText, holdSentence, titleFor, titleNames, withTeammate } from './queue'
 import type { FeedThread, QueueItem } from './queue'
 
 const HOUR = 3_600_000
@@ -239,7 +239,27 @@ export function threadRows(sid: string, projectId: string, feedThreads: readonly
  * message, another package, a package that changed: each makes it a different text.
  */
 export function signatureOf(it: QueueItem): string {
-  return [kickoffText(it), it.coversThrough ?? '', it.packageUpdatedAt ?? ''].join('\n')
+  const o = it.open ?? null
+  const mine = o?.state === 'held_by_me'
+  // A package is read as it was before anyone picked it up, and without how many of its drafts are left:
+  // picking it up or sending one of its drafts is not something new for the thread that has it.
+  const plain: QueueItem = mine ? { ...it, open: null } : o ? { ...it, open: { ...o, unsent: 0 } } : it
+  return [kickoffText(plain), it.coversThrough ?? '', mine ? `held:${o.newer}` : (it.packageUpdatedAt ?? '')].join('\n')
+}
+
+/**
+ * Whether a thread that was given `had` (the signature stored when Update went, or the chip's) already has
+ * what is waiting on `it` now. The same signature, or: a package the viewer holds, with nothing from the
+ * client since its drafts were written, in the thread that was given that package. The package's own
+ * `updated_at` is not asked then: while the viewer holds it, a change to it is their own doing.
+ */
+export function hasWaiting(had: string, it: QueueItem): boolean {
+  const want = signatureOf(it)
+  if (had === want) return true
+  const o = it.open ?? null
+  if (o?.state !== 'held_by_me' || o.newer > 0) return false
+  const head = (s: string): string => s.slice(0, Math.max(0, s.lastIndexOf('\n')))
+  return head(had) === head(want)
 }
 
 /**
@@ -286,14 +306,17 @@ export function recommend(
 export function waitingText(it: QueueItem): string {
   const o = it.open ?? null
   const drafts = !o ? '' : o.state === 'held_by_me' ? `${o.unsent} draft${o.unsent === 1 ? '' : 's'} not sent` : o.state === 'held_by_other' ? `drafts with ${o.by}` : o.state === 'stale' ? 'drafts out of date' : 'drafts ready'
-  const parts = [it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', it.tasks ? `${it.tasks} task${it.tasks > 1 ? 's' : ''} due` : '', drafts]
+  // for the founder, a package that waits for his OK: that first, and who sends it once he has given it
+  const ok = it.kind === 'ok' ? `needs your OK · ${(it.ok ?? null)?.sends ?? NOBODY} sends` : ''
+  const parts = [ok, it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', it.tasks ? `${it.tasks} task${it.tasks > 1 ? 's' : ''} due` : '', drafts]
   return parts.filter(Boolean).join(', ') || 'drafts ready'
 }
 
 /**
  * R5: the one message that starts a client's reply in a thread. The Start chip carries it as its prompt and
  * Update sends it into the existing thread, with a first line saying what is new. Seven cases, the first
- * that holds:
+ * that holds (and, for the founder alone, an eighth between 2 and 3: a package that waits for his OK and
+ * that somebody else sends, `okKickoff`):
  *   1. a package the person already picked up, with a draft not sent: carry on with it
  *   2. a prepared package that is theirs to pick up
  *   3. a package a teammate picked up: show what is waiting, run no prep, draft no second reply
@@ -313,6 +336,8 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
       ? `[mm-link ${id}] Carry on with the reply drafts for ${who}. I already picked up package ${it.packageId.slice(0, 8)}: ${o.unsent} draft(s) not sent yet${o.newer > 0 ? `, and ${o.newer} client message(s) arrived since` : ''}. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the five-part pickup view and wait for me. Send nothing without my go.`
       : it.packageId
         ? `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${it.packageId.slice(0, 8)} and wait for me. Send nothing without my go.`
+        : it.kind === 'ok' && o
+          ? okKickoff(it, o)
         : o?.state === 'held_by_other'
           ? `[mm-link ${id}] ${who}: ${o.by} picked up the reply drafts (package ${o.id.slice(0, 8)}) and has ${o.unsent} not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`
           : o?.state === 'stale' && it.messages > 0
@@ -325,6 +350,16 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
   if (opts.update) return `New since this thread last worked on this client: ${waitingText(it)}.\n${body}`
   const handover = opts.replaces ? handoverText(it, opts.replaces) : ''
   return handover ? `${body}\n\n${handover}` : body
+}
+
+/**
+ * The kickoff for a package that waits for the founder's OK and that somebody else sends (kind `ok`): he
+ * is shown the package and what needs his OK. He does not pick it up, and nothing is drafted or sent.
+ */
+function okKickoff(it: QueueItem, o: NonNullable<QueueItem['open']>): string {
+  const who = `${it.projectName} (OW project ${it.projectId})`
+  const sends = (it.ok ?? null)?.sends ?? NOBODY
+  return `[mm-link ${it.projectId}] ${who}: reply package ${o.id.slice(0, 8)} is flagged for my OK${o.state === 'stale' ? ' and is marked out of date' : ''}, and ${sends} sends it. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go.`
 }
 
 /** The thread a new one takes over from: the app's id for it and its own title. */
@@ -343,7 +378,7 @@ export const THREAD_ID = /^local_[A-Za-z0-9_-]{1,100}$/
 export function handoverText(it: QueueItem, old: Replaced): string {
   if (!THREAD_ID.test(old.sid)) return ''
   // (a kickoff that shows no pickup view: tasks only, or a package a teammate holds)
-  const before = it.packageId || (it.messages > 0 && it.open?.state !== 'held_by_other') ? 'Before the pickup view' : 'Before showing me what is due'
+  const before = it.packageId || it.kind === 'ok' || (it.messages > 0 && it.open?.state !== 'held_by_other') ? 'Before the pickup view' : 'Before showing me what is due'
   return `This thread replaces "${cleanTitle(old.title)}" (thread ${old.sid}) for ${it.projectName}. ${before}, and without reading that thread in full: read only its last three messages with the session tools (list_events, a small limit) and list anything left open in it: a question waiting on me, something promised and not done, a draft that was not sent. Keep that list to ten lines, then carry on.`
 }
 
@@ -413,26 +448,32 @@ export const rowState = (row: Row): RowState => {
 }
 
 export function rowFor(it: QueueItem, rec: Recommendation, now: number): Row {
+  // a client whose drafts a teammate holds, and that is not the viewer's to act on: who to ask, and no action
+  const note = withTeammate(it) ? holdSentence(it) : ''
   return {
     projectId: it.projectId, client: it.client, title: titleFor(it, now), waiting: waitingText(it), state: rec.state, reason: rec.reason,
     // no thread of any kind: the row goes in the first group, marked
     fresh: rec.fresh === true,
     // the thread this row's button acts on: a press acts on this one or on none
     ...(rec.target ? { target: rec.target.sid } : {}),
+    ...(note ? { note } : {}),
   }
 }
 
 /**
  * The buttons on a row: ONE action, chosen by its state, then Drafts (Rob, 2026-10-12: "it should be
  * 'update thread', 'open thread', or 'start thread'... depending on whether you know what we should do").
+ * A row under `With a teammate` is not the viewer's to act on: Drafts alone.
  */
 export function rowButtons(row: Row): RowButton[] {
+  if (row.note) return ['drafts']
   const state = rowState(row)
   return [state === 'current' ? 'open' : state, 'drafts']
 }
 
-/** The second line of a row: what is waiting, then the action and its reason, or when the thread was updated. */
+/** The second line of a row: what is waiting, then the action and its reason, or when the thread was updated. A row with no action: what is waiting. */
 export function rowDetail(row: Row): string {
+  if (row.note) return row.waiting
   const state = rowState(row)
   return state === 'current' ? `${row.waiting} · ${row.reason}` : `${row.waiting} · ${LABEL[state]}: ${row.reason}`
 }
@@ -466,12 +507,39 @@ export function rowGroups(rows: readonly Row[]): Array<{ heading: string; rows: 
   ].filter(g => g.rows.length > 0)
 }
 
-/** The pane as plain text, one line per thing drawn: for tests and for a surface that draws no buttons. */
-export function paneText(rows: readonly Row[], header: string, note: string): string {
+export type Fold = 'teammate' | 'older'
+
+/**
+ * The two groups under the list, in the order they are drawn: `With a teammate (n)`, then `Older (n)`.
+ * Each is closed until the person opens it, and one with nobody in it is not drawn. Their rows are numbered
+ * on from the list's. Nobody in them is pinned, and the header does not count them.
+ */
+export function foldGroups(queue: { rows: readonly Row[]; teammate?: readonly Row[]; older?: readonly Row[] }): Array<{ key: Fold; heading: string; rows: Array<{ row: Row; n: number }> }> {
+  const teammate = Array.isArray(queue.teammate) ? queue.teammate : []
+  const older = Array.isArray(queue.older) ? queue.older : []
+  const numbered = (group: readonly Row[], from: number) => group.map((row, i) => ({ row, n: from + i + 1 }))
+  const groups: Array<{ key: Fold; heading: string; rows: Array<{ row: Row; n: number }> }> = [
+    { key: 'teammate', heading: `With a teammate (${teammate.length})`, rows: numbered(teammate, queue.rows.length) },
+    { key: 'older', heading: `Older (${older.length})`, rows: numbered(older, queue.rows.length + teammate.length) },
+  ]
+  return groups.filter(g => g.rows.length > 0)
+}
+
+/** The pane as plain text, one line per thing drawn: for tests and for a surface that draws no buttons. `folds` are the two groups under the list, each drawn open. */
+export function paneText(rows: readonly Row[], header: string, note: string, folds: { teammate?: readonly Row[]; older?: readonly Row[] } = {}): string {
   const out = [header]
+  const draw = (row: Row, lead: string): void => {
+    out.push('', `${lead} ${row.title}`, `   ${rowDetail(row)}`)
+    if (row.note) out.push(`   ${row.note}`)
+    out.push(`   ${rowButtons(row).map(b => `[ ${LABEL[b]} ]`).join(' ')}`)
+  }
   for (const group of rowGroups(rows)) {
     out.push('', group.heading)
-    for (const { row, n, mark } of group.rows) out.push('', `${mark}${n}. ${row.title}`, `   ${rowDetail(row)}`, `   ${rowButtons(row).map(b => `[ ${LABEL[b]} ]`).join(' ')}`)
+    for (const { row, n, mark } of group.rows) draw(row, `${mark}${n}.`)
+  }
+  for (const group of foldGroups({ rows, ...folds })) {
+    out.push('', group.heading)
+    for (const { row, n } of group.rows) draw(row, `${n}.`)
   }
   out.push('', note)
   return out.join('\n')
