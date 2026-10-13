@@ -2650,7 +2650,12 @@ describe('a new thread takes over from an old one', () => {
     // the chip's very prompt, from another session or a schedule
     await $.prompt.submit({ text: prompt, wait: false, origin: { kind: 'peer' } } as never)
     await $.prompt.submit({ text: prompt, wait: false, origin: { kind: 'scheduled-trigger' } } as never)
-    expect(snapshot(w)).toBe(before)
+    // nothing changes but one record (B3): the person's own prompt here opened with Acme's marker, so this
+    // thread is never linked by itself to another client, though it did not take Acme's link
+    const after = JSON.parse(snapshot(w)) as Record<string, unknown>
+    expect(after['mm.marked']).toEqual({ [SELF]: ACME })
+    delete after['mm.marked']
+    expect(JSON.stringify(after)).toBe(before)
     // and with no chip on record for the client at all
     w.stored['mm.chips'] = []
     await $.prompt.submit({ text: prompt, wait: false, origin: { kind: 'composer' } })
@@ -4220,6 +4225,43 @@ describe('B3: a thread is linked by itself only to the one client its sessions d
     }
     expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
     expect(w.threads.get(SELF)?.title).toMatch(ACME_NAMED)
+  })
+
+  test('[2] the marker record is kept for the newest 300 threads, as every per-thread record is', async ($, on) => {
+    const many = Object.fromEntries(Array.from({ length: 300 }, (_, n) => [`local_m${n}`, BOLT]))
+    const w = world(on, { store: { 'mm.marked': many } })
+    await mm($, '')
+    await $.prompt.submit({ text: ACME_KICKOFF, wait: false, origin: { kind: 'sdk' } } as never)
+    const marked = w.stored['mm.marked'] as Record<string, string>
+    expect(Object.keys(marked).length).toBe(300)
+    expect(marked.local_m0).toBeUndefined()
+    expect(marked.local_m1).toBe(BOLT)
+    expect(Object.keys(marked).at(-1)).toBe(SELF)
+    expect(marked[SELF]).toBe(ACME)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+  })
+
+  test('[2] a 0.4.1 store, which has no marker record, upgrades cleanly: the first marker starts it, and nothing else moves', async ($, on) => {
+    const store = {
+      'mm.links': { [BOLT]: 'local_b' },
+      'mm.pins': { local_b: ourPin(BOLT, 'Bolt Staffing') },
+      'mm.titles': { local_b: 'Staffing plan' },
+      'mm.unlinked': { local_u: NOW - 2 * HOUR },
+      'mm.auto': {},
+      'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW - HOUR } },
+      'mm.last': { at: NOW - 10 * 60_000, member: ME, items: [], pinned: 1, recs: {}, projects: [ACME, BOLT, CEDAR] },
+    }
+    const w = world(on, { threads: [thread('local_b', BOLT_TITLE, 20, { pinned: true }), thread('local_u', 'Unlinked notes', 6)], store })
+    expect(w.stored['mm.marked']).toBeUndefined()
+    // the marker arrives before any sync of the new version
+    await $.prompt.submit({ text: ACME_KICKOFF, wait: false, origin: { kind: 'sdk' } } as never)
+    expect(w.stored['mm.marked']).toEqual({ [SELF]: ACME })
+    expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_b', [ACME]: SELF })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_b', [ACME]: SELF })
+    expect(w.stored['mm.unlinked']).toEqual(store['mm.unlinked'])
+    expect(w.stored['mm.marked']).toEqual({ [SELF]: ACME })
+    expect((w.stored['mm.pins'] as Record<string, unknown>).local_b).toEqual(ourPin(BOLT, 'Bolt Staffing'))
   })
 
   test('[1] a session whose rows name two projects in the window is never linked by itself, to either', async ($, on) => {
