@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { ME, NOW, ago, fakeApp, hooks, mm, next, paneButtons, pid, press, tool } from './fake-app.test-helper'
+import { ME, NOW, ago, bandButtons, fakeApp, hooks, mm, next, paneButtons, pid, press, tool } from './fake-app.test-helper'
 import type { Feed } from './queue'
 
 // The bridge's own hooks in a pretend desktop app (fake-app.test-helper.ts): one store and one app shared by the threads
@@ -369,5 +369,147 @@ describe('re-review of a446f5ab: Start after a chip was spent, a re-check after 
     expect(linksOf(w)).toEqual({ [pid(2)]: 'local_l4' })
     expect(await mm(t, 'link Acme (00000001)')).toBe('This thread is now Acme\'s. Showing Acme in the side pane.')
     expect(linksOf(w)).toEqual({ [pid(1)]: 'local_l4' })
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------- 0.5.1
+// Rob, 2026-10-13: "it takes quite a long time for anything to happen after we click a button to open the list
+// or update threads or anything." S2: a press draws its answer at once from what its row was drawn from; the
+// feed and the app are asked after, and the list is drawn again when they answer.
+
+describe('S3: a press answers within 100 ms of fake time while OW takes 5 seconds to answer the feed', () => {
+  type Queue = { header: string; note: string; rows: Array<{ projectId: string; state: string; reason: string }> }
+  type Notice = { text: string }
+  /** As many turns of the event loop as the work a press set going needs, with the fake clock standing still. */
+  const settle = async () => {
+    for (let i = 0; i < 20_000; i++) await Promise.resolve()
+  }
+  /**
+   * Client One has a thread the person linked (local_s3a); Client Two has none. The hub synced once at 9 AM,
+   * which is what the rows are drawn from; six minutes later OW is slow.
+   */
+  async function slowOw(tag: string) {
+    const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], drafts: [], mail: [mail(1, 'Client One'), mail(2, 'Client Two')] }
+    const hubId = `local_${tag}hub`
+    const w = fakeApp(feed, [{ sessionId: hubId }, { sessionId: `local_${tag}a`, title: 'Client One work' }])
+    w.put('mm.links', { [pid(1)]: `local_${tag}a` })
+    const hub = w.session(hubId)
+    await mm(hub, '')
+    await w.advance(6 * 60_000)
+    w.delayFeed(5_000)
+    const queue = () => w.view(hubId, 'queue') as Queue | undefined
+    const notice = () => (w.view(hubId, 'notice') as Notice | undefined)?.text ?? ''
+    const closeouts = () => w.fetched.filter(u => u.includes('/closeout')).length
+    return { w, hub, hubId, queue, notice, closeouts }
+  }
+
+  test('the band\'s Open list and a typed /mm open the pane at once, drawn from the last sync; the refresh draws it again', async () => {
+    const { w, hub, hubId, queue, closeouts } = await slowOw('s3l')
+    const t0 = w.now()
+    // the band's button, in a thread whose pane has nothing drawn yet
+    const other = w.session('local_s3la')
+    const open = (await bandButtons(hub)).get('mm-open-list')
+    expect(open).toBeDefined()
+    const before = w.opened.length
+    open?.()
+    await settle()
+    expect(w.now() - t0).toBeLessThanOrEqual(100)
+    expect(w.opened.slice(before)).toEqual([{ thread: hubId, id: 'mm-queue' }])
+    expect(queue()?.header).toBe('Needs you now (2)')
+    // drawn from the 9 AM sync, and it says so; the feed is being asked, and has not answered
+    expect(queue()?.note).toContain('Updated 13:00 UTC')
+    const asked = closeouts()
+    await w.advance(5_000)
+    await settle()
+    expect(closeouts()).toBe(asked)
+    expect(queue()?.note).toContain('Updated 13:06 UTC')
+    // a typed /mm in another thread: the same at once, and its answer once the feed has answered
+    const opens = w.opened.length
+    const typed = mm(other, '')
+    await settle()
+    expect(w.opened.slice(opens)).toEqual([{ thread: 'local_s3la', id: 'mm-queue' }])
+    expect((w.view('local_s3la', 'queue') as Queue | undefined)?.header).toBe('Needs you now (2)')
+    await w.advance(5_000)
+    expect(await typed).toBe('2 clients need you; 1 thread pinned. The list is in the side pane.')
+  })
+
+  test('Update and Start send exactly once and answer at once; Open and Drafts draw within 100 ms; each refresh then draws the list again', async () => {
+    const { w, hub, hubId, queue, notice } = await slowOw('s3p')
+    const t0 = w.now()
+    const spawns = () => w.calls.filter(c => c.tool === 'spawn_task').length
+
+    // Update on Client One: its thread is the person's link, so nothing is asked before the send but that the thread is there
+    expect(await press(hub, `update:${pid(1)}`)).toBe(true)
+    expect(w.now() - t0).toBeLessThanOrEqual(100)
+    expect(w.sends().map(s => s.args.session_id)).toEqual(['local_s3pa'])
+    expect(notice()).toBe('Sent to Client One\'s thread.')
+    // the refresh: the thread is pinned and named, the line says where it is, and the row reads Open thread
+    await w.advance(5_000)
+    await settle()
+    expect(notice()).toBe('Sent to Client One\'s thread: open "22h left Client One reply" under Pinned.')
+    expect(w.app.get('local_s3pa')).toMatchObject({ title: '🟡 22h left · Client One · reply', pinned: true })
+    expect(queue()?.rows.find(r => r.projectId === pid(1))?.state).toBe('current')
+
+    // Open, once the feed this session read is a minute old: the answer at once, the refresh after
+    await w.advance(61_000)
+    const t1 = w.now()
+    expect(await press(hub, `open:${pid(1)}`)).toBe(true)
+    expect(w.now() - t1).toBeLessThanOrEqual(100)
+    expect(notice()).toBe('Open "22h left Client One reply" under Pinned.')
+    expect(w.sends().length).toBe(1)
+
+    // Drafts on Client Two: its part of the pane, at once, with nothing fetched for it
+    const reads = w.fetched.length
+    expect(await press(hub, `drafts:${pid(2)}`)).toBe(true)
+    expect(w.now() - t1).toBeLessThanOrEqual(100)
+    expect((w.view(hubId, 'view') as { text: string } | undefined)?.text).toContain('## Client Two')
+    expect(w.fetched.slice(reads).filter(u => !u.includes('/closeout'))).toEqual([])
+
+    // Start on Client Two: one chip, at once
+    expect(await press(hub, `start:${pid(2)}`)).toBe(true)
+    expect(w.now() - t1).toBeLessThanOrEqual(100)
+    expect(spawns()).toBe(1)
+    expect(notice()).toBe('A chip for Client Two is ready here: click Start on it.')
+    // the refreshes land: Client Two's row then says where its chip is
+    await w.advance(5_000)
+    await settle()
+    expect(queue()?.rows.find(r => r.projectId === pid(2))?.reason).toBe('the chip is ready here')
+    expect(w.sends().length).toBe(1)
+    expect(spawns()).toBe(1)
+  })
+
+  test('Update on a thread the bridge linked by itself asks the feed first (B3), says it is checking at once, and sends once', async () => {
+    const feed: Feed = { member: ME, role: 'founder', mail: [mail(1, 'Client One')], tickets: {}, threads: [{ project_id: pid(1), session_id: 'cli-s3b', last_activity_at: ago(1), sole: true }] }
+    const w = fakeApp(feed, [{ sessionId: 'local_s3bhub' }, { sessionId: 'local_s3ba', title: 'Client One work' }])
+    w.put('mm.threads', { 'cli-s3b': { app: 'local_s3ba', at: Date.parse(ago(0)) } })
+    const hub = w.session('local_s3bhub')
+    await mm(hub, '')
+    expect((w.stored('mm.auto') as Record<string, { sid: string }>)[pid(1)]?.sid).toBe('local_s3ba')
+    w.delayFeed(5_000)
+    expect(await press(hub, `update:${pid(1)}`)).toBe(true)
+    // nothing sent until the feed says the thread is still Client One's alone; the press says it is at it
+    expect(w.sends()).toEqual([])
+    expect((w.view('local_s3bhub', 'notice') as Notice | undefined)?.text).toBe('Checking…')
+    await w.advance(5_000)
+    await settle()
+    expect(w.sends().map(s => s.args.session_id)).toEqual(['local_s3ba'])
+    expect((w.view('local_s3bhub', 'notice') as Notice | undefined)?.text).toContain('Sent to Client One\'s thread')
+  })
+
+  test('Update on a thread the bridge linked by itself, whose session the feed now shows declared another project too: nothing is sent (B3)', async () => {
+    const feed: Feed = { member: ME, role: 'founder', mail: [mail(1, 'Client One')], tickets: {}, threads: [{ project_id: pid(1), session_id: 'cli-s3c', last_activity_at: ago(1), sole: true }] }
+    const w = fakeApp(feed, [{ sessionId: 'local_s3chub' }, { sessionId: 'local_s3ca', title: 'Pipeline speed' }])
+    w.put('mm.threads', { 'cli-s3c': { app: 'local_s3ca', at: Date.parse(ago(0)) } })
+    const hub = w.session('local_s3chub')
+    await mm(hub, '')
+    // drawn while the link stood; the feed then says otherwise
+    feed.threads = [{ project_id: pid(1), session_id: 'cli-s3c', last_activity_at: ago(1), sole: false }]
+    expect(await press(hub, `update:${pid(1)}`)).toBe(true)
+    await settle()
+    expect(w.sends()).toEqual([])
+    expect((w.view('local_s3chub', 'notice') as Notice | undefined)?.text).toBe('That thread is no longer available. The list has been refreshed.')
+    // and the refresh after it let the link go: its own name back, our pin off
+    expect(w.stored('mm.links')).toEqual({})
+    expect(w.app.get('local_s3ca')).toMatchObject({ title: 'Pipeline speed', pinned: false })
   })
 })

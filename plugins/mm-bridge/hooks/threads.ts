@@ -19,7 +19,7 @@
 import { businessMsBetween } from './business-time'
 import type { MmRow } from '../types'
 
-import { NOBODY, cleanTitle, clockText, holdSentence, titleFor, titleNames, withTeammate } from './queue'
+import { MAY_NEED_OK, NOBODY, cleanTitle, clockText, holdSentence, titleFor, titleNames, withTeammate } from './queue'
 import type { FeedThread, QueueItem } from './queue'
 
 const HOUR = 3_600_000
@@ -512,7 +512,11 @@ export const rowState = (row: Row): RowState => {
 
 export function rowFor(it: QueueItem, rec: Recommendation, now: number): Row {
   // a client whose drafts a teammate holds, and that is not the viewer's to act on: who to ask, and no action
-  const note = withTeammate(it) ? holdSentence(it) : ''
+  const withMate = withTeammate(it)
+  // (the founder) a package flagged for his OK that a teammate sends, theirs to decide until its reply is due:
+  // the row's sentence is followed by Opus's words, R2
+  const may = withMate && it.theirs && it.kind === 'ok' ? MAY_NEED_OK : ''
+  const note = withMate ? [holdSentence(it), may].filter(Boolean).join(' · ') : ''
   return {
     projectId: it.projectId, client: it.client, title: titleFor(it, now), waiting: waitingText(it), state: rec.state, reason: rec.reason,
     // no thread of any kind: the row goes in the first group, marked
@@ -520,8 +524,13 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number): Row {
     // the thread this row's button acts on: a press acts on this one or on none
     ...(rec.target ? { target: rec.target.sid } : {}),
     ...(note ? { note } : {}),
+    // (the founder's alone, 0.5.1) a teammate's to see through: no action, with a sentence or without one
+    ...(withMate && it.theirs ? { theirs: true } : {}),
   }
 }
+
+/** A row under `With a teammate`: not the viewer's to act on. */
+const notMine = (row: Row): boolean => Boolean(row.note) || row.theirs === true
 
 /**
  * The buttons on a row: ONE action, chosen by its state, then Drafts (Rob, 2026-10-12: "it should be
@@ -529,14 +538,14 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number): Row {
  * A row under `With a teammate` is not the viewer's to act on: Drafts alone.
  */
 export function rowButtons(row: Row): RowButton[] {
-  if (row.note) return ['drafts']
+  if (notMine(row)) return ['drafts']
   const state = rowState(row)
   return [state === 'current' ? 'open' : state, 'drafts']
 }
 
 /** The second line of a row: what is waiting, then the action and its reason, or when the thread was updated. A row with no action: what is waiting. */
 export function rowDetail(row: Row): string {
-  if (row.note) return row.waiting
+  if (notMine(row)) return row.waiting
   const state = rowState(row)
   return state === 'current' ? `${row.waiting} · ${row.reason}` : `${row.waiting} · ${LABEL[state]}: ${row.reason}`
 }
