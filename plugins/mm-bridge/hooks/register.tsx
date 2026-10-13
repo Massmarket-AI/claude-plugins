@@ -2,7 +2,9 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { MmBand, MmFolds, MmNotice, MmQueue, MmView } from '../types'
 
-import { MAIL_LOOKBACK_HOURS, MAX_PINS, buildLists, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, dueLine, feedClients, holdBanner, isDraftDone, isUuid, needsLine, noteText, titleFor } from './queue'
+import {
+  MAIL_LOOKBACK_HOURS, MAX_PINS, buildLists, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, dueLine, feedClients, holdBanner, isDraftDone, isUuid, needsLine, noteText, titleFor, withHolder,
+} from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
   LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, foldGroups, hasWaiting, kickoffText, onlyClients, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail,
@@ -67,14 +69,16 @@ import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, 
 // many tables) and a whole pass over the app's threads, some presses on two. So (0.5.1, S2) a press draws
 // its answer AT ONCE from what the row was drawn from: the last sync stored, the store, and the row's own
 // thread. The feed and the app are asked AFTER that, and the list is drawn again when they answer. A press
-// may take a feed this session read less than FEED_REUSE_MS ago. Update and Open ask the app one thing
-// first: whether the row's thread is still there (`storedPass`). Update refuses when the client's link, read
-// from the store, is now another thread. Update on a thread the bridge linked by itself, or one its row
-// offered with no link, also reads the feed before it sends, because only the feed says whether B3 has let
-// that thread go, or a newer thread of the client's has taken it (`updateThread`, `takenOver`). ⛔ Nothing
-// that guards a send moved: a press acts on the thread its row showed or on none, B3, a thread taken over
-// and the second-send guards are asked before the send as before, and every write is made over a fresh copy
-// and checked again.
+// may take a feed this session read less than FEED_REUSE_MS ago, and a refresh that fails says so in one
+// line (L3). Update and Open ask the app one thing first: whether the row's thread is still there
+// (`storedPass`). Update refuses when the client's link, read from the store, is now another thread. And
+// Update, the one press that sends, reads the feed once before every send, drawing `Checking…` meanwhile
+// (M1): with no feed it sends nothing, with nothing waiting now it sends nothing, and otherwise its kickoff
+// is the client as the feed has it now; on a thread the bridge linked by itself, or one its row offered
+// with no link, that feed also says whether B3 has let the thread go, or a newer thread of the client's has
+// taken it (`updateThread`, `takenOver`). ⛔ Nothing that guards a send moved: a press acts on the thread its
+// row showed or on none, B3, a thread taken over and the second-send guards are asked before the send as
+// before, and every write is made over a fresh copy and checked again.
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
@@ -135,6 +139,8 @@ const PICKUP_REUSE_MS = 60_000
 const PICKUPS_MAX = 20
 /** What the pane says while it has nothing to draw yet: the list, or a client's pickup view. */
 const CHECKING = 'Checking…'
+/** The pane's one line when the refresh after a press failed (Opus, 10-13, L3): until the next sync that works. */
+const REFRESH_FAILED = 'Couldn\'t refresh the list. Showing what was last loaded.'
 /** `[mm-link <project id>]`, counted only at the very start of a prompt. */
 const MARKER = /^\[mm-link ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]/
 /**
@@ -1236,6 +1242,34 @@ async function refreshList($: EngineInterface): Promise<Pass> {
 }
 
 /**
+ * The refresh after a press failed (L3): the pane says so in one line, under the list it still shows. The list
+ * is the one last drawn; the line goes with the next list drawn from a sync that worked (`showQueue`), or, in a
+ * thread that does not sync, once the store holds a sync newer than the failure (`clearRefreshFailed`).
+ */
+async function refreshFailed($: EngineInterface): Promise<void> {
+  try {
+    const { value: queue } = await $.state.get(QUEUE)
+    if (queue && Array.isArray(queue.rows)) await $.state.set(QUEUE, { ...queue, warning: REFRESH_FAILED, warnedAt: await $.clock.now() } satisfies MmQueue)
+  } catch {
+    // the line is a convenience: its failure breaks nothing
+  }
+}
+
+/** The line a failed refresh left, taken off once the store holds a sync newer than it (any session's). */
+async function clearRefreshFailed($: EngineInterface): Promise<void> {
+  try {
+    const { value: queue } = await $.state.get(QUEUE)
+    if (!queue?.warning) return
+    const last = await storeGet<Last | null>($, 'mm.last', null)
+    if (!last || !(last.at > (queue.warnedAt ?? Infinity))) return
+    const { warning: _warning, warnedAt: _warnedAt, ...clear } = queue
+    await $.state.set(QUEUE, clear)
+  } catch {
+    // as above
+  }
+}
+
+/**
  * A client's recommendation as the last sync stored it, with the thread it named: what a press acts on (S2).
  * Undefined when there is none, or it has a shape no version wrote. (A sync by an older version stored the
  * state under `action`.)
@@ -1406,6 +1440,12 @@ async function showList($: EngineInterface, press: boolean): Promise<string> {
   let last: Last
   try {
     last = (await reconcile($, press ? await recentFeed($) : await fetchFeed($))).last
+  } catch (err) {
+    // the list it opened with stays, and the pane says it is the one last loaded (L3). A typed /mm still
+    // answers with the failure, as before; the band's button has said all there is to say.
+    await refreshFailed($)
+    if (!press) throw err
+    return REFRESH_FAILED
   } finally {
     await reading
   }
@@ -1547,6 +1587,8 @@ async function tick($: EngineInterface): Promise<void> {
     // the chips this session minted that are no longer wanted
     await withdrawChips($).catch(() => {})
     await refreshBand($)
+    // a failed refresh's line, once a sync since has worked (L3)
+    await clearRefreshFailed($)
     await beat($, { ok: true })
   } catch (err) {
     const last = await storeGet<Last | null>($, 'mm.last', null)
@@ -1718,7 +1760,8 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
   // A client that already has a thread: the new one is asked to look at how the old one ended (handoverText).
   const prompt = kickoffText(it, { replaces: await replaced($, it, pass) })
   const r = (await $.mcp.call('ccd_session', 'spawn_task', {
-    title: `${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open?.state === 'held_by_other' ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : 'reply to the client'}`,
+    // (a stale package a teammate has is worded as one a teammate holds: M2)
+    title: `${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : 'reply to the client'}`,
     tldr: `${it.client} needs you: ${needsLine(it, now)}. Start this to open a thread for that client with the drafts or the messages waiting.`,
     prompt,
   })) as Mcp
@@ -2002,19 +2045,33 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
   }
   const refused = await anothers(target.sid)
   if (refused) return { said: refused }
-  // ⛔ (S2) B3 guards a send, and only the feed can answer it: a thread the bridge linked by itself, or one
-  // the row offered with no link, is this client's only while the feed's rows for its sessions say so (the
-  // Pipeline speed thread, 2026-10-13). So for such a thread the feed is read before anything is sent: the one
-  // network call, never a feed kept from before. The pass after the answer is made over it. A link the person
-  // made is never let go by B3, and needs no such read. And a row's thread with no link is no longer the
-  // client's once a newer thread of the client's has taken it (`takenOver`): refused, as in 0.5.0.
+  // ⛔ (S2, M1) Update is the one press that sends, so it reads the feed ONCE before every send (Opus, 10-13:
+  // the review's A1 and A2 sent a kickoff for mail answered since, and with the feed down). `Checking…` is
+  // drawn at once. The feed cannot be had: nothing is sent. The client has nothing waiting now: nothing is
+  // sent, and the list is drawn again. Otherwise the kickoff, and whether the thread already has it, come from
+  // the client as the feed has it NOW (`cur`). The pass after the answer is made over that feed.
+  // ⛔ And B3 guards a send, which only that feed can answer: a thread the bridge linked by itself, or one the
+  // row offered with no link, is this client's only while the feed's rows for its sessions say so (the
+  // Pipeline speed thread, 2026-10-13). A link the person made is never let go by B3. A row's thread with no
+  // link is no longer the client's once a newer thread of the client's has taken it (`takenOver`): refused,
+  // as in 0.5.0.
   let guard: Feed | null = null
+  let cur = it
   if (pass.stored) {
+    await say($, CHECKING, false)
+    let read: Feed
+    try {
+      read = await fetchFeed($)
+    } catch {
+      return { said: `Couldn't reach the list to check ${it.client}. Nothing was sent; try again in a minute.`, after: undefined }
+    }
+    guard = read
+    const lists = buildLists(read, await $.clock.now())
+    const fresh = [...lists.queue, ...lists.teammate, ...lists.older].find(i => i.projectId === it.projectId)
+    if (!fresh) return { said: `${it.client} has nothing waiting now. The list has been refreshed.`, after: async () => void (await reconcile($, read)) }
+    cur = fresh
     const auto = await storeGet<Auto>($, 'mm.auto', {})
     if (linked !== target.sid || auto[it.projectId]?.sid === target.sid) {
-      await say($, CHECKING, false)
-      const read = await fetchFeed($)
-      guard = read
       const rows = feedThreadsOf(read)
       const pairs = await storeGet<Pairs>($, 'mm.threads', {})
       const marked = await storeGet<Record<string, string>>($, 'mm.marked', {})
@@ -2029,18 +2086,19 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
   // The thread already has what is waiting now: nothing is sent twice. (Its row draws no Update button;
   // this is the typed command, or a row drawn before another thread's Update went.)
   // ⛔ Asked of what is stored too, and of what this session sent (F2): a second press never sends the same
-  // kickoff into the same thread, whatever became of the writes after the first one went.
-  const signature = signatureOf(it)
-  const sent = (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[it.projectId]
-  const has = (sent && sent.sid === target.sid && hasWaiting(sent.sig, it)) || sentHere.get(`${it.projectId}\n${target.sid}`) === signature
-  if (pass.last.recs[it.projectId]?.state === 'current' || has) {
+  // kickoff into the same thread, whatever became of the writes after the first one went. (A press asks of
+  // the client as the feed has it now, not of the stored sync's word that the thread was current.)
+  const signature = signatureOf(cur)
+  const sent = (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[cur.projectId]
+  const has = (sent && sent.sid === target.sid && hasWaiting(sent.sig, cur)) || sentHere.get(`${cur.projectId}\n${target.sid}`) === signature
+  if ((!pass.stored && pass.last.recs[it.projectId]?.state === 'current') || has) {
     return { said: `${it.client}'s thread already has this. Open "${cleanTitle(pass.live.get(target.sid)?.title ?? target.title)}" under Pinned.` }
   }
   const here = target.sid === (await selfId($))
   if (here && how.typed) return { said: `You are already in ${it.client}'s thread. Press Update thread on its row in the pane to pick it up here.` }
 
   const failed = (why: string): Answer => ({ said: `Could not send to ${it.client}'s thread: ${why}` })
-  const text = kickoffText(it, { update: true })
+  const text = kickoffText(cur, { update: true })
   try {
     if (here) {
       // The client's thread is this one, and the app's send does not take the sending thread: the kickoff
@@ -2110,6 +2168,8 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
       thread = (await (feed ? reconcile($, feed, pass.pairs) : guard ? reconcile($, guard) : refreshList($))).live.get(sid) ?? thread
     } catch (err) {
       await noteFailure($, 'update: the sync after it', err)
+      // (a press's refresh that failed shows in the pane: L3)
+      if (pass.stored) await refreshFailed($)
     }
   }
   // The toast says it went. Update also takes the person there when the app can be told to open the
@@ -2222,14 +2282,21 @@ async function act($: EngineInterface, verb: Verb, row: Row): Promise<Answer> {
     const { it, pass } = quick
     if (verb === 'start') return { said: await startThread($, it, pass, false), after }
     if (verb === 'open') return { said: await showThread($, it, pass, row.target), after }
-    // (an Update that sent nothing is answered too, and the list brought up to date after it)
+    // (an Update that sent nothing is answered too, and the list brought up to date after it, unless it says
+    // there is nothing to bring it up to date with)
     const answer = await updateThread($, null, it, pass, { typed: false, shown: row.target })
-    return answer.after ? answer : { ...answer, after }
+    return 'after' in answer ? answer : { ...answer, after }
   }
   // What is stored cannot vouch for the row: the list is brought up to date first, as in 0.5.0, and the
-  // press says it is at it meanwhile.
+  // press says it is at it meanwhile. (Update with no feed sends nothing, and says so: M1.)
   await say($, CHECKING, false)
-  const feed = await fetchFeed($)
+  let feed: Feed
+  try {
+    feed = await fetchFeed($)
+  } catch (err) {
+    if (verb === 'update') return { said: `Couldn't reach the list to check ${row.client}. Nothing was sent; try again in a minute.` }
+    throw err
+  }
   const pass = await reconcile($, feed)
   const it = listedIn(pass.last).find(i => i.projectId === row.projectId)
   if (!it) return { said: noClient(row.client) }
@@ -2286,6 +2353,8 @@ async function press($: EngineInterface, verb: Verb, row: Row): Promise<void> {
     if (later) await say($, later, false)
   } catch (err) {
     await beat($, { ok: false, refreshError: short(`${verb}: ${errorText(err)}`, 300) })
+    // and the pane says so, in one line (L3)
+    await refreshFailed($)
   }
   try {
     await refreshBand($)
@@ -2375,7 +2444,8 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       // a stored record this version cannot draw: as before, the list first
     }
     if (said) {
-      await (press ? refreshList($) : sync($)).catch(() => {})
+      // (a refresh that fails leaves the list as it was, and the pane says so: L3)
+      await (press ? refreshList($) : sync($)).catch(() => refreshFailed($))
       await refreshSelf($, false)
       return said
     }
@@ -2750,6 +2820,7 @@ export const register: Register = on => {
         ) : null}
         {hasList && queue ? <Text bold>{queue.header}</Text> : <Text dimColor>{CHECKING}</Text>}
         {notice?.text ? <Text>{notice.text}</Text> : null}
+        {hasList && queue?.warning ? <Text>{queue.warning}</Text> : null}
         {hasList && queue
           ? rowGroups(queue.rows).map(group => (
               <Box flexDirection="column" marginTop={1}>

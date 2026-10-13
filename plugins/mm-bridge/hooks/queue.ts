@@ -107,6 +107,13 @@ export type OpenPackage = {
   newer: number
 }
 
+/**
+ * A package that is a teammate's and not the viewer's to pick up or rebuild: one a teammate holds, and (for
+ * the founder) a stale one a teammate has (R1: `by` names them). The kickoff and the bridge note word the
+ * two alike: show what is waiting, run no prep, draft no second reply (Opus, 10-13, M2).
+ */
+export const withHolder = (o: OpenPackage): boolean => o.state === 'held_by_other' || (o.state === 'stale' && o.by !== '')
+
 /** The newest time of each kind of thing a client has for the viewer, in ms (0: none): a message received, the mail a package covers, a task created (or due, where the feed gives no creation time). */
 export type Newest = { mail: number; pkg: number; task: number }
 
@@ -347,6 +354,12 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
   const okTheirs = new Set<string>()
   /** (the founder) The teammate who sends a stale package of the client's, where a client message waits after its drafts (R1). */
   const staleTheirs = new Map<string, string>()
+  /**
+   * (the founder) For each client with a stale package a teammate has: that teammate, and the client messages
+   * waiting after its drafts, in this pass's window. Counted only for the client's place under With a teammate,
+   * once nothing else of the founder's lists the client (below).
+   */
+  const staleMail = new Map<string, { name: string; mail: Array<{ m: FeedMail; due: number }> }>()
   for (const d of feed.drafts ?? []) {
     // the package id goes into the kickoff and the pickup request: a lower-case uuid or nothing
     if (!usable(d.project_id, d.project_name) || !isUuid(d.package_id)) continue
@@ -404,17 +417,18 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     if (it.kind === 'ok' && !forOk) continue
     it.open = open(held ? 'held_by_other' : d.status === 'stale' ? 'stale' : 'prepared')
     // R1: with a client message waiting after its drafts were built, the client lists under With a teammate,
-    // like any reply a teammate holds (the message is counted for him there, whoever owns the client); with
-    // none, it is not listed. A message the viewer's own mail already counted is not counted twice.
+    // like any reply a teammate holds; with none, it is not listed. The messages are only noted here: they are
+    // counted after the tasks, and only where they are all that lists the client (Opus, 10-13, B1).
     if (staleTheirsHere) {
       const after = ms(d.covers_through)
+      const waiting = staleMail.get(d.project_id) ?? { name: holderName(sender), mail: [] }
       for (const m of feed.mail ?? []) {
-        if (counted.has(m) || m.project_id !== d.project_id || m.reply_status !== 'unanswered') continue
+        if (m.project_id !== d.project_id || m.reply_status !== 'unanswered' || waiting.mail.some(w => w.m === m)) continue
         if (Number.isFinite(after) && !(ms(m.received_at) > after)) continue
         const due = replyDue(m)
-        if (inWindow(due)) countMail(it, m, due)
+        if (inWindow(due)) waiting.mail.push({ m, due })
       }
-      if (it.messages > 0) staleTheirs.set(d.project_id, holderName(sender))
+      if (waiting.mail.length) staleMail.set(d.project_id, waiting)
       continue
     }
     // ⛔ With one exception, for the founder alone: a package flagged for his OK is listed whoever owns the
@@ -469,8 +483,17 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
   //       approving it with a one-line reason or asking him (Rob, 10-07: client-reply-prep §1 rule 13, §5.2),
   //       until its reply is due: the due time its row shows, in business time. From then it is in his list,
   //       as the `ok` kind always was. With a teammate: whoever holds it, else the one who sends it.
-  //   R1: a stale package a teammate sends, with a client message waiting after its drafts (above).
+  //   R1: a stale package a teammate sends, with a client message waiting after its drafts. ⛔ Those messages
+  //       place the client under With a teammate and nothing more: where anything of his own lists the client
+  //       (a task of his, his own mail, a package of his or one that waits for his OK), his row is for that, and
+  //       they are not added to it (Opus, 10-13, B1: his task row was turned into a reply and pinned as one).
   if (founder) {
+    for (const [pid, waiting] of staleMail) {
+      const it = byProject.get(pid)
+      if (!it || it.tasks > 0 || it.messages > 0 || it.kind !== 'task' || it.packageId) continue
+      for (const { m, due } of waiting.mail) if (!counted.has(m)) countMail(it, m, due)
+      if (it.messages > 0) staleTheirs.set(pid, waiting.name)
+    }
     for (const it of byProject.values()) {
       const o = it.open ?? null
       const name =
@@ -657,7 +680,8 @@ export function noteText(it: QueueItem, member: string): string {
     return `Reply package ${it.packageId.slice(0, 8)} is already picked up by ${holderName(member)}, the person in this session, with ${draftCount(o.unsent)} not sent yet${it.flagged ? ', flagged for approval' : ''}; the five-part pickup view is in the side pane.${newer} The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${it.packageId}.`
   }
   if (it.packageId) return `Reply package ${it.packageId.slice(0, 8)} is prepared${it.flagged ? ' and flagged for approval' : ''}; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${it.packageId}.`
-  if (o?.state === 'held_by_other') return `${waiting}; ${o.by} picked up the reply drafts for this client (package ${o.id.slice(0, 8)}) and has ${draftCount(o.unsent)} not sent yet. Do not write a second reply: ask ${o.by}.`
+  // (the founder) a stale package a teammate has is treated as one a teammate holds: never "pick it up" (M2)
+  if (o && withHolder(o)) return `${waiting}; ${o.by} picked up the reply drafts for this client (package ${o.id.slice(0, 8)}) and has ${draftCount(o.unsent)} not sent yet. Do not write a second reply: ask ${o.by}.`
   if (o?.state === 'stale') return `${waiting}; reply drafts exist (package ${o.id.slice(0, 8)}) but are marked out of date. When the person asks for the reply, pick the package up and rebuild the drafts first (client-reply-prep §9 with --package ${o.id}).`
   if (o?.state === 'prepared') return `${waiting}; reply drafts are prepared for this client (package ${o.id.slice(0, 8)}). When the person asks to act on them, follow client-reply-prep §9 with --package ${o.id}.`
   return `${waiting}; no reply drafts are prepared yet.`

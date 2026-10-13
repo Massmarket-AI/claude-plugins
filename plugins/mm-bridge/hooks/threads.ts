@@ -19,7 +19,7 @@
 import { businessMsBetween } from './business-time'
 import type { MmRow } from '../types'
 
-import { MAY_NEED_OK, NOBODY, cleanTitle, clockText, decidesText, holdSentence, titleFor, titleNames, withTeammate } from './queue'
+import { MAY_NEED_OK, NOBODY, cleanTitle, clockText, decidesText, holdSentence, titleFor, titleNames, withHolder, withTeammate } from './queue'
 import type { FeedThread, QueueItem } from './queue'
 
 const HOUR = 3_600_000
@@ -402,7 +402,7 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
         ? `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${it.packageId.slice(0, 8)} and wait for me. Send nothing without my go.`
         : it.kind === 'ok' && o
           ? okKickoff(it, o)
-        : o?.state === 'held_by_other'
+        : o && withHolder(o)
           ? `[mm-link ${id}] ${who}: ${o.by} picked up the reply drafts (package ${o.id.slice(0, 8)}) and has ${o.unsent} not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`
           : o?.state === 'stale' && it.messages > 0
             ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting, reply due ${due}. Load the client's project skill first, then follow client-reply-prep §9: package ${o.id.slice(0, 8)} exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.`
@@ -441,8 +441,9 @@ export const THREAD_ID = /^local_[A-Za-z0-9_-]{1,100}$/
  */
 export function handoverText(it: QueueItem, old: Replaced): string {
   if (!THREAD_ID.test(old.sid)) return ''
-  // (a kickoff that shows no pickup view: tasks only, or a package a teammate holds)
-  const before = it.packageId || it.kind === 'ok' || (it.messages > 0 && it.open?.state !== 'held_by_other') ? 'Before the pickup view' : 'Before showing me what is due'
+  // (a kickoff that shows no pickup view: tasks only, or a package a teammate holds or, stale, has)
+  const o = it.open ?? null
+  const before = it.packageId || it.kind === 'ok' || (it.messages > 0 && !(o && withHolder(o))) ? 'Before the pickup view' : 'Before showing me what is due'
   return `This thread replaces "${cleanTitle(old.title)}" (thread ${old.sid}) for ${it.projectName}. ${before}, and without reading that thread in full: read only its last three messages with the session tools (list_events, a small limit) and list anything left open in it: a question waiting on me, something promised and not done, a draft that was not sent. Keep that list to ten lines, then carry on.`
 }
 

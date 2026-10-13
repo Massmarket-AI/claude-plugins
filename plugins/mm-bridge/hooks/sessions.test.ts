@@ -433,19 +433,21 @@ describe('S3: a press answers within 100 ms of fake time while OW takes 5 second
     expect(await typed).toBe('2 clients need you; 1 thread pinned. The list is in the side pane.')
   })
 
-  test('Update and Start send exactly once and answer at once; Open and Drafts draw within 100 ms; each refresh then draws the list again', async () => {
+  test('Update says it is checking at once and sends exactly once when the feed answers; Start answers at once; Open and Drafts draw within 100 ms; each refresh then draws the list again', async () => {
     const { w, hub, hubId, queue, notice } = await slowOw('s3p')
     const t0 = w.now()
     const spawns = () => w.calls.filter(c => c.tool === 'spawn_task').length
 
-    // Update on Client One: its thread is the person's link, so nothing is asked before the send but that the thread is there
+    // Update on Client One: the one press that sends reads the feed first, whoever linked the thread (M1)
     expect(await press(hub, `update:${pid(1)}`)).toBe(true)
     expect(w.now() - t0).toBeLessThanOrEqual(100)
-    expect(w.sends().map(s => s.args.session_id)).toEqual(['local_s3pa'])
-    expect(notice()).toBe('Sent to Client One\'s thread.')
-    // the refresh: the thread is pinned and named, the line says where it is, and the row reads Open thread
+    expect(notice()).toBe('Checking…')
+    expect(w.sends()).toEqual([])
+    // the feed answers: one send, then the pass over that same feed pins and names the thread, the line says
+    // where it is, and the row reads Open thread
     await w.advance(5_000)
     await settle()
+    expect(w.sends().map(s => s.args.session_id)).toEqual(['local_s3pa'])
     expect(notice()).toBe('Sent to Client One\'s thread: open "22h left Client One reply" under Pinned.')
     expect(w.app.get('local_s3pa')).toMatchObject({ title: '🟡 22h left · Client One · reply', pinned: true })
     expect(queue()?.rows.find(r => r.projectId === pid(1))?.state).toBe('current')
@@ -511,5 +513,129 @@ describe('S3: a press answers within 100 ms of fake time while OW takes 5 second
     // and the refresh after it let the link go: its own name back, our pin off
     expect(w.stored('mm.links')).toEqual({})
     expect(w.app.get('local_s3ca')).toMatchObject({ title: 'Pipeline speed', pinned: false })
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------- 0.5.1 fix round 1
+// The independent review of e4511774: M1, Update sent from a stale stored sync (A1, A2); L3, a refresh that
+// failed after a press was silent.
+
+describe('M1: Update, the one press that sends, reads the feed once before every send', () => {
+  type Notice = { text: string }
+  const settle = async () => {
+    for (let i = 0; i < 20_000; i++) await Promise.resolve()
+  }
+  /** Client Three has one unanswered message and a thread the person linked; the hub has synced once. */
+  async function linkedRow(tag: string, n: number) {
+    const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], drafts: [], mail: [mail(n, 'Client Three')] }
+    const hubId = `local_${tag}hub`
+    const w = fakeApp(feed, [{ sessionId: hubId }, { sessionId: `local_${tag}a`, title: 'Client Three work' }])
+    w.put('mm.links', { [pid(n)]: `local_${tag}a` })
+    const hub = w.session(hubId)
+    await mm(hub, '')
+    const notice = () => (w.view(hubId, 'notice') as Notice | undefined)?.text ?? ''
+    return { feed, w, hub, hubId, notice }
+  }
+
+  test('A1: its message answered since the row was drawn: nothing is sent, it says so, and the list is drawn again', async () => {
+    const { feed, w, hub, hubId, notice } = await linkedRow('m1a', 31)
+    feed.mail = []
+    await w.advance(4 * 60_000)
+    expect(await press(hub, `update:${pid(31)}`)).toBe(true)
+    await settle()
+    expect(w.sends()).toEqual([])
+    expect(notice()).toBe('Client Three has nothing waiting now. The list has been refreshed.')
+    expect((w.view(hubId, 'queue') as { header: string } | undefined)?.header).toBe('Nothing needs you right now.')
+  })
+
+  test('A2: the feed down, and a stored sync two days old: nothing is sent, and it says so', async () => {
+    const { w, hub, notice } = await linkedRow('m1b', 32)
+    w.feedAnswers(503)
+    await w.advance(48 * 3_600_000)
+    expect(await press(hub, `update:${pid(32)}`)).toBe(true)
+    await settle()
+    expect(w.sends()).toEqual([])
+    expect(notice()).toBe('Couldn\'t reach the list to check Client Three. Nothing was sent; try again in a minute.')
+  })
+
+  test('a second message since the row was drawn: the kickoff is the client as the feed has it now', async () => {
+    const { feed, w, hub } = await linkedRow('m1c', 33)
+    feed.mail = [...(feed.mail ?? []), mail(33, 'Client Three', 1)]
+    expect(await press(hub, `update:${pid(33)}`)).toBe(true)
+    await settle()
+    const sent = w.sends()
+    expect(sent.length).toBe(1)
+    expect(String(sent[0]?.args.message)).toContain('New since this thread last worked on this client: 2 messages waiting.')
+    expect(String(sent[0]?.args.message)).toContain('needs a reply: 2 client message(s) waiting')
+  })
+})
+
+describe('L3: a refresh that fails after a press shows in one line, until a sync works', () => {
+  const settle = async () => {
+    for (let i = 0; i < 20_000; i++) await Promise.resolve()
+  }
+  type Queue = { header: string; warning?: string }
+  /** Every text the thread's pane draws. */
+  async function paneTexts($: unknown): Promise<string[]> {
+    const tree = await hooks['ui.render:{"component":"Pane","requestId":"mm-queue"}']?.($, { props: {} }, next)
+    const out: string[] = []
+    const walk = (node: unknown, depth: number): void => {
+      if (typeof node === 'string') out.push(node)
+      if (!node || typeof node !== 'object' || depth > 40) return
+      if (Array.isArray(node)) {
+        for (const n of node) walk(n, depth + 1)
+        return
+      }
+      const o = node as { props?: Record<string, unknown>; children?: unknown }
+      walk(o.props?.children, depth + 1)
+      walk(o.children, depth + 1)
+    }
+    walk(tree, 0)
+    return out
+  }
+  const LINE = 'Couldn\'t refresh the list. Showing what was last loaded.'
+  /** Client Four has no thread: its row's Start answers at once, and the list is then brought up to date. */
+  async function startThenFail(tag: string, n: number) {
+    const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], drafts: [], mail: [mail(n, 'Client Four')] }
+    const hubId = `local_${tag}hub`
+    const w = fakeApp(feed, [{ sessionId: hubId }])
+    const hub = w.session(hubId)
+    await mm(hub, '')
+    // a minute on, OW stops answering: the press answers, and its refresh fails
+    await w.advance(61_000)
+    w.feedAnswers(503)
+    expect(await press(hub, `start:${pid(n)}`)).toBe(true)
+    await settle()
+    expect((w.view(hubId, 'notice') as { text: string } | undefined)?.text).toBe('A chip for Client Four is ready here: click Start on it.')
+    return { w, hub, hubId }
+  }
+
+  test('the press answers, its refresh fails: one line under the list it still shows; the next sync that works takes it away', async () => {
+    const { w, hub, hubId } = await startThenFail('l3a', 34)
+    expect((w.view(hubId, 'queue') as Queue | undefined)?.warning).toBe(LINE)
+    expect(await paneTexts(hub)).toContain(LINE)
+    expect((await paneTexts(hub)).filter(t => t === LINE).length).toBe(1)
+    expect(await paneTexts(hub)).toContain('Needs you now (1)')
+    // OW answers again: a sync that works draws the list without it
+    w.feedAnswers(200)
+    await mm(hub, '')
+    expect((w.view(hubId, 'queue') as Queue | undefined)?.warning).toBeUndefined()
+    expect(await paneTexts(hub)).not.toContain(LINE)
+  })
+
+  test('in a thread that does not sync, the line goes once the store holds a sync newer than the failure', async () => {
+    const { w, hub, hubId } = await startThenFail('l3b', 35)
+    expect((w.view(hubId, 'queue') as Queue | undefined)?.warning).toBe(LINE)
+    // another thread holds the sync, and its sync works a moment later
+    w.feedAnswers(200)
+    await w.advance(1_000)
+    const other = w.session('local_l3bother')
+    await mm(other, '')
+    w.put('mm.lease', { owner: 'cli:local_l3bother', until: w.now() + 24 * 3_600_000 })
+    // this thread's own timer: no sync of its own, and the line goes
+    await hooks['session.start']?.(hub, { cwd: '/w', surface: 'desktop', isInteractive: false }, next)
+    await w.advance(4_000)
+    await settle()
+    expect((w.view(hubId, 'queue') as Queue | undefined)?.warning).toBeUndefined()
   })
 })

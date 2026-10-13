@@ -45,7 +45,19 @@ export type MmRow = {
  * closed until the person opens one: clients whose drafts a teammate holds, and clients whose only items
  * are more than 3 business days overdue. Neither is pinned or counted in the header.
  */
-export type MmQueue = { header: string; rows: MmRow[]; note: string; teammate?: MmRow[]; older?: MmRow[] }
+export type MmQueue = {
+  header: string
+  rows: MmRow[]
+  note: string
+  teammate?: MmRow[]
+  older?: MmRow[]
+  /**
+   * One line under the header when the refresh after a press failed: the list shown is the one last loaded.
+   * Gone with the next list drawn from a sync that worked. `warnedAt` is when it failed.
+   */
+  warning?: string
+  warnedAt?: number
+}
 
 /** Which of the two groups under the list the person has opened. */
 export type MmFolds = { teammate?: boolean; older?: boolean }

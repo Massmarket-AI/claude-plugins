@@ -60,6 +60,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   const opened: Array<{ thread: string; id: string }> = []
   /** OW answers the closeout feed this long after it is asked (0: at once): a slow feed, on the fake clock. */
   let feedDelayMs = 0
+  /** The closeout feed's HTTP status (200: it answers). */
+  let feedStatus = 200
   /** Threads the app refuses to pin. */
   const failPins = new Set<string>()
   const text = (value: unknown): Mcp => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }], isError: false })
@@ -113,6 +115,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
         fetch: async (url: string) => {
           fetched.push(url)
           if (feedDelayMs > 0 && url.includes('/closeout')) await new Promise<void>(resolve => void timers.push({ at: time + feedDelayMs, fn: resolve, done: false }))
+          if (feedStatus !== 200 && url.includes('/closeout')) return { status: feedStatus, ok: false, headers: {}, text: 'unavailable' }
           return { status: 200, ok: true, headers: {}, text: JSON.stringify(url.includes('/reply-package') ? { markdown: '## A client\n\n1. What the client sent' } : feed) }
         },
       },
@@ -169,6 +172,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
     now: () => time,
     /** From now on OW answers the closeout feed `ms` after it is asked (0: at once). */
     delayFeed: (ms: number) => void (feedDelayMs = ms),
+    /** From now on the closeout feed answers with this HTTP status (200: as normal). */
+    feedAnswers: (status: number) => void (feedStatus = status),
     /** What a thread's pane holds: its Needs-you rows, by the state key the bridge writes. */
     view: (self: string, key: string) => views.get(self)?.get(key),
     stored: (key: string) => (stored[key] === undefined ? undefined : JSON.parse(stored[key] as string)),

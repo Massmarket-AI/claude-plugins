@@ -6,7 +6,7 @@ import {
   holdSentence, holderName, isDraftDone, isUuid, needsLine, noteText, shortName, titleFor, titleNames, withTeammate,
 } from './queue'
 import type { Feed, QueueItem } from './queue'
-import { kickoffText, waitingText } from './threads'
+import { handoverText, kickoffText, waitingText } from './threads'
 
 const NOW = Date.parse('2026-10-08T15:00:00Z') // 11 AM ET
 const iso = (hoursFromNow: number) => new Date(NOW + hoursFromNow * 3_600_000).toISOString()
@@ -872,6 +872,41 @@ describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the 
     // his own client's stale package keeps the line it had
     const own = buildLists({ ...f, drafts: [pkg({ status: 'stale', flagged_for_rob: true, project_owner_email: FOUNDER })] }, MON).queue[0] as QueueItem
     expect(draftsLine(own)).toContain('Pick up')
+  })
+
+  test('M2 (review of e4511774, B1): his own task on a client whose stale package a teammate has, a client message after it: his row is for his task, the teammate\'s mail is not added, nothing invites him to take the package over', async () => {
+    const f = asFounder({
+      drafts: [pkg({ status: 'stale', flagged_for_rob: true })],
+      mail: [theirMail('2026-10-12 10:30')],
+      tickets: { due_today: [{ ...committed(P1, 'Acme Roofing — Pat', at('2026-10-12 18:00')), assignee_email: FOUNDER }] },
+    })
+    expect(where(f, MON)).toEqual({ queue: [P1], teammate: [], older: [] })
+    const it = buildLists(f, MON).queue[0] as QueueItem
+    expect(it).toMatchObject({ kind: 'task', tasks: 1, messages: 0, mail: [] })
+    expect(it.theirs).toBeUndefined()
+    // pinned and named for his task, never as a reply
+    expect(titleFor(it, MON)).toBe('🔴 1h left · Acme Roofing · task')
+    expect(it.dueAt).toBe(et('2026-10-12 18:00'))
+    // the kickoff and the note word it as a package a teammate holds: show what is waiting, no prep, no second reply
+    expect(kickoffText(it)).toContain('Builder B picked up the reply drafts (package aaaaaaaa) and has 2 not sent yet. Load the client\'s project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply.')
+    expect(kickoffText(it)).not.toContain('rebuild the drafts')
+    expect(noteText(it, FOUNDER)).toContain('Do not write a second reply: ask Builder B.')
+    expect(noteText(it, FOUNDER)).not.toContain('pick the package up')
+    expect(draftsLine(it)).toBe('_Builder B has these drafts. Their reminder lists what is still open._')
+  })
+
+  test('M2 (review of e4511774, B2): a client under With a teammate for a teammate\'s stale package: the note, the kickoff and its handover word it as a package a teammate holds', async () => {
+    const it = buildLists(asFounder({ drafts: [pkg({ status: 'stale' })], mail: [theirMail('2026-10-12 10:30')] }), MON).teammate[0] as QueueItem
+    expect(it).toMatchObject({ kind: 'reply', messages: 1, theirs: 'Builder B' })
+    const note = noteText(it, FOUNDER)
+    expect(note).toBe('1 client message waiting on our reply and 0 committed tasks due; Builder B picked up the reply drafts for this client (package aaaaaaaa) and has 2 drafts not sent yet. Do not write a second reply: ask Builder B.')
+    expect(note).not.toContain('pick the package up')
+    expect(kickoffText(it)).toContain('Do not run prep and do not draft a second reply. Send nothing without my go.')
+    expect(kickoffText(it)).not.toContain('rebuild the drafts')
+    expect(handoverText(it, { sid: 'local_0f1e2d3c-aaaa-4bbb-8ccc-000000000001', title: 'Roof quote' })).toContain('Before showing me what is due')
+    // his own client's stale package keeps the wording that rebuilds the drafts, as before
+    const own = buildLists(asFounder({ drafts: [pkg({ status: 'stale', project_owner_email: FOUNDER })], mail: [{ ...theirMail('2026-10-12 10:30'), project_owner_email: FOUNDER }] }), MON).queue[0] as QueueItem
+    expect(kickoffText(own)).toContain('so pick it up, rebuild the drafts')
   })
 
   test('a teammate\'s own view of the same feeds is what it was: the package is theirs to send, and nothing of R1 or R2 applies', async () => {
