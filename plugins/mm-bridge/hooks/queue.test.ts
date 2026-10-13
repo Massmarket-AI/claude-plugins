@@ -710,6 +710,18 @@ describe('B4: a package flagged for the founder lists for him whoever owns the c
     expect(where(asFounder({ drafts: [flagged({ flagged_for_rob: false, ...pickedUp(TEAMMATE_B) })] }))).toEqual({ queue: [], teammate: [], older: [] })
   })
 
+  test('his own client\'s (or an unowned client\'s) stale flagged package with no client message waiting stays unlisted: a second reply is not invited (10-13 meeting, M1)', async () => {
+    for (const owner of [FOUNDER, null]) {
+      const stale = flagged({ status: 'stale', project_owner_email: owner })
+      expect(where(asFounder({ drafts: [stale] })), String(owner)).toEqual({ queue: [], teammate: [], older: [] })
+      // a client message waiting lists it, as any message does, with the kickoff that rebuilds the drafts
+      const withMail = asFounder({ drafts: [stale], mail: [{ ...mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 10:30'), project_owner_email: owner }] })
+      const [it] = lists(withMail).queue
+      expect(it, String(owner)).toMatchObject({ projectId: P1, kind: 'reply' })
+      expect(kickoffText(it as QueueItem)).toContain('exists but is marked out of date, so pick it up, rebuild the drafts')
+    }
+  })
+
   test('two packages on the client: the one that waits for his OK stays the row\'s package, whichever comes later', async () => {
     const other = draft(P1, 'Acme Roofing — Pat', { package_id: PKG_B, ...pickedUp(TEAMMATE_B), project_owner_email: TEAMMATE_B, covers_through: at('2026-10-12 11:00') })
     for (const drafts of [[flagged(), other], [other, flagged()]]) {

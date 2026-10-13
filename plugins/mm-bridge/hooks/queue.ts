@@ -347,6 +347,10 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     // ⛔ With one exception, for the founder alone: a package flagged for his OK is listed whoever owns the
     // client, as its own kind (Rob, 2026-10-12: six such packages were missing from his panel). It is due
     // when a prepared one would be. Somebody else sends it: the owner on record.
+    // ⛔ Not the founder's own client's (or an unowned client's) STALE flagged package: with no client
+    // message waiting it lists nothing, and that stays so (Rob's 10-13 morning meeting, finding M1: 12 of
+    // 102 packages in 14 days went stale because we had already replied by hand; listing them would invite
+    // a second reply, and OW's fix will close such packages). With a message waiting, the message lists it.
     if (founder && d.flagged_for_rob === true && (held || !isMine(d.project_owner_email, feed))) {
       it.kind = 'ok'
       it.ok = { sends: d.project_owner_email ? holderName(d.project_owner_email) : NOBODY }
