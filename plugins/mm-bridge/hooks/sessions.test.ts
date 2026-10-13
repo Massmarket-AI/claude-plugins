@@ -246,6 +246,29 @@ describe('F2: a write the engine refuses midway leaves nothing half done', () =>
     expect(w.app.get('local_tt')).toMatchObject({ title: 'My own name', pinned: false })
   })
 
+  test('F7: a pin the person took off stays off when the sync that saw it could not record it', async () => {
+    const feed: Feed = { member: ME, role: 'founder', mail: [mail(1, 'Client One')], tickets: {}, threads: [] }
+    const w = fakeApp(feed, [{ sessionId: 'local_f7hub' }, { sessionId: 'local_f7', title: 'Client One work' }])
+    w.put('mm.links', { [pid(1)]: 'local_f7' })
+    const hub = w.session('local_f7hub')
+    await mm(hub, '')
+    expect(w.app.get('local_f7')?.pinned).toBe(true)
+    // the person takes our pin off; the sync that sees it cannot record that
+    const thread = w.app.get('local_f7')
+    if (thread) thread.pinned = false
+    w.refuse('mm.unpinned', 1)
+    await w.advance(6 * 60_000)
+    await mm(hub, '').catch(() => undefined)
+    // the next sync still sees it was the person: recorded now, and not pinned again
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(Object.keys(w.stored('mm.unpinned') as object)).toEqual(['local_f7'])
+    expect(w.app.get('local_f7')?.pinned).toBe(false)
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(w.app.get('local_f7')?.pinned).toBe(false)
+  })
+
   test('Start: the chip\'s record refused is noted, and written again 1 to 3 seconds later', async () => {
     const feed: Feed = { member: ME, role: 'founder', mail: [mail(1, 'Client One')], tickets: {}, threads: [] }
     const w = fakeApp(feed, [{ sessionId: 'local_sthub' }])

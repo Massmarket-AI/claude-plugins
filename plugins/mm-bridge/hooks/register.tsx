@@ -1133,10 +1133,13 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   await patchStore<Auto>($, 'mm.auto', {}, (fresh, stored) => applyChanges(fresh, was.auto, auto, 'set') || !stored)
   await patchStore<Record<string, string>>($, 'mm.titles', {}, fresh => applyChanges(fresh, was.titles, titles, 'set'))
   await patchStore<Record<string, string>>($, 'mm.links', {}, (fresh, stored) => applyChanges(fresh, was.links, links) || !stored)
+  // ⛔ The person's unpins BEFORE the pin records (F7): the pass that sees a pin taken off by hand both
+  // records it and turns our pin record into not ours. Written the other way round, a refused second write
+  // left neither, and the next sync pinned the thread again.
+  await patchStore<Record<string, Unpinned>>($, 'mm.unpinned', {}, (fresh, stored) => keepNewest(fresh, was.unpinned, unpinned) || !stored)
   await patchStore<Record<string, Pin>>($, 'mm.pins', {}, (fresh, stored) => applyChanges(fresh, was.pins, pins) || !stored)
   await patchStore<Auto>($, 'mm.auto', {}, fresh => applyChanges(fresh, was.auto, auto, 'delete'))
   await patchStore<Record<string, string>>($, 'mm.titles', {}, (fresh, stored) => keepNewest(fresh, was.titles, titles) || !stored)
-  await patchStore<Record<string, Unpinned>>($, 'mm.unpinned', {}, (fresh, stored) => keepNewest(fresh, was.unpinned, unpinned) || !stored)
   await $.store.set('mm.last', last)
   await showQueue($, member, items, rows, want.size, now, folds)
   return { last, live, pairs, listed: true, unseen }
