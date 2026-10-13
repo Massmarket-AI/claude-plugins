@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { ME, ago, fakeApp, mm, pid } from './fake-app'
+import { ME, ago, fakeApp, mm, pid, tool } from './fake-app'
 import type { Feed } from './queue'
 
 // The bridge's own hooks in a pretend desktop app (fake-app.ts): one store and one app shared by the threads
@@ -76,5 +76,64 @@ describe('F3: /mm link never picks one client of several the name could mean', (
     expect(await mm(t1, 'link acme')).toBe('More than one client matches "acme": Acme, Acme North. Type more of the name.')
     expect(await mm(t1, 'link bolt')).toBe('More than one client matches "bolt": Bolt Glass, Bolt Steel. Type more of the name.')
     expect(w.stored('mm.links')).toBeUndefined()
+  })
+})
+
+describe('F4: only the person moves a client, or undoes their own unlink', () => {
+  const oneClient = (): Feed => ({ member: ME, role: 'founder', mail: [mail(1, 'Client One')], tickets: {}, threads: [] })
+
+  test('the tool cannot take a client from the thread the person linked it to (P3), nor can a /mm that is not the person\'s', async () => {
+    const w = fakeApp(oneClient(), [{ sessionId: 'local_t1', title: 'Client One work' }, { sessionId: 'local_t2', title: 'Other client work' }])
+    w.put('mm.links', { [pid(1)]: 'local_t1' })
+    w.put('mm.acted', { [pid(1)]: { sid: 'local_t1', at: Date.parse(ago(0)) } })
+    const t2 = w.session('local_t2')
+    const refusal = 'Client One already has a thread. Only the person can move it: they type /mm link Client One in the thread that should have it.'
+    expect(await tool(t2, 'link Client One')).toBe(refusal)
+    expect(await mm(t2, 'link Client One', 'peer')).toBe(refusal)
+    expect(linksOf(w)).toEqual({ [pid(1)]: 'local_t1' })
+    expect(w.calls.filter(c => c.tool === 'set_session_title' || c.tool === 'set_pinned')).toEqual([])
+  })
+
+  test('the tool cannot link a thread the person unlinked, and the unlink stays (P3b)', async () => {
+    const w = fakeApp(oneClient(), [{ sessionId: 'local_t2', title: 'Mine' }])
+    const unlinkedAt = Date.parse(ago(0)) - 1_000
+    w.put('mm.unlinked', { local_t2: unlinkedAt })
+    const t2 = w.session('local_t2')
+    expect(await tool(t2, 'link Client One')).toBe('This thread was unlinked by the person. Only they can link it again: they type /mm link Client One here.')
+    expect(w.stored('mm.unlinked')).toEqual({ local_t2: unlinkedAt })
+    expect(w.stored('mm.links')).toBeUndefined()
+    // the person can
+    expect(await mm(t2, 'link Client One')).toBe('This thread is now Client One\'s. Showing Client One in the side pane.')
+    expect(w.stored('mm.unlinked')).toEqual({})
+  })
+
+  test('a client whose thread is gone may be linked by the tool, and a link the tool makes is never stamped', async () => {
+    const w = fakeApp(oneClient(), [{ sessionId: 'local_t2', title: 'Mine' }])
+    // linked to a thread the app no longer has
+    w.put('mm.links', { [pid(1)]: 'local_gone' })
+    const t2 = w.session('local_t2')
+    expect(await tool(t2, 'link Client One')).toBe('This thread is now Client One\'s. Showing Client One in the side pane.')
+    expect(linksOf(w)).toEqual({ [pid(1)]: 'local_t2' })
+    expect(w.stored('mm.acted')).toBeUndefined()
+  })
+
+  test('the thread a client is moved from gets its own name back and our pin off, never a frozen client name (P3c)', async () => {
+    const w = fakeApp(oneClient(), [{ sessionId: 'local_t1', title: 'Original one' }, { sessionId: 'local_t2', title: 'Other client work' }])
+    w.put('mm.links', { [pid(1)]: 'local_t1' })
+    const t1 = w.session('local_t1')
+    await mm(t1, '')
+    expect(w.app.get('local_t1')).toMatchObject({ title: '🟡 22h left · Client One · reply', pinned: true })
+    // the tool is refused; the person moves it, typing /mm link in the other thread
+    const t2 = w.session('local_t2')
+    expect(await tool(t2, 'link Client One')).toContain('already has a thread')
+    expect(await mm(t2, 'link Client One')).toBe('This thread is now Client One\'s. Showing Client One in the side pane.')
+    expect(linksOf(w)).toEqual({ [pid(1)]: 'local_t2' })
+    expect(w.app.get('local_t1')).toMatchObject({ title: 'Original one', pinned: false })
+    expect(w.app.get('local_t2')).toMatchObject({ title: '🟡 22h left · Client One · reply', pinned: true })
+    // and later syncs leave it so
+    await w.advance(6 * 60_000)
+    await mm(t1, '')
+    expect(w.app.get('local_t1')).toMatchObject({ title: 'Original one', pinned: false })
+    expect((w.stored('mm.titles') as Record<string, string>).local_t1).toBeUndefined()
   })
 })

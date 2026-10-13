@@ -1080,11 +1080,18 @@ describe('B2: one client\'s kickoff never goes into another client\'s thread', (
     expect(w.acted()).toEqual([])
   })
 
-  test('the tool may still link a thread that belongs to no client, and one the person unlinked', async ($, on) => {
+  test('the tool may still link a thread that belongs to no client, never stamping it; one the person unlinked it may not (F4)', async ($, on) => {
     const w = world(on, { store: { 'mm.links': { [BOLT]: SELF }, 'mm.unlinked': { [SELF]: NOW - HOUR } } })
-    // the stored link is an older copy written back after the unlink: this thread is nobody's
+    // the person unlinked this thread: only they link it again, and nothing is written
+    const before = snapshot(w)
+    expect(await tool($, 'link Acme Roofing')).toBe('This thread was unlinked by the person. Only they can link it again: they type /mm link Acme Roofing here.')
+    expect(snapshot(w)).toBe(before)
+    // a thread that is nobody's: the tool links it, and does not stamp it
+    w.stored['mm.unlinked'] = {}
+    w.stored['mm.links'] = {}
     expect(await tool($, 'link Acme Roofing')).toBe('This thread is now Acme Roofing\'s. Showing Acme Roofing in the side pane.')
     expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+    expect(w.stored['mm.acted']).toBeUndefined()
     expect(w.acted()).toEqual([])
   })
 

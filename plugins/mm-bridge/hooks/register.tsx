@@ -998,11 +998,24 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
         s.pinned = false
         writes++
       }
-      // ⛔ The tick is for a client with nothing left in play for the person: in none of the three lists.
-      const still = [...items, ...quiet].find(i => i.projectId === pin.projectId)
-      // the name in a pin record may be one an older version stored as the feed wrote it
-      const title = still ? titleFor(still, now) : clearedTitle(cleanName(pin.client), now)
-      if (s.title !== title) await rename(s, title)
+      if (ownerOf(sid, links) !== pin.projectId) {
+        // ⛔ The thread is no longer this client's (the client was moved to another thread, or its link went
+        // some other way): its own name back, as an undone link gets it, never the name of a client it no
+        // longer has (review of 79cbc596, F4: the thread a client was moved from kept that client's name).
+        const own = titles[sid]
+        if (own !== undefined && s.title !== own) {
+          await mcpJson($, 'ccd_session_mgmt', 'set_session_title', { session_id: sid, title: own })
+          s.title = own
+          writes++
+        }
+        delete titles[sid]
+      } else {
+        // ⛔ The tick is for a client with nothing left in play for the person: in none of the three lists.
+        const still = [...items, ...quiet].find(i => i.projectId === pin.projectId)
+        // the name in a pin record may be one an older version stored as the feed wrote it
+        const title = still ? titleFor(still, now) : clearedTitle(cleanName(pin.client), now)
+        if (s.title !== title) await rename(s, title)
+      }
     }
     delete pins[sid]
   }
@@ -1927,18 +1940,29 @@ async function runCommand($: EngineInterface, args: string, by: By): Promise<str
     if (found.length > 1) return severalClients(arg, found)
     named = found[0]
     if (!named) return verb === 'link' ? noFeedClient(arg) : noClient(arg)
-    // ⛔ Only the person moves a thread from one client to another. For anyone else (Claude through the
-    // tool, a /mm that is not the person's) `link` in a thread that is already another client's is refused
-    // here, before anything is written. A thread that is nobody's may still be linked.
+    // ⛔ Only the person moves a client or a thread, and only the person undoes their own unlink. For anyone
+    // else (Claude through the tool, a /mm that is not the person's) `link` is refused here, before
+    // anything is written, when this thread is one the person unlinked, when it is already another client's,
+    // or when the client is already linked to another thread that is still there (review of 79cbc596, F4).
+    // A thread that is nobody's may still be linked to a client that has no thread.
     if (verb === 'link' && by !== 'person') {
       const me = await selfId($)
-      const owner = me && !(me in (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))) ? ownerOf(me, await storeGet<Record<string, string>>($, 'mm.links', {})) : undefined
+      if (me && me in (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))) {
+        return `This thread was unlinked by the person. Only they can link it again: they type /mm link ${named.client} here.`
+      }
+      const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+      const owner = me ? ownerOf(me, links) : undefined
       if (owner !== undefined && owner !== named.projectId) {
         const pin = (await storeGet<Record<string, Pin>>($, 'mm.pins', {}))[me]
         const here = await desktopOnly(async () => asThread(await mcpJson($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' })), null)
         // the client's name wherever it can still be read; failing all of that, the sentence names no one
         const other = ownerName(owner, queue, pin, here?.title) || 'another client'
         return `This thread is ${other}'s. Only the person can move it: they type /mm link ${named.client}.`
+      }
+      // (a thread the app says is gone, or archived, holds nothing; one it cannot answer for is still there)
+      const holder = links[named.projectId]
+      if (holder !== undefined && holder !== me && (await lookup($, holder)) !== 'gone') {
+        return `${named.client} already has a thread. Only the person can move it: they type /mm link ${named.client} in the thread that should have it.`
       }
     }
   }
@@ -1966,8 +1990,9 @@ async function runCommand($: EngineInterface, args: string, by: By): Promise<str
       links[pid] = me
     })
     await claim($, pid, me)
-    if (it) await stamp($, pid, me)
-    else {
+    // ⛔ Only the person's own link stamps: one Claude or anything else made is not pinned ahead of the cap.
+    if (it && by === 'person') await stamp($, pid, me)
+    else if (!it) {
       // A client with nothing waiting: linked, and nothing more. No stamp (nothing was acted on, so nothing
       // pins). The bridge's record of this thread, when it has one, is now this client's: the sync takes our
       // pin off and the thread's name says this client is clear, instead of naming the client it was.
