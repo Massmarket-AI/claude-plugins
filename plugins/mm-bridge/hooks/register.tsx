@@ -64,7 +64,7 @@ import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, 
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.4.1'
+const VERSION = '0.5.0'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
 const VIEW = { plugin: 'mm-bridge', key: 'view' } as const
 const QUEUE = { plugin: 'mm-bridge', key: 'queue' } as const
