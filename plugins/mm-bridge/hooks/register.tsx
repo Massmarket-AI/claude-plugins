@@ -1008,7 +1008,14 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     if (s.title !== title) await rename(s, title)
     if (!s.pinned) {
       await recordPin(sid, record(true))
-      await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: sid, pinned: true })
+      try {
+        await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: sid, pinned: true })
+      } catch (err) {
+        // ⛔ The app refused the pin: our record goes back to not ours, so the next sync pins it again
+        // instead of reading a pin that never was as one the person took off (L3).
+        await recordPin(sid, record(false)).catch(() => {})
+        throw err
+      }
       s.pinned = true
       writes++
     }

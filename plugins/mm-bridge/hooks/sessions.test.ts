@@ -341,4 +341,21 @@ describe('re-review of a446f5ab: Start after a chip was spent, a re-check after 
     expect(Object.values(links).filter(s => s === 'local_l2a').length).toBe(1)
     expect(links).toEqual({ [pid(2)]: 'local_l2a' })
   })
+
+  test('L3: a pin the app refused is pinned on the next sync, never read as the person\'s unpin (P10)', async () => {
+    const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], mail: [mail(1, 'Client One')] }
+    const w = fakeApp(feed, [{ sessionId: 'local_l3hub' }, { sessionId: 'local_l3a', title: 'A work' }])
+    w.put('mm.links', { [pid(1)]: 'local_l3a' })
+    const hub = w.session('local_l3hub')
+    w.failPins.add('local_l3a')
+    let failed = ''
+    await mm(hub, '').catch((err: unknown) => void (failed = String(err)))
+    expect(failed).toContain('set_pinned failed')
+    expect((w.stored('mm.pins') as Record<string, { byUs: boolean }>).local_l3a?.byUs).toBe(false)
+    w.failPins.clear()
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(w.app.get('local_l3a')?.pinned).toBe(true)
+    expect(w.stored('mm.unpinned') ?? {}).toEqual({})
+  })
 })
