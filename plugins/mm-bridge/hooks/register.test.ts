@@ -4111,9 +4111,10 @@ describe('B3: a thread is linked by itself only to the one client its sessions d
     expect(w.threads.get('local_pipe')).toMatchObject({ title: 'Pipeline speed', pinned: false })
     // not the person's unlink: no record of one
     expect(w.stored['mm.unlinked']).toBeUndefined()
-    // and Acme's row has no thread for Update to send into
+    // (the row still offers it, as it offers any thread a client's session ran in, for the person to choose:
+    // nothing goes into it unless they press)
     const ui = await pane($)
-    expect(await lines(ui)).toContain('drafts ready · Start thread: no thread yet')
+    expect(await lines(ui)).toContain('drafts ready · Update thread: thread from Mon, Oct 12 exists')
     await ui.unmount()
     // nor does it link itself again while the feed shows both
     await w.clock.advance(6 * 60_000)
