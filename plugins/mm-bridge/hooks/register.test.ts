@@ -1036,18 +1036,14 @@ describe('B2: one client\'s kickoff never goes into another client\'s thread', (
     await ui.unmount()
   })
 
-  test('a thread that linked itself and is then reached by a second client\'s session stops being the first one\'s: undone like any automatic link', async ($, on) => {
+  test('a thread that linked itself and is then reached by a second client\'s session stops being the first one\'s: undone on the next sync (B3)', async ($, on) => {
     const w = world(on, { feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.threads': PAIRS } })
     await mm($, '')
     expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a' })
     // a /clear in that thread, and the new session declares Bolt: Acme's session is still listed
     w.stored['mm.threads'] = { ...PAIRS, 'cli-second': { app: 'local_a', at: NOW } }
     w.setFeed(feed({ threads: [declared(ACME, 'cli-acme', 30), declared(BOLT, 'cli-second', 0)] }))
-    for (let i = 0; i < 2; i++) {
-      await w.clock.advance(6 * 60_000)
-      await mm($, '')
-    }
-    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a' })
+    // (0.4.1 waited for three such syncs; a thread that no longer qualifies is let go on the next)
     await w.clock.advance(6 * 60_000)
     await mm($, '')
     expect(w.stored['mm.links']).toEqual({})
@@ -4087,5 +4083,100 @@ describe('B1: a pass writes only what it changed, over a fresh copy; what the pe
     for (const sid of ['local_a', 'local_b', 'local_c']) expect(w.threads.get(sid)?.pinned).toBe(true)
     expect(w.threads.get('local_u')?.title).toBe('Unlinked notes')
     expect(w.acted()).toEqual([])
+  })
+})
+
+describe('B3: a thread is linked by itself only to the one client its sessions declared', () => {
+  /** Massmarket's internal-ops project: a project like any other here. */
+  const INTERNAL = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
+  const pipeline = (on: On) =>
+    world(on, {
+      feed: feed({ threads: [declared(ACME, 'cli-pipe', 2)] }),
+      threads: [thread('local_pipe', 'Pipeline speed', 2)],
+      store: { 'mm.threads': { 'cli-pipe': { app: 'local_pipe', at: NOW } } },
+    })
+
+  test('[3] the Pipeline speed case: once the feed shows its session declared another project too, the link it made by itself is let go on the next sync, its name back and our pin off', async ($, on) => {
+    const w = pipeline(on)
+    await mm($, '')
+    // the feed could not tell: the session's only row named Acme
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_pipe' })
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: 'local_pipe', miss: 0 } })
+    expect(w.threads.get('local_pipe')).toMatchObject({ title: ACME_TITLE, pinned: true })
+    // the feed now carries that session's internal-ops row as well
+    w.setFeed(feed({ threads: [declared(ACME, 'cli-pipe', 2), declared(INTERNAL, 'cli-pipe', 1)] }))
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.stored['mm.auto']).toEqual({})
+    expect(w.threads.get('local_pipe')).toMatchObject({ title: 'Pipeline speed', pinned: false })
+    // not the person's unlink: no record of one
+    expect(w.stored['mm.unlinked']).toBeUndefined()
+    // and Acme's row has no thread for Update to send into
+    const ui = await pane($)
+    expect(await lines(ui)).toContain('drafts ready · Start thread: no thread yet')
+    await ui.unmount()
+    // nor does it link itself again while the feed shows both
+    await w.clock.advance(6 * 60_000)
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.acted()).toEqual([])
+  })
+
+  test('[3] a link the person made is never let go by it: /mm link, then the same rows', async ($, on) => {
+    const w = world(on, {
+      feed: feed({ threads: [declared(ACME, SELF_CLI, 2)] }),
+      self: thread(SELF, 'Pipeline speed', 2),
+      store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } },
+    })
+    await mm($, '')
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0 } })
+    expect(await mm($, 'link Acme Roofing')).toBe('This thread is now Acme Roofing\'s. Showing Acme Roofing in the side pane.')
+    w.setFeed(feed({ threads: [declared(ACME, SELF_CLI, 2), declared(INTERNAL, SELF_CLI, 1)] }))
+    for (let i = 0; i < 4; i++) {
+      await w.clock.advance(6 * 60_000)
+      await mm($, '')
+    }
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+    expect(w.threads.get(SELF)?.title).toMatch(ACME_NAMED)
+  })
+
+  test('[1] a session whose rows name two projects in the window is never linked by itself, to either', async ($, on) => {
+    const w = world(on, {
+      feed: feed({ threads: [declared(ACME, 'cli-x', 2), declared(BOLT, 'cli-x', 1)] }),
+      threads: [thread('local_x', 'Hub thread', 1)],
+      store: { 'mm.threads': { 'cli-x': { app: 'local_x', at: NOW } } },
+    })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.threads.get('local_x')).toMatchObject({ title: 'Hub thread', pinned: false })
+    // the person may still take it for either: both rows show it
+    const ui = await pane($)
+    expect(await lines(ui)).toContain('drafts ready · Update thread: thread from Mon, Oct 12 exists')
+    await ui.unmount()
+  })
+
+  test('[2] a thread that opened with a marker for one client is never linked by itself to another, and one already so linked is let go', async ($, on) => {
+    // Bolt's thread is elsewhere, so this thread's Bolt marker does not take Bolt; the feed then lists its session for Acme
+    const w = world(on, { threads: [thread('local_b', 'Staffing plan', 20)], store: { 'mm.links': { [BOLT]: 'local_b' }, 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } } })
+    await mm($, '')
+    await $.prompt.submit({ text: BOLT_KICKOFF, wait: false, origin: { kind: 'sdk' } } as never)
+    expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_b' })
+    expect(w.stored['mm.marked']).toEqual({ [SELF]: BOLT })
+    w.setFeed(feed({ threads: [declared(ACME, SELF_CLI, 1)] }))
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_b' })
+    expect(w.threads.get(SELF)?.title).toBe('Morning hub')
+  })
+
+  test('[2] [3] the marker arrives after the thread linked itself to another client: let go on the next sync', async ($, on) => {
+    const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } } })
+    await mm($, '')
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0 } })
+    // this thread is Acme's, so the Bolt marker links nothing; it still says which client the thread is for
+    await $.prompt.submit({ text: BOLT_KICKOFF, wait: false, origin: { kind: 'sdk' } } as never)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.threads.get(SELF)).toMatchObject({ title: 'Morning hub', pinned: false })
   })
 })

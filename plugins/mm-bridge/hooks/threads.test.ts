@@ -4,8 +4,8 @@ import { buildLists, buildQueue } from './queue'
 import type { Feed, FeedThread, QueueItem } from './queue'
 import {
   CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, LONG_CONTEXT_TOKENS, LONG_THREAD_ROWS, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
-  autoLinkFor, bandWords, clientThreads, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail, rowFor,
-  rowGroups, sharedThreads, signatureOf, threadLength, threadLink, threadRows, titleLooksLike, titleSuggestion, waitingText,
+  autoLinkFor, bandWords, clientThreads, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
+  rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLength, threadLink, threadRows, titleLooksLike, titleSuggestion, waitingText,
 } from './threads'
 import type { AppThread, ClientThread, Pairs, Platform } from './threads'
 
@@ -189,6 +189,38 @@ describe('R1: which threads are a client\'s', () => {
     expect(clientThreads(BOLT, {}, feedThreads, both, one).map(t => t.sid)).toEqual(['local_a'])
     // two sessions of ONE client in a thread do not make it shared, and a session the app cannot place counts for nothing
     expect([...sharedThreads([declared(ACME, 'cli-old', '2026-10-04 03:00'), declared(ACME, 'cli-new', '2026-10-12 10:00'), declared(BOLT, 'cli-elsewhere', '2026-10-12 10:00')], both)]).toEqual([])
+  })
+
+  test('[B3.1] a thread links itself only when EVERY feed row of its sessions names that one client', async () => {
+    const INTERNAL = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
+    const one = liveOf(app('local_p', 'Pipeline speed', '2026-10-12 10:00'), app('local_b', 'Bolt only', '2026-10-08 10:00'))
+    const p = pairsOf({ 'cli-p': 'local_p', 'cli-b': 'local_b' })
+    // one session, rows for two projects in the window: linked to neither
+    const two = [declared(ACME, 'cli-p', '2026-10-12 09:00'), declared(BOLT, 'cli-p', '2026-10-12 10:00')]
+    expect(soleClient('local_p', two, p)).toBeUndefined()
+    expect(autoLinkFor(ACME, {}, two, p, one)).toBeUndefined()
+    expect(autoLinkFor(BOLT, {}, two, p, one)).toBeUndefined()
+    // the internal-ops project counts like any other: a pipeline thread that loaded a client's skill for reference
+    const pipeline = [declared(ACME, 'cli-p', '2026-10-12 09:00'), declared(INTERNAL, 'cli-p', '2026-10-12 10:00')]
+    expect(autoLinkFor(ACME, {}, pipeline, p, one)).toBeUndefined()
+    expect(onlyClients(ACME, 'local_p', pipeline, p)).toBe(false)
+    // rows for the one client alone: it links, and a thread with no row at all is nobody's
+    const alone = [declared(ACME, 'cli-p', '2026-10-12 09:00'), declared(BOLT, 'cli-b', '2026-10-08 10:00')]
+    expect(soleClient('local_p', alone, p)).toBe(ACME)
+    expect(autoLinkFor(ACME, {}, alone, p, one)).toBe('local_p')
+    expect(soleClient('local_b', [], p)).toBeUndefined()
+    expect(onlyClients(BOLT, 'local_b', [], p)).toBe(false)
+  })
+
+  test('[B3.2] a thread that opened with an [mm-link] marker for one client is never linked by itself to another', async () => {
+    const one = liveOf(app('local_p', 'Chip for Bolt', '2026-10-12 10:00'))
+    const p = pairsOf({ 'cli-p': 'local_p' })
+    const rows = [declared(ACME, 'cli-p', '2026-10-12 09:00')]
+    expect(autoLinkFor(ACME, {}, rows, p, one, {}, { local_p: BOLT })).toBeUndefined()
+    expect(onlyClients(ACME, 'local_p', rows, p, { local_p: BOLT })).toBe(false)
+    // a marker for that same client is no bar
+    expect(autoLinkFor(ACME, {}, rows, p, one, {}, { local_p: ACME })).toBe('local_p')
+    expect(autoLinkFor(ACME, {}, rows, p, one, {}, { local_other: BOLT })).toBe('local_p')
   })
 
   test('two clients linked to one thread (an older version allowed it): it is the first one\'s', async () => {

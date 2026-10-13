@@ -5,8 +5,8 @@ import type { MmBand, MmFolds, MmNotice, MmQueue, MmView } from '../types'
 import { MAX_PINS, buildLists, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, dueLine, feedClients, holdBanner, isDraftDone, isUuid, needsLine, noteText, titleFor } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
-  LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFor, bandWords, clientThreads, foldGroups, hasWaiting, kickoffText, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups,
-  sharedThreads, signatureOf, threadLength, threadLink, threadRows, titleSuggestion,
+  LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFor, bandWords, clientThreads, foldGroups, hasWaiting, kickoffText, onlyClients, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor,
+  rowGroups, signatureOf, threadLength, threadLink, threadRows, titleSuggestion,
 } from './threads'
 import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, Row, RowButton, RowState, Sent } from './threads'
 
@@ -765,6 +765,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   const readings = await storeGet<Record<string, ContextReading>>($, 'mm.ctx', {})
   const released = await storeGet<string[]>($, 'mm.released', [])
   const unpinned = await storeGet<Record<string, Unpinned>>($, 'mm.unpinned', {})
+  /** The client each thread's [mm-link] marker named: never a thread the bridge links to another by itself. */
+  const marked = await storeGet<Record<string, string>>($, 'mm.marked', {})
   /**
    * The shared maps as this pass read them. ⛔ The pass never writes one of them back whole: at its end each
    * gets only what the pass itself changed, over a fresh copy (`applyChanges`). Its app calls take seconds,
@@ -804,35 +806,42 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // A link the bridge made by itself stops being one when the link is gone or the person acted on it.
   // (An entry of any other shape is dropped with them.)
   for (const [pid, a] of Object.entries(auto)) if (!a || typeof a.sid !== 'string' || links[pid] !== a.sid || acted[pid]?.sid === a.sid) delete auto[pid]
-  // ⛔ And it is undone when it stops being true: its thread's session missing from the feed's threads for
-  // that client, or the thread now reached by sessions of more than one client, AUTO_MISSES syncs in a row.
-  // Counted once per feed, and only when the feed's list has entries: a feed with no `threads`, or an
-  // empty one, says nothing either way and changes no count. A miss counts only when the one before it is
-  // MISS_GAP_MS old: three /mm in a row are one sync. A thread that cannot be seen is left as it is.
+  // ⛔ And it is undone when it stops being true. At once, on this sync (B3, 2026-10-13), when it no longer
+  // qualifies: the feed's rows for its thread's sessions name another client (alone, or beside this one;
+  // the internal-ops project counts like any other), or the thread opened with an [mm-link] marker for
+  // another client. More quietly, when the feed stops listing its thread's sessions at all, AUTO_MISSES
+  // syncs in a row: those misses are counted once per feed, and only when the feed's list has entries (a
+  // feed with no `threads`, or an empty one, says nothing either way and changes no count), and a miss
+  // counts only when the one before it is MISS_GAP_MS old (three /mm in a row are one sync). A thread that
+  // cannot be seen is left as it is. A link the person made is not in `auto`, and is never undone here.
   const undone: string[] = []
-  if (!known && feedThreads.length) {
-    const shared = sharedThreads(feedThreads, pairs)
+  if (!known) {
     for (const [pid, a] of Object.entries(auto)) {
       if (unseen.has(a.sid)) continue
-      if (!shared.has(a.sid) && feedThreads.some(t => t.project_id === pid && pairs[t.session_id]?.app === a.sid)) {
+      const declared = feedThreads.some(t => pairs[t.session_id]?.app === a.sid)
+      const markedOther = marked[a.sid] !== undefined && marked[a.sid] !== pid
+      if (!markedOther && declared && onlyClients(pid, a.sid, feedThreads, pairs, marked)) {
         a.miss = 0
         delete a.at
         continue
       }
-      if (typeof a.at === 'number' && now - a.at < MISS_GAP_MS) continue
-      a.miss = (Number(a.miss) || 0) + 1
-      a.at = now
-      if (a.miss < AUTO_MISSES) continue
+      if (!markedOther && !declared) {
+        if (!feedThreads.length) continue
+        if (typeof a.at === 'number' && now - a.at < MISS_GAP_MS) continue
+        a.miss = (Number(a.miss) || 0) + 1
+        a.at = now
+        if (a.miss < AUTO_MISSES) continue
+      }
       delete auto[pid]
       delete links[pid]
       undone.push(a.sid)
     }
   }
 
-  // R1: a client with no thread takes the most recently active thread whose session declared it, unless
-  // that thread ran sessions for more than one client (autoLinkFor).
+  // R1: a client with no thread takes the most recently active thread whose sessions declared it and no
+  // other client, and that did not open with a marker for another (autoLinkFor).
   for (const it of items) {
-    const sid = autoLinkFor(it.projectId, links, feedThreads, pairs, live, unlinked)
+    const sid = autoLinkFor(it.projectId, links, feedThreads, pairs, live, unlinked, marked)
     if (!sid) continue
     links[it.projectId] = sid
     auto[it.projectId] = { sid, miss: 0 }
@@ -1976,7 +1985,17 @@ async function linkFromMarker($: EngineInterface, text: string, origin: string |
   const inFeed = Array.isArray(last?.projects) ? last.projects : (last?.items ?? []).map(i => i.projectId)
   if (!inFeed.includes(projectId)) return
   const me = await selfId($)
-  if (!me || me in (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))) return
+  if (!me) return
+  // ⛔ This thread declared this client: the bridge never links it by itself to another one (B3), whatever
+  // becomes of the link this prompt makes. Kept whether or not it links (an unlinked thread, another
+  // client's thread).
+  await patchStore<Record<string, string>>($, 'mm.marked', {}, marked => {
+    if (marked[me] === projectId) return false
+    delete marked[me]
+    marked[me] = projectId
+    capped(marked)
+  })
+  if (me in (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))) return
   const now = await $.clock.now()
   const chips = await chipsOf($, now)
   // the chip this thread was started from: the one for this client whose prompt is this prompt, to the letter

@@ -158,10 +158,39 @@ export function sharedThreads(feedThreads: readonly FeedThread[], pairs: Pairs):
 }
 
 /**
+ * The one client a thread's sessions declared in the feed's window: the project EVERY feed row of every
+ * session that runs in the thread names. Undefined when there is no such row, or when the rows name two
+ * or more projects, whichever they are: the internal-ops project counts like any other (B3, 2026-10-13: a
+ * pipeline thread that loaded one client's skill for reference was linked to that client, pinned and named
+ * as its thread, so that client's Update would have sent into it).
+ */
+export function soleClient(sid: string, feedThreads: readonly FeedThread[], pairs: Pairs): string | undefined {
+  let only: string | undefined
+  for (const t of feedThreads) {
+    if (pairs[t.session_id]?.app !== sid) continue
+    if (only !== undefined && only !== t.project_id) return undefined
+    only = t.project_id
+  }
+  return only
+}
+
+/**
+ * Whether a thread may be, or stay, linked to a client by the bridge itself: every feed row of its
+ * sessions names that client (`soleClient`), and it did not open with an [mm-link] marker for another one
+ * (`marked`: the project each thread's marker named). A thread the feed lists for nobody does not qualify
+ * here; whether such a link is undone is the sync's count of misses.
+ */
+export function onlyClients(projectId: string, sid: string, feedThreads: readonly FeedThread[], pairs: Pairs, marked: Readonly<Record<string, string>> = {}): boolean {
+  if (marked[sid] !== undefined && marked[sid] !== projectId) return false
+  return soleClient(sid, feedThreads, pairs) === projectId
+}
+
+/**
  * R1: the thread a client links itself to when it has none: the most recently active thread whose Claude
- * Code session declared that client. A thread already linked to another client is left alone, a thread the
- * person unlinked is never linked again by itself (`unlinked`), a thread that ran sessions for more than
- * one client is never linked by itself (`sharedThreads`), and a title match is never enough.
+ * Code sessions declared that client and no other (`onlyClients`). A thread already linked to another
+ * client is left alone, a thread the person unlinked is never linked again by itself (`unlinked`), a
+ * thread that ran sessions for more than one client, or opened with a marker for another, is never linked
+ * by itself, and a title match is never enough.
  */
 export function autoLinkFor(
   projectId: string,
@@ -170,11 +199,11 @@ export function autoLinkFor(
   pairs: Pairs,
   live: ReadonlyMap<string, AppThread>,
   unlinked: Readonly<Record<string, unknown>> = {},
+  marked: Readonly<Record<string, string>> = {},
 ): string | undefined {
   if (links[projectId]) return undefined
   const taken = new Set(Object.values(links))
-  const shared = sharedThreads(feedThreads, pairs)
-  return matchedThreads(projectId, links, feedThreads, pairs, live).find(t => !taken.has(t.sid) && !(t.sid in unlinked) && !shared.has(t.sid))?.sid
+  return matchedThreads(projectId, links, feedThreads, pairs, live).find(t => !taken.has(t.sid) && !(t.sid in unlinked) && onlyClients(projectId, t.sid, feedThreads, pairs, marked))?.sid
 }
 
 /**
