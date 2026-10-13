@@ -144,8 +144,10 @@ export const MAX_PINS = 8
  * How far back the feed is asked for client mail, in business hours: OW's `mail_hours`, which takes 1 to
  * 168. A reply is due 24 business hours after a message, and a client goes under Older once that is more
  * than 3 business days past, so mail belongs under Older only when it is more than 96 business hours old.
- * The 96 asked for until 2026-10-13 meant Older could never hold any mail (review of 79cbc596, F1). Mail OW
- * sends from further back than this is read the same way, and goes under Older.
+ * The 96 asked for until 2026-10-13 meant Older could never hold any mail (review of 79cbc596, F1). Rob, that
+ * day: "I kind of do think expanding that to 7 days would be better." The list keeps its 3-business-day
+ * cut; mail 3 to 7 business days overdue goes under Older. Mail OW sends from further back than this is read
+ * the same way, and goes under Older too.
  */
 export const MAIL_LOOKBACK_HOURS = 168
 

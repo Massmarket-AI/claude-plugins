@@ -747,11 +747,17 @@ describe('F1: the feed is asked for mail far enough back for Older to hold any',
       // the 96 business hours asked for before: its oldest mail was never more than 3 business days past due
       const was = buildLists(feed({ mail: [oldMail(subtractBusinessMs(now, 96 * HOUR) + 60_000)] }), now)
       expect([was.queue.length, was.older.length]).toEqual([1, 0])
-      // the oldest the feed is asked for now, and mail older than that: under Older, never nowhere
-      for (const received of [subtractBusinessMs(now, MAIL_LOOKBACK_HOURS * HOUR) + 60_000, subtractBusinessMs(now, 300 * HOUR)]) {
+      // (Rob, 10-13: the list keeps its 3-business-day cut; mail 3 to 7 business days overdue goes under Older)
+      // mail 3 business days and a minute, 4, 5 and 6 business days overdue (the last the oldest the feed is
+      // asked for now), and mail OW sends from further back: under Older, never nowhere
+      const overdue = (days: number, extraMs = 0) => subtractBusinessMs(now, (days + 1) * 24 * HOUR + extraMs)
+      for (const received of [overdue(3, 60_000), overdue(4), overdue(5), subtractBusinessMs(now, MAIL_LOOKBACK_HOURS * HOUR) + 60_000, subtractBusinessMs(now, 300 * HOUR)]) {
         const l = buildLists(feed({ mail: [oldMail(received)] }), now)
         expect([l.queue.length, l.teammate.length, l.older.map(i => i.projectId)]).toEqual([0, 0, [P1]])
       }
+      // and 3 business days overdue exactly is still the list's, as before
+      const edge = buildLists(feed({ mail: [oldMail(overdue(3))] }), now)
+      expect([edge.queue.length, edge.older.length]).toEqual([1, 0])
     })
   }
 })
