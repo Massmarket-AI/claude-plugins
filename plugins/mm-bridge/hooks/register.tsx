@@ -203,8 +203,12 @@ type Pass = { last: Last; live: Map<string, AppThread>; pairs: Pairs; listed: bo
 /** Who ran a /mm command: the person, or anything else (the model through the tool, another session, a schedule, a plugin). */
 type By = 'person' | 'other'
 
-let selfCache: string | null = null
-let instanceCache: string | null = null
+/**
+ * This session's thread, as the app answered `get_session self`, by the session's own id. In the app one
+ * module serves one session, so this holds one entry; keyed by the session, several sessions run against
+ * one store in a test (concurrency.test.ts) each know their own thread.
+ */
+const selves = new Map<string, string>()
 /** When this session last asked the app for its own context reading (0: never). */
 let contextAskedAt = 0
 /**
@@ -261,17 +265,22 @@ async function desktopOnly<T>(work: () => Promise<T>, fallback: T): Promise<T> {
 }
 
 async function selfId($: EngineInterface): Promise<string> {
-  if (!selfCache) {
-    const me = await desktopOnly(async () => (await mcpJson($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' })) as AppThread, null)
-    if (!me?.sessionId) return ''
-    selfCache = me.sessionId
-  }
-  return selfCache
+  const cli = await instanceId($)
+  const known = selves.get(cli)
+  if (known) return known
+  const me = await desktopOnly(async () => (await mcpJson($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' })) as AppThread, null)
+  if (!me?.sessionId) return ''
+  selves.set(cli, me.sessionId)
+  return me.sessionId
+}
+
+/** This thread's id as the timer already learnt it, or '': no app call is made to find it out. */
+async function knownSelf($: EngineInterface): Promise<string> {
+  return selves.get(await instanceId($)) ?? ''
 }
 
 async function instanceId($: EngineInterface): Promise<string> {
-  if (!instanceCache) instanceCache = String(await $.session.id())
-  return instanceCache
+  return String((await $.session.id()) ?? '')
 }
 
 /** A thread as the app answered it, kept to the fields the bridge uses; null for anything that is not an open thread. */
@@ -381,6 +390,91 @@ function capped<T>(record: Record<string, T>, max = REMEMBER_MAX): Record<string
 }
 
 /**
+ * ⛔ THE ONE WAY a map or a list that sessions share is written to the store (B1, 2026-10-13: of fifteen
+ * threads started within a minute or two, two lost the link their [mm-link] marker wrote).
+ *
+ * Every desktop thread is a process of its own. The engine reads the store's file afresh on each get and
+ * writes ONE key on each set, under a lock (its own source, 2.1.295), so a set never touches another key.
+ * But a key is written whole: a session that writes back a map it read earlier takes away whatever another
+ * session put into it since (a dozen threads linking themselves; a sync whose pass takes seconds of app
+ * calls between its reads and its writes). So the key is read again immediately before the write, `change`
+ * makes ONLY its caller's own change to that fresh copy, and it is written at once: nothing is awaited
+ * between the read and the write. `change` answers false to write nothing; `stored` tells it whether the
+ * store held the key at all. A value of the wrong shape (an older version's, a damaged file) is read as
+ * `empty`.
+ * The store has no compare-and-set, so two sessions can still meet between that read and that write; what
+ * the person's own act wrote is checked again a moment later (`settleLater`).
+ */
+async function patchStore<T extends object>($: EngineInterface, key: string, empty: T, change: (fresh: T, stored: boolean) => boolean | void): Promise<T> {
+  const v = await $.store.get(key)
+  const shaped = v !== null && typeof v === 'object' && Array.isArray(v) === Array.isArray(empty)
+  const fresh = (shaped ? v : empty) as T
+  if (change(fresh, v !== undefined) === false) return fresh
+  await $.store.set(key, fresh)
+  return fresh
+}
+
+const sameValue = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
+/** A copy of what a pass read, to tell later what the pass itself changed. */
+const copyOf = <T,>(v: T): T => JSON.parse(JSON.stringify(v ?? null)) ?? v
+
+/**
+ * What a pass changed in a map, entry by entry, made on the store's fresh copy (`patchStore`): `before` is
+ * the map as the pass read it, `after` as the pass left it. An entry the pass did not change is left as the
+ * store has it now, and so is one another session changed since the pass read it: a sync never takes back a
+ * link, a pin or a record written while it ran (it sees it on its next pass). Answers whether it changed
+ * anything.
+ */
+function applyChanges<V>(fresh: Record<string, V>, before: Readonly<Record<string, V>>, after: Readonly<Record<string, V>>): boolean {
+  let changed = false
+  for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const had = Object.hasOwn(before, k) ? before[k] : undefined
+    const has = Object.hasOwn(after, k) ? after[k] : undefined
+    if (sameValue(had, has)) continue
+    const now = Object.hasOwn(fresh, k) ? fresh[k] : undefined
+    if (!sameValue(now, had)) continue
+    if (has === undefined) delete fresh[k]
+    else fresh[k] = has as V
+    changed = true
+  }
+  return changed
+}
+
+/** The same for a list of thread ids: what the pass took off it comes off, what it added goes on, the rest is the store's. */
+function applyListChanges(fresh: string[], before: readonly string[], after: readonly string[]): boolean {
+  const off = before.filter(x => !after.includes(x))
+  const on = after.filter(x => !before.includes(x) && !fresh.includes(x))
+  const kept = fresh.filter(x => !off.includes(x))
+  if (kept.length === fresh.length && !on.length) return false
+  fresh.splice(0, fresh.length, ...kept, ...on)
+  return true
+}
+
+/** 1 to 3 seconds, spread by the thread's own id: a dozen threads that start together do not check again together. */
+function settleMs(id: string): number {
+  // FNV-1a, then mixed, so ids that differ in one character land far apart
+  let h = 0x811c9dc5
+  for (const c of id) h = Math.imul(h ^ c.charCodeAt(0), 0x01000193) >>> 0
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0
+  h = (h ^ (h >>> 16)) >>> 0
+  return 1_000 + (h % 2_001)
+}
+
+/**
+ * Once, 1 to 3 seconds after a write the person's own act made (a marker's link, a session's own pair), it is
+ * read again and written again if it is gone: what two sessions meeting between a read and a write can still
+ * lose (patchStore), and what a set the engine could not lock in time never wrote. Anything going wrong here
+ * is swallowed: the next sync is the fallback.
+ */
+function settleLater($: EngineInterface, id: string, check: () => Promise<void>): void {
+  try {
+    $.clock.after(settleMs(id), () => void check().catch(() => {}))
+  } catch {
+    // no timer here: nothing is checked again
+  }
+}
+
+/**
  * The app's list of threads does not say which Claude Code session runs in each, and the feed names a
  * thread by that session id (it is what the worklog hook sends). So every session writes down its own
  * pair, and the session that syncs reads them all: a thread opened since this version was installed can
@@ -388,15 +482,22 @@ function capped<T>(record: Record<string, T>, max = REMEMBER_MAX): Record<string
  */
 async function recordSelf($: EngineInterface): Promise<void> {
   const app = await selfId($)
-  const cli = String((await $.session.id()) ?? '')
+  const cli = await instanceId($)
   if (!app || !cli) return
   const now = await $.clock.now()
-  const pairs = await storeGet<Pairs>($, 'mm.threads', {})
-  const mine = pairs[cli]
+  const mine = (await storeGet<Pairs>($, 'mm.threads', {}))[cli]
   if (mine && mine.app === app && now - mine.at < DAY_MS) return
-  pairs[cli] = { app, at: now }
-  for (const [k, v] of Object.entries(pairs)) if (now - v.at > PAIR_KEEP_MS) delete pairs[k]
-  await $.store.set('mm.threads', pairs)
+  const write = () =>
+    patchStore<Pairs>($, 'mm.threads', {}, pairs => {
+      pairs[cli] = { app, at: now }
+      for (const [k, v] of Object.entries(pairs)) if (!v || now - v.at > PAIR_KEEP_MS) delete pairs[k]
+    })
+  // gone a moment later (another session's write met this one, or this one was never made): written again.
+  // A pair the app's own record has since given another thread is the app's word, and is left.
+  settleLater($, app, async () => {
+    if (!(await storeGet<Pairs>($, 'mm.threads', {}))[cli]) await write()
+  })
+  await write()
 }
 
 /**
@@ -412,7 +513,7 @@ async function recordContext($: EngineInterface): Promise<void> {
   const now = await $.clock.now()
   if (contextAskedAt && now - contextAskedAt < CONTEXT_EVERY_MS) return
   // The session's own thread, as the timer already learnt it: no call is made here to find it out.
-  const me = selfCache
+  const me = await knownSelf($)
   if (!me) return
   contextAskedAt = now
   try {
@@ -421,11 +522,13 @@ async function recordContext($: EngineInterface): Promise<void> {
     if (!c || c.status !== 'ok') return
     const numbers = [c.tokensUsed, c.contextWindow, c.percentUsed]
     if (!numbers.every(n => typeof n === 'number' && Number.isFinite(n) && n >= 0)) return
-    const all = await storeGet<Record<string, ContextReading>>($, 'mm.ctx', {})
-    // written last, so the cap keeps the readings most recently taken
-    delete all[me]
-    all[me] = { tokensUsed: c.tokensUsed as number, contextWindow: c.contextWindow as number, percentUsed: c.percentUsed as number, at: now }
-    await $.store.set('mm.ctx', capped(all))
+    const reading = { tokensUsed: c.tokensUsed as number, contextWindow: c.contextWindow as number, percentUsed: c.percentUsed as number, at: now }
+    await patchStore<Record<string, ContextReading>>($, 'mm.ctx', {}, all => {
+      // written last, so the cap keeps the readings most recently taken
+      delete all[me]
+      all[me] = reading
+      capped(all)
+    })
   } catch {
     // no reading this time: the row count decides until there is one
   }
@@ -433,10 +536,10 @@ async function recordContext($: EngineInterface): Promise<void> {
 
 /** A thread linked by the person (a command, a button, a chip's first message) may link itself again later. */
 async function forgetUnlink($: EngineInterface, sid: string): Promise<void> {
-  const unlinked = await storeGet<Record<string, number>>($, 'mm.unlinked', {})
-  if (!(sid in unlinked)) return
-  delete unlinked[sid]
-  await $.store.set('mm.unlinked', unlinked)
+  await patchStore<Record<string, number>>($, 'mm.unlinked', {}, unlinked => {
+    if (!(sid in unlinked)) return false
+    delete unlinked[sid]
+  })
 }
 
 /** Where the desktop app keeps its record of each thread, by platform. The first folder that lists is used. */
@@ -472,6 +575,8 @@ async function readRecords($: EngineInterface, now: number, live: ReadonlyMap<st
   for (const s of live.values()) if (!s.isArchived && !paired.has(s.sessionId)) need.add(s.sessionId)
   if (!need.size) return
   const seen = await storeGet<Records>($, 'mm.records', {})
+  /** What this pass learnt from the records it opened: the only entries it writes. */
+  const learnt: Records = {}
   const found: Pairs = {}
   let opened = 0
   for (const root of await recordRoots($)) {
@@ -511,8 +616,7 @@ async function readRecords($: EngineInterface, now: number, live: ReadonlyMap<st
         // unreadable, not JSON, too large: this record gives no pair
       }
       opened++
-      delete seen[app]
-      seen[app] = cli ? { m: file.mtimeMs, cli } : { m: file.mtimeMs }
+      learnt[app] = seen[app] = cli ? { m: file.mtimeMs, cli } : { m: file.mtimeMs }
       if (cli) said.push({ app, cli, mtimeMs: file.mtimeMs })
     }
     // A record just opened is the app's own word: it wins over a pair a session wrote down. Oldest first,
@@ -526,11 +630,20 @@ async function readRecords($: EngineInterface, now: number, live: ReadonlyMap<st
     }
     break
   }
-  if (opened) await $.store.set('mm.records', capped(seen))
+  if (opened) {
+    await patchStore<Records>($, 'mm.records', {}, records => {
+      // each written last, so the cap keeps the records most recently opened
+      for (const [app, said] of Object.entries(learnt)) {
+        delete records[app]
+        records[app] = said
+      }
+      capped(records)
+    })
+  }
   if (Object.keys(found).length) {
     Object.assign(pairs, found)
-    // written over a fresh copy: another session may have recorded itself since this pass began
-    await $.store.set('mm.threads', { ...(await storeGet<Pairs>($, 'mm.threads', {})), ...found })
+    // over a fresh copy: another session may have recorded itself since this pass began
+    await patchStore<Pairs>($, 'mm.threads', {}, fresh => void Object.assign(fresh, found))
   }
 }
 
@@ -549,23 +662,32 @@ async function allPairs($: EngineInterface, now: number, live: ReadonlyMap<strin
   return pairs
 }
 
+/** What a client's thread has now (Update sent it, or a chip it opened with carried it): written last, so the cap keeps the newest. */
+async function putSent($: EngineInterface, projectId: string, sent: Sent): Promise<void> {
+  await patchStore<Record<string, Sent>>($, 'mm.sent', {}, all => {
+    delete all[projectId]
+    all[projectId] = sent
+    capped(all)
+  })
+}
+
 /** The person made or used this link (Update, /mm link): its thread stays pinned for a day, and a pin they took off it comes back. */
 async function stamp($: EngineInterface, projectId: string, sid: string): Promise<void> {
   const now = await $.clock.now()
-  const acted = await storeGet<Acted>($, 'mm.acted', {})
-  for (const [pid, a] of Object.entries(acted)) if (now - a.at >= ACTED_MS) delete acted[pid]
-  acted[projectId] = { sid, at: now }
-  await $.store.set('mm.acted', acted)
+  await patchStore<Acted>($, 'mm.acted', {}, acted => {
+    for (const [pid, a] of Object.entries(acted)) if (!a || now - a.at >= ACTED_MS) delete acted[pid]
+    acted[projectId] = { sid, at: now }
+  })
   await pinAgain($, sid)
 }
 
 /** The person acted on this thread's client (Update, Start, /mm link): the pin they took off it may come back. */
 async function pinAgain($: EngineInterface, sid: string | undefined): Promise<void> {
   if (!sid) return
-  const unpinned = await storeGet<Record<string, Unpinned>>($, 'mm.unpinned', {})
-  if (!(sid in unpinned)) return
-  delete unpinned[sid]
-  await $.store.set('mm.unpinned', unpinned)
+  await patchStore<Record<string, Unpinned>>($, 'mm.unpinned', {}, unpinned => {
+    if (!(sid in unpinned)) return false
+    delete unpinned[sid]
+  })
 }
 
 /**
@@ -573,14 +695,15 @@ async function pinAgain($: EngineInterface, sid: string | undefined): Promise<vo
  * the bridge made by itself: its thread may show the drafts pane, and the link is not undone by a sync.
  */
 async function claim($: EngineInterface, projectId: string | undefined, sid: string): Promise<void> {
-  const auto = await storeGet<Auto>($, 'mm.auto', {})
-  let changed = false
-  for (const [pid, a] of Object.entries(auto)) {
-    if (pid !== projectId && a?.sid !== sid) continue
-    delete auto[pid]
-    changed = true
-  }
-  if (changed) await $.store.set('mm.auto', auto)
+  await patchStore<Auto>($, 'mm.auto', {}, auto => {
+    let changed = false
+    for (const [pid, a] of Object.entries(auto)) {
+      if (pid !== projectId && a?.sid !== sid) continue
+      delete auto[pid]
+      changed = true
+    }
+    return changed
+  })
 }
 
 /**
@@ -642,6 +765,12 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   const readings = await storeGet<Record<string, ContextReading>>($, 'mm.ctx', {})
   const released = await storeGet<string[]>($, 'mm.released', [])
   const unpinned = await storeGet<Record<string, Unpinned>>($, 'mm.unpinned', {})
+  /**
+   * The shared maps as this pass read them. ⛔ The pass never writes one of them back whole: at its end each
+   * gets only what the pass itself changed, over a fresh copy (`applyChanges`). Its app calls take seconds,
+   * and a thread started meanwhile writes its own link into the same map (B1).
+   */
+  const was = { links: copyOf(links), pins: copyOf(pins), titles: copyOf(titles), auto: copyOf(auto), unpinned: copyOf(unpinned), released: Array.isArray(released) ? [...released] : [] }
   /** The threads linked as this pass began: one that is linked no more at its end loses its context reading. */
   const linkedBefore = new Set(Object.values(links))
 
@@ -911,18 +1040,27 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // copy: each session writes its own reading there, and may have since this pass began.)
   for (const sid of linkedBefore) if (ownerOf(sid, links) === undefined) dropped.add(sid)
   if ([...dropped].some(sid => sid in readings)) {
-    const fresh = await storeGet<Record<string, ContextReading>>($, 'mm.ctx', {})
-    for (const sid of dropped) delete fresh[sid]
-    await $.store.set('mm.ctx', fresh)
+    await patchStore<Record<string, ContextReading>>($, 'mm.ctx', {}, fresh => {
+      for (const sid of dropped) delete fresh[sid]
+    })
   }
-  if (released.length || waiting.length) await $.store.set('mm.released', waiting)
+  await patchStore<string[]>($, 'mm.released', [], fresh => applyListChanges(fresh, was.released, waiting))
 
   const last: Last = { at: now, member, items, ...also, pinned: want.size, recs, projects }
-  await $.store.set('mm.links', links)
-  await $.store.set('mm.pins', pins)
-  await $.store.set('mm.titles', capped(titles))
-  await $.store.set('mm.auto', auto)
-  await $.store.set('mm.unpinned', capped(unpinned))
+  // ⛔ What this pass changed, and nothing else: a link, a pin, a name or a record another session wrote
+  // while it ran is the store's, and stays. (A map the store does not hold yet is written, empty or not, as
+  // a sync always left these five.)
+  /** Its changes to a capped map, the oldest entries past the cap trimmed after. */
+  const keepNewest = <V,>(fresh: Record<string, V>, before: Record<string, V>, after: Record<string, V>): boolean => {
+    const changed = applyChanges(fresh, before, after)
+    const had = Object.keys(fresh).length
+    return Object.keys(capped(fresh)).length !== had || changed
+  }
+  await patchStore<Record<string, string>>($, 'mm.links', {}, (fresh, stored) => applyChanges(fresh, was.links, links) || !stored)
+  await patchStore<Record<string, Pin>>($, 'mm.pins', {}, (fresh, stored) => applyChanges(fresh, was.pins, pins) || !stored)
+  await patchStore<Record<string, string>>($, 'mm.titles', {}, (fresh, stored) => keepNewest(fresh, was.titles, titles) || !stored)
+  await patchStore<Auto>($, 'mm.auto', {}, (fresh, stored) => applyChanges(fresh, was.auto, auto) || !stored)
+  await patchStore<Record<string, Unpinned>>($, 'mm.unpinned', {}, (fresh, stored) => keepNewest(fresh, was.unpinned, unpinned) || !stored)
   await $.store.set('mm.last', last)
   await showQueue($, member, items, rows, want.size, now, folds)
   return { last, live, pairs, listed: true, unseen }
@@ -1059,8 +1197,9 @@ async function refreshSelf($: EngineInterface, force: boolean): Promise<string> 
     await $.session.append({
       message: { type: 'user', content: [{ type: 'text', text: `[Massmarket bridge, no reply needed] ${it.projectName}: ${titleFor(it, now)}. ${body} Nothing has been sent.` }] },
     })
-    noted[me] = sig
-    await $.store.set('mm.noted', noted)
+    await patchStore<Record<string, string>>($, 'mm.noted', {}, fresh => {
+      fresh[me] = sig
+    })
   }
   return `Showing ${it.client} in the side pane.`
 }
@@ -1092,7 +1231,7 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
     return rec?.state !== undefined ? rec.fresh === true : rec?.action === 'start' && !rec.target
   }).length
   const needs = `Needs you: ${items.length} client${items.length === 1 ? '' : 's'}${fresh ? ` · ${fresh} with no thread yet` : ''}`
-  const me = selfCache
+  const me = await knownSelf($)
   const mine = me ? ownerOf(me, await storeGet<Record<string, string>>($, 'mm.links', {})) : undefined
   const it = mine ? items.find(i => i.projectId === mine) : undefined
   // In a waiting client's thread the line names it, and carries the button that opens its part of the pane.
@@ -1305,11 +1444,11 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
     // chip for the client, here or in another thread, is superseded by this one.
     const answer = textOf(r)
     const taskId = /\btask_id:\s*(task_[A-Za-z0-9]{1,40})/.exec(answer)?.[1] ?? /\b(task_[0-9a-f]{6,40})\b/.exec(answer)?.[1] ?? ''
-    const chips = await chipsOf($, now)
-    for (const c of chips) if (c.projectId === it.projectId) c.superseded = true
     const had = (await storeGet<Record<string, string>>($, 'mm.links', {}))[it.projectId]
-    chips.push({ projectId: it.projectId, signature, taskId, threadId: me, at: now, prompt, ...(had ? { had } : {}) })
-    await $.store.set('mm.chips', chips.slice(-CHIPS_MAX))
+    await patchChips($, now, chips => {
+      for (const c of chips) if (c.projectId === it.projectId) c.superseded = true
+      return [...chips, { projectId: it.projectId, signature, taskId, threadId: me, at: now, prompt, ...(had ? { had } : {}) }]
+    })
     // The person asked for this client: a pin they took off its thread may come back.
     await pinAgain($, had)
   } catch {
@@ -1326,12 +1465,30 @@ async function started($: EngineInterface, feed: Feed, pass: Pass, said: string)
 
 /** The chips on record: well-formed ones, minted no longer ago than CHIP_KEEP_MS. */
 async function chipsOf($: EngineInterface, now: number): Promise<Chip[]> {
-  const stored = await storeGet<unknown>($, 'mm.chips', [])
+  return validChips(await storeGet<unknown>($, 'mm.chips', []), now)
+}
+
+function validChips(stored: unknown, now: number): Chip[] {
   if (!Array.isArray(stored)) return []
   return (stored as Array<Partial<Chip> | null>).filter(
     (c): c is Chip =>
       Boolean(c) && typeof c === 'object' && isUuid(c?.projectId) && typeof c?.signature === 'string' && typeof c?.taskId === 'string' && typeof c?.threadId === 'string' && typeof c?.prompt === 'string' && typeof c?.at === 'number' && now - c.at <= CHIP_KEEP_MS,
   )
+}
+
+/** One chip told from another: the thread that minted it, its client, its id and when. */
+const sameChip = (a: Chip, b: Chip): boolean => a.threadId === b.threadId && a.projectId === b.projectId && a.taskId === b.taskId && a.at === b.at
+
+/**
+ * The chips on record, changed by `change` over a fresh copy (patchStore): the chips another thread minted,
+ * spent or withdrew meanwhile stay as that thread left them. What is written is well-formed and recent.
+ */
+async function patchChips($: EngineInterface, now: number, change: (chips: Chip[]) => Chip[] | false): Promise<void> {
+  await patchStore<unknown[]>($, 'mm.chips', [], raw => {
+    const next = change(validChips(raw, now))
+    if (next === false) return false
+    raw.splice(0, raw.length, ...next.slice(-CHIPS_MAX))
+  })
 }
 
 /** A client's live chip: the newest one on record for it that nothing has superseded. */
@@ -1345,7 +1502,7 @@ const liveChip = (chips: readonly Chip[], projectId: string): Chip | undefined =
  * ⛔ From what is stored: no feed call. The one app call is the withdrawal itself.
  */
 async function withdrawChips($: EngineInterface): Promise<void> {
-  const me = selfCache
+  const me = await knownSelf($)
   if (!me) return
   const now = await $.clock.now()
   const chips = await chipsOf($, now)
@@ -1380,14 +1537,13 @@ async function withdrawChips($: EngineInterface): Promise<void> {
     }
   }
   if (!changed) return
-  // written over a fresh copy: another thread may have minted or claimed a chip while this one was calling
-  const fresh = await chipsOf($, now)
-  const same = (a: Chip, b: Chip) => a.threadId === b.threadId && a.projectId === b.projectId && a.taskId === b.taskId && a.at === b.at
-  const kept = fresh.filter(f => ![...forget].some(c => same(c, f))).map(f => {
-    const tried = mine.find(c => same(c, f))
-    return tried?.tries ? { ...f, tries: tried.tries } : f
-  })
-  await $.store.set('mm.chips', kept)
+  // over a fresh copy: another thread may have minted or claimed a chip while this one was calling
+  await patchChips($, now, fresh =>
+    fresh.filter(f => ![...forget].some(c => sameChip(c, f))).map(f => {
+      const tried = mine.find(c => sameChip(c, f))
+      return tried?.tries ? { ...f, tries: tried.tries } : f
+    }),
+  )
 }
 
 /**
@@ -1502,18 +1658,15 @@ async function updateThread($: EngineInterface, feed: Feed, it: QueueItem, pass:
   let thread = pass.live.get(target.sid)
   try {
     await forgetUnlink($, target.sid)
-    // read again: the pass before the send may be seconds old
-    const fresh = await storeGet<Record<string, string>>($, 'mm.links', {})
-    fresh[it.projectId] = target.sid
-    await $.store.set('mm.links', fresh)
+    // over a fresh copy: the pass before the send may be seconds old
+    await patchStore<Record<string, string>>($, 'mm.links', {}, fresh => {
+      fresh[it.projectId] = target.sid
+    })
     await claim($, it.projectId, target.sid)
     // The person acted on this thread: it is pinned first, and the cap of 8 does not unpin it for a day.
     await stamp($, it.projectId, target.sid)
     // What the thread has now: while this is what would be sent, its row reads Open thread, not Update.
-    const sent = await storeGet<Record<string, Sent>>($, 'mm.sent', {})
-    delete sent[it.projectId]
-    sent[it.projectId] = { sid: target.sid, sig: signatureOf(it), at: await $.clock.now() }
-    await $.store.set('mm.sent', capped(sent))
+    await putSent($, it.projectId, { sid: target.sid, sig: signatureOf(it), at: await $.clock.now() })
     thread = (await reconcile($, feed, pass.pairs)).live.get(target.sid) ?? thread
   } catch {
     // the message is in the thread either way; the next sync pins and names it
@@ -1689,33 +1842,39 @@ async function runCommand($: EngineInterface, args: string, by: By): Promise<str
   }
   if (verb === 'unlink') {
     const me = await selfId($)
-    const links = await storeGet<Record<string, string>>($, 'mm.links', {})
-    const pins = await storeGet<Record<string, Pin>>($, 'mm.pins', {})
-    for (const k of Object.keys(links)) if (links[k] === me) delete links[k]
-    if (me && pins[me]?.byUs) await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: me, pinned: false })
-    delete pins[me]
-    await $.store.set('mm.links', links)
-    await $.store.set('mm.pins', pins)
+    // (each map changed over a fresh copy: this thread's own entries come off, nothing else is touched)
+    await patchStore<Record<string, string>>($, 'mm.links', {}, (links, stored) => {
+      const had = Object.keys(links).length
+      for (const k of Object.keys(links)) if (links[k] === me) delete links[k]
+      return Object.keys(links).length !== had || !stored
+    })
+    if (me && (await storeGet<Record<string, Pin>>($, 'mm.pins', {}))[me]?.byUs) await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: me, pinned: false })
+    await patchStore<Record<string, Pin>>($, 'mm.pins', {}, (pins, stored) => {
+      if (!(me in pins) && stored) return false
+      delete pins[me]
+    })
     if (me) {
       await claim($, undefined, me)
       // Unlinking is final for linking by itself: this thread is never auto-linked again, to any client.
-      const unlinked = await storeGet<Record<string, number>>($, 'mm.unlinked', {})
-      unlinked[me] = await $.clock.now()
-      await $.store.set('mm.unlinked', capped(unlinked))
+      const at = await $.clock.now()
+      await patchStore<Record<string, number>>($, 'mm.unlinked', {}, unlinked => {
+        unlinked[me] = at
+        capped(unlinked)
+      })
       // And its own name comes back.
-      const titles = await storeGet<Record<string, string>>($, 'mm.titles', {})
-      const own = titles[me]
+      const own = (await storeGet<Record<string, string>>($, 'mm.titles', {}))[me]
       if (own !== undefined) {
         await mcpJson($, 'ccd_session_mgmt', 'set_session_title', { session_id: me, title: own })
-        delete titles[me]
-        await $.store.set('mm.titles', titles)
+        await patchStore<Record<string, string>>($, 'mm.titles', {}, titles => {
+          if (titles[me] !== own) return false
+          delete titles[me]
+        })
       }
       // The link is dropped, and the thread's context reading with it.
-      const readings = await storeGet<Record<string, ContextReading>>($, 'mm.ctx', {})
-      if (me in readings) {
+      await patchStore<Record<string, ContextReading>>($, 'mm.ctx', {}, readings => {
+        if (!(me in readings)) return false
         delete readings[me]
-        await $.store.set('mm.ctx', readings)
-      }
+      })
       // So is the note that the person took our pin off it: it is no client's thread now.
       await pinAgain($, me)
     }
@@ -1769,22 +1928,22 @@ async function runCommand($: EngineInterface, args: string, by: By): Promise<str
     const me = await selfId($)
     if (!me) return 'Linking a thread works in the desktop app\'s Code tab only.'
     await forgetUnlink($, me)
-    const links = await storeGet<Record<string, string>>($, 'mm.links', {})
-    // ⛔ a thread is one client's: linked here by hand, it is no longer any other client's
-    for (const k of Object.keys(links)) if (links[k] === me && k !== pid) delete links[k]
-    links[pid] = me
-    await $.store.set('mm.links', links)
+    await patchStore<Record<string, string>>($, 'mm.links', {}, links => {
+      // ⛔ a thread is one client's: linked here by hand, it is no longer any other client's
+      for (const k of Object.keys(links)) if (links[k] === me && k !== pid) delete links[k]
+      links[pid] = me
+    })
     await claim($, pid, me)
     if (it) await stamp($, pid, me)
     else {
       // A client with nothing waiting: linked, and nothing more. No stamp (nothing was acted on, so nothing
       // pins). The bridge's record of this thread, when it has one, is now this client's: the sync takes our
       // pin off and the thread's name says this client is clear, instead of naming the client it was.
-      const pins = await storeGet<Record<string, Pin>>($, 'mm.pins', {})
-      if (pins[me]) {
-        pins[me] = { ...pins[me], projectId: pid, client: named.client }
-        await $.store.set('mm.pins', pins)
-      }
+      const client = named.client
+      await patchStore<Record<string, Pin>>($, 'mm.pins', {}, pins => {
+        if (!pins[me]) return false
+        pins[me] = { ...pins[me], projectId: pid, client }
+      })
     }
     await reconcile($, feed, pairs)
     return `This thread is now ${(it ?? named).client}'s. ${await refreshSelf($, true)}`
@@ -1807,6 +1966,8 @@ async function runCommand($: EngineInterface, args: string, by: By): Promise<str
  * the prompt of a chip the bridge minted for that client (Start thread, /mm start) was started from that
  * chip, and it takes the client. The thread the client had is given back on the next sync: its own title,
  * our pin off. No other thread ever takes a client this way.
+ * ⛔ Each map is changed over a fresh copy (patchStore), and the link is checked again a moment later
+ * (settleLater): a dozen threads started together each keep their own (B1).
  */
 async function linkFromMarker($: EngineInterface, text: string, origin: string | undefined): Promise<void> {
   const projectId = MARKER.exec(text)?.[1]
@@ -1816,41 +1977,74 @@ async function linkFromMarker($: EngineInterface, text: string, origin: string |
   if (!inFeed.includes(projectId)) return
   const me = await selfId($)
   if (!me || me in (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))) return
-  const links = await storeGet<Record<string, string>>($, 'mm.links', {})
-  const owner = ownerOf(me, links)
-  if (owner !== undefined && owner !== projectId) return
   const now = await $.clock.now()
   const chips = await chipsOf($, now)
   // the chip this thread was started from: the one for this client whose prompt is this prompt, to the letter
   const chip = [...chips].reverse().find(c => c.projectId === projectId && c.prompt.trim() === text.trim())
-  const had = links[projectId]
-  if (had !== undefined && had !== me && !chip) return
-  if (had !== me) {
-    links[projectId] = me
-    await $.store.set('mm.links', links)
-    if (had !== undefined) {
-      const released = await storeGet<string[]>($, 'mm.released', [])
-      if (!released.includes(had)) await $.store.set('mm.released', [...released, had].slice(-REMEMBER_MAX))
-    }
-  }
-  // the person started this: the link is theirs, not one the bridge made by itself
-  await claim($, projectId, me)
   // What this thread has: the kickoff it opened with. From the chip, what the chip carried; with no chip
   // on record, only when its prompt is exactly the kickoff that would be sent now.
   const it = listedIn(last).find(i => i.projectId === projectId)
   const sig = chip ? chip.signature : it && kickoffText(it) === text.trim() ? signatureOf(it) : undefined
-  if (sig !== undefined) {
-    const sent = await storeGet<Record<string, Sent>>($, 'mm.sent', {})
-    delete sent[projectId]
-    sent[projectId] = { sid: me, sig, at: now }
-    await $.store.set('mm.sent', capped(sent))
+  /** The thread the client had, when this one takes it by the chip rule. */
+  let had: string | undefined
+  /** Whether this thread is the client's once the link is written (it may have been already). */
+  let ours = false
+  const link = () =>
+    patchStore<Record<string, string>>($, 'mm.links', {}, links => {
+      // decided on the fresh copy: whose this thread is, and who holds the client, NOW
+      const owner = ownerOf(me, links)
+      if (owner !== undefined && owner !== projectId) return false
+      const holder = links[projectId]
+      if (holder !== undefined && holder !== me && !chip) return false
+      ours = true
+      if (holder === me) return false
+      had = holder
+      links[projectId] = me
+    })
+  // Checked again 1 to 3 seconds later, once: gone (another session's write met this one, or the engine
+  // could not lock the store in time), and the thread is not one the person unlinked since, and no other
+  // thread took the client by the chip rule (this one is then on the list of threads given back): written
+  // again. A client another thread holds now is left with it, unless the bridge linked that one by itself.
+  settleLater($, me, async () => {
+    // (only a link this prompt made or found: one it was refused is never written later)
+    if (!ours || me in (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))) return
+    const released = await storeGet<string[]>($, 'mm.released', [])
+    if (Array.isArray(released) && released.includes(me)) return
+    const auto = await storeGet<Auto>($, 'mm.auto', {})
+    let again = false
+    await patchStore<Record<string, string>>($, 'mm.links', {}, links => {
+      const holder = links[projectId]
+      const owner = ownerOf(me, links)
+      if (holder === me || (owner !== undefined && owner !== projectId)) return false
+      if (holder !== undefined && auto[projectId]?.sid !== holder) return false
+      links[projectId] = me
+      again = true
+    })
+    if (!again) return
+    await claim($, projectId, me)
+    if (sig !== undefined && !(await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[projectId]) await putSent($, projectId, { sid: me, sig, at: now })
+  })
+  await link()
+  if (!ours) return
+  if (had !== undefined) {
+    const given = had
+    await patchStore<string[]>($, 'mm.released', [], released => {
+      if (released.includes(given)) return false
+      released.push(given)
+      released.splice(0, Math.max(0, released.length - REMEMBER_MAX))
+    })
   }
+  // the person started this: the link is theirs, not one the bridge made by itself
+  await claim($, projectId, me)
+  if (sig !== undefined) await putSent($, projectId, { sid: me, sig, at: now })
   if (chip) {
     // The person started it: the chip is spent. Any other chip for the client is superseded, for the
     // thread that minted it to withdraw on its own tick.
-    const rest = chips.filter(c => c !== chip)
-    for (const c of rest) if (c.projectId === projectId) c.superseded = true
-    await $.store.set('mm.chips', rest)
+    await patchChips($, now, fresh => {
+      const rest = fresh.filter(c => !sameChip(c, chip))
+      for (const c of rest) if (c.projectId === projectId) c.superseded = true
+      return rest
+    })
   }
 }
 

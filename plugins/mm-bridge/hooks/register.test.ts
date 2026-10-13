@@ -74,6 +74,8 @@ type WorldOptions = {
   feedStatus?: () => number
   files?: Record<string, { text: string; mtimeMs: number }>
   env?: Record<string, string>
+  /** Runs at each app call, before it is answered: what another session does to the store while a pass waits on the app. */
+  during?: (call: Call, stored: Record<string, unknown>) => void
 }
 
 function world(on: On, opts: WorldOptions = {}) {
@@ -102,6 +104,7 @@ function world(on: On, opts: WorldOptions = {}) {
   on('mcp.call', async (_$, e) => {
     if (opts.terminal && e.server.startsWith('ccd_')) return { deny: `MCP server "${e.server}" is not connected` }
     calls.push({ server: e.server, tool: e.tool, args: e.args })
+    opts.during?.({ server: e.server, tool: e.tool, args: e.args }, stored)
     const id = e.args.session_id === 'self' ? self.sessionId : String(e.args.session_id ?? '')
     const t = threads.get(id)
     const refused = (why: string) => ({ value: { content: [{ type: 'text' as const, text: why }], isError: true } })
@@ -3937,6 +3940,152 @@ describe('(v) /mm link takes any client the feed knows, by name or by project id
     w.stored['mm.links'] = {}
     expect(await tool($, 'link Zed Plumbing')).toBe(`This thread is now Zed Plumbing's. ${NOTHING}`)
     expect(w.stored['mm.links']).toEqual({ [ZED]: SELF })
+    expect(w.acted()).toEqual([])
+  })
+})
+
+describe('B1: a pass writes only what it changed, over a fresh copy; what the person\'s act wrote is checked again', () => {
+  // (concurrency.test.ts runs a dozen sessions at once against one store; these are the same rules, one at a time)
+
+  test('a sync never takes back a link, an unlink, a pin record or a pair another thread wrote while it waited on the app', async ($, on) => {
+    let wrote = false
+    const w = world(on, {
+      threads: [thread('local_a', 'Roof quote', 30), thread('local_b', 'Chip for Bolt', 0), thread('local_c', 'Dental notes', 40)],
+      // the app's list leaves Acme's thread out: the sync asks for it by id, after it has read the links
+      unlisted: ['local_a'],
+      store: { 'mm.links': { [ACME]: 'local_a', [CEDAR]: 'local_c' } },
+      during: (call, stored) => {
+        if (wrote || call.tool !== 'get_session' || call.args.session_id !== 'local_a') return
+        wrote = true
+        // meanwhile: Bolt's new thread links itself from its marker; the person unlinks Cedar's thread there
+        // (its link goes, its unlink record comes); a session writes its pair; another pins a thread of its own
+        stored['mm.links'] = { [ACME]: 'local_a', [BOLT]: 'local_b' }
+        stored['mm.unlinked'] = { local_c: NOW }
+        stored['mm.threads'] = { 'cli-bolt': { app: 'local_b', at: NOW } }
+        stored['mm.pins'] = { ...(stored['mm.pins'] as object), local_x: { projectId: CEDAR, client: 'Cedar Dental', byUs: false } }
+      },
+    })
+    await mm($, '')
+    expect(wrote).toBe(true)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a', [BOLT]: 'local_b' })
+    expect(w.stored['mm.unlinked']).toEqual({ local_c: NOW })
+    expect(w.stored['mm.threads']).toEqual({ 'cli-bolt': { app: 'local_b', at: NOW } })
+    expect((w.stored['mm.pins'] as Record<string, unknown>).local_x).toEqual({ projectId: CEDAR, client: 'Cedar Dental', byUs: false })
+    // and the next sync works from all of it: Bolt's thread is pinned and named as Bolt's
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a', [BOLT]: 'local_b' })
+    expect(w.threads.get('local_b')).toMatchObject({ title: BOLT_TITLE, pinned: true })
+  })
+
+  test('the link a marker wrote is checked again 1 to 3 seconds later, and written again when it is gone', async ($, on) => {
+    const w = world(on)
+    await mm($, '')
+    await $.prompt.submit({ text: ACME_KICKOFF, wait: false, origin: { kind: 'sdk' } } as never)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+    // another session's write, begun before this one, lands after it
+    w.stored['mm.links'] = {}
+    await w.clock.advance(900)
+    expect(w.stored['mm.links']).toEqual({})
+    await w.clock.advance(2_200)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+    // once: a later loss is the next sync's to see
+    w.stored['mm.links'] = {}
+    await w.clock.advance(10_000)
+    expect(w.stored['mm.links']).toEqual({})
+  })
+
+  test('the check leaves it: unlinked since, taken by another thread by the chip rule or by the person, or never this thread\'s', async ($, on) => {
+    const w = world(on, { threads: [thread('local_o', 'Other thread', 2)] })
+    await mm($, '')
+    const marker = async () => {
+      w.stored['mm.links'] = {}
+      await $.prompt.submit({ text: ACME_KICKOFF, wait: false, origin: { kind: 'sdk' } } as never)
+      expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+    }
+    // the person unlinked this thread meanwhile
+    await marker()
+    w.stored['mm.links'] = {}
+    w.stored['mm.unlinked'] = { [SELF]: NOW }
+    await w.clock.advance(3_100)
+    expect(w.stored['mm.links']).toEqual({})
+    w.stored['mm.unlinked'] = {}
+    // a thread started from the bridge's chip took the client: this one is on the list of threads given back
+    await marker()
+    w.stored['mm.links'] = { [ACME]: 'local_o' }
+    w.stored['mm.released'] = [SELF]
+    await w.clock.advance(3_100)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_o' })
+    w.stored['mm.released'] = []
+    // the person linked another thread to it
+    await marker()
+    w.stored['mm.links'] = { [ACME]: 'local_o' }
+    await w.clock.advance(3_100)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_o' })
+    // ⛔ but a link the bridge made by itself does not keep it from the thread the person started
+    await marker()
+    w.stored['mm.links'] = { [ACME]: 'local_o' }
+    w.stored['mm.auto'] = { [ACME]: { sid: 'local_o', miss: 0 } }
+    await w.clock.advance(3_100)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+    expect(w.stored['mm.auto']).toEqual({})
+    // a marker this thread was refused (it is Bolt's) is never written later
+    w.stored['mm.links'] = { [BOLT]: SELF }
+    await $.prompt.submit({ text: ACME_KICKOFF, wait: false, origin: { kind: 'sdk' } } as never)
+    w.stored['mm.links'] = { [BOLT]: SELF }
+    await w.clock.advance(3_100)
+    expect(w.stored['mm.links']).toEqual({ [BOLT]: SELF })
+  })
+
+  test('a session\'s own pair is checked again the same way', async ($, on) => {
+    const w = world(on)
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    expect(w.stored['mm.threads']).toEqual({ [SELF_CLI]: { app: SELF, at: NOW + 4_000 } })
+    w.stored['mm.threads'] = { 'cli-other': { app: 'local_other', at: NOW } }
+    await w.clock.advance(3_100)
+    expect(w.stored['mm.threads']).toEqual({ 'cli-other': { app: 'local_other', at: NOW }, [SELF_CLI]: { app: SELF, at: NOW + 4_000 } })
+  })
+
+  test('upgrading from a 0.4.1 store keeps every link, pin and unlink record', async ($, on) => {
+    const ZED = '66666666-6666-4666-8666-666666666666'
+    // the keys and shapes 0.4.1 leaves (Rob's store, 2026-10-13): no teammate or older list, no released,
+    // chips, sent, ctx or unpinned keys yet
+    const store = {
+      'mm.lease': { owner: 'a-session-that-closed', until: NOW - 60_000 },
+      'mm.links': { [ACME]: 'local_a', [BOLT]: 'local_b', [CEDAR]: 'local_c', [ZED]: 'local_z' },
+      'mm.pins': { local_a: ourPin(ACME, 'Acme Roofing'), local_b: { projectId: BOLT, client: 'Bolt Staffing', byUs: false }, local_c: ourPin(CEDAR, 'Cedar Dental') },
+      'mm.last': { at: NOW - 10 * 60_000, member: ME, items: [], pinned: 3, recs: {}, projects: [ACME, BOLT, CEDAR, ZED] },
+      'mm.threads': { 'cli-acme': { app: 'local_a', at: NOW - HOUR } },
+      'mm.records': { local_b: { m: 1, cli: 'cli-b' } },
+      'mm.titles': { local_a: 'Roof quote', local_c: 'Dental intake' },
+      'mm.auto': { [CEDAR]: { sid: 'local_c', miss: 1, at: NOW - 10 * 60_000 } },
+      'mm.acted': { [BOLT]: { sid: 'local_b', at: NOW - HOUR } },
+      'mm.noted': { local_a: 'pkg:aaaaaaaa' },
+      'mm.unlinked': { local_u: NOW - 2 * HOUR },
+    }
+    const w = world(on, {
+      threads: [
+        thread('local_a', ACME_TITLE, 3, { pinned: true }), thread('local_b', BOLT_TITLE, 2, { pinned: true }), thread('local_c', CEDAR_TITLE, 4, { pinned: true }),
+        thread('local_z', '✓ Zed Plumbing · clear 9 AM', 50), thread('local_u', 'Unlinked notes', 6),
+      ],
+      store,
+    })
+    // the new version's first tick in this thread: its pair, and a sync (the lease is free)
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    await w.clock.advance(3_100)
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual(store['mm.links'])
+    expect(w.stored['mm.unlinked']).toEqual(store['mm.unlinked'])
+    expect(w.stored['mm.pins']).toEqual(store['mm.pins'])
+    expect(w.stored['mm.acted']).toEqual(store['mm.acted'])
+    expect(w.stored['mm.auto']).toEqual(store['mm.auto'])
+    expect(w.stored['mm.titles']).toEqual(store['mm.titles'])
+    expect(w.stored['mm.records']).toEqual(store['mm.records'])
+    expect(w.stored['mm.threads']).toEqual({ ...store['mm.threads'], [SELF_CLI]: { app: SELF, at: NOW + 4_000 } })
+    // the threads are as they were: each still its client's, pinned, and nothing was sent
+    for (const sid of ['local_a', 'local_b', 'local_c']) expect(w.threads.get(sid)?.pinned).toBe(true)
+    expect(w.threads.get('local_u')?.title).toBe('Unlinked notes')
     expect(w.acted()).toEqual([])
   })
 })
