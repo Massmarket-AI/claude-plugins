@@ -55,8 +55,6 @@ function hooksOf(): Record<string, Hook> {
 
 type WorldOptions = {
   seed: number
-  /** A set of this key that is refused, as the engine refuses one it cannot lock in time: how many times. */
-  refuse?: { key: string; times: number }
 }
 
 /**
@@ -70,7 +68,8 @@ function world(opts: WorldOptions) {
     for (let n = Math.floor(rnd() * (most + 1)); n > 0; n--) await Promise.resolve()
   }
   const stored: Record<string, string> = {}
-  let refusals = opts.refuse?.times ?? 0
+  /** Sets of this key the engine refuses next, as it refuses one it cannot lock in time. */
+  const refusing = { key: '', times: 0 }
   let time = NOW
   const timers: Array<{ at: number; fn: () => void; done: boolean }> = []
   const app = new Map<string, Thread>()
@@ -106,9 +105,9 @@ function world(opts: WorldOptions) {
         },
         set: async (key: string, value: unknown) => {
           await turns(4)
-          if (opts.refuse?.key === key && refusals > 0) {
-            refusals--
-            throw new Error(`mm-bridge: $.store.set failed: Lock file is already being held`)
+          if (refusing.key === key && refusing.times > 0) {
+            refusing.times--
+            throw new Error('mm-bridge: $.store.set failed: Lock file is already being held')
           }
           stored[key] = JSON.stringify(value)
         },
@@ -168,6 +167,8 @@ function world(opts: WorldOptions) {
     session,
     stored: (key: string) => (stored[key] === undefined ? undefined : JSON.parse(stored[key] as string)),
     put: (key: string, value: unknown) => void (stored[key] = JSON.stringify(value)),
+    /** The next `times` sets of `key`, from any session, are refused. */
+    refuse: (key: string, times: number) => Object.assign(refusing, { key, times }),
     /**
      * Moves the clock on and runs every timer that falls due, in the order they fall due: those due at the
      * same moment together, each moment's work run to its end before the next (a check 1.2 s on is over
@@ -268,8 +269,9 @@ describe('B1: a dozen threads started at once against one store, with a sync run
   }
 
   test('a set the engine cannot lock in time: the link is written again 1 to 3 seconds later', async () => {
-    const w = world({ seed: 5, refuse: { key: 'mm.links', times: 3 } })
+    const w = world({ seed: 5 })
     const { threads } = await before(w)
+    w.refuse('mm.links', 3)
     await Promise.all(threads.slice(0, 3).map((t, i) => hooks['prompt.submit']?.(t, { text: KICKOFF(i + 1), origin: sdk }, next)))
     // the three refused writes left no link
     const links = (w.stored('mm.links') ?? {}) as Record<string, string>
