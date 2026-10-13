@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { businessMsBetween } from './business-time'
+import { businessMsBetween, subtractBusinessMs } from './business-time'
 import {
-  NOBODY, WINDOW_AHEAD_MS, WINDOW_BACK_MS, buildLists, buildQueue, cleanName, cleanText, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockLead, clockText, draftsLine, dueLine, holdBanner,
+  MAIL_LOOKBACK_HOURS, NOBODY, WINDOW_AHEAD_MS, WINDOW_BACK_MS, buildLists, buildQueue, cleanName, cleanText, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockLead, clockText, draftsLine, dueLine, holdBanner,
   holdSentence, holderName, isDraftDone, isUuid, needsLine, noteText, shortName, titleFor, titleNames, withTeammate,
 } from './queue'
 import type { Feed, QueueItem } from './queue'
@@ -731,6 +731,29 @@ describe('B4: a package flagged for the founder lists for him whoever owns the c
       expect(kickoffText(it as QueueItem)).toContain('reply package aaaaaaaa is flagged for my OK')
     }
   })
+})
+
+describe('F1: the feed is asked for mail far enough back for Older to hold any', () => {
+  const HOUR = 3_600_000
+  const oldMail = (receivedMs: number) => ({
+    message_id_key: `m-${receivedMs}`, received_at: new Date(receivedMs).toISOString(), sender: 'client@example.com', subject: 'Hi', snippet: 'hello',
+    project_id: P1, project_name: 'Acme Roofing', reply_status: 'unanswered', project_owner_email: 'builder-a@example.com',
+  })
+  // several moments across a week, a weekend among them
+  for (const nowIso of ['2026-10-13T13:00:00Z', '2026-10-12T13:30:00Z', '2026-10-16T20:00:00Z', '2026-10-19T14:00:00Z']) {
+    test(`the oldest mail the feed is asked for goes under Older, and so does mail OW sends from further back (now ${nowIso})`, async () => {
+      const now = Date.parse(nowIso)
+      expect(MAIL_LOOKBACK_HOURS).toBe(168)
+      // the 96 business hours asked for before: its oldest mail was never more than 3 business days past due
+      const was = buildLists(feed({ mail: [oldMail(subtractBusinessMs(now, 96 * HOUR) + 60_000)] }), now)
+      expect([was.queue.length, was.older.length]).toEqual([1, 0])
+      // the oldest the feed is asked for now, and mail older than that: under Older, never nowhere
+      for (const received of [subtractBusinessMs(now, MAIL_LOOKBACK_HOURS * HOUR) + 60_000, subtractBusinessMs(now, 300 * HOUR)]) {
+        const l = buildLists(feed({ mail: [oldMail(received)] }), now)
+        expect([l.queue.length, l.teammate.length, l.older.map(i => i.projectId)]).toEqual([0, 0, [P1]])
+      }
+    })
+  }
 })
 
 describe('(s) nothing drops off silently: a client whose only items are more than 3 business days overdue', () => {

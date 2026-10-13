@@ -2,7 +2,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { MmBand, MmFolds, MmNotice, MmQueue, MmView } from '../types'
 
-import { MAX_PINS, buildLists, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, dueLine, feedClients, holdBanner, isDraftDone, isUuid, needsLine, noteText, titleFor } from './queue'
+import { MAIL_LOOKBACK_HOURS, MAX_PINS, buildLists, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, dueLine, feedClients, holdBanner, isDraftDone, isUuid, needsLine, noteText, titleFor } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
   LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, foldGroups, hasWaiting, kickoffText, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor,
@@ -367,7 +367,8 @@ function feedThreadsOf(feed: Feed): FeedThread[] {
 }
 
 async function fetchFeed($: EngineInterface): Promise<Feed> {
-  const r = await $.http.fetch(`${EXT}/closeout?mail_hours=96`, { headers: { Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER } })
+  // (OW's most: mail old enough to go under Older is in the feed, MAIL_LOOKBACK_HOURS)
+  const r = await $.http.fetch(`${EXT}/closeout?mail_hours=${MAIL_LOOKBACK_HOURS}`, { headers: { Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER } })
   const failed = () => new Error(`closeout HTTP ${r.status}: ${short(r.text, 160)}`)
   if (!r.ok) throw failed()
   const feed = JSON.parse(r.text) as Feed | null
