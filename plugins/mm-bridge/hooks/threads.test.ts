@@ -936,7 +936,8 @@ describe('a new thread for a client whose package waits for the founder\'s OK, o
   const flagged = { package_id: PKG, project_id: ACME, project_name: 'Acme Roofing — Pat', status: 'prepared', covers_through: at('2026-10-12 08:00'), drafts_ready: 1, flagged_for_rob: true, project_owner_email: 'builder-b@example.com' }
 
   test('needs his OK: the handover paragraph reads "Before the pickup view", as for any kickoff that shows one', async () => {
-    const [it] = buildQueue({ ...founder, drafts: [flagged] }, NOW)
+    // (a teammate sends it: before its reply time it is listed under With a teammate, R2; the kickoff is the same)
+    const [it] = buildLists({ ...founder, drafts: [flagged] }, NOW).teammate
     expect(it?.kind).toBe('ok')
     expect(handoverText(it as QueueItem, old).startsWith('This thread replaces "Roof quote" (thread local_0f1e2d3c-aaaa-4bbb-8ccc-000000000001) for Acme Roofing Pat. Before the pickup view, and without reading that thread in full:')).toBe(true)
   })
@@ -945,5 +946,167 @@ describe('a new thread for a client whose package waits for the founder\'s OK, o
     const held = { ...flagged, flagged_for_rob: false, status: 'picked_up', drafts_unsent: 1, picked_up_by: 'j.smith@example.com', project_id: BOLT, project_name: 'Bolt Staffing (Sam)', project_owner_email: ME }
     const it = buildLists({ ...FEED, drafts: [held] }, NOW).teammate[0] as QueueItem
     expect(handoverText(it, old)).toContain('for Bolt Staffing (Sam). Before showing me what is due, and without reading that thread in full:')
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------- 0.5.1
+// R1 and R2 (Rob's 16 rows, 2026-10-13): which rows reach the founder, and how a row under With a teammate
+// reads for him. And a teammate's own pane, which does not change.
+
+describe('R1 and R2: a row under With a teammate, for the founder', () => {
+  const FOUNDER = 'owner@example.com'
+  const SENDS = 'builder-b@example.com'
+  const founderFeed = (drafts: Feed['drafts'], mail: Feed['mail'] = []): Feed => ({ member: FOUNDER, role: 'founder', drafts, mail, tickets: {} })
+  /** A package a teammate sends, covering Acme's mail through Monday 8 AM: its reply is due Tuesday 8 AM. */
+  const pkgOf = (over: Record<string, unknown> = {}) => ({
+    package_id: PKG, project_id: ACME, project_name: 'Acme Roofing — Pat', status: 'prepared', covers_through: at('2026-10-12 08:00'), drafts_ready: 1, drafts_unsent: 1,
+    flagged_for_rob: true, project_owner_email: SENDS, ...over,
+  })
+  const rowOf = (f: Feed, list: 'queue' | 'teammate', now = NOW) => {
+    const it = buildLists(f, now)[list][0]
+    if (!it) throw new Error(`no row in ${list}`)
+    return rowFor(it, recommend([], undefined, now), now)
+  }
+
+  test('R2, prepared and flagged: no line of its own under the title (title and waiting text say it), Drafts and no action', async () => {
+    const row = rowOf(founderFeed([pkgOf()]), 'teammate')
+    expect(row).toMatchObject({
+      title: '🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides', waiting: 'may need your OK · Builder B decides, drafts ready', theirs: true,
+    })
+    expect(row.note).toBeUndefined()
+    expect(rowButtons(row)).toEqual(['drafts'])
+    expect(rowDetail(row)).toBe('may need your OK · Builder B decides, drafts ready')
+  })
+
+  test('R2, picked up by a teammate: the row\'s sentence, then " · may need your OK"; the holder decides, whoever owns the client', async () => {
+    for (const owner of [SENDS, FOUNDER, null]) {
+      const row = rowOf(founderFeed([pkgOf({ status: 'picked_up', picked_up_by: 'j.smith@example.com', picked_up_at: at('2026-10-12 09:30'), project_owner_email: owner })]), 'teammate')
+      expect(row.note, String(owner)).toBe('J Smith picked up the reply drafts for this client (Mon 9:30 AM) and has 1 draft not sent yet. Ask J Smith before writing a second reply. · may need your OK')
+      expect(row.title).toBe('🟡 with J Smith · Acme Roofing · may need your OK · J Smith decides')
+      expect(row.waiting).toBe('may need your OK · J Smith decides, drafts with J Smith')
+      expect(rowButtons(row)).toEqual(['drafts'])
+    }
+  })
+
+  test('R2, once its reply is due: an ordinary row of his, with its one action, no sentence, and today\'s words', async () => {
+    const due = et('2026-10-13 09:00')
+    const row = rowOf(founderFeed([pkgOf()]), 'queue', due)
+    expect(row.note).toBeUndefined()
+    expect(row.theirs).toBeUndefined()
+    expect(row.title).toBe('🔴 1h late · Acme Roofing · needs your OK')
+    expect(row.waiting).toBe('needs your OK · Builder B sends, drafts ready')
+    expect(rowButtons(row)).toEqual(['start', 'drafts'])
+  })
+
+  test('R1, flagged or not, with a client message after its drafts: who sends it, no sentence of its own, Drafts and no action', async () => {
+    const mail = [{ message_id_key: 'm1', received_at: at('2026-10-12 10:00'), sender: 'client@example.com', subject: 'Question', snippet: 'hello', project_id: ACME, project_name: 'Acme Roofing — Pat', reply_status: 'unanswered', project_owner_email: SENDS }]
+    for (const flagged of [true, false]) {
+      const row = rowOf(founderFeed([pkgOf({ status: 'stale', flagged_for_rob: flagged })], mail), 'teammate')
+      expect(row).toMatchObject({ title: '🟡 with Builder B · Acme Roofing · reply', waiting: '1 message waiting, drafts out of date', theirs: true })
+      expect(row.note).toBeUndefined()
+      expect(rowButtons(row)).toEqual(['drafts'])
+      expect(rowDetail(row)).toBe('1 message waiting, drafts out of date')
+    }
+  })
+
+  test('the pane draws such a row under With a teammate, numbered on from the list', async () => {
+    const l = buildLists(founderFeed([pkgOf()]), NOW)
+    const rows = l.teammate.map(it => rowFor(it, recommend([], undefined, NOW), NOW))
+    expect(paneText([], 'Nothing needs you right now.', 'note', { teammate: rows }).split('\n')).toEqual([
+      'Nothing needs you right now.',
+      '',
+      'With a teammate (1)',
+      '',
+      '1. 🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides',
+      '   may need your OK · Builder B decides, drafts ready',
+      '   [ Drafts ]',
+      '',
+      'note',
+    ])
+  })
+})
+
+describe('a teammate\'s own pane is byte-identical to 0.5.0 for the same feed', () => {
+  const OTHER = 'builder-b@example.com'
+  const pid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`
+  const pkg = (n: number) => `aaaaaaa${n}-bbbb-4ccc-8ddd-eeeeeeeeeeee`
+  const mailOf = (n: number, name: string, received: string, owner: string | null = ME) => ({
+    message_id_key: `${n}-${received}`, received_at: at(received), sender: 'client@example.com', subject: 'Question', snippet: 'hello',
+    project_id: pid(n), project_name: name, reply_status: 'unanswered', project_owner_email: owner,
+  })
+  const draftOf = (n: number, name: string, over: Record<string, unknown> = {}) => ({
+    package_id: pkg(n), project_id: pid(n), project_name: name, status: 'prepared', covers_through: at('2026-10-12 08:00'), drafts_ready: 1, drafts_unsent: 1,
+    flagged_for_rob: false, picked_up_by: null, picked_up_at: null, project_owner_email: ME, ...over,
+  })
+  /** A teammate's own feed, with every shape R1 and R2 touch for the founder. */
+  const TEAMMATE_FEED: Feed = {
+    member: ME,
+    role: 'builder',
+    drafts: [
+      draftOf(1, 'Acme Roofing — Pat', { flagged_for_rob: true }),
+      draftOf(2, 'Bolt Staffing (Sam)', { status: 'picked_up', picked_up_by: 'j.smith@example.com', picked_up_at: at('2026-10-12 09:30') }),
+      draftOf(3, 'Cedar Dental', { status: 'stale', flagged_for_rob: true }),
+      draftOf(4, 'Dune Freight', { flagged_for_rob: true, project_owner_email: OTHER }),
+      draftOf(5, 'Elm Travel', { status: 'stale', project_owner_email: OTHER }),
+      draftOf(6, 'Fig Legal', { status: 'picked_up', picked_up_by: OTHER, picked_up_at: at('2026-10-12 09:00'), flagged_for_rob: true }),
+    ],
+    mail: [
+      mailOf(2, 'Bolt Staffing (Sam)', '2026-10-12 09:00'),
+      mailOf(3, 'Cedar Dental', '2026-10-12 10:00'),
+      mailOf(5, 'Elm Travel', '2026-10-12 10:00', OTHER),
+      mailOf(6, 'Fig Legal', '2026-10-12 10:15'),
+      mailOf(7, 'Gale Clinic', '2026-10-02 10:00'),
+    ],
+    tickets: { due_today: [{ ticket_id: 't8', project_id: pid(8), project_name: 'Hale Plumbing', title: 'Send the quote', due_at: at('2026-10-12 16:00'), due_source: 'commitment', assignee_email: ME }] },
+  }
+  /** What 0.5.0 (b83abc92) gave for this very feed at NOW, captured by running its own code on it. */
+  const TEAMMATE_050 = {
+    lists: "{\"queue\":[{\"projectId\":\"00000008-0000-4000-8000-000000000008\",\"projectName\":\"Hale Plumbing\",\"client\":\"Hale Plumbing\",\"dueAt\":1791835200000,\"kind\":\"task\",\"messages\":0,\"tasks\":1,\"packageId\":null,\"coversThrough\":null,\"packageUpdatedAt\":null,\"flagged\":false,\"mail\":[],\"taskTitles\":[\"Send the quote\"],\"open\":null,\"ok\":null,\"newest\":{\"mail\":0,\"pkg\":0,\"task\":1791835200000}},{\"projectId\":\"00000001-0000-4000-8000-000000000001\",\"projectName\":\"Acme Roofing Pat\",\"client\":\"Acme Roofing\",\"dueAt\":1791892800000,\"kind\":\"ready\",\"messages\":0,\"tasks\":0,\"packageId\":\"aaaaaaa1-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"coversThrough\":\"2026-10-12T12:00:00.000Z\",\"packageUpdatedAt\":null,\"flagged\":true,\"mail\":[],\"taskTitles\":[],\"open\":null,\"ok\":null,\"newest\":{\"mail\":0,\"pkg\":1791806400000,\"task\":0}},{\"projectId\":\"00000003-0000-4000-8000-000000000003\",\"projectName\":\"Cedar Dental\",\"client\":\"Cedar Dental\",\"dueAt\":1791900000000,\"kind\":\"reply\",\"messages\":1,\"tasks\":0,\"packageId\":null,\"coversThrough\":null,\"packageUpdatedAt\":null,\"flagged\":false,\"mail\":[{\"at\":\"2026-10-12T14:00:00.000Z\",\"sender\":\"client@example.com\",\"subject\":\"Question\",\"snippet\":\"hello\"}],\"taskTitles\":[],\"open\":{\"id\":\"aaaaaaa3-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"state\":\"stale\",\"by\":\"\",\"at\":null,\"unsent\":1,\"newer\":0},\"ok\":null,\"newest\":{\"mail\":1791813600000,\"pkg\":0,\"task\":0}}],\"teammate\":[{\"projectId\":\"00000002-0000-4000-8000-000000000002\",\"projectName\":\"Bolt Staffing (Sam)\",\"client\":\"Bolt Staffing\",\"dueAt\":1791896400000,\"kind\":\"reply\",\"messages\":1,\"tasks\":0,\"packageId\":null,\"coversThrough\":null,\"packageUpdatedAt\":null,\"flagged\":false,\"mail\":[{\"at\":\"2026-10-12T13:00:00.000Z\",\"sender\":\"client@example.com\",\"subject\":\"Question\",\"snippet\":\"hello\"}],\"taskTitles\":[],\"open\":{\"id\":\"aaaaaaa2-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"state\":\"held_by_other\",\"by\":\"J Smith\",\"at\":\"2026-10-12T13:30:00.000Z\",\"unsent\":1,\"newer\":0},\"ok\":null,\"newest\":{\"mail\":1791810000000,\"pkg\":0,\"task\":0}},{\"projectId\":\"00000006-0000-4000-8000-000000000006\",\"projectName\":\"Fig Legal\",\"client\":\"Fig Legal\",\"dueAt\":1791900900000,\"kind\":\"reply\",\"messages\":1,\"tasks\":0,\"packageId\":null,\"coversThrough\":null,\"packageUpdatedAt\":null,\"flagged\":false,\"mail\":[{\"at\":\"2026-10-12T14:15:00.000Z\",\"sender\":\"client@example.com\",\"subject\":\"Question\",\"snippet\":\"hello\"}],\"taskTitles\":[],\"open\":{\"id\":\"aaaaaaa6-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"state\":\"held_by_other\",\"by\":\"Builder B\",\"at\":\"2026-10-12T13:00:00.000Z\",\"unsent\":1,\"newer\":0},\"ok\":null,\"newest\":{\"mail\":1791814500000,\"pkg\":0,\"task\":0}}],\"older\":[{\"projectId\":\"00000007-0000-4000-8000-000000000007\",\"projectName\":\"Gale Clinic\",\"client\":\"Gale Clinic\",\"dueAt\":1791208800000,\"kind\":\"reply\",\"messages\":1,\"tasks\":0,\"packageId\":null,\"coversThrough\":null,\"packageUpdatedAt\":null,\"flagged\":false,\"mail\":[{\"at\":\"2026-10-02T14:00:00.000Z\",\"sender\":\"client@example.com\",\"subject\":\"Question\",\"snippet\":\"hello\"}],\"taskTitles\":[],\"open\":null,\"ok\":null,\"newest\":{\"mail\":1790949600000,\"pkg\":0,\"task\":0}}]}",
+    rows: "{\"queue\":[{\"projectId\":\"00000008-0000-4000-8000-000000000008\",\"client\":\"Hale Plumbing\",\"title\":\"🔴 5h left · Hale Plumbing · task\",\"waiting\":\"1 task due\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true},{\"projectId\":\"00000001-0000-4000-8000-000000000001\",\"client\":\"Acme Roofing\",\"title\":\"🟡 21h left · Acme Roofing · reply ready · flagged\",\"waiting\":\"drafts ready\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true},{\"projectId\":\"00000003-0000-4000-8000-000000000003\",\"client\":\"Cedar Dental\",\"title\":\"🟡 23h left · Cedar Dental · reply\",\"waiting\":\"1 message waiting, drafts out of date\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true}],\"teammate\":[{\"projectId\":\"00000002-0000-4000-8000-000000000002\",\"client\":\"Bolt Staffing\",\"title\":\"🟡 with J Smith · Bolt Staffing · reply\",\"waiting\":\"1 message waiting, drafts with J Smith\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true,\"note\":\"J Smith picked up the reply drafts for this client (Mon 9:30 AM) and has 1 draft not sent yet. Ask J Smith before writing a second reply.\"},{\"projectId\":\"00000006-0000-4000-8000-000000000006\",\"client\":\"Fig Legal\",\"title\":\"🟡 with Builder B · Fig Legal · reply\",\"waiting\":\"1 message waiting, drafts with Builder B\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true,\"note\":\"Builder B picked up the reply drafts for this client (Mon 9 AM) and has 1 draft not sent yet. Ask Builder B before writing a second reply.\"}],\"older\":[{\"projectId\":\"00000007-0000-4000-8000-000000000007\",\"client\":\"Gale Clinic\",\"title\":\"🔴 5d late · Gale Clinic · reply\",\"waiting\":\"1 message waiting\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true}]}",
+    pane: [
+      "H",
+      "",
+      "New: no thread yet (3)",
+      "",
+      "◆ 1. 🔴 5h left · Hale Plumbing · task",
+      "   1 task due · Start thread: no thread yet",
+      "   [ Start thread ] [ Drafts ]",
+      "",
+      "◆ 2. 🟡 21h left · Acme Roofing · reply ready · flagged",
+      "   drafts ready · Start thread: no thread yet",
+      "   [ Start thread ] [ Drafts ]",
+      "",
+      "◆ 3. 🟡 23h left · Cedar Dental · reply",
+      "   1 message waiting, drafts out of date · Start thread: no thread yet",
+      "   [ Start thread ] [ Drafts ]",
+      "",
+      "With a teammate (2)",
+      "",
+      "4. 🟡 with J Smith · Bolt Staffing · reply",
+      "   1 message waiting, drafts with J Smith",
+      "   J Smith picked up the reply drafts for this client (Mon 9:30 AM) and has 1 draft not sent yet. Ask J Smith before writing a second reply.",
+      "   [ Drafts ]",
+      "",
+      "5. 🟡 with Builder B · Fig Legal · reply",
+      "   1 message waiting, drafts with Builder B",
+      "   Builder B picked up the reply drafts for this client (Mon 9 AM) and has 1 draft not sent yet. Ask Builder B before writing a second reply.",
+      "   [ Drafts ]",
+      "",
+      "Older (1)",
+      "",
+      "6. 🔴 5d late · Gale Clinic · reply",
+      "   1 message waiting · Start thread: no thread yet",
+      "   [ Start thread ] [ Drafts ]",
+      "",
+      "N",
+    ],
+  }
+
+  test('the three lists, their rows, and the pane as text', async () => {
+    const l = buildLists(TEAMMATE_FEED, NOW)
+    const rowsOf = (items: readonly QueueItem[]) => items.map(it => rowFor(it, recommend([], undefined, NOW), NOW))
+    expect(JSON.stringify(l)).toBe(TEAMMATE_050.lists)
+    expect(JSON.stringify({ queue: rowsOf(l.queue), teammate: rowsOf(l.teammate), older: rowsOf(l.older) })).toBe(TEAMMATE_050.rows)
+    expect(paneText(rowsOf(l.queue), 'H', 'N', { teammate: rowsOf(l.teammate), older: rowsOf(l.older) }).split('\n')).toEqual(TEAMMATE_050.pane)
   })
 })

@@ -8,7 +8,8 @@
 //   - a reply package the viewer picked up, with a draft not sent, pins like a prepared one
 //   - a ticket with a date WE committed to, between 3 business days overdue and 24 business hours from now
 //     (clients never set dates; SLA and phase dates are not promises and do not pin)
-//   - for the founder alone: a reply package flagged for his OK, whoever owns the client (kind `ok`)
+//   - for the founder alone: a reply package flagged for his OK, whoever owns the client (kind `ok`); one a
+//     teammate sends only once its reply is due (0.5.1, R2: until then it is theirs to decide)
 // Work that must start now at 1.5 h a day waits for real hour estimates (quote line items).
 //
 // Two more lists are built beside that one (buildLists), and neither pins or is counted: clients whose
@@ -90,7 +91,8 @@ export type Feed = {
  * held the drafts was told none were prepared).
  *   held_by_me     the viewer picked it up and a draft is not sent yet
  *   held_by_other  a teammate picked it up; `by` is their name
- *   stale          drafts exist but are marked out of date, and nobody holds it
+ *   stale          drafts exist but are marked out of date, and nobody holds it; for the founder, `by` is the
+ *                  teammate it is with when it is a teammate's (R1, 0.5.1), else ''
  *   prepared       drafts are ready, but the client does not pin for the viewer on them (another owner's
  *                  client, or a package older than the window)
  * `unsent` is the drafts not sent on a held package, the drafts ready otherwise. `newer` is the client
@@ -104,6 +106,13 @@ export type OpenPackage = {
   unsent: number
   newer: number
 }
+
+/**
+ * A package that is a teammate's and not the viewer's to pick up or rebuild: one a teammate holds, and (for
+ * the founder) a stale one a teammate has (R1: `by` names them). The kickoff and the bridge note word the
+ * two alike: show what is waiting, run no prep, draft no second reply (Opus, 10-13, M2).
+ */
+export const withHolder = (o: OpenPackage): boolean => o.state === 'held_by_other' || (o.state === 'stale' && o.by !== '')
 
 /** The newest time of each kind of thing a client has for the viewer, in ms (0: none): a message received, the mail a package covers, a task created (or due, where the feed gives no creation time). */
 export type Newest = { mail: number; pkg: number; task: number }
@@ -132,7 +141,23 @@ export type QueueItem = {
   ok: { sends: string } | null
   /** What "something new arrived" is measured against. Every read is `it.newest ?? …`: an item an older version stored has none. */
   newest: Newest
+  /**
+   * For the founder alone: the teammate a client's package is with when it is theirs to see through, not his
+   * (0.5.1). R1: a stale package a teammate sends, with a client message waiting after its drafts. R2: a
+   * current package flagged for his OK that a teammate sends, until its reply is due. The client then lists
+   * under With a teammate. Absent otherwise, and on an item an older version stored.
+   */
+  theirs?: string
 }
+
+/**
+ * What a row under With a teammate adds to its sentence when the package there is flagged for the founder's
+ * OK (R2, Opus's words): the teammate decides whether it needs him (client-reply-prep §1 rule 13, §5.2).
+ */
+export const MAY_NEED_OK = 'may need your OK'
+
+/** (the founder, R2) What such a row's title and waiting text say in place of `needs your OK · <X> sends`, before its reply is due (Opus's words). */
+export const decidesText = (who: string): string => `${MAY_NEED_OK} · ${who} decides`
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
@@ -226,9 +251,11 @@ export type Lists = { queue: QueueItem[]; teammate: QueueItem[]; older: QueueIte
 
 /**
  * A teammate holds this client's reply drafts and nothing else keeps it in the viewer's list: no committed
- * task of the viewer's own due there, and (for the founder) no package waiting for his OK.
+ * task of the viewer's own due there, and (for the founder) no package waiting for his OK. For the founder
+ * too: a client whose package a teammate sends and that is theirs to see through (`theirs`, R1 and R2).
  */
-export const withTeammate = (it: QueueItem): boolean => (it.open ?? null)?.state === 'held_by_other' && it.tasks === 0 && it.kind !== 'ok'
+export const withTeammate = (it: QueueItem): boolean =>
+  it.tasks === 0 && (Boolean(it.theirs) || ((it.open ?? null)?.state === 'held_by_other' && it.kind !== 'ok'))
 
 export function buildLists(feed: Feed, now: number): Lists {
   const current = build(feed, now, false)
@@ -300,22 +327,39 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     if (Number.isFinite(at) && at > it.newest[kind]) it.newest[kind] = at
   }
 
-  for (const m of feed.mail ?? []) {
-    if (m.reply_status !== 'unanswered' || !m.project_id || !m.project_name) continue
-    if (!usable(m.project_id, m.project_name)) continue
-    if (!isMine(m.project_owner_email, feed)) continue
-    // The feed's reply time is trusted when it gives one; otherwise 24 business hours after the message arrived.
-    const due = Number.isFinite(ms(m.reply_due_at)) ? ms(m.reply_due_at) : businessDeadline(ms(m.received_at), DAY)
-    if (!inWindow(due)) continue
-    const it = item(m.project_id, m.project_name)
+  /** The mail rows counted for the viewer: a message is counted once. */
+  const counted = new Set<FeedMail>()
+  /** The feed's reply time is trusted when it gives one; otherwise 24 business hours after the message arrived. */
+  const replyDue = (m: FeedMail): number => (Number.isFinite(ms(m.reply_due_at)) ? ms(m.reply_due_at) : businessDeadline(ms(m.received_at), DAY))
+  /** A client message waiting on our reply, on the client's item. */
+  const countMail = (it: QueueItem, m: FeedMail, due: number): void => {
+    counted.add(m)
     it.messages += 1
     it.dueAt = Math.min(it.dueAt, due)
     if (it.kind === 'task') it.kind = 'reply'
     it.mail.push({ at: m.received_at, sender: m.sender ?? '?', subject: m.subject ?? '', snippet: m.snippet ?? '' })
     seen(it, 'mail', ms(m.received_at))
   }
+  for (const m of feed.mail ?? []) {
+    if (m.reply_status !== 'unanswered' || !m.project_id || !m.project_name) continue
+    if (!usable(m.project_id, m.project_name)) continue
+    if (!isMine(m.project_owner_email, feed)) continue
+    const due = replyDue(m)
+    if (!inWindow(due)) continue
+    countMail(item(m.project_id, m.project_name), m, due)
+  }
 
   const me = typeof feed.member === 'string' ? feed.member.toLowerCase() : ''
+  /** (the founder) The clients whose row is a package that waits for his OK and that a teammate sends (R2). */
+  const okTheirs = new Set<string>()
+  /** (the founder) The teammate who sends a stale package of the client's, where a client message waits after its drafts (R1). */
+  const staleTheirs = new Map<string, string>()
+  /**
+   * (the founder) For each client with a stale package a teammate has: that teammate, and the client messages
+   * waiting after its drafts, in this pass's window. Counted only for the client's place under With a teammate,
+   * once nothing else of the founder's lists the client (below).
+   */
+  const staleMail = new Map<string, { name: string; mail: Array<{ m: FeedMail; due: number }> }>()
   for (const d of feed.drafts ?? []) {
     // the package id goes into the kickoff and the pickup request: a lower-case uuid or nothing
     if (!usable(d.project_id, d.project_name) || !isUuid(d.package_id)) continue
@@ -325,14 +369,27 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     const unsent = d.drafts_unsent ?? ready
     // What counts: a held package with a draft not sent, or a prepared or stale one with a draft ready.
     if (held ? unsent < 1 || holder === '' : (d.status !== 'prepared' && d.status !== 'stale') || ready < 1) continue
+    // (the founder) A teammate has this package to see through (Opus, 10-13): the teammate who holds it, whoever
+    // owns the client; with nobody holding it, the owner on record when that is a teammate. ⛔ A package he
+    // holds is his, and so is one with no holder on a client with no owner on record (R3).
+    const sender = typeof d.project_owner_email === 'string' ? d.project_owner_email.toLowerCase() : ''
+    const mates = founder && (held ? holder !== me : sender !== '' && sender !== me)
+    // ⛔ R1 (0.5.1): a stale package a teammate has never puts a row on the founder's list, flagged or not
+    // (Rob's 16 rows, 10-13: Mugen, ReGen, Remver and Talon were answered by hand; the owner's stale reminder
+    // carries what is still open). So it is never a package that waits for his OK. (A stale package is held
+    // by nobody: it is the owner's on record.)
+    const staleTheirsHere = mates && d.status === 'stale'
+    const forOk = founder && d.flagged_for_rob === true && !staleTheirsHere
     const heldByMe = held && holder === me
     const it = item(d.project_id, d.project_name)
     const due = Number.isFinite(ms(d.covers_through)) ? businessDeadline(ms(d.covers_through), DAY) : now
     // (this pass's side of the window: not yet 3 business days past its reply time, or only what is past that)
     const inReach = older ? tooOld(due) : !tooOld(due)
+    // `by`: the teammate who holds it; for the founder, also the teammate a stale package is with (R1), so
+    // that its pane names them instead of inviting him to pick it up
     const open = (state: OpenPackage['state']): OpenPackage => ({
-      id: d.package_id, state, by: state === 'held_by_other' ? holderName(holder) : '', at: held ? d.picked_up_at ?? null : null,
-      unsent: held ? unsent : ready, newer: 0,
+      id: d.package_id, state, by: state === 'held_by_other' ? holderName(holder) : state === 'stale' && staleTheirsHere ? holderName(sender) : '',
+      at: held ? d.picked_up_at ?? null : null, unsent: held ? unsent : ready, newer: 0,
     })
     // ⛔ The holder is asked first, the owner second: a package the viewer holds is theirs to finish whoever
     // owns the client (Rob, 2026-10-12: a client owned by a teammate, picked up and sent by the founder,
@@ -355,10 +412,25 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     // Any other open package never pins by itself: it only changes what the client's row, pane and note say.
     if (it.packageId) continue
     // ⛔ (the founder) A client listed for a package that waits for his OK keeps that package as its own: a
-    // later package of the client's that is not flagged does not take its place on the row, in the pane or
-    // in the kickoff (B4, 2026-10-13).
-    if (it.kind === 'ok' && !(founder && d.flagged_for_rob === true)) continue
+    // later package of the client's that is not flagged (or that a teammate sends and is stale, R1) does not
+    // take its place on the row, in the pane or in the kickoff (B4, 2026-10-13).
+    if (it.kind === 'ok' && !forOk) continue
     it.open = open(held ? 'held_by_other' : d.status === 'stale' ? 'stale' : 'prepared')
+    // R1: with a client message waiting after its drafts were built, the client lists under With a teammate,
+    // like any reply a teammate holds; with none, it is not listed. The messages are only noted here: they are
+    // counted after the tasks, and only where they are all that lists the client (Opus, 10-13, B1).
+    if (staleTheirsHere) {
+      const after = ms(d.covers_through)
+      const waiting = staleMail.get(d.project_id) ?? { name: holderName(sender), mail: [] }
+      for (const m of feed.mail ?? []) {
+        if (m.project_id !== d.project_id || m.reply_status !== 'unanswered' || waiting.mail.some(w => w.m === m)) continue
+        if (Number.isFinite(after) && !(ms(m.received_at) > after)) continue
+        const due = replyDue(m)
+        if (inWindow(due)) waiting.mail.push({ m, due })
+      }
+      if (waiting.mail.length) staleMail.set(d.project_id, waiting)
+      continue
+    }
     // ⛔ With one exception, for the founder alone: a package flagged for his OK is listed whoever owns the
     // client, as its own kind (Rob, 2026-10-12: six such packages were missing from his panel). It is due
     // when a prepared one would be. Somebody else sends it: the owner on record.
@@ -366,9 +438,12 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     // message waiting it lists nothing, and that stays so (Rob's 10-13 morning meeting, finding M1: 12 of
     // 102 packages in 14 days went stale because we had already replied by hand; listing them would invite
     // a second reply, and OW's fix will close such packages). With a message waiting, the message lists it.
-    if (founder && d.flagged_for_rob === true && (held || !isMine(d.project_owner_email, feed))) {
+    if (forOk && (held || !isMine(d.project_owner_email, feed))) {
       it.kind = 'ok'
       it.ok = { sends: d.project_owner_email ? holderName(d.project_owner_email) : NOBODY }
+      // R2: one a teammate sends is theirs to decide until its reply is due (below)
+      if (mates) okTheirs.add(d.project_id)
+      else okTheirs.delete(d.project_id)
       if (inReach) {
         it.dueAt = Math.min(it.dueAt, due)
         seen(it, 'pkg', ms(d.covers_through))
@@ -400,6 +475,33 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     it.open.newer = after.length
     // (they are new for this client whoever owns it: the package is the viewer's to finish)
     for (const m of after) seen(it, 'mail', ms(m.received_at))
+  }
+
+  // (the founder) Whose a client is to see through, when it is a teammate's (0.5.1). ⛔ A package of his own,
+  // or one he holds, is his (R3).
+  //   R2: a current package flagged for his OK that a teammate sends is theirs to decide, the person holding it
+  //       approving it with a one-line reason or asking him (Rob, 10-07: client-reply-prep §1 rule 13, §5.2),
+  //       until its reply is due: the due time its row shows, in business time. From then it is in his list,
+  //       as the `ok` kind always was. With a teammate: whoever holds it, else the one who sends it.
+  //   R1: a stale package a teammate sends, with a client message waiting after its drafts. ⛔ Those messages
+  //       place the client under With a teammate and nothing more: where anything of his own lists the client
+  //       (a task of his, his own mail, a package of his or one that waits for his OK), his row is for that, and
+  //       they are not added to it (Opus, 10-13, B1: his task row was turned into a reply and pinned as one).
+  if (founder) {
+    for (const [pid, waiting] of staleMail) {
+      const it = byProject.get(pid)
+      if (!it || it.tasks > 0 || it.messages > 0 || it.kind !== 'task' || it.packageId) continue
+      for (const { m, due } of waiting.mail) if (!counted.has(m)) countMail(it, m, due)
+      if (it.messages > 0) staleTheirs.set(pid, waiting.name)
+    }
+    for (const it of byProject.values()) {
+      const o = it.open ?? null
+      const name =
+        it.kind === 'ok'
+          ? okTheirs.has(it.projectId) && it.dueAt > now ? (o?.state === 'held_by_other' ? o.by : (it.ok ?? null)?.sends) : undefined
+          : it.kind === 'ready' ? undefined : staleTheirs.get(it.projectId)
+      if (name) it.theirs = name
+    }
   }
 
   return [...byProject.values()]
@@ -451,9 +553,15 @@ export function clockText(t: number, now: number): string {
   return a.date === etParts(now).date ? a.time : `${a.day} ${a.time}`
 }
 
-/** What is due, in a word or two: a package the viewer picked up is `your draft`, one that waits for the founder's OK `needs your OK`. */
+/**
+ * What is due, in a word or two: a package the viewer picked up is `your draft`, one that waits for the
+ * founder's OK `needs your OK`; one a teammate decides on before its reply is due `may need your OK ·
+ * <teammate> decides` (R2).
+ */
 const whatOf = (it: QueueItem): string =>
-  it.open?.state === 'held_by_me' ? 'your draft' : it.kind === 'ok' ? 'needs your OK' : it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : 'task'
+  it.open?.state === 'held_by_me'
+    ? 'your draft'
+    : it.kind === 'ok' ? (it.theirs ? decidesText(it.theirs) : 'needs your OK') : it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : 'task'
 
 /** What is due for a client and when, in words: `reply ready due tomorrow 8 AM`. */
 export function dueLine(it: QueueItem, now: number): string {
@@ -489,8 +597,9 @@ export function titleFor(it: QueueItem, now: number): string {
   // A client whose drafts a teammate holds, and that is not the viewer's to act on: who has it stands where
   // the clock would (`🟡 with J Smith · Acme Legal · reply`), and nothing about it reads as late.
   const theirs = withTeammate(it)
-  // (`your draft` for a package the viewer holds, and `with <Name>` when a teammate holds it: 0.4.1)
-  const parts = [theirs ? `🟡 with ${it.open?.by ?? ''}` : `${isRed(it, now) ? '🔴' : '🟡'} ${clockLead(it.dueAt, now)}`, it.client, whatOf(it)]
+  // (`your draft` for a package the viewer holds, and `with <Name>` when a teammate holds it: 0.4.1; for the
+  // founder, the teammate it is with when it is theirs to see through: 0.5.1)
+  const parts = [theirs ? `🟡 with ${it.theirs ?? it.open?.by ?? ''}` : `${isRed(it, now) ? '🔴' : '🟡'} ${clockLead(it.dueAt, now)}`, it.client, whatOf(it)]
   if (it.messages > 1) parts.push(`${it.messages} new`)
   if (it.open?.state === 'held_by_other' && !theirs) parts.push(`with ${it.open.by}`)
   if (it.flagged) parts.push('flagged')
@@ -545,6 +654,8 @@ export function draftsLine(it: QueueItem): string {
   if (o?.state === 'held_by_me') return `_You picked up the reply drafts for this client: ${draftCount(o.unsent)} not sent yet. ${ask('Show me')}._`
   if (it.packageId) return `_Reply drafts are prepared for this client, but the pickup view could not be loaded here. ${ask('Show me')}._`
   if (o?.state === 'held_by_other') return `_${o.by} picked up the reply drafts for this client${pickedAt(o.at)} and has ${draftCount(o.unsent)} not sent yet. Ask ${o.by} before writing a second reply._`
+  // (the founder) a stale package a teammate has: not his to pick up (R1, Opus's words)
+  if (o?.state === 'stale' && o.by) return `_${o.by} has these drafts. Their reminder lists what is still open._`
   if (o?.state === 'stale') return `_Reply drafts exist for this client but are marked out of date. ${ask('Pick up')} and it will rebuild them first._`
   if (o?.state === 'prepared') return `_Reply drafts are prepared for this client. ${ask('Pick up')}._`
   return `_No reply drafts are prepared yet. ${ask('Pick up')}._`
@@ -570,6 +681,9 @@ export function noteText(it: QueueItem, member: string): string {
   }
   if (it.packageId) return `Reply package ${it.packageId.slice(0, 8)} is prepared${it.flagged ? ' and flagged for approval' : ''}; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${it.packageId}.`
   if (o?.state === 'held_by_other') return `${waiting}; ${o.by} picked up the reply drafts for this client (package ${o.id.slice(0, 8)}) and has ${draftCount(o.unsent)} not sent yet. Do not write a second reply: ask ${o.by}.`
+  // (the founder) a stale package a teammate has is treated as one a teammate holds: never "pick it up" (M2),
+  // its first sentence in Opus's words for a package nobody picked up
+  if (o && withHolder(o)) return `${waiting}; ${o.by} has the reply drafts (package ${o.id.slice(0, 8)}), and they are marked out of date. Do not write a second reply: ask ${o.by}.`
   if (o?.state === 'stale') return `${waiting}; reply drafts exist (package ${o.id.slice(0, 8)}) but are marked out of date. When the person asks for the reply, pick the package up and rebuild the drafts first (client-reply-prep §9 with --package ${o.id}).`
   if (o?.state === 'prepared') return `${waiting}; reply drafts are prepared for this client (package ${o.id.slice(0, 8)}). When the person asks to act on them, follow client-reply-prep §9 with --package ${o.id}.`
   return `${waiting}; no reply drafts are prepared yet.`

@@ -29,9 +29,15 @@ export type MmRow = {
   /**
    * Set on a row under `With a teammate`: who holds the client's reply drafts, and to ask them before
    * writing a second reply. Such a row is not the viewer's to act on: it carries this sentence and the
-   * Drafts button, and no action.
+   * Drafts button, and no action. For the founder, on a package flagged for his OK that a teammate holds,
+   * the sentence is followed by ` · may need your OK`.
    */
   note?: string
+  /**
+   * For the founder alone: true on a row under `With a teammate` whose client's package a teammate sends
+   * and sees through (0.5.1). Like a row with a `note`, it has the Drafts button and no action, sentence or not.
+   */
+  theirs?: boolean
 }
 
 /**
@@ -39,7 +45,19 @@ export type MmRow = {
  * closed until the person opens one: clients whose drafts a teammate holds, and clients whose only items
  * are more than 3 business days overdue. Neither is pinned or counted in the header.
  */
-export type MmQueue = { header: string; rows: MmRow[]; note: string; teammate?: MmRow[]; older?: MmRow[] }
+export type MmQueue = {
+  header: string
+  rows: MmRow[]
+  note: string
+  teammate?: MmRow[]
+  older?: MmRow[]
+  /**
+   * One line under the header when the refresh after a press failed: the list shown is the one last loaded.
+   * Gone with the next list drawn from a sync that worked. `warnedAt` is when it failed.
+   */
+  warning?: string
+  warnedAt?: number
+}
 
 /** Which of the two groups under the list the person has opened. */
 export type MmFolds = { teammate?: boolean; older?: boolean }

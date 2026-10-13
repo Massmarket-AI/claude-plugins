@@ -56,6 +56,12 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   /** Every file the bridge wrote (its heartbeat: where its errors go). */
   const written: Array<{ path: string; text: string }> = []
   const fetched: string[] = []
+  /** Every pane a thread's bridge opened, in order. */
+  const opened: Array<{ thread: string; id: string }> = []
+  /** OW answers the closeout feed this long after it is asked (0: at once): a slow feed, on the fake clock. */
+  let feedDelayMs = 0
+  /** The closeout feed's HTTP status (200: it answers). */
+  let feedStatus = 200
   /** Threads the app refuses to pin. */
   const failPins = new Set<string>()
   const text = (value: unknown): Mcp => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }], isError: false })
@@ -108,6 +114,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
       http: {
         fetch: async (url: string) => {
           fetched.push(url)
+          if (feedDelayMs > 0 && url.includes('/closeout')) await new Promise<void>(resolve => void timers.push({ at: time + feedDelayMs, fn: resolve, done: false }))
+          if (feedStatus !== 200 && url.includes('/closeout')) return { status: feedStatus, ok: false, headers: {}, text: 'unavailable' }
           return { status: 200, ok: true, headers: {}, text: JSON.stringify(url.includes('/reply-package') ? { markdown: '## A client\n\n1. What the client sent' } : feed) }
         },
       },
@@ -138,7 +146,10 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
         resolve: () => ({ Box: 'Box', Button: 'Button', Markdown: 'Markdown', Text: 'Text' }),
         status: () => undefined,
         toast: () => undefined,
-        open: async () => ({ isPlaced: true }),
+        open: async (spec: { id: string }) => {
+          opened.push({ thread: self, id: spec.id })
+          return { isPlaced: true }
+        },
         scroll: async () => undefined,
       },
       process: { run: async () => ({ exitCode: 1, stdout: '', stderr: '' }) },
@@ -154,8 +165,15 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
     appends,
     written,
     fetched,
+    opened,
     failPins,
     session,
+    /** The fake clock now. */
+    now: () => time,
+    /** From now on OW answers the closeout feed `ms` after it is asked (0: at once). */
+    delayFeed: (ms: number) => void (feedDelayMs = ms),
+    /** From now on the closeout feed answers with this HTTP status (200: as normal). */
+    feedAnswers: (status: number) => void (feedStatus = status),
     /** What a thread's pane holds: its Needs-you rows, by the state key the bridge writes. */
     view: (self: string, key: string) => views.get(self)?.get(key),
     stored: (key: string) => (stored[key] === undefined ? undefined : JSON.parse(stored[key] as string)),
@@ -190,7 +208,15 @@ export const mm = async ($: unknown, args: string, kind = 'composer'): Promise<s
  * factory inside them: both are read.)
  */
 export async function paneButtons($: unknown): Promise<Map<string, () => void>> {
-  const tree = await hooks['ui.render:{"component":"Pane","requestId":"mm-queue"}']?.($, { props: {} }, next)
+  return buttonsIn(await hooks['ui.render:{"component":"Pane","requestId":"mm-queue"}']?.($, { props: {} }, next))
+}
+
+/** The buttons the band above the prompt draws in a thread, by key, each with its own handler. */
+export async function bandButtons($: unknown): Promise<Map<string, () => void>> {
+  return buttonsIn(await hooks['ui.render:{"component":"AbovePrompt"}']?.($, { props: { hasSurvey: false } }, next))
+}
+
+function buttonsIn(tree: unknown): Map<string, () => void> {
   const found = new Map<string, () => void>()
   const walk = (node: unknown, depth: number): void => {
     if (!node || typeof node !== 'object' || depth > 40) return

@@ -19,7 +19,7 @@
 import { businessMsBetween } from './business-time'
 import type { MmRow } from '../types'
 
-import { NOBODY, cleanTitle, clockText, holdSentence, titleFor, titleNames, withTeammate } from './queue'
+import { MAY_NEED_OK, NOBODY, cleanTitle, clockText, decidesText, holdSentence, titleFor, titleNames, withHolder, withTeammate } from './queue'
 import type { FeedThread, QueueItem } from './queue'
 
 const HOUR = 3_600_000
@@ -369,8 +369,9 @@ export function recommend(
 export function waitingText(it: QueueItem): string {
   const o = it.open ?? null
   const drafts = !o ? '' : o.state === 'held_by_me' ? `${o.unsent} draft${o.unsent === 1 ? '' : 's'} not sent` : o.state === 'held_by_other' ? `drafts with ${o.by}` : o.state === 'stale' ? 'drafts out of date' : 'drafts ready'
-  // for the founder, a package that waits for his OK: that first, and who sends it once he has given it
-  const ok = it.kind === 'ok' ? `needs your OK · ${(it.ok ?? null)?.sends ?? NOBODY} sends` : ''
+  // for the founder, a package that waits for his OK: that first, and who sends it once he has given it; one a
+  // teammate decides on, before its reply is due, says so instead (R2)
+  const ok = it.kind === 'ok' ? (it.theirs ? decidesText(it.theirs) : `needs your OK · ${(it.ok ?? null)?.sends ?? NOBODY} sends`) : ''
   const parts = [ok, it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', it.tasks ? `${it.tasks} task${it.tasks > 1 ? 's' : ''} due` : '', drafts]
   return parts.filter(Boolean).join(', ') || 'drafts ready'
 }
@@ -382,7 +383,8 @@ export function waitingText(it: QueueItem): string {
  * that somebody else sends, `okKickoff`):
  *   1. a package the person already picked up, with a draft not sent: carry on with it
  *   2. a prepared package that is theirs to pick up
- *   3. a package a teammate picked up: show what is waiting, run no prep, draft no second reply
+ *   3. a package a teammate picked up: show what is waiting, run no prep, draft no second reply (and, for
+ *      the founder, a stale package a teammate has, not held: the same, in words of its own)
  *   4. client messages waiting and a package marked out of date: pick it up and rebuild the drafts
  *   5. client messages waiting and a prepared package older than the window: pick it up
  *   6. client messages with no package yet
@@ -403,6 +405,9 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
           ? okKickoff(it, o)
         : o?.state === 'held_by_other'
           ? `[mm-link ${id}] ${who}: ${o.by} picked up the reply drafts (package ${o.id.slice(0, 8)}) and has ${o.unsent} not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`
+        : o && withHolder(o)
+          ? // (the founder) a stale package a teammate has, not held: Opus's words, 10-13
+            `[mm-link ${id}] ${who}: ${o.by} has the reply drafts (package ${o.id.slice(0, 8)}), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`
           : o?.state === 'stale' && it.messages > 0
             ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting, reply due ${due}. Load the client's project skill first, then follow client-reply-prep §9: package ${o.id.slice(0, 8)} exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.`
             : o?.state === 'prepared' && it.messages > 0
@@ -440,8 +445,9 @@ export const THREAD_ID = /^local_[A-Za-z0-9_-]{1,100}$/
  */
 export function handoverText(it: QueueItem, old: Replaced): string {
   if (!THREAD_ID.test(old.sid)) return ''
-  // (a kickoff that shows no pickup view: tasks only, or a package a teammate holds)
-  const before = it.packageId || it.kind === 'ok' || (it.messages > 0 && it.open?.state !== 'held_by_other') ? 'Before the pickup view' : 'Before showing me what is due'
+  // (a kickoff that shows no pickup view: tasks only, or a package a teammate holds or, stale, has)
+  const o = it.open ?? null
+  const before = it.packageId || it.kind === 'ok' || (it.messages > 0 && !(o && withHolder(o))) ? 'Before the pickup view' : 'Before showing me what is due'
   return `This thread replaces "${cleanTitle(old.title)}" (thread ${old.sid}) for ${it.projectName}. ${before}, and without reading that thread in full: read only its last three messages with the session tools (list_events, a small limit) and list anything left open in it: a question waiting on me, something promised and not done, a draft that was not sent. Keep that list to ten lines, then carry on.`
 }
 
@@ -512,7 +518,12 @@ export const rowState = (row: Row): RowState => {
 
 export function rowFor(it: QueueItem, rec: Recommendation, now: number): Row {
   // a client whose drafts a teammate holds, and that is not the viewer's to act on: who to ask, and no action
-  const note = withTeammate(it) ? holdSentence(it) : ''
+  const withMate = withTeammate(it)
+  // (the founder) a package flagged for his OK that a teammate has, theirs to decide until its reply is due:
+  // the row's sentence is followed by Opus's words, R2. A row with no sentence (a prepared package) gets no
+  // line of them alone: its title and waiting text already say it (Opus, 10-13).
+  const hold = withMate ? holdSentence(it) : ''
+  const note = hold && it.theirs && it.kind === 'ok' ? `${hold} · ${MAY_NEED_OK}` : hold
   return {
     projectId: it.projectId, client: it.client, title: titleFor(it, now), waiting: waitingText(it), state: rec.state, reason: rec.reason,
     // no thread of any kind: the row goes in the first group, marked
@@ -520,8 +531,13 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number): Row {
     // the thread this row's button acts on: a press acts on this one or on none
     ...(rec.target ? { target: rec.target.sid } : {}),
     ...(note ? { note } : {}),
+    // (the founder's alone, 0.5.1) a teammate's to see through: no action, with a sentence or without one
+    ...(withMate && it.theirs ? { theirs: true } : {}),
   }
 }
+
+/** A row under `With a teammate`: not the viewer's to act on. */
+const notMine = (row: Row): boolean => Boolean(row.note) || row.theirs === true
 
 /**
  * The buttons on a row: ONE action, chosen by its state, then Drafts (Rob, 2026-10-12: "it should be
@@ -529,14 +545,14 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number): Row {
  * A row under `With a teammate` is not the viewer's to act on: Drafts alone.
  */
 export function rowButtons(row: Row): RowButton[] {
-  if (row.note) return ['drafts']
+  if (notMine(row)) return ['drafts']
   const state = rowState(row)
   return [state === 'current' ? 'open' : state, 'drafts']
 }
 
 /** The second line of a row: what is waiting, then the action and its reason, or when the thread was updated. A row with no action: what is waiting. */
 export function rowDetail(row: Row): string {
-  if (row.note) return row.waiting
+  if (notMine(row)) return row.waiting
   const state = rowState(row)
   return state === 'current' ? `${row.waiting} · ${row.reason}` : `${row.waiting} · ${LABEL[state]}: ${row.reason}`
 }

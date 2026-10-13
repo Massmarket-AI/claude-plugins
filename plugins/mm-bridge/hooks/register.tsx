@@ -2,11 +2,13 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { MmBand, MmFolds, MmNotice, MmQueue, MmView } from '../types'
 
-import { MAIL_LOOKBACK_HOURS, MAX_PINS, buildLists, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, dueLine, feedClients, holdBanner, isDraftDone, isUuid, needsLine, noteText, titleFor } from './queue'
+import {
+  MAIL_LOOKBACK_HOURS, MAX_PINS, buildLists, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, dueLine, feedClients, holdBanner, isDraftDone, isUuid, needsLine, noteText, titleFor, withHolder,
+} from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
-  LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, foldGroups, hasWaiting, kickoffText, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor,
-  rowGroups, signatureOf, threadLength, threadLink, threadRows, titleSuggestion,
+  LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, foldGroups, hasWaiting, kickoffText, onlyClients, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail,
+  rowFor, rowGroups, signatureOf, threadLength, threadLink, threadRows, titleSuggestion,
 } from './threads'
 import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, Row, RowButton, RowState, Sent } from './threads'
 
@@ -61,6 +63,22 @@ import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, 
 // ⛔ To take the person to a thread, ONE program is started: the system's own opener, with the app's own
 //    link to that thread as its only argument besides the opener's own, and only because the person
 //    pressed Open thread or Update thread or typed /mm update (openThread).
+//
+// Rob, 2026-10-13: "it takes quite a long time for anything to happen after we click a button to open the
+// list or update threads or anything." Every press waited on the feed (an HTTPS call to OW whose route reads
+// many tables) and a whole pass over the app's threads, some presses on two. So (0.5.1, S2) a press draws
+// its answer AT ONCE from what the row was drawn from: the last sync stored, the store, and the row's own
+// thread. The feed and the app are asked AFTER that, and the list is drawn again when they answer. A press
+// may take a feed this session read less than FEED_REUSE_MS ago, and a refresh that fails says so in one
+// line (L3). Update and Open ask the app one thing first: whether the row's thread is still there
+// (`storedPass`). Update refuses when the client's link, read from the store, is now another thread. And
+// Update, the one press that sends, reads the feed once before every send, drawing `Checking…` meanwhile
+// (M1): with no feed it sends nothing, with nothing waiting now it sends nothing, and otherwise its kickoff
+// is the client as the feed has it now; on a thread the bridge linked by itself, or one its row offered
+// with no link, that feed also says whether B3 has let the thread go, or a newer thread of the client's has
+// taken it (`updateThread`, `takenOver`). ⛔ Nothing that guards a send moved: a press acts on the thread its
+// row showed or on none, B3, a thread taken over and the second-send guards are asked before the send as
+// before, and every write is made over a fresh copy and checked again.
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
@@ -113,6 +131,16 @@ const OPEN_WAIT_MS = 10_000
 const ASK_WAIT_MS = 10_000
 /** The first line of the message Update sends: how a session knows an Update just arrived in its thread. */
 const UPDATE_OPENS_WITH = 'New since this thread last worked on this client: '
+/** A feed this session read may be taken for a press's refresh while it is younger than this (S2). */
+const FEED_REUSE_MS = 60_000
+/** A pickup view this session read is drawn at once, while it is read again, when it is younger than this. */
+const PICKUP_REUSE_MS = 60_000
+/** The most pickup views remembered. */
+const PICKUPS_MAX = 20
+/** What the pane says while it has nothing to draw yet: the list, or a client's pickup view. */
+const CHECKING = 'Checking…'
+/** The pane's one line when the refresh after a press failed (Opus, 10-13, L3): until the next sync that works. */
+const REFRESH_FAILED = 'Couldn\'t refresh the list. Showing what was last loaded.'
 /** `[mm-link <project id>]`, counted only at the very start of a prompt. */
 const MARKER = /^\[mm-link ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]/
 /**
@@ -198,8 +226,10 @@ type Listed = { threads: AppThread[]; complete: boolean }
 /**
  * One pass over a feed. `listed` is false where the app's thread list could not be had. `unseen` holds the
  * linked or pinned threads the list left out and the app did not answer for: kept, and not acted on.
+ * `stored`: no pass was made. A press's answer drawn from what the last sync stored, `live` holding at most
+ * the row's own thread as the app answered for it by id (`storedPass`, S2).
  */
-type Pass = { last: Last; live: Map<string, AppThread>; pairs: Pairs; listed: boolean; unseen: ReadonlySet<string> }
+type Pass = { last: Last; live: Map<string, AppThread>; pairs: Pairs; listed: boolean; unseen: ReadonlySet<string>; stored?: true }
 /** Who ran a /mm command: the person, or anything else (the model through the tool, another session, a schedule, a plugin). */
 type By = 'person' | 'other'
 
@@ -232,6 +262,16 @@ const sentHere = new Map<string, string>()
  * or the client has moved on (M1).
  */
 const mintedHere = new Set<string>()
+/**
+ * The feed this session read last: when, and the sync record the pass over it stored (`wrote`, as stored). A
+ * press takes it again only while it is younger than FEED_REUSE_MS AND the store still holds that very
+ * record: no other session has synced since, so the list drawn from it is the list drawn now (S2).
+ */
+let recent: { at: number; feed: Feed; wrote: string } | null = null
+/** The pickup views this session read, by package: drawn at once for a press while they are read again. */
+const pickups = new Map<string, { at: number; text: string }>()
+/** Each session's newest draw of its client part: an older one still reading its view draws nothing over it. */
+const viewDraws = new Map<string, number>()
 
 /**
  * A write that failed after the person's act went (an Update's message, a chip): noted where the bridge's
@@ -395,7 +435,18 @@ async function fetchFeed($: EngineInterface): Promise<Feed> {
   // ⛔ A 200 that is not a feed (neither `tickets` nor `mail` in it) is a failed call, not "nobody needs
   // you": read as an empty feed it would take every pin off and rename every thread "clear".
   if (!feed || typeof feed !== 'object' || !('tickets' in feed || 'mail' in feed)) throw failed()
+  recent = { at: await $.clock.now(), feed, wrote: '' }
   return feed
+}
+
+/**
+ * The feed for a press's refresh (S2): the one this session read last, while it is younger than
+ * FEED_REUSE_MS and the store still holds the sync record made from it; else OW is asked again.
+ */
+async function recentFeed($: EngineInterface): Promise<Feed> {
+  const r = recent
+  if (r?.wrote && (await $.clock.now()) - r.at < FEED_REUSE_MS && JSON.stringify(await storeGet<Last | null>($, 'mm.last', null)) === r.wrote) return r.feed
+  return fetchFeed($)
 }
 
 async function storeGet<T>($: EngineInterface, key: string, fallback: T): Promise<T> {
@@ -772,7 +823,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const recs: Record<string, Recommendation> = {}
     for (const it of [...items, ...quiet]) recs[it.projectId] = carried(it)
     const last: Last = { at: now, member, items, ...also, pinned: before?.pinned ?? 0, recs, projects }
-    await $.store.set('mm.last', last)
+    await storeLast($, feed, last)
     const rowsOf = (list: readonly QueueItem[]): Row[] => list.map(it => rowFor(it, recs[it.projectId] as Recommendation, now))
     await showQueue($, member, items, rowsOf(items), last.pinned, now, { teammate: rowsOf(lists.teammate), older: rowsOf(lists.older) })
     return { last, live, pairs: known ?? {}, listed: false, unseen: new Set() }
@@ -1151,17 +1202,27 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   await patchStore<Record<string, Pin>>($, 'mm.pins', {}, (fresh, stored) => applyChanges(fresh, was.pins, pins) || !stored)
   await patchStore<Auto>($, 'mm.auto', {}, fresh => applyChanges(fresh, was.auto, auto, 'delete'))
   await patchStore<Record<string, string>>($, 'mm.titles', {}, (fresh, stored) => keepNewest(fresh, was.titles, titles) || !stored)
-  await $.store.set('mm.last', last)
+  await storeLast($, feed, last)
   await showQueue($, member, items, rows, want.size, now, folds)
   return { last, live, pairs, listed: true, unseen }
 }
 
-/** Puts the list in the Needs-you pane and on the status line. `folds` are the two closed groups under it: neither is counted. */
-async function showQueue($: EngineInterface, member: string, items: QueueItem[], rows: Row[], pinned: number, now: number, folds: { teammate: Row[]; older: Row[] }): Promise<void> {
+/** The sync record a pass made, stored; and, when the pass was over the feed this session read last, kept with it (recentFeed). */
+async function storeLast($: EngineInterface, feed: Feed, last: Last): Promise<void> {
+  await $.store.set('mm.last', last)
+  if (recent?.feed === feed) recent.wrote = JSON.stringify(last)
+}
+
+/**
+ * Puts the list in the Needs-you pane and on the status line. `folds` are the two closed groups under it:
+ * neither is counted. `syncedAt` is when the list was worked out: the list drawn from a stored sync says that
+ * sync's time, not the time it was drawn.
+ */
+async function showQueue($: EngineInterface, member: string, items: QueueItem[], rows: Row[], pinned: number, now: number, folds: { teammate: Row[]; older: Row[] }, syncedAt = now): Promise<void> {
   const queue: MmQueue = {
     header: items.length ? `Needs you now (${items.length}${items.length > MAX_PINS ? `, the first ${MAX_PINS} pin` : ''})` : 'Nothing needs you right now.',
     rows,
-    note: `Updated ${new Date(now).toISOString().slice(11, 16)} UTC for ${member}. ${PANE_SENTENCE}`,
+    note: `Updated ${new Date(syncedAt).toISOString().slice(11, 16)} UTC for ${member}. ${PANE_SENTENCE}`,
     ...(folds.teammate.length ? { teammate: folds.teammate } : {}),
     ...(folds.older.length ? { older: folds.older } : {}),
   }
@@ -1175,10 +1236,73 @@ async function sync($: EngineInterface): Promise<Last> {
   return (await reconcile($, await fetchFeed($))).last
 }
 
+/** A press's refresh (S2): the list brought up to date after the press drew its answer, with a feed OW gave this session less than a minute ago when there is one. */
+async function refreshList($: EngineInterface): Promise<Pass> {
+  return reconcile($, await recentFeed($))
+}
+
+/**
+ * The refresh after a press failed (L3): the pane says so in one line, under the list it still shows. The list
+ * is the one last drawn; the line goes with the next list drawn from a sync that worked (`showQueue`), or, in a
+ * thread that does not sync, once the store holds a sync newer than the failure (`clearRefreshFailed`).
+ */
+async function refreshFailed($: EngineInterface): Promise<void> {
+  try {
+    const { value: queue } = await $.state.get(QUEUE)
+    if (queue && Array.isArray(queue.rows)) await $.state.set(QUEUE, { ...queue, warning: REFRESH_FAILED, warnedAt: await $.clock.now() } satisfies MmQueue)
+  } catch {
+    // the line is a convenience: its failure breaks nothing
+  }
+}
+
+/** The line a failed refresh left, taken off once the store holds a sync newer than it (any session's). */
+async function clearRefreshFailed($: EngineInterface): Promise<void> {
+  try {
+    const { value: queue } = await $.state.get(QUEUE)
+    if (!queue?.warning) return
+    const last = await storeGet<Last | null>($, 'mm.last', null)
+    if (!last || !(last.at > (queue.warnedAt ?? Infinity))) return
+    const { warning: _warning, warnedAt: _warnedAt, ...clear } = queue
+    await $.state.set(QUEUE, clear)
+  } catch {
+    // as above
+  }
+}
+
+/**
+ * A client's recommendation as the last sync stored it, with the thread it named: what a press acts on (S2).
+ * Undefined when there is none, or it has a shape no version wrote. (A sync by an older version stored the
+ * state under `action`.)
+ */
+function storedRec(last: Last | null, projectId: string): Recommendation | undefined {
+  const was = last?.recs?.[projectId] as (Partial<Recommendation> & { action?: unknown }) | undefined
+  const state = was?.state ?? was?.action
+  if (!was || (state !== 'update' && state !== 'start' && state !== 'current') || typeof was.reason !== 'string') return undefined
+  const t = was.target as { sid?: unknown; title?: unknown; suggested?: unknown } | null | undefined
+  const target = t && typeof t === 'object' && typeof t.sid === 'string' && t.sid && typeof t.title === 'string' ? { sid: t.sid, title: t.title, suggested: t.suggested === true } : undefined
+  const fresh = was.state !== undefined ? was.fresh === true : state === 'start' && !target
+  return { state, reason: was.reason, ...(target ? { target } : {}), ...(fresh ? { fresh: true as const } : {}) }
+}
+
+/** The three lists as the last sync stored them, drawn in this thread's pane: no feed call and no app call (S2). */
+async function drawStored($: EngineInterface, last: Last, now: number): Promise<void> {
+  const list = (v: unknown): QueueItem[] => (Array.isArray(v) ? (v as QueueItem[]) : [])
+  const rowsOf = (items: readonly QueueItem[]): Row[] => items.map(it => rowFor(it, storedRec(last, it.projectId) ?? recommend([], undefined, now), now))
+  const items = list(last.items)
+  const at = Number.isFinite(last.at) ? last.at : now
+  await showQueue($, memberText(last.member), items, rowsOf(items), Number(last.pinned) || 0, now, { teammate: rowsOf(list(last.teammate)), older: rowsOf(list(last.older)) }, at)
+}
+
+/** The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that waits for his OK. */
+function pickupOf(it: QueueItem): string | null {
+  const packageId = it.packageId ?? (it.kind === 'ok' ? ((it.open ?? null)?.id ?? null) : null)
+  return packageId && isUuid(packageId) ? packageId : null
+}
+
 async function renderPickup($: EngineInterface, it: QueueItem): Promise<string | null> {
   // The package that is the viewer's to work, or (for the founder) the one that waits for his OK: he reads it, he does not pick it up.
-  const packageId = it.packageId ?? (it.kind === 'ok' ? ((it.open ?? null)?.id ?? null) : null)
-  if (!packageId || !isUuid(packageId)) return null
+  const packageId = pickupOf(it)
+  if (!packageId) return null
   try {
     const r = await $.http.fetch(`${EXT}/reply-package?package_id=${packageId}&format=pickup`, {
       headers: { Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER },
@@ -1202,21 +1326,70 @@ async function renderPickup($: EngineInterface, it: QueueItem): Promise<string |
   return null
 }
 
-/** A client's pane: the pickup view (under a line saying the viewer holds it, when they do), or what is waiting. */
-async function paneMarkdown($: EngineInterface, it: QueueItem, now: number): Promise<string> {
-  const view = await renderPickup($, it)
-  return view ? [holdBanner(it), view].filter(Boolean).join('\n\n') : clientMarkdown(it, now)
+/** This draw of the client part is now this session's newest: an older one still reading its view draws nothing over it. */
+async function newDraw($: EngineInterface): Promise<() => Promise<boolean>> {
+  const id = await instanceId($)
+  const draw = (viewDraws.get(id) ?? 0) + 1
+  viewDraws.set(id, draw)
+  return async () => viewDraws.get(id) === draw
 }
 
 /**
  * The client part of the pane: a client's prepared drafts when there is a package (under a line saying the
  * viewer holds it, when they do), else the messages waiting on our reply, the tasks due and what is true of
- * its reply drafts (paneMarkdown). `own` is the client of the thread the pane is in: its part is headed
- * `This thread: <client>`. One package read (the pickup view), in this thread's own session.
+ * its reply drafts. `own` is the client of the thread the pane is in: its part is headed `This thread:
+ * <client>`. One package read (the pickup view), in this thread's own session.
+ * In two steps (S2). This call draws at once what needs no network: the whole part for a client with no
+ * package; for one with a package and `atOnce` (a press), the pickup view this session read less than a
+ * minute ago, else the client's heading and `Checking…`. The step it answers reads the pickup view and draws
+ * it. Only this session's newest draw lands: a press on another row meanwhile is not drawn over.
  */
+async function beginClient($: EngineInterface, it: QueueItem, own: boolean, atOnce: boolean): Promise<() => Promise<void>> {
+  const heading = own ? `This thread: ${it.client}` : ''
+  const newest = await newDraw($)
+  const draw = async (text: string): Promise<void> => {
+    if (await newest()) await $.state.set(VIEW, { text, heading } satisfies MmView)
+  }
+  const withBanner = (view: string): string => [holdBanner(it), view].filter(Boolean).join('\n\n')
+  const now = await $.clock.now()
+  const packageId = pickupOf(it)
+  if (!packageId) {
+    await draw(clientMarkdown(it, now))
+    return async () => {}
+  }
+  if (atOnce) {
+    const seen = pickups.get(packageId)
+    await draw(seen && now - seen.at < PICKUP_REUSE_MS ? withBanner(seen.text) : [`## ${it.projectName}`, titleFor(it, now), CHECKING].join('\n\n'))
+  }
+  return async () => {
+    const view = await renderPickup($, it)
+    if (view) {
+      pickups.delete(packageId)
+      pickups.set(packageId, { at: await $.clock.now(), text: view })
+      for (const old of [...pickups.keys()].slice(0, Math.max(0, pickups.size - PICKUPS_MAX))) pickups.delete(old)
+    }
+    await draw(view ? withBanner(view) : clientMarkdown(it, await $.clock.now()))
+  }
+}
+
+/** No client part: the pane holds the list alone (and a client part still being read is not drawn after this). */
+async function clearClient($: EngineInterface): Promise<() => Promise<void>> {
+  await newDraw($)
+  await $.state.set(VIEW, { text: '', heading: '' })
+  return async () => {}
+}
+
+/** The client part, drawn when it is read: what the timer and a pass draw (no `Checking…` in a pane the person may be reading). */
 async function showClient($: EngineInterface, it: QueueItem, own: boolean): Promise<void> {
-  const text = await paneMarkdown($, it, await $.clock.now())
-  await $.state.set(VIEW, { text, heading: own ? `This thread: ${it.client}` : '' } satisfies MmView)
+  await (await beginClient($, it, own, false))()
+}
+
+/** What a client's part shows, in a word: the thread's note and its part are drawn again only when this changes. */
+function partSig(it: QueueItem): string {
+  const o = it.open ?? null
+  return o
+    ? `open:${o.id}:${o.state}:${it.coversThrough ?? ''}:${o.unsent}:${o.newer}:${it.messages}:${it.tasks}`
+    : it.packageId ? `pkg:${it.packageId}:${it.coversThrough}` : `q:${it.messages}:${it.tasks}:${it.dueAt}`
 }
 
 /** The client part as the state holds it; a session an older version left its view in held plain text there. */
@@ -1226,26 +1399,62 @@ async function clientPart($: EngineInterface): Promise<MmView> {
   return value && typeof value.text === 'string' ? { text: value.text, heading: typeof value.heading === 'string' ? value.heading : '' } : { text: '', heading: '' }
 }
 
-/** The waiting client this thread is linked to, if it is linked to one. */
-async function ownClient($: EngineInterface, items: readonly QueueItem[]): Promise<QueueItem | undefined> {
-  const me = await selfId($)
+/**
+ * The waiting client this thread is linked to, if it is linked to one. From what is stored and this thread's
+ * id as the timer (or a pass) already learnt it: no app call (S2).
+ */
+async function ownIn($: EngineInterface, items: readonly QueueItem[]): Promise<QueueItem | undefined> {
+  const me = await knownSelf($)
   const pid = me ? ownerOf(me, await storeGet<Record<string, string>>($, 'mm.links', {})) : undefined
   return pid ? items.find(i => i.projectId === pid) : undefined
 }
 
 /**
- * The pane, as the person asked for it (/mm, /mm view, the band's buttons): ONE pane with two parts in a
- * thread that is a waiting client's, the client's part on top and the Needs-you list under it; the list
+ * The pane, as the person asked for it (/mm, the band's Open list, the tool's ""): ONE pane with two parts in
+ * a thread that is a waiting client's, the client's part on top and the Needs-you list under it; the list
  * alone in any other thread (Rob, 2026-10-12: "Needs you shows up on the bottom half of the panel on the
  * right, and the one for that specific client shows up on the top half").
+ * S2: it opens AT ONCE, drawn from what the last sync stored; the list is then brought up to date and drawn
+ * again, and the client part with it when what it shows changed. A press (`press`, the band's button) may take
+ * a feed this session read less than a minute ago; a typed /mm asks OW again.
  * ⛔ Opened only because the person asked. Nothing opens a pane from a timer: the API has no way to make
  *    one available without drawing it, and drawing it opens a closed side panel.
  */
-async function openPane($: EngineInterface, items: readonly QueueItem[]): Promise<void> {
-  const mine = await ownClient($, items)
-  if (mine) await showClient($, mine, true)
-  else await $.state.set(VIEW, { text: '', heading: '' })
+async function showList($: EngineInterface, press: boolean): Promise<string> {
+  const now = await $.clock.now()
+  const kept = await storeGet<Last | null>($, 'mm.last', null)
+  let before: QueueItem | undefined
+  let finish: () => Promise<void>
+  try {
+    if (kept && Array.isArray(kept.items)) await drawStored($, kept, now)
+    before = await ownIn($, listedIn(kept))
+    finish = before ? await beginClient($, before, true, true) : await clearClient($)
+  } catch {
+    // a stored list this version cannot draw (an older version's, a damaged file): the pass below draws it
+    before = undefined
+    finish = await clearClient($)
+  }
   await $.ui.open({ id: PANE_QUEUE, title: 'Needs you' })
+  // after the pane is open: its client part read, and the list brought up to date, side by side
+  const reading = finish()
+  let last: Last
+  try {
+    last = (await reconcile($, press ? await recentFeed($) : await fetchFeed($))).last
+  } catch (err) {
+    // the list it opened with stays, and the pane says it is the one last loaded (L3). A typed /mm still
+    // answers with the failure, as before; the band's button has said all there is to say.
+    await refreshFailed($)
+    if (!press) throw err
+    return REFRESH_FAILED
+  } finally {
+    await reading
+  }
+  const after = await ownIn($, listedIn(last))
+  if ((after ? `${after.projectId}\n${partSig(after)}` : '') !== (before ? `${before.projectId}\n${partSig(before)}` : '')) {
+    if (after) await showClient($, after, true)
+    else await clearClient($)
+  }
+  return last.items.length ? `${last.items.length} client${last.items.length === 1 ? '' : 's'} need you; ${last.pinned} thread${last.pinned === 1 ? '' : 's'} pinned. The list is in the side pane.` : 'Nothing needs you right now.'
 }
 
 /**
@@ -1273,15 +1482,15 @@ async function refreshSelf($: EngineInterface, force: boolean): Promise<string> 
     if (force) await $.state.set(VIEW, { text: '', heading: '' })
     return 'Nothing needs you on this client right now.'
   }
-  const o = it.open ?? null
-  const sig = o
-    ? `open:${o.id}:${o.state}:${it.coversThrough ?? ''}:${o.unsent}:${o.newer}:${it.messages}:${it.tasks}`
-    : it.packageId ? `pkg:${it.packageId}:${it.coversThrough}` : `q:${it.messages}:${it.tasks}:${it.dueAt}`
+  const sig = partSig(it)
   const noted = await storeGet<Record<string, string>>($, 'mm.noted', {})
   if (!force && noted[me] === sig) return 'Up to date.'
   const now = await $.clock.now()
-  await showClient($, it, true)
+  // asked for by the person, the pane opens at once and its client part is read after (S2); the timer draws
+  // the part only once it has read it
+  const finish = await beginClient($, it, true, force)
   if (force) await $.ui.open({ id: PANE_QUEUE, title: 'Needs you' })
+  await finish()
   if (noted[me] !== sig) {
     const body = noteText(it, last?.member ?? '')
     await $.session.append({
@@ -1378,6 +1587,8 @@ async function tick($: EngineInterface): Promise<void> {
     // the chips this session minted that are no longer wanted
     await withdrawChips($).catch(() => {})
     await refreshBand($)
+    // a failed refresh's line, once a sync since has worked (L3)
+    await clearRefreshFailed($)
     await beat($, { ok: true })
   } catch (err) {
     const last = await storeGet<Last | null>($, 'mm.last', null)
@@ -1549,7 +1760,8 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
   // A client that already has a thread: the new one is asked to look at how the old one ended (handoverText).
   const prompt = kickoffText(it, { replaces: await replaced($, it, pass) })
   const r = (await $.mcp.call('ccd_session', 'spawn_task', {
-    title: `${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open?.state === 'held_by_other' ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : 'reply to the client'}`,
+    // (a stale package a teammate has is worded as one a teammate holds: M2)
+    title: `${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : 'reply to the client'}`,
     tldr: `${it.client} needs you: ${needsLine(it, now)}. Start this to open a thread for that client with the drafts or the messages waiting.`,
     prompt,
   })) as Mcp
@@ -1740,6 +1952,52 @@ async function openThread($: EngineInterface, thread: AppThread | undefined): Pr
 }
 
 /**
+ * (S2) Whether another thread has taken the client from a thread its row offered with no link: refused, as the
+ * pass before the press refused it in 0.5.0 (Opus, 2026-10-13: "restore the refusal"). By the feed Update has
+ * just read, another open thread whose sessions declared that client alone, and that is no other client's,
+ * is the client's thread now: one more recently active than the row's thread (each dated as the row's
+ * recommendation dates it: the app's last activity, else the feed's), or any at all where the row offered
+ * only a title look-alike. (A link moves only through mm.links, which the press has read already.)
+ * The app is asked for each such thread by id, at most LOOKUPS_PER_SYNC: local calls, no network.
+ */
+async function takenOver(
+  $: EngineInterface,
+  projectId: string,
+  target: { sid: string; suggested: boolean },
+  links: Readonly<Record<string, string>>,
+  rows: readonly FeedThread[],
+  pairs: Pairs,
+  marked: Readonly<Record<string, string>>,
+  shown: AppThread | undefined,
+): Promise<boolean> {
+  /** The newest the feed has for each thread of the client's: the row's own, and every other. */
+  const feedAt = new Map<string, number>()
+  for (const t of rows) {
+    const sid = t.project_id === projectId ? pairs[t.session_id]?.app : undefined
+    if (!sid) continue
+    const at = Date.parse(t.last_activity_at)
+    feedAt.set(sid, Math.max(feedAt.get(sid) ?? -Infinity, Number.isFinite(at) ? at : -Infinity))
+  }
+  const dated = (t: AppThread | undefined, sid: string): number => {
+    const at = t?.lastActivityAt ? Date.parse(t.lastActivityAt) : NaN
+    return Number.isFinite(at) ? at : (feedAt.get(sid) ?? -Infinity)
+  }
+  const mine = dated(shown, target.sid)
+  const others = [...feedAt.keys()].filter(sid => {
+    if (sid === target.sid) return false
+    const owner = ownerOf(sid, links)
+    return (owner === undefined || owner === projectId) && onlyClients(projectId, sid, rows, pairs, marked)
+  })
+  for (const sid of others.slice(0, LOOKUPS_PER_SYNC)) {
+    const found = await lookup($, sid)
+    if (found === 'gone' || found === 'unknown') continue
+    const at = dated(found, sid)
+    if (Number.isFinite(at) && (target.suggested || !Number.isFinite(mine) || at > mine)) return true
+  }
+  return false
+}
+
+/**
  * Update thread: the client's thread gets the kickoff as a message, which starts a model turn there, and
  * is then linked, pinned and named. The app refuses to bring a thread forward unless this thread started
  * it (ccd_window.open_session_in), so the answer says which pinned thread to open.
@@ -1750,15 +2008,21 @@ async function openThread($: EngineInterface, thread: AppThread | undefined): Pr
  *
  * ⛔ Nothing is written before the message went: no link, no unlink record forgotten, no stamp.
  * ⛔ Never into a thread linked to another client.
+ *
+ * A press whose pass is `stored` (S2) answers as soon as the message went and the writes after it are made:
+ * the list is brought up to date after that answer (`after`), and where the thread could not be opened, the
+ * line the pane keeps then says where it is, by the name that pass gave it. `feed` is the feed the typed
+ * command (or a press the stored state could not vouch for) brought the list up to date with; null for a
+ * `stored` pass.
  */
-async function updateThread($: EngineInterface, feed: Feed, it: QueueItem, pass: Pass, how: { typed: true } | { typed: false; shown: string | undefined }): Promise<Said> {
+async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem, pass: Pass, how: { typed: true } | { typed: false; shown: string | undefined }): Promise<Answer> {
   // With no thread list there is nothing to act on: a thread remembered from an earlier sync may be gone.
-  if (!pass.listed) return NO_THREAD_LIST
+  if (!pass.listed) return { said: NO_THREAD_LIST }
   const target = pass.last.recs[it.projectId]?.target
   const links = await storeGet<Record<string, string>>($, 'mm.links', {})
   // The same for a client whose linked thread the app's list left out and the app did not answer for.
   const linked = links[it.projectId]
-  if ((linked && pass.unseen.has(linked)) || (!how.typed && how.shown && pass.unseen.has(how.shown))) return NO_THREAD_LIST
+  if ((linked && pass.unseen.has(linked)) || (!how.typed && how.shown && pass.unseen.has(how.shown))) return { said: NO_THREAD_LIST }
   /** The refusal for a thread that is another client's, or null when it is free or this client's. */
   const anothers = async (sid: string): Promise<string | null> => {
     const owner = ownerOf(sid, links)
@@ -1768,31 +2032,73 @@ async function updateThread($: EngineInterface, feed: Feed, it: QueueItem, pass:
     return other ? `That thread belongs to ${other}. Use Start thread for ${it.client}.` : THREAD_GONE
   }
   if (how.typed) {
-    if (!target) return `No thread for ${it.client} yet: use /mm start ${it.client}.`
-    if (target.suggested) return `No linked thread for ${it.client} yet. Press Update thread on its row to use "${cleanTitle(target.title)}", or type /mm start ${it.client}.`
+    if (!target) return { said: `No thread for ${it.client} yet: use /mm start ${it.client}.` }
+    if (target.suggested) return { said: `No linked thread for ${it.client} yet. Press Update thread on its row to use "${cleanTitle(target.title)}", or type /mm start ${it.client}.` }
   } else {
     const refused = how.shown ? await anothers(how.shown) : null
-    if (refused) return refused
+    if (refused) return { said: refused }
     // the list was drawn again by the pass that ran before this
-    if (!how.shown || !target || target.sid !== how.shown) return THREAD_GONE
+    if (!how.shown || !target || target.sid !== how.shown) return { said: THREAD_GONE }
+    // (S2) with no pass before it: the client's link, read now, is no other thread. Moved since the row was
+    // drawn, the client's thread is that other one, which the row never showed.
+    if (pass.stored && linked !== undefined && linked !== target.sid) return { said: THREAD_GONE }
   }
   const refused = await anothers(target.sid)
-  if (refused) return refused
+  if (refused) return { said: refused }
+  // ⛔ (S2, M1) Update is the one press that sends, so it reads the feed ONCE before every send (Opus, 10-13:
+  // the review's A1 and A2 sent a kickoff for mail answered since, and with the feed down). `Checking…` is
+  // drawn at once. The feed cannot be had: nothing is sent. The client has nothing waiting now: nothing is
+  // sent, and the list is drawn again. Otherwise the kickoff, and whether the thread already has it, come from
+  // the client as the feed has it NOW (`cur`). The pass after the answer is made over that feed.
+  // ⛔ And B3 guards a send, which only that feed can answer: a thread the bridge linked by itself, or one the
+  // row offered with no link, is this client's only while the feed's rows for its sessions say so (the
+  // Pipeline speed thread, 2026-10-13). A link the person made is never let go by B3. A row's thread with no
+  // link is no longer the client's once a newer thread of the client's has taken it (`takenOver`): refused,
+  // as in 0.5.0.
+  let guard: Feed | null = null
+  let cur = it
+  if (pass.stored) {
+    await say($, CHECKING, false)
+    let read: Feed
+    try {
+      read = await fetchFeed($)
+    } catch {
+      return { said: `Couldn't reach the list to check ${it.client}. Nothing was sent; try again in a minute.`, after: undefined }
+    }
+    guard = read
+    const lists = buildLists(read, await $.clock.now())
+    const fresh = [...lists.queue, ...lists.teammate, ...lists.older].find(i => i.projectId === it.projectId)
+    if (!fresh) return { said: `${it.client} has nothing waiting now. The list has been refreshed.`, after: async () => void (await reconcile($, read)) }
+    cur = fresh
+    const auto = await storeGet<Auto>($, 'mm.auto', {})
+    if (linked !== target.sid || auto[it.projectId]?.sid === target.sid) {
+      const rows = feedThreadsOf(read)
+      const pairs = await storeGet<Pairs>($, 'mm.threads', {})
+      const marked = await storeGet<Record<string, string>>($, 'mm.marked', {})
+      const still =
+        linked === target.sid
+          ? autoLinkFate(it.projectId, target.sid, rows, pairs, marked) !== 'goes'
+          : (target.suggested ? !declaredOther(it.projectId, target.sid, rows, pairs, marked) : onlyClients(it.projectId, target.sid, rows, pairs, marked)) &&
+            !(await takenOver($, it.projectId, target, links, rows, pairs, marked, pass.live.get(target.sid)))
+      if (!still) return { said: THREAD_GONE, after: async () => void (await reconcile($, read)) }
+    }
+  }
   // The thread already has what is waiting now: nothing is sent twice. (Its row draws no Update button;
   // this is the typed command, or a row drawn before another thread's Update went.)
   // ⛔ Asked of what is stored too, and of what this session sent (F2): a second press never sends the same
-  // kickoff into the same thread, whatever became of the writes after the first one went.
-  const signature = signatureOf(it)
-  const sent = (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[it.projectId]
-  const has = (sent && sent.sid === target.sid && hasWaiting(sent.sig, it)) || sentHere.get(`${it.projectId}\n${target.sid}`) === signature
-  if (pass.last.recs[it.projectId]?.state === 'current' || has) {
-    return `${it.client}'s thread already has this. Open "${cleanTitle(pass.live.get(target.sid)?.title ?? target.title)}" under Pinned.`
+  // kickoff into the same thread, whatever became of the writes after the first one went. (A press asks of
+  // the client as the feed has it now, not of the stored sync's word that the thread was current.)
+  const signature = signatureOf(cur)
+  const sent = (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[cur.projectId]
+  const has = (sent && sent.sid === target.sid && hasWaiting(sent.sig, cur)) || sentHere.get(`${cur.projectId}\n${target.sid}`) === signature
+  if ((!pass.stored && pass.last.recs[it.projectId]?.state === 'current') || has) {
+    return { said: `${it.client}'s thread already has this. Open "${cleanTitle(pass.live.get(target.sid)?.title ?? target.title)}" under Pinned.` }
   }
   const here = target.sid === (await selfId($))
-  if (here && how.typed) return `You are already in ${it.client}'s thread. Press Update thread on its row in the pane to pick it up here.`
+  if (here && how.typed) return { said: `You are already in ${it.client}'s thread. Press Update thread on its row in the pane to pick it up here.` }
 
-  const failed = (why: string) => `Could not send to ${it.client}'s thread: ${why}`
-  const text = kickoffText(it, { update: true })
+  const failed = (why: string): Answer => ({ said: `Could not send to ${it.client}'s thread: ${why}` })
+  const text = kickoffText(cur, { update: true })
   try {
     if (here) {
       // The client's thread is this one, and the app's send does not take the sending thread: the kickoff
@@ -1856,18 +2162,37 @@ async function updateThread($: EngineInterface, feed: Feed, it: QueueItem, pass:
     if ((await storeGet<Acted>($, 'mm.acted', {}))[pid]?.sid !== sid) await step('the stamp, again', () => stamp($, pid, sid))
   })
   let thread = pass.live.get(sid)
-  try {
-    thread = (await reconcile($, feed, pass.pairs)).live.get(sid) ?? thread
-  } catch (err) {
-    // the next sync pins and names it
-    await noteFailure($, 'update: the sync after it', err)
+  /** The pass that pins and names it (over the feed B3 was asked of, when it was); on its failure the next sync does. */
+  const settle = async (): Promise<void> => {
+    try {
+      thread = (await (feed ? reconcile($, feed, pass.pairs) : guard ? reconcile($, guard) : refreshList($))).live.get(sid) ?? thread
+    } catch (err) {
+      await noteFailure($, 'update: the sync after it', err)
+      // (a press's refresh that failed shows in the pane: L3)
+      if (pass.stored) await refreshFailed($)
+    }
   }
-  if (here) return `Picking up ${it.client} in this thread.`
   // The toast says it went. Update also takes the person there when the app can be told to open the
   // thread; when it cannot, the line the pane keeps says where the thread is.
   const went = `Sent to ${it.client}'s thread.`
-  if (await openThread($, thread)) return went
-  return { text: `Sent to ${it.client}'s thread: open "${cleanTitle(thread?.title ?? target.title)}" under Pinned.`, toast: went }
+  const where = () => `Sent to ${it.client}'s thread: open "${cleanTitle(thread?.title ?? target.title)}" under Pinned.`
+  if (pass.stored) {
+    // S2: the answer now; the pass after it. Where the thread could not be opened, the toast says it went at
+    // once, and the line the pane keeps says where the thread is once that pass has named it.
+    if (here) return { said: `Picking up ${it.client} in this thread.`, after: settle }
+    if (await openThread($, thread)) return { said: went, after: settle }
+    return {
+      said: went,
+      after: async () => {
+        await settle()
+        return where()
+      },
+    }
+  }
+  await settle()
+  if (here) return { said: `Picking up ${it.client} in this thread.` }
+  if (await openThread($, thread)) return { said: went }
+  return { said: { text: where(), toast: went } }
 }
 
 /**
@@ -1881,6 +2206,8 @@ async function showThread($: EngineInterface, it: QueueItem, pass: Pass, shown: 
   const target = pass.last.recs[it.projectId]?.target
   // the list was drawn again by the pass that ran before this
   if (!shown || !target || target.suggested || target.sid !== shown) return THREAD_GONE
+  // (S2) with no pass before it: the client's link, read now, is no other thread
+  if (pass.stored && linked !== undefined && linked !== shown) return THREAD_GONE
   const thread = pass.live.get(shown)
   if (await openThread($, thread)) return ''
   return `Open "${cleanTitle(thread?.title ?? target.title)}" under Pinned.`
@@ -1889,41 +2216,102 @@ async function showThread($: EngineInterface, it: QueueItem, pass: Pass, shown: 
 /**
  * Drafts, on a row: that client's part goes to the top of the pane (its five-part pickup view when there
  * is a package, else what is waiting and due) and the pane shows its top. Links, pins and starts nothing.
+ * S2: the pane opens at once with what needs no network (beginClient); the pickup view is read after.
  */
-async function showDrafts($: EngineInterface, it: QueueItem): Promise<string> {
-  const mine = await ownClient($, [it])
-  await showClient($, it, mine !== undefined)
+async function showDrafts($: EngineInterface, it: QueueItem): Promise<Answer> {
+  const mine = await ownIn($, [it])
+  const finish = await beginClient($, it, mine !== undefined, true)
   await $.ui.open({ id: PANE_QUEUE, title: 'Needs you' })
   // the row pressed may be far down the list: the part just drawn is at the top
   await Promise.resolve($.ui.scroll({ to: 'start', in: PANE_QUEUE })).catch(() => {})
-  return ''
+  return { said: '', after: finish }
 }
 
 /** What a button or a command answers: one sentence, or the line the pane keeps with a shorter toast. */
 type Said = string | { text: string; toast: string }
 
+/**
+ * What a press answers at once, and what it does after that answer is drawn (S2): the list brought up to date,
+ * a pickup view read. A line `after` answers is what the pane keeps from then on (no second toast).
+ */
+type Answer = { said: Said; after?: () => Promise<Said | void> }
+
+/**
+ * S2: what a press acts on, from what its row was drawn from, with no feed call and at most one app call.
+ *   { it, pass }  the client as the last sync stored it, and a `stored` pass: that sync's recommendations,
+ *                 and for Update and Open the row's thread as the app answers for it by id now. That is the
+ *                 one call before the press acts: the thread must still be there.
+ *   { said }      refused here, as the pass before the press refused it in 0.5.0: the row's thread is no
+ *                 longer the one the stored sync names for the client, or the app says it is gone, or no
+ *                 app answers for threads here
+ *   null          what is stored cannot vouch for the row: the caller brings the list up to date first
+ */
+async function storedPass($: EngineInterface, verb: Exclude<Verb, 'drafts'>, row: Row): Promise<{ it: QueueItem; pass: Pass } | { said: Said } | null> {
+  const last = await storeGet<Last | null>($, 'mm.last', null)
+  if (!last || !Array.isArray(last.items) || !last.recs || typeof last.recs !== 'object') return null
+  const it = listedIn(last).find(i => i.projectId === row.projectId)
+  if (!it) return null
+  const pass: Pass = { last, live: new Map(), pairs: {}, listed: true, unseen: new Set(), stored: true }
+  if (verb === 'start') return { it, pass }
+  if (!row.target) {
+    // a row drawn with no thread to act on: no app answered for threads when it was drawn
+    return (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop' ? null : { said: NO_THREAD_LIST }
+  }
+  const target = storedRec(last, it.projectId)?.target
+  if (!target) return null
+  if (target.sid !== row.target) return { said: THREAD_GONE }
+  const found = await lookup($, row.target)
+  if (found === 'unknown') return { said: NO_THREAD_LIST }
+  if (found === 'gone') return { said: THREAD_GONE }
+  pass.live.set(found.sessionId, found)
+  return { it, pass }
+}
+
 /** A button on a row. `row` is the row as it was drawn: Update and Open act on the thread that row showed. */
-async function act($: EngineInterface, verb: Verb, row: Row): Promise<Said> {
+async function act($: EngineInterface, verb: Verb, row: Row): Promise<Answer> {
   if (verb === 'drafts') {
     const last = (await storeGet<Last | null>($, 'mm.last', null)) ?? (await sync($))
     const it = listedIn(last).find(i => i.projectId === row.projectId)
-    return it ? showDrafts($, it) : noClient(row.client)
+    return it ? showDrafts($, it) : { said: noClient(row.client) }
   }
-  const feed = await fetchFeed($)
+  // S2: from what the row was drawn from, the list brought up to date after the answer
+  const after = async (): Promise<void> => void (await refreshList($))
+  const quick = await storedPass($, verb, row)
+  if (quick && 'said' in quick) return { said: quick.said, after }
+  if (quick) {
+    const { it, pass } = quick
+    if (verb === 'start') return { said: await startThread($, it, pass, false), after }
+    if (verb === 'open') return { said: await showThread($, it, pass, row.target), after }
+    // (an Update that sent nothing is answered too, and the list brought up to date after it, unless it says
+    // there is nothing to bring it up to date with)
+    const answer = await updateThread($, null, it, pass, { typed: false, shown: row.target })
+    return 'after' in answer ? answer : { ...answer, after }
+  }
+  // What is stored cannot vouch for the row: the list is brought up to date first, as in 0.5.0, and the
+  // press says it is at it meanwhile. (Update with no feed sends nothing, and says so: M1.)
+  await say($, CHECKING, false)
+  let feed: Feed
+  try {
+    feed = await fetchFeed($)
+  } catch (err) {
+    if (verb === 'update') return { said: `Couldn't reach the list to check ${row.client}. Nothing was sent; try again in a minute.` }
+    throw err
+  }
   const pass = await reconcile($, feed)
   const it = listedIn(pass.last).find(i => i.projectId === row.projectId)
-  if (!it) return noClient(row.client)
-  if (verb === 'start') return started($, feed, pass, await startThread($, it, pass, false))
-  if (verb === 'open') return showThread($, it, pass, row.target)
+  if (!it) return { said: noClient(row.client) }
+  if (verb === 'start') return { said: await started($, feed, pass, await startThread($, it, pass, false)) }
+  if (verb === 'open') return { said: await showThread($, it, pass, row.target) }
   return updateThread($, feed, it, pass, { typed: false, shown: row.target })
 }
 
-async function say($: EngineInterface, said: Said): Promise<void> {
+/** Puts what a press or a command said above the list, and in a toast (`toast` false: the line alone, for what the work after a press says). */
+async function say($: EngineInterface, said: Said, toast = true): Promise<void> {
   const text = typeof said === 'string' ? said : said.text
   const notice: MmNotice = { text, at: await $.clock.now() }
   await $.state.set(NOTICE, notice)
-  const toast = typeof said === 'string' ? said : said.toast
-  if (toast) $.ui.toast(toast)
+  const brief = typeof said === 'string' ? said : said.toast
+  if (toast && brief) $.ui.toast(brief)
 }
 
 /**
@@ -1931,6 +2319,9 @@ async function say($: EngineInterface, said: Said): Promise<void> {
  * ⛔ One at a time per client. While a press on Update, Start or Open is in flight for a client, another
  * for that client does nothing: no call, no message, no toast. The hold ends when the first returns, or
  * after PRESS_HOLD_MS. (Taken and released with no await in between, so two presses cannot both pass.)
+ * S2: the press answers as soon as it has acted (`act`); what it does after that answer (`after`: the list
+ * brought up to date, a pickup view read) runs once the answer is drawn and the hold is released. Its
+ * failure is noted where the bridge's errors go; the next sync is the fallback.
  */
 async function press($: EngineInterface, verb: Verb, row: Row): Promise<void> {
   const held = verb !== 'drafts'
@@ -1942,19 +2333,33 @@ async function press($: EngineInterface, verb: Verb, row: Row): Promise<void> {
       if (pressing.get(row.projectId) === mine) pressing.delete(row.projectId)
     })
   }
-  let said: Said
+  let answer: Answer
   try {
-    said = await act($, verb, row)
+    answer = await act($, verb, row)
   } catch (err) {
-    said = errorText(err)
+    answer = { said: errorText(err) }
   } finally {
     if (held && pressing.get(row.projectId) === mine) pressing.delete(row.projectId)
   }
   try {
-    await say($, said)
+    await say($, answer.said)
     await refreshBand($)
   } catch {
     // the thread went away while the press was in flight: there is nobody to tell
+  }
+  if (!answer.after) return
+  try {
+    const later = await answer.after()
+    if (later) await say($, later, false)
+  } catch (err) {
+    await beat($, { ok: false, refreshError: short(`${verb}: ${errorText(err)}`, 300) })
+    // and the pane says so, in one line (L3)
+    await refreshFailed($)
+  }
+  try {
+    await refreshBand($)
+  } catch {
+    // as above
   }
 }
 
@@ -1968,20 +2373,20 @@ async function toggleFold($: EngineInterface, key: Fold): Promise<void> {
   }
 }
 
-/** The band's button: the Needs-you list, in this thread, as /mm opens it. Sends nothing. */
+/** The band's button: the Needs-you list, in this thread, as /mm opens it (a press: S2). Sends nothing. */
 async function openList($: EngineInterface): Promise<void> {
   try {
-    await runCommand($, '', 'person')
+    await runCommand($, '', 'person', true)
   } catch (err) {
     await say($, errorText(err))
   }
   await refreshBand($)
 }
 
-/** The band's second button, in a waiting client's thread: the pane with that client's part on top, as /mm view opens it. Sends nothing. */
+/** The band's second button, in a waiting client's thread: the pane with that client's part on top, as /mm view opens it (a press: S2). Sends nothing. */
 async function openDrafts($: EngineInterface): Promise<void> {
   try {
-    await runCommand($, 'view', 'person')
+    await runCommand($, 'view', 'person', true)
   } catch (err) {
     await say($, errorText(err))
   }
@@ -1989,12 +2394,13 @@ async function openDrafts($: EngineInterface): Promise<void> {
 }
 
 /**
- * /mm, and the `mm` tool. `by` is who ran it.
+ * /mm, and the `mm` tool. `by` is who ran it. `press` is the band's buttons, which run /mm and /mm view: the
+ * list may then be brought up to date with a feed this session read less than a minute ago (S2).
  * ⛔ `update` and `start` are the person's alone. For anyone else (Claude through the tool, a /mm that came
  * from another session, a schedule, a channel or a plugin) they are refused here, first, before anything
  * is fetched, called, stored or stamped.
  */
-async function runCommand($: EngineInterface, args: string, by: By): Promise<string> {
+async function runCommand($: EngineInterface, args: string, by: By, press = false): Promise<string> {
   const [verb = 'queue', ...rest] = args.trim().split(/\s+/).filter(Boolean)
   const arg = rest.join(' ')
   if (by !== 'person' && (verb === 'update' || verb === 'start')) return ONLY_THE_PERSON[verb]
@@ -2028,7 +2434,22 @@ async function runCommand($: EngineInterface, args: string, by: By): Promise<str
     // The pane it opens is the one /mm opens, so the list under the client's part is brought up to date too.
     // In a terminal session, or with the feed not answering, the client's part is still shown. (Not while
     // the bridge is paused: /mm view then shows what the last sync stored, as it always has.)
-    if (!(await $.store.get('mm.paused'))) await sync($).catch(() => {})
+    if (await $.store.get('mm.paused')) return refreshSelf($, true)
+    // S2: when the last sync stored this thread's client, its part opens at once from that, and the list is
+    // brought up to date after; the part is drawn again (and the note for Claude added) only if that changed it.
+    let said = ''
+    try {
+      if (await ownIn($, listedIn(await storeGet<Last | null>($, 'mm.last', null)))) said = await refreshSelf($, true)
+    } catch {
+      // a stored record this version cannot draw: as before, the list first
+    }
+    if (said) {
+      // (a refresh that fails leaves the list as it was, and the pane says so: L3)
+      await (press ? refreshList($) : sync($)).catch(() => refreshFailed($))
+      await refreshSelf($, false)
+      return said
+    }
+    await sync($).catch(() => {})
     return refreshSelf($, true)
   }
   if (verb === 'unlink') {
@@ -2072,88 +2493,83 @@ async function runCommand($: EngineInterface, args: string, by: By): Promise<str
     return 'This thread is no longer linked to a client.'
   }
 
+  // The pane: this thread's client on top when it is a waiting client's thread, the list under it. It opens
+  // at once from what the last sync stored, and the list is brought up to date after (S2).
+  if (verb !== 'link' && verb !== 'start' && verb !== 'update') return showList($, press)
   const feed = await fetchFeed($)
-  let named: KnownClient | undefined
-  if (verb === 'link' || verb === 'start' || verb === 'update') {
-    // The name is settled before anything is touched: no client, or more than one, does nothing at all.
-    // (any client the pane lists, in the list or in one of the two groups under it; for `link`, any client
-    // the feed knows, by name or by id: `linkable`)
-    const lists = buildLists(feed, await $.clock.now())
-    const queue = [...lists.queue, ...lists.teammate, ...lists.older]
-    const found = verb === 'link' ? linkable(arg, queue, feed) : clientsNamed(arg, queue)
-    // a client the feed knows only by its id gets its name before any sentence uses it
-    for (const [n, f] of found.entries()) if (!f.client) found[n] = { ...f, client: await nameOfId($, f.projectId) }
-    if (found.length > 1) return severalClients(arg, found)
-    named = found[0]
-    if (!named) return verb === 'link' ? noFeedClient(arg) : noClient(arg)
-    // ⛔ Only the person moves a client or a thread, and only the person undoes their own unlink. For anyone
-    // else (Claude through the tool, a /mm that is not the person's) `link` is refused here, before
-    // anything is written, when this thread is one the person unlinked, when it is already another client's,
-    // or when the client is already linked to another thread that is still there (review of 79cbc596, F4).
-    // A thread that is nobody's may still be linked to a client that has no thread.
-    if (verb === 'link' && by !== 'person') {
-      const me = await selfId($)
-      if (me && me in (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))) {
-        return `This thread was unlinked by the person. Only they can link it again: they type /mm link ${named.client} here.`
-      }
-      const links = await storeGet<Record<string, string>>($, 'mm.links', {})
-      const owner = me ? ownerOf(me, links) : undefined
-      if (owner !== undefined && owner !== named.projectId) {
-        const pin = (await storeGet<Record<string, Pin>>($, 'mm.pins', {}))[me]
-        const here = await desktopOnly(async () => asThread(await mcpJson($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' })), null)
-        // the client's name wherever it can still be read; failing all of that, the sentence names no one
-        const other = ownerName(owner, queue, pin, here?.title) || 'another client'
-        return `This thread is ${other}'s. Only the person can move it: they type /mm link ${named.client}.`
-      }
-      // (a thread the app says is gone, or archived, holds nothing; one it cannot answer for is still there)
-      const holder = links[named.projectId]
-      if (holder !== undefined && holder !== me && (await lookup($, holder)) !== 'gone') {
-        return `${named.client} already has a thread. Only the person can move it: they type /mm link ${named.client} in the thread that should have it.`
-      }
+  // The name is settled before anything is touched: no client, or more than one, does nothing at all.
+  // (any client the pane lists, in the list or in one of the two groups under it; for `link`, any client
+  // the feed knows, by name or by id: `linkable`)
+  const lists = buildLists(feed, await $.clock.now())
+  const queue = [...lists.queue, ...lists.teammate, ...lists.older]
+  const found = verb === 'link' ? linkable(arg, queue, feed) : clientsNamed(arg, queue)
+  // a client the feed knows only by its id gets its name before any sentence uses it
+  for (const [n, f] of found.entries()) if (!f.client) found[n] = { ...f, client: await nameOfId($, f.projectId) }
+  if (found.length > 1) return severalClients(arg, found)
+  const named = found[0]
+  if (!named) return verb === 'link' ? noFeedClient(arg) : noClient(arg)
+  // ⛔ Only the person moves a client or a thread, and only the person undoes their own unlink. For anyone
+  // else (Claude through the tool, a /mm that is not the person's) `link` is refused here, before
+  // anything is written, when this thread is one the person unlinked, when it is already another client's,
+  // or when the client is already linked to another thread that is still there (review of 79cbc596, F4).
+  // A thread that is nobody's may still be linked to a client that has no thread.
+  if (verb === 'link' && by !== 'person') {
+    const me = await selfId($)
+    if (me && me in (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))) {
+      return `This thread was unlinked by the person. Only they can link it again: they type /mm link ${named.client} here.`
+    }
+    const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+    const owner = me ? ownerOf(me, links) : undefined
+    if (owner !== undefined && owner !== named.projectId) {
+      const pin = (await storeGet<Record<string, Pin>>($, 'mm.pins', {}))[me]
+      const here = await desktopOnly(async () => asThread(await mcpJson($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' })), null)
+      // the client's name wherever it can still be read; failing all of that, the sentence names no one
+      const other = ownerName(owner, queue, pin, here?.title) || 'another client'
+      return `This thread is ${other}'s. Only the person can move it: they type /mm link ${named.client}.`
+    }
+    // (a thread the app says is gone, or archived, holds nothing; one it cannot answer for is still there)
+    const holder = links[named.projectId]
+    if (holder !== undefined && holder !== me && (await lookup($, holder)) !== 'gone') {
+      return `${named.client} already has a thread. Only the person can move it: they type /mm link ${named.client} in the thread that should have it.`
     }
   }
   const pass = await reconcile($, feed)
   const { last, pairs } = pass
-  if (named) {
-    const pid = named.projectId
-    const it = listedIn(last).find(i => i.projectId === pid)
-    // (a client on none of the three lists is one `link` alone may name)
-    if (!it && verb !== 'link') return noClient(arg)
-    // The person typed it: /mm start starts a new thread and /mm update updates the existing one, whatever
-    // the row recommends (only a thread that already has this is not sent it again). A typed /mm start
-    // always mints its chip.
-    if (it && verb === 'start') return started($, feed, pass, await startThread($, it, pass, true))
-    if (it && verb === 'update') {
-      const said = await updateThread($, feed, it, pass, { typed: true })
-      return typeof said === 'string' ? said : said.text
-    }
-    const me = await selfId($)
-    if (!me) return 'Linking a thread works in the desktop app\'s Code tab only.'
-    await forgetUnlink($, me)
-    await patchStore<Record<string, string>>($, 'mm.links', {}, links => {
-      // ⛔ a thread is one client's: linked here by hand, it is no longer any other client's
-      for (const k of Object.keys(links)) if (links[k] === me && k !== pid) delete links[k]
-      links[pid] = me
-    })
-    await claim($, pid, me)
-    // ⛔ Only the person's own link stamps: one Claude or anything else made is not pinned ahead of the cap.
-    if (it && by === 'person') await stamp($, pid, me)
-    else if (!it) {
-      // A client with nothing waiting: linked, and nothing more. No stamp (nothing was acted on, so nothing
-      // pins). The bridge's record of this thread, when it has one, is now this client's: the sync takes our
-      // pin off and the thread's name says this client is clear, instead of naming the client it was.
-      const client = named.client
-      await patchStore<Record<string, Pin>>($, 'mm.pins', {}, pins => {
-        if (!pins[me]) return false
-        pins[me] = { ...pins[me], projectId: pid, client }
-      })
-    }
-    await reconcile($, feed, pairs)
-    return `This thread is now ${(it ?? named).client}'s. ${await refreshSelf($, true)}`
+  const pid = named.projectId
+  const it = listedIn(last).find(i => i.projectId === pid)
+  // (a client on none of the three lists is one `link` alone may name)
+  if (!it && verb !== 'link') return noClient(arg)
+  // The person typed it: /mm start starts a new thread and /mm update updates the existing one, whatever
+  // the row recommends (only a thread that already has this is not sent it again). A typed /mm start
+  // always mints its chip.
+  if (it && verb === 'start') return started($, feed, pass, await startThread($, it, pass, true))
+  if (it && verb === 'update') {
+    const { said } = await updateThread($, feed, it, pass, { typed: true })
+    return typeof said === 'string' ? said : said.text
   }
-  // The pane: this thread's client on top when it is a waiting client's thread, the list under it.
-  await openPane($, listedIn(last))
-  return last.items.length ? `${last.items.length} client${last.items.length === 1 ? '' : 's'} need you; ${last.pinned} thread${last.pinned === 1 ? '' : 's'} pinned. The list is in the side pane.` : 'Nothing needs you right now.'
+  const me = await selfId($)
+  if (!me) return 'Linking a thread works in the desktop app\'s Code tab only.'
+  await forgetUnlink($, me)
+  await patchStore<Record<string, string>>($, 'mm.links', {}, links => {
+    // ⛔ a thread is one client's: linked here by hand, it is no longer any other client's
+    for (const k of Object.keys(links)) if (links[k] === me && k !== pid) delete links[k]
+    links[pid] = me
+  })
+  await claim($, pid, me)
+  // ⛔ Only the person's own link stamps: one Claude or anything else made is not pinned ahead of the cap.
+  if (it && by === 'person') await stamp($, pid, me)
+  else if (!it) {
+    // A client with nothing waiting: linked, and nothing more. No stamp (nothing was acted on, so nothing
+    // pins). The bridge's record of this thread, when it has one, is now this client's: the sync takes our
+    // pin off and the thread's name says this client is clear, instead of naming the client it was.
+    const client = named.client
+    await patchStore<Record<string, Pin>>($, 'mm.pins', {}, pins => {
+      if (!pins[me]) return false
+      pins[me] = { ...pins[me], projectId: pid, client }
+    })
+  }
+  await reconcile($, feed, pairs)
+  return `This thread is now ${(it ?? named).client}'s. ${await refreshSelf($, true)}`
 }
 
 /**
@@ -2377,7 +2793,7 @@ export const register: Register = on => {
     const client = await clientPart($)
     // Nothing synced yet, or a value an older version of this plugin left in this session.
     const hasList = Boolean(queue && Array.isArray(queue.rows))
-    if (!hasList && !client.text) return <Text dimColor>Checking…</Text>
+    if (!hasList && !client.text) return <Text dimColor>{CHECKING}</Text>
     const drawRow = (row: Row, lead: string) => (
       <Box flexDirection="column" marginTop={1}>
         <Text>{`${lead} ${row.title}`}</Text>
@@ -2402,8 +2818,9 @@ export const register: Register = on => {
             <Markdown text={client.text} />
           </Box>
         ) : null}
-        {hasList && queue ? <Text bold>{queue.header}</Text> : <Text dimColor>Checking…</Text>}
+        {hasList && queue ? <Text bold>{queue.header}</Text> : <Text dimColor>{CHECKING}</Text>}
         {notice?.text ? <Text>{notice.text}</Text> : null}
+        {hasList && queue?.warning ? <Text>{queue.warning}</Text> : null}
         {hasList && queue
           ? rowGroups(queue.rows).map(group => (
               <Box flexDirection="column" marginTop={1}>
