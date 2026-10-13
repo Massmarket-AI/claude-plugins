@@ -14,8 +14,9 @@
  * captures the agent side regardless of which browser/VM is in play).
  *
  * Wired for SessionStart + PostToolUse + Stop in `.claude/settings.json`. One
- * script, dispatched on `hook_event_name` from stdin — see the three branches
- * below.
+ * script, dispatched on `hook_event_name` from stdin — see the branches at the
+ * end of main(). (It also answers SubagentStart, where that event is registered
+ * for it: see handleSubagentStart. The installer does not register it.)
  *
  * Task announcing (SPEC-task-announcing-v2, 2026-09-30): SessionStart injects the
  * tracking instruction first; the thread declares its client by loading a
@@ -36,6 +37,12 @@
  * `auto`; a background task reporting back takes the origin of the turn that
  * dispatched it; when the hook cannot tell, it sends nothing. See the TURN
  * ORIGIN block.
+ *
+ * Turn origin, follow-ups (0.11.6, 2026-10-13): who started each agent is kept
+ * in a small file of its own, so hooks that save side by side cannot lose one;
+ * the cap on those is cut by last use; a report written inside a running turn
+ * does not change whose turn it is; a scheduled task's prompt is recognised by
+ * its whole text; and an agent can be fixed at its own start (SubagentStart).
  *
  * Identity: reuses the SAME per-member `team_auth_tokens` UUID already handed
  * out for the Chrome extension (rollout/slips/), via env var MM_TRACKER_TOKEN.
@@ -385,7 +392,7 @@ function stateString(value) {
 function loadSessionState(sessionId) {
   try {
     const parsed = readSessionStateFile(sessionId);
-    return {
+    const state = {
       seenTodos: Array.isArray(parsed.seenTodos) ? parsed.seenTodos : [],
       toolCallCount: parsed.toolCallCount || 0,
       // ⛔ Chips bridge — every key here MUST round-trip. SessionStart writes
@@ -410,18 +417,24 @@ function loadSessionState(sessionId) {
       session_title: stateString(parsed.session_title),
       session_title_read_at: stateString(parsed.session_title_read_at),
       // ⛔ Turn origin (0.11.5) — who started the turn this session is in, the
-      // id of that turn's prompt, who started the chain of work it belongs to,
-      // and who started each agent and background task of the session. The
-      // same round-trip rule applies: a key missing here is erased by the next
-      // save, and every later row of a long turn, whose opening entry is by
-      // then further back than the tail that is read, would be sent with no
-      // origin — and an agent's rows would take the origin of whatever prompt
-      // is current when each is written. See turnOriginFor and rowOriginFor.
+      // id of that turn's prompt, and who started the chain of work it belongs
+      // to. The same round-trip rule applies: a key missing here is erased by
+      // the next save, and every later row of a long turn, whose opening entry
+      // is by then further back than the tail that is read, would be sent with
+      // no origin. See turnOriginFor.
+      //
+      // ⛔ WHO STARTED EACH AGENT AND BACKGROUND TASK IS NOT IN THIS OBJECT
+      // (0.11.6). It is one small file per task beside this one (see TASK
+      // ORIGINS): agents make tool calls side by side, each in a hook process
+      // that saves this whole object, and no merge on save kept all of them.
       turn_origin: turnOriginKept(parsed.turn_origin),
       turn_origin_prompt_id: stateString(parsed.turn_origin_prompt_id),
       turn_chain_origin: turnOriginKept(parsed.turn_chain_origin),
-      turn_task_origins: taskOriginsKept(parsed.turn_task_origins),
     };
+    // A state file 0.11.5 wrote still holds its tasks in a `turn_task_origins`
+    // key. They are moved to their own files, once; the key is not carried on.
+    migrateTaskOrigins(sessionId, parsed.turn_task_origins);
+    return state;
   } catch {
     return {
       seenTodos: [],
@@ -438,7 +451,6 @@ function loadSessionState(sessionId) {
       turn_origin: null,
       turn_origin_prompt_id: null,
       turn_chain_origin: null,
-      turn_task_origins: Object.create(null),
     };
   }
 }
@@ -489,43 +501,12 @@ function keepNewerDeclarations(file, state) {
   });
 }
 
-/**
- * ⛔ AN AGENT'S ORIGIN IS NEVER ERASED BY A PROCESS THAT DID NOT KNOW IT (0.11.5).
- * The same race as the declarations above, and a surer one: a turn that
- * dispatches five agents has five of them making tool calls at once, each
- * hook process loading the state, fixing the origin of ITS agent and saving the
- * whole object. The last save would drop the other four, and each of those
- * agents' next rows would be fixed again from whatever prompt is current by
- * then — the very thing a kept origin exists to prevent.
- *
- * So right before a save the file is read again and the two lists are joined:
- * for a task both hold, the one fixed LATER is kept (a resume re-fixes a task).
- * The caller's object is updated too. Bounded by trimTaskOrigins.
- */
-function keepNewerTaskOrigins(file, state) {
-  let disk = null;
-  try {
-    disk = JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return;
-  }
-  if (!disk || typeof disk !== "object") return;
-  const onDisk = taskOriginsKept(disk.turn_task_origins);
-  const own = taskOriginsKept(state.turn_task_origins);
-  Object.keys(onDisk).forEach((id) => {
-    if (!own[id] || onDisk[id][1] > own[id][1]) own[id] = onDisk[id];
-  });
-  state.turn_task_origins = own;
-  trimTaskOrigins(state);
-}
-
 function saveSessionState(sessionId, state) {
   const file = stateFilePath(sessionId);
   if (!file) return;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     keepNewerDeclarations(file, state);
-    keepNewerTaskOrigins(file, state);
     fs.writeFileSync(file, JSON.stringify(state), "utf8");
   } catch {
     /* best-effort */
@@ -551,6 +532,7 @@ function pruneStateFiles(dir) {
         const p = path.join(dir, name);
         const stat = fs.lstatSync(p);
         if (stat.isFile() && stat.mtimeMs < cutoff) fs.unlinkSync(p);
+        else if (stat.isDirectory() && stat.mtimeMs < cutoff) pruneTaskOriginsDir(dir, name);
       } catch {
         /* this entry only */
       }
@@ -5615,10 +5597,12 @@ function sessionTitleFor(payload, state) {
 // task (review R2). The prompt id in a hook payload is the session's, so an
 // agent still working when a newer prompt arrives would take that prompt's
 // origin for the rest of its rows, and so would its report. Each agent's
-// origin is therefore fixed once — by the row that started it, or by its own
-// first row — and kept by the agent's id (`agent_id` in the hook's input); a
-// task notification is read as the origin of the task it reports. See
-// rowOriginFor.
+// origin is therefore fixed once — by the row that started it, by its own
+// start where the hook is told of it, or by its own first row — and kept by the
+// agent's id (`agent_id` in the hook's input), in a small file of its own (TASK
+// ORIGINS); a task notification that OPENS a prompt is read as the origin of
+// the task it reports. One written inside a running turn changes nothing: the
+// turn is whoever opened it. See rowOriginFor and turnOriginFor.
 //
 // ⛔ THE BRIDGE'S MARKER. A prompt that begins `[mm-link <project id>]` is a
 // kickoff the mm-bridge plugin wrote (a chip's first prompt, or its Update), and
@@ -5631,8 +5615,10 @@ function sessionTitleFor(payload, state) {
 // the app starts a scheduled task's session with the task's prompt wrapped in
 // `<scheduled-task name="…" file="…">`, and stamps it `human` more often than
 // `scheduled` (7 of 10 on Rob's Mac over 14 days; every one the first entry of
-// its session, the tag at the very start). So a stamped entry whose text begins
-// with that tag is "auto" whatever its stamp says, like the marker.
+// its session, the opening tag at the very start and the closing tag at the
+// very end). So a stamped entry whose text is, whole, that wrapper is "auto"
+// whatever its stamp says. A prompt that only BEGINS by quoting the tag is not
+// (isScheduledTaskPrompt).
 //
 // ⛔ PER TURN. Every hook payload carries `prompt_id`, and Claude Code writes the
 // same id (`promptId`) on every user entry of that prompt, so "this row's turn"
@@ -5661,9 +5647,10 @@ function sessionTitleFor(payload, state) {
 //     cleared, so an older chain's answer is not handed to this turn's tasks
 //     (review R3);
 //   - the state holds those words ("person", "auto", or "none" for a start that
-//     was read and says nothing), the prompt's id, and one word per agent or
-//     background task under Claude Code's own id for it (the newest 400), and
-//     nothing else: no prompt text is kept and none is sent;
+//     was read and says nothing) and the prompt's id; beside it, one small file
+//     per agent or background task holds one word under Claude Code's own id
+//     for it (the 400 used last). Nothing else: no prompt text is kept and none
+//     is sent;
 //   - a missing path, a path outside both `<home>/.claude/` and the folder
 //     CLAUDE_CONFIG_DIR names (review R6: by the path as written, or by real
 //     path), a file that cannot be read, a tail with no stamped entry for this
@@ -5704,11 +5691,15 @@ const TURN_ORIGIN_MARKER_RE =
   /^\[mm-link [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\]/;
 
 /**
- * The wrapper the app puts around a scheduled task's prompt, at the very start
- * of the text: `<scheduled-task name="…" file="…">`. The tag's name and what
- * follows it (a space or `>`), so `<scheduled-tasks>` is not it.
+ * The wrapper the app puts around a scheduled task's prompt:
+ * `<scheduled-task name="…" file="…">…</scheduled-task>`. This is how it OPENS,
+ * at the very start of the text: the tag's name and what follows it (a space or
+ * `>`), so `<scheduled-tasks>` is not it.
  */
 const TURN_ORIGIN_SCHEDULED_TASK_RE = /^<scheduled-task[\s>]/;
+
+/** …and how the wrapper CLOSES: the last thing in the text, but for white space. */
+const TURN_ORIGIN_SCHEDULED_TASK_END = "</scheduled-task>";
 
 /**
  * The id of an agent or of a background task, as Claude Code writes one: a
@@ -5725,8 +5716,14 @@ const TURN_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const TURN_TASK_NOTIFICATION_RE =
   /^\s*<task-notification>\s*<task-id>([A-Za-z0-9][A-Za-z0-9._-]{0,79})<\/task-id>/;
 
-/** At most this many tasks' origins are kept for a session: the ones fixed last. */
+/** At most this many tasks' origins are kept for a session: the ones USED last. */
 const TURN_TASK_ORIGINS_MAX = 400;
+
+/** A task's own file inside the session's task folder: `t-<task id>.json`. */
+const TURN_TASK_FILE_RE = /^t-([A-Za-z0-9][A-Za-z0-9._-]{0,79})\.json$/;
+
+/** A file this hook was still writing when it stopped: `.tmp-<pid>-<random>`. */
+const TURN_TASK_TEMP_RE = /^\.tmp-\d+-[0-9a-f]{8}$/;
 
 /**
  * This run's turn origin for the worklog body: "person", "auto", or null when
@@ -5761,10 +5758,45 @@ function taskIdOf(value) {
   return typeof value === "string" && TURN_TASK_ID_RE.test(value) ? value : null;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// TASK ORIGINS — who started each agent and background task of a session
+// (0.11.6: one small file per task).
+//
+// ⛔ WHY NOT A LIST IN THE SESSION'S STATE FILE (delta review F2). 0.11.5 kept
+// `{ <task id>: [origin, fixed at] }` in the state object and joined it with the
+// file's copy right before every save. That narrowed the race and did not close
+// it: read, join and write are three steps, and a turn that sends 16 agents out
+// has 16 hook processes saving in the same few milliseconds. The reviewer saw
+// between 3 and 16 of 16 agents kept. A lost agent is fixed AGAIN, by its next
+// row, from whatever prompt is current by then — the very thing a kept origin
+// exists to prevent.
+//
+// So each task has a file of its own, `t-<task id>.json`, in a folder beside
+// the session's state file (`<session>.tasks/`). A process that fixes agent A
+// writes A's file and nobody else's: there is nothing shared to read back and
+// write over. One file is written whole to a temporary name and renamed into
+// place, so a reader sees the old answer or the new one, never half of either.
+//
+// ⛔ TWO TIMES, NOT ONE (delta review F3). The file holds the origin and when it
+// was FIXED. When it was last USED is the file's own modification time, set
+// again each time a row or a report reads the origin. The cap is cut by last
+// use: 0.11.5 cut by when a task was fixed, so a long-lived agent — fixed
+// first, still working — was the first one dropped, and its next row was fixed
+// again from the prompt current by then.
+//
+// The ids are Claude Code's own random ones, already checked against
+// TURN_TASK_ID_RE: a short token with no path separator. The `t-` in front keeps
+// every name clear of the ones Windows reserves.
+//
+// ⛔ BEST-EFFORT AND SILENT, like the rest of the state: nothing here throws,
+// and a failure is "nothing kept for this task" — its next row is asked again.
+// ───────────────────────────────────────────────────────────────────────────
+
 /**
- * The session's kept task origins, cleaned: `{ <task id>: [<origin>, <fixed at,
- * epoch ms>] }` with nothing in it but well-formed entries. An object with no
- * prototype, so no task id can be mistaken for something every object has.
+ * The session's kept task origins as 0.11.5 held them in the state file,
+ * cleaned: `{ <task id>: [<origin>, <fixed at, epoch ms>] }` with nothing in it
+ * but well-formed entries. An object with no prototype, so no task id can be
+ * mistaken for something every object has. Read only by migrateTaskOrigins.
  */
 function taskOriginsKept(value) {
   const out = Object.create(null);
@@ -5781,31 +5813,180 @@ function taskOriginsKept(value) {
   return out;
 }
 
-/** The newest TURN_TASK_ORIGINS_MAX entries are kept; a long session forgets its oldest tasks. */
-function trimTaskOrigins(state) {
-  const map = state.turn_task_origins;
-  const ids = Object.keys(map);
-  if (ids.length <= TURN_TASK_ORIGINS_MAX) return;
-  ids.sort((a, b) => map[b][1] - map[a][1]);
-  const kept = Object.create(null);
-  for (let i = 0; i < TURN_TASK_ORIGINS_MAX; i++) kept[ids[i]] = map[ids[i]];
-  state.turn_task_origins = kept;
+/**
+ * The folder that holds this session's task files, or null: the session's state
+ * file with `.tasks` where its `.json` is. (A payload that names no session
+ * shares its folder's `unknown.tasks`, as it shares `unknown.json`.)
+ */
+function taskOriginsDirFor(sessionId) {
+  const file = stateFilePath(sessionId);
+  return file ? file.replace(/\.json$/, ".tasks") : null;
 }
 
-/** The kept origin of a task ("person", "auto" or "none"), or null when none is kept for it. */
-function taskOriginGet(state, id) {
-  const map = state && state.turn_task_origins;
-  const entry = id && map && typeof map === "object" ? map[id] : null;
-  return Array.isArray(entry) ? turnOriginKept(entry[0]) : null;
+/** A task's file in `dir`, or null when either is missing or the id is not an id. */
+function taskOriginFile(dir, id) {
+  return dir && taskIdOf(id) ? path.join(dir, `t-${id}.json`) : null;
+}
+
+/** What a task's file holds — `[origin, fixed at]` — or null when there is none that reads. */
+function taskOriginRead(dir, id) {
+  const file = taskOriginFile(dir, id);
+  if (!file) return null;
+  try {
+    const entry = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (!Array.isArray(entry)) return null;
+    const origin = turnOriginKept(entry[0]);
+    const at = Number(entry[1]);
+    return origin && Number.isFinite(at) ? [origin, at] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write a task's file whole: to a temporary name in the same folder, then
+ * renamed into place. Where the rename is refused (Windows, while another
+ * process holds the old file open) the file is written directly: a file this
+ * small goes out in one write. Never throws; false when nothing was written,
+ * which includes an origin that is not one of the three words and a time that
+ * is not a number.
+ */
+function taskOriginWrite(dir, id, origin, fixedAtMs) {
+  const file = taskOriginFile(dir, id);
+  const word = turnOriginKept(origin);
+  const at = Number(fixedAtMs);
+  if (!file || !word || !Number.isFinite(at)) return false;
+  // One of three fixed words and one number, written out by hand: nothing a
+  // tool call carried is ever serialised between describeToolCall and the
+  // event handlers, and two guard tests read this stretch of the file for that.
+  const body = `["${word}",${at}]`;
+  let temp = null;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    temp = path.join(dir, `.tmp-${process.pid}-${require("crypto").randomBytes(4).toString("hex")}`);
+    fs.writeFileSync(temp, body, "utf8");
+    fs.renameSync(temp, file);
+    return true;
+  } catch {
+    try {
+      fs.writeFileSync(file, body, "utf8");
+      return true;
+    } catch {
+      return false;
+    } finally {
+      if (temp) {
+        try {
+          fs.unlinkSync(temp);
+        } catch {
+          /* it was renamed, or never written */
+        }
+      }
+    }
+  }
+}
+
+/**
+ * The cap, cut by LAST USE: when the folder holds more than
+ * TURN_TASK_ORIGINS_MAX task files, the ones read longest ago go. Run only when
+ * a task is fixed, never per row. Two processes cutting at once take the same
+ * files; whichever comes second finds them gone.
+ */
+function trimTaskOrigins(dir) {
+  try {
+    const names = fs.readdirSync(dir).filter((name) => TURN_TASK_FILE_RE.test(name));
+    if (names.length <= TURN_TASK_ORIGINS_MAX) return;
+    const used = [];
+    names.forEach((name) => {
+      try {
+        used.push([name, fs.statSync(path.join(dir, name)).mtimeMs]);
+      } catch {
+        /* gone already */
+      }
+    });
+    used.sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+    for (let i = TURN_TASK_ORIGINS_MAX; i < used.length; i++) {
+      try {
+        fs.unlinkSync(path.join(dir, used[i][0]));
+      } catch {
+        /* another process took it */
+      }
+    }
+  } catch {
+    /* no folder, nothing to cut */
+  }
+}
+
+/**
+ * The kept origin of a task ("person", "auto" or "none"), or null when none is
+ * kept for it. Reading it is USING it: the file's time is set to now, which is
+ * what keeps a task that is still at work clear of the cap.
+ */
+function taskOriginGet(dir, id) {
+  const entry = taskOriginRead(dir, id);
+  if (!entry) return null;
+  try {
+    const now = new Date();
+    fs.utimesSync(taskOriginFile(dir, id), now, now);
+  } catch {
+    /* still kept; only its place in the queue for the cap is older */
+  }
+  return entry[0];
 }
 
 /** Fix a task's origin, as of now. A value that is not a kept origin fixes nothing. */
-function taskOriginSet(state, id, origin) {
+function taskOriginSet(dir, id, origin) {
   const kept = turnOriginKept(origin);
-  if (!id || !kept) return;
-  state.turn_task_origins = taskOriginsKept(state.turn_task_origins);
-  state.turn_task_origins[id] = [kept, Date.now()];
-  trimTaskOrigins(state);
+  if (!dir || !taskIdOf(id) || !kept) return;
+  if (taskOriginWrite(dir, id, kept, Date.now())) trimTaskOrigins(dir);
+}
+
+/**
+ * Move the tasks a 0.11.5 state file held into their own files, once. A task
+ * that already has a file keeps it (it was fixed since). Each moved task keeps
+ * the time it was fixed; its "last used" starts now. Never throws.
+ */
+function migrateTaskOrigins(sessionId, legacy) {
+  try {
+    const map = taskOriginsKept(legacy);
+    const ids = Object.keys(map);
+    if (ids.length === 0) return;
+    const dir = taskOriginsDirFor(sessionId);
+    if (!dir) return;
+    let moved = false;
+    ids.forEach((id) => {
+      if (taskOriginRead(dir, id)) return;
+      if (taskOriginWrite(dir, id, map[id][0], map[id][1])) moved = true;
+    });
+    if (moved) trimTaskOrigins(dir);
+  } catch {
+    /* the tasks are fixed again by their next rows */
+  }
+}
+
+/**
+ * Remove a session's task folder, `<dir>/<name>`, when the session's state file
+ * is gone (pruneStateFiles removed it after 48 hours unused, and calls this for
+ * a folder that old). Only this hook's own files are deleted, and the folder
+ * itself only when that leaves it empty. Never throws.
+ */
+function pruneTaskOriginsDir(dir, name) {
+  try {
+    if (!/\.tasks$/.test(name)) return;
+    if (fs.existsSync(path.join(dir, name.replace(/\.tasks$/, ".json")))) return;
+    const folder = path.join(dir, name);
+    fs.readdirSync(folder).forEach((entry) => {
+      if (!TURN_TASK_FILE_RE.test(entry) && !TURN_TASK_TEMP_RE.test(entry)) return;
+      try {
+        const p = path.join(folder, entry);
+        if (fs.lstatSync(p).isFile()) fs.unlinkSync(p);
+      } catch {
+        /* this entry only */
+      }
+    });
+    fs.rmdirSync(folder);
+  } catch {
+    /* best-effort: something else is in there, or it is already gone */
+  }
 }
 
 /**
@@ -5863,13 +6044,29 @@ function turnEntryText(row) {
 }
 
 /**
- * True when a prompt's own opening words say the SYSTEM wrote it, whatever its
- * stamp says: the bridge's kickoff marker, or the app's scheduled-task wrapper.
- * Both are tested at the very start of the text and nowhere else.
+ * True when the text IS a scheduled task's prompt as the app writes it: the
+ * wrapper opens at the very start and closes at the very end (white space after
+ * it aside), so the wrapper is the whole of the text.
+ *
+ * ⛔ THE WHOLE TEXT, NOT ITS FIRST WORDS (0.11.6, delta review F6). A person can
+ * begin a prompt by quoting the tag — pasting a task's file to ask why it ran
+ * twice — and what they type after it makes it theirs. The app writes nothing
+ * outside the wrapper: on Rob's Mac over 45 days, 10 of 10 such prompts were a
+ * plain string that began with the opening tag and ended with the closing one.
+ */
+function isScheduledTaskPrompt(text) {
+  if (!TURN_ORIGIN_SCHEDULED_TASK_RE.test(text)) return false;
+  return text.trimEnd().endsWith(TURN_ORIGIN_SCHEDULED_TASK_END);
+}
+
+/**
+ * True when a prompt's own words say the SYSTEM wrote it, whatever its stamp
+ * says: the bridge's kickoff marker at the very start of the text, or a text
+ * that is, whole, the app's scheduled-task wrapper.
  */
 function turnEntryAutoByText(row) {
   const text = turnEntryText(row);
-  return TURN_ORIGIN_MARKER_RE.test(text) || TURN_ORIGIN_SCHEDULED_TASK_RE.test(text);
+  return TURN_ORIGIN_MARKER_RE.test(text) || isScheduledTaskPrompt(text);
 }
 
 /**
@@ -5916,8 +6113,9 @@ function turnEntryTaskId(row) {
  *
  *   it starts a chain             { promptId, continues: false, value }
  *   it continues one, and the     { promptId, taskId, continues: true,
- *   tail shows where it started     chainInTail: true, value }: `value` is that
- *                                   start's
+ *   tail shows where it started     chainInTail: true, startPromptId, value }:
+ *                                   `value` is that start's, `startPromptId`
+ *                                   the id of the prompt it opened
  *   it continues one, and the     { promptId, taskId, continues: true,
  *   tail does not show the start    chainInTail: false }: the caller has what
  *                                   was kept
@@ -6011,6 +6209,7 @@ function readTurnOrigin(transcriptPath, promptId) {
         taskId: turn.taskId,
         continues: true,
         chainInTail: true,
+        startPromptId: rowPromptId,
         value: classifyTurnEntry(row),
       };
     }
@@ -6040,8 +6239,11 @@ function readTurnOrigin(transcriptPath, promptId) {
  *   the tail holds a stamped entry of this prompt…
  *     …that starts a chain                          its answer; kept as the
  *                                                   turn's AND as the chain's
- *     …that is a task reporting back, and the       that task's origin; kept
- *       task's origin is kept (rowOriginFor)        as the turn's
+ *     …that is a task reporting back INSIDE the     the turn's own answer: the
+ *       turn (the start the tail shows is this      start's, or what is kept
+ *       prompt's, or an answer is kept for it)      for this prompt
+ *     …that is a task reporting back and OPENS      that task's origin; kept
+ *       the prompt, the task's origin being kept    as the turn's
  *     …that continues a chain whose start the       that start's answer; kept
  *       tail shows                                  as the turn's and the chain's
  *     …that continues one whose start the tail      the chain's answer that was
@@ -6084,15 +6286,35 @@ function turnOriginFor(payload, state) {
       if (!found.continues || found.chainInTail) {
         state.turn_chain_origin = turnOriginValue(found.value) || "none";
       }
-      // A task reporting back takes the origin of the task itself when that
-      // was fixed (an agent's first row, or the row that started it): the
-      // prompt that is current when it reports may be somebody else's. With
-      // none kept for it, and for the app resuming a turn, the chain answers —
-      // what the tail shows, or what was kept when its start was read.
-      const reported = found.continues ? taskOriginGet(state, found.taskId) : null;
-      state.turn_origin = reported || turnOriginKept(state.turn_chain_origin);
-      state.turn_origin_prompt_id = found.promptId || promptId;
-      return state.turn_origin;
+      const foundPromptId = found.promptId || promptId;
+      if (!found.continues) {
+        state.turn_origin = turnOriginKept(state.turn_chain_origin);
+      } else if (found.chainInTail && foundPromptId && found.startPromptId === foundPromptId) {
+        // ⛔ A REPORT WRITTEN INSIDE A RUNNING TURN DOES NOT OPEN IT (delta
+        // review F1). The start the tail shows is this same prompt's own
+        // opening entry: the turn is whoever opened it, and the task that
+        // happened to report while it ran changes nothing.
+        state.turn_origin = turnOriginKept(state.turn_chain_origin);
+      } else if (
+        !found.chainInTail &&
+        foundPromptId &&
+        stateString(state.turn_origin_prompt_id) === foundPromptId &&
+        turnOriginKept(state.turn_origin)
+      ) {
+        // The same, when this prompt's opening entry has left the tail: an
+        // answer is already kept for the prompt, from when it could be read,
+        // and a report written since does not replace it.
+      } else {
+        // The report OPENS the prompt. It takes the origin of the task itself
+        // when that was fixed (the row that started it, or the agent's first
+        // row): the prompt before it may be somebody else's. With none kept
+        // for it, and for the app resuming a turn, the chain answers — what
+        // the tail shows, or what was kept when its start was read.
+        const reported = taskOriginGet(taskOriginsDirFor(payload.session_id), found.taskId);
+        state.turn_origin = reported || turnOriginKept(state.turn_chain_origin);
+      }
+      state.turn_origin_prompt_id = foundPromptId;
+      return turnOriginKept(state.turn_origin);
     }
     if (!promptId) return null;
     if (stateString(state.turn_origin_prompt_id) === promptId) {
@@ -6147,28 +6369,78 @@ function turnOriginFor(payload, state) {
  * the starting row's own origin could not be read, a task that had an origin
  * loses it ("none") rather than keep an answer from before.
  *
- * The ids are Claude Code's own random ones. They are kept in the session's
- * state file with one word each, are never sent, and name nothing outside this
- * machine.
+ * ⛔ AND BY ITS OWN START, WHEN THE HOOK IS TOLD OF IT (0.11.6, delta review
+ * F4): see handleSubagentStart. An agent no tool result named — one that runs in
+ * the foreground — was otherwise fixed by its first ROW, and a prompt that
+ * arrived between its start and its first tool call fixed it wrongly (57 of
+ * 81,540 agent rows over 14 days on one machine).
+ *
+ * The ids are Claude Code's own random ones. They are kept in a folder beside
+ * the session's state file, one small file and one word each (TASK ORIGINS),
+ * are never sent, and name nothing outside this machine.
  *
  * Never throws: any failure is null.
  */
 function rowOriginFor(payload, state) {
   try {
+    const tasks = taskOriginsDirFor(payload && payload.session_id);
     const agent = taskIdOf(payload && payload.agent_id);
-    let kept = agent ? taskOriginGet(state, agent) : null;
+    let kept = agent ? taskOriginGet(tasks, agent) : null;
     if (!kept) {
       kept = turnOriginFor(payload, state);
-      if (agent && kept) taskOriginSet(state, agent, kept);
+      if (agent && kept) taskOriginSet(tasks, agent, kept);
     }
     const started = dispatchedTaskIds(payload);
     for (let i = 0; i < started.length; i++) {
-      if (kept) taskOriginSet(state, started[i], kept);
-      else if (taskOriginGet(state, started[i])) taskOriginSet(state, started[i], "none");
+      if (kept) taskOriginSet(tasks, started[i], kept);
+      else if (taskOriginRead(tasks, started[i])) taskOriginSet(tasks, started[i], "none");
     }
     return turnOriginValue(kept);
   } catch {
     return null;
+  }
+}
+
+/**
+ * SubagentStart: an agent is starting. Fix who started it, now, from the turn
+ * that is current — before a newer prompt can arrive between this and the
+ * agent's first tool call.
+ *
+ * ⛔ ONLY WHEN NOTHING IS KEPT FOR THE AGENT. The row that started it (an agent
+ * sent to the background, or set to work again) knows more than this event
+ * does: it carries the origin of the very row whose tool call started the
+ * agent, which for an agent started BY an agent is that agent's own origin and
+ * not the session's current prompt. Either can arrive first. So this fixes an
+ * agent nothing has fixed, and never replaces an answer.
+ *
+ * ⛔ NO REQUEST, NO ROW, NOTHING PRINTED. A SubagentStart hook's output is
+ * shown to the agent as context; this one has nothing to tell it. A turn that
+ * cannot be read fixes nothing, and the agent's first row asks again, as
+ * before. The session's state is saved only when this read changed what is
+ * kept for the turn.
+ *
+ * ⛔ THIS RUNS ONLY WHERE SubagentStart IS REGISTERED FOR THE HOOK, which the
+ * installer does not do (it registers PostToolUse, Stop and SessionStart).
+ * Where it is not registered nothing changes: the first-row rule stands.
+ */
+function handleSubagentStart(payload) {
+  const sessionId = payload.session_id;
+  const tasks = taskOriginsDirFor(sessionId);
+  const agent = taskIdOf(payload.agent_id);
+  if (!tasks || !agent) return;
+  if (taskOriginRead(tasks, agent)) return;
+  const state = loadSessionState(sessionId);
+  const turnBefore = state.turn_origin;
+  const promptBefore = state.turn_origin_prompt_id;
+  const chainBefore = state.turn_chain_origin;
+  const kept = turnOriginFor(payload, state);
+  if (kept) taskOriginSet(tasks, agent, kept);
+  if (
+    state.turn_origin !== turnBefore ||
+    state.turn_origin_prompt_id !== promptBefore ||
+    state.turn_chain_origin !== chainBefore
+  ) {
+    saveSessionState(sessionId, state);
   }
 }
 
@@ -7637,6 +7909,8 @@ async function main() {
       await handleStop(payload);
     } else if (event === "SessionStart") {
       await handleSessionStart(payload);
+    } else if (event === "SubagentStart") {
+      handleSubagentStart(payload);
     }
   } catch (err) {
     debugLog(`unhandled error for event=${event}: ${err && err.stack}`);
