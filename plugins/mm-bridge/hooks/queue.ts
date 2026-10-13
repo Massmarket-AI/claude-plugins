@@ -231,6 +231,29 @@ export function buildQueue(feed: Feed, now: number): QueueItem[] {
   return buildLists(feed, now).queue
 }
 
+/** A client as a name or an id may mean it: its id, its project's name and its short name, both cleaned. */
+export type KnownClient = Pick<QueueItem, 'projectId' | 'projectName' | 'client'>
+
+/**
+ * Every client the feed names, whether or not anything of it is waiting on the viewer: each project on a
+ * mail row, a reply package or a ticket (all three buckets), with the name that row gives it. What `/mm link`
+ * may mean beyond the three lists (Rob, 2026-10-13: a client with nothing waiting could not be linked).
+ * ⛔ The same rule as the lists: a lower-case uuid and a name with something left once cleaned, or nothing.
+ * The feed's `threads` carry no name: a project known only there is named by its id (register.tsx).
+ */
+export function feedClients(feed: Feed): KnownClient[] {
+  const out = new Map<string, KnownClient>()
+  const add = (projectId: unknown, projectName: unknown) => {
+    if (!isUuid(projectId) || out.has(projectId) || cleanName(projectName) === '') return
+    out.set(projectId, { projectId, projectName: cleanName(projectName), client: shortName(projectName as string) })
+  }
+  for (const m of feed.mail ?? []) add(m?.project_id, m?.project_name)
+  for (const d of feed.drafts ?? []) add(d?.project_id, d?.project_name)
+  const t = feed.tickets ?? {}
+  for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? []]) for (const tk of k) add(tk?.project_id, tk?.project_name)
+  return [...out.values()]
+}
+
 /**
  * One pass over the feed. `older` false: what is overdue by up to 3 business days or due within the next
  * 24 business hours. `older` true: only what is more than 3 business days overdue, by the same rules of

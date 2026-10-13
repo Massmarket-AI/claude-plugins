@@ -2,8 +2,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { MmBand, MmFolds, MmNotice, MmQueue, MmView } from '../types'
 
-import { MAX_PINS, buildLists, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, dueLine, holdBanner, isDraftDone, isUuid, needsLine, noteText, titleFor } from './queue'
-import type { Feed, FeedThread, QueueItem } from './queue'
+import { MAX_PINS, buildLists, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, dueLine, feedClients, holdBanner, isDraftDone, isUuid, needsLine, noteText, titleFor } from './queue'
+import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
   LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFor, bandWords, clientThreads, foldGroups, hasWaiting, kickoffText, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups,
   sharedThreads, signatureOf, threadLength, threadLink, threadRows, titleSuggestion,
@@ -1039,7 +1039,12 @@ async function refreshSelf($: EngineInterface, force: boolean): Promise<string> 
   }
   const last = await storeGet<Last | null>($, 'mm.last', null)
   const it = listedIn(last).find(i => i.projectId === pid)
-  if (!it) return 'Nothing needs you on this client right now.'
+  if (!it) {
+    // A client on none of the lists (one /mm link may name): asked for by the person, the pane's client part
+    // is emptied, so it does not go on showing the client this thread was before.
+    if (force) await $.state.set(VIEW, { text: '', heading: '' })
+    return 'Nothing needs you on this client right now.'
+  }
   const o = it.open ?? null
   const sig = o
     ? `open:${o.id}:${o.state}:${it.coversThrough ?? ''}:${o.unsent}:${o.newer}:${it.messages}:${it.tasks}`
@@ -1196,18 +1201,58 @@ async function syncAsked($: EngineInterface): Promise<void> {
  * The clients a typed name could mean. One whose short name or full name it is exactly, if there is one;
  * otherwise every client whose name contains it. More than one is a question for the person, never a guess.
  */
-function clientsNamed(name: string, items: readonly QueueItem[]): QueueItem[] {
+function clientsNamed<T extends KnownClient>(name: string, items: readonly T[]): T[] {
   const q = cleanName(name).toLowerCase()
   if (!q) return []
-  const short = (i: QueueItem) => i.client.replace(/…$/, '').toLowerCase()
+  const short = (i: T) => i.client.replace(/…$/, '').toLowerCase()
   const exact = items.filter(i => short(i) === q || i.projectName.toLowerCase() === q)
   return exact.length ? exact : items.filter(i => i.projectName.toLowerCase().includes(q) || short(i).includes(q))
 }
 
 // What the person typed is echoed cleaned, like any other text that did not come from this file.
 const noClient = (name: string) => `No client matching "${cleanName(name)}" needs you right now. /mm shows who does.`
+/** /mm link's answer when nothing anywhere in the feed is that client: not a name, not an id. */
+const noFeedClient = (name: string) => `No client named "${cleanName(name)}" is in your feed. /mm link takes a client's name or project id.`
 
-function severalClients(name: string, found: readonly QueueItem[]): string {
+/** A project id as the person may type it: the whole uuid, or its first 8 characters (`client 1a08666a` too, as a sentence names one). */
+const ID_TYPED = /^(?:client\s+)?([0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)$/
+
+/**
+ * The clients `/mm link <x>` could mean (Rob, 2026-10-13: a client with nothing waiting could not be
+ * linked). The first of these that finds any:
+ *   1. a client on the pane's three lists, by name, exactly as `start` and `update` resolve one
+ *   2. any client the feed names (its mail, reply packages and tickets), by name, the same way
+ *   3. a project id: the whole uuid, or its first 8 characters when only one project the feed carries
+ *      starts with them (the feed's `threads` included, which carry an id and no name)
+ * A client known only by its id comes back with no name: the caller names it (`nameOfId`).
+ */
+function linkable(arg: string, listed: readonly QueueItem[], feed: Feed): KnownClient[] {
+  const onLists = clientsNamed(arg, listed)
+  if (onLists.length) return onLists
+  const named = feedClients(feed)
+  const byName = clientsNamed(arg, named)
+  if (byName.length) return byName
+  const typed = ID_TYPED.exec(arg.trim().toLowerCase())?.[1]
+  if (!typed) return []
+  const ids = feedProjects(feed).filter(id => (typed.length === 8 ? id.startsWith(typed) : id === typed))
+  // (one known only by its id is told apart from another by the whole id, should a sentence list both)
+  return ids.map(id => listed.find(i => i.projectId === id) ?? named.find(n => n.projectId === id) ?? { projectId: id, projectName: id, client: '' })
+}
+
+/**
+ * The name of a client the feed knows only by its id, for a sentence: from what `ownerName` reads (a pin
+ * record of the bridge's for that client, else the name the bridge gave the thread linked to it), failing
+ * those `client <first 8 characters of the id>`. Its thread's name is asked of the app only when it is linked.
+ */
+async function nameOfId($: EngineInterface, projectId: string): Promise<string> {
+  const pins = await storeGet<Record<string, Pin>>($, 'mm.pins', {})
+  const pin = Object.values(pins).find(p => p?.projectId === projectId)
+  const linked = (await storeGet<Record<string, string>>($, 'mm.links', {}))[projectId]
+  const thread = linked && THREAD_ID.test(linked) ? await desktopOnly(async () => asThread(await mcpJson($, 'ccd_session_mgmt', 'get_session', { session_id: linked })), null) : null
+  return ownerName(projectId, [], pin, thread?.title) || `client ${projectId.slice(0, 8)}`
+}
+
+function severalClients(name: string, found: readonly KnownClient[]): string {
   const short = found.map(i => i.client)
   // two clients with the same short name are told apart by their full names
   const names = new Set(short).size === short.length ? short : found.map(i => i.projectName)
@@ -1678,16 +1723,19 @@ async function runCommand($: EngineInterface, args: string, by: By): Promise<str
   }
 
   const feed = await fetchFeed($)
-  let named: QueueItem | undefined
+  let named: KnownClient | undefined
   if (verb === 'link' || verb === 'start' || verb === 'update') {
     // The name is settled before anything is touched: no client, or more than one, does nothing at all.
-    // (any client the pane lists, in the list or in one of the two groups under it)
+    // (any client the pane lists, in the list or in one of the two groups under it; for `link`, any client
+    // the feed knows, by name or by id: `linkable`)
     const lists = buildLists(feed, await $.clock.now())
     const queue = [...lists.queue, ...lists.teammate, ...lists.older]
-    const found = clientsNamed(arg, queue)
+    const found = verb === 'link' ? linkable(arg, queue, feed) : clientsNamed(arg, queue)
+    // a client the feed knows only by its id gets its name before any sentence uses it
+    for (const [n, f] of found.entries()) if (!f.client) found[n] = { ...f, client: await nameOfId($, f.projectId) }
     if (found.length > 1) return severalClients(arg, found)
     named = found[0]
-    if (!named) return noClient(arg)
+    if (!named) return verb === 'link' ? noFeedClient(arg) : noClient(arg)
     // ⛔ Only the person moves a thread from one client to another. For anyone else (Claude through the
     // tool, a /mm that is not the person's) `link` in a thread that is already another client's is refused
     // here, before anything is written. A thread that is nobody's may still be linked.
@@ -1706,13 +1754,15 @@ async function runCommand($: EngineInterface, args: string, by: By): Promise<str
   const pass = await reconcile($, feed)
   const { last, pairs } = pass
   if (named) {
-    const it = listedIn(last).find(i => i.projectId === named.projectId)
-    if (!it) return noClient(arg)
+    const pid = named.projectId
+    const it = listedIn(last).find(i => i.projectId === pid)
+    // (a client on none of the three lists is one `link` alone may name)
+    if (!it && verb !== 'link') return noClient(arg)
     // The person typed it: /mm start starts a new thread and /mm update updates the existing one, whatever
     // the row recommends (only a thread that already has this is not sent it again). A typed /mm start
     // always mints its chip.
-    if (verb === 'start') return started($, feed, pass, await startThread($, it, pass, true))
-    if (verb === 'update') {
+    if (it && verb === 'start') return started($, feed, pass, await startThread($, it, pass, true))
+    if (it && verb === 'update') {
       const said = await updateThread($, feed, it, pass, { typed: true })
       return typeof said === 'string' ? said : said.text
     }
@@ -1721,13 +1771,23 @@ async function runCommand($: EngineInterface, args: string, by: By): Promise<str
     await forgetUnlink($, me)
     const links = await storeGet<Record<string, string>>($, 'mm.links', {})
     // ⛔ a thread is one client's: linked here by hand, it is no longer any other client's
-    for (const k of Object.keys(links)) if (links[k] === me && k !== it.projectId) delete links[k]
-    links[it.projectId] = me
+    for (const k of Object.keys(links)) if (links[k] === me && k !== pid) delete links[k]
+    links[pid] = me
     await $.store.set('mm.links', links)
-    await claim($, it.projectId, me)
-    await stamp($, it.projectId, me)
+    await claim($, pid, me)
+    if (it) await stamp($, pid, me)
+    else {
+      // A client with nothing waiting: linked, and nothing more. No stamp (nothing was acted on, so nothing
+      // pins). The bridge's record of this thread, when it has one, is now this client's: the sync takes our
+      // pin off and the thread's name says this client is clear, instead of naming the client it was.
+      const pins = await storeGet<Record<string, Pin>>($, 'mm.pins', {})
+      if (pins[me]) {
+        pins[me] = { ...pins[me], projectId: pid, client: named.client }
+        await $.store.set('mm.pins', pins)
+      }
+    }
     await reconcile($, feed, pairs)
-    return `This thread is now ${it.client}'s. ${await refreshSelf($, true)}`
+    return `This thread is now ${(it ?? named).client}'s. ${await refreshSelf($, true)}`
   }
   // The pane: this thread's client on top when it is a waiting client's thread, the list under it.
   await openPane($, listedIn(last))
@@ -1813,7 +1873,7 @@ export const register: Register = on => {
       await $.tool.register({
         name: 'mm',
         description:
-          'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "link <client>" (make this thread that client\'s), "unlink", "pause", "resume". Starting or updating a client thread is for the person only: they press the button in the pane or type /mm start <client> or /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
+          'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "link <client>" (make this thread that client\'s: a name or project id of any client in the feed), "unlink", "pause", "resume". Starting or updating a client thread is for the person only: they press the button in the pane or type /mm start <client> or /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
         inputSchema: { type: 'object', properties: { args: { type: 'string', description: 'what follows /mm' } } },
         isDeferred: false,
       })

@@ -722,7 +722,7 @@ describe('R6: the commands', () => {
     expect(w.registered.length).toBe(2)
     expect(w.registered[0]).toBe('Massmarket: /mm (what needs you) · /mm link <client> · /mm update <client> · /mm start <client> · /mm view · /mm unlink · /mm status · /mm pause|resume')
     expect(w.registered[1]).toBe(
-      'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "link <client>" (make this thread that client\'s), "unlink", "pause", "resume". Starting or updating a client thread is for the person only: they press the button in the pane or type /mm start <client> or /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
+      'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "link <client>" (make this thread that client\'s: a name or project id of any client in the feed), "unlink", "pause", "resume". Starting or updating a client thread is for the person only: they press the button in the pane or type /mm start <client> or /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
     )
     // neither verb is offered to Claude as something the tool takes
     expect(w.registered[1]).not.toContain('"update <client>"')
@@ -3788,5 +3788,155 @@ describe('(u) a client whose reply drafts a teammate holds: not pinned, not coun
     expect(String(w.acted()[0]?.args.message ?? w.acted()[0]?.args.text ?? JSON.stringify(w.acted()[0]?.args))).toContain('Do not run prep and do not draft a second reply.')
     // and it is still not pinned: it is not the viewer's to act on
     expect(w.threads.get('local_b')?.pinned).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------- round 3
+// (v) /mm link takes any client the feed knows; B1 every write of a shared map goes over a fresh copy; B3 a
+// thread is linked by itself only to the one client its sessions declared; B4 a package flagged for the
+// founder lists for him whoever owns the client.
+
+describe('(v) /mm link takes any client the feed knows, by name or by project id', () => {
+  const ZED = '66666666-6666-4666-8666-666666666666'
+  const ZEN = '44444444-4444-4444-8444-444444444444'
+  const ZEN_GARDEN = '55555555-5555-4555-8555-555555555555'
+  const ACME_GLASS = '88888888-8888-4888-8888-888888888888'
+  const YEW = '99999999-9999-4999-8999-999999999999'
+  /** Known only from the feed's threads: an id and no name. */
+  const QUILL = '77777777-7777-4777-8777-777777777777'
+  const AB1 = 'abababab-1111-4111-8111-111111111111'
+  const AB2 = 'abababab-2222-4222-8222-222222222222'
+  /** Acme, Bolt and Cedar need the person; Zed, Zen, Zen Garden and Acme Glass were answered; Yew has a ticket with no date we committed to. */
+  const known = (): Feed => {
+    const f = feed({
+      threads: [declared(QUILL, 'cli-quill', 5), declared(AB1, 'cli-ab1', 6), declared(AB2, 'cli-ab2', 7)],
+    })
+    f.mail = [
+      ...(f.mail ?? []),
+      mailFor(ZED, 'Zed Plumbing — Lee', 30, { reply_status: 'replied' }),
+      mailFor(ZEN, 'Zen', 31, { reply_status: 'replied' }),
+      mailFor(ZEN_GARDEN, 'Zen Garden Spa', 32, { reply_status: 'replied' }),
+      mailFor(ACME_GLASS, 'Acme Glass', 33, { reply_status: 'replied' }),
+    ] as Feed['mail']
+    f.tickets = { ...f.tickets, due_soon: [{ ticket_id: 't9', project_id: YEW, project_name: 'Yew Legal', title: 'Renewal', due_at: new Date(NOW + 30 * HOUR).toISOString(), due_source: 'sla', assignee_email: ME }] }
+    return f
+  }
+  const linkWorld = (on: On, more: WorldOptions = {}) => world(on, { feed: known(), ...more })
+  const NOTHING = 'Nothing needs you on this client right now.'
+
+  test('[5] a client with nothing waiting is linked by name: claimed, not stamped, not pinned, and a sync runs', async ($, on) => {
+    const w = linkWorld(on, { store: { 'mm.unlinked': { [SELF]: NOW - HOUR }, 'mm.links': { [BOLT]: SELF }, 'mm.auto': { [BOLT]: { sid: SELF, miss: 0 } } } })
+    expect(await mm($, 'link Zed Plumbing')).toBe(`This thread is now Zed Plumbing's. ${NOTHING}`)
+    // the unlink record is forgotten, the thread is no longer Bolt's, and the link is the person's
+    expect(w.stored['mm.unlinked']).toEqual({})
+    expect(w.stored['mm.links']).toEqual({ [ZED]: SELF })
+    expect(w.stored['mm.auto']).toEqual({})
+    // nothing was acted on, so nothing pins: no stamp, no pin, no rename, no message, no chip
+    expect(w.stored['mm.acted']).toBeUndefined()
+    expect(w.threads.get(SELF)).toMatchObject({ title: 'Morning hub', pinned: false })
+    expect(w.writes()).toEqual([])
+    // the sync ran after the link (the list is up to date) and it keeps the link
+    expect((w.stored['mm.last'] as { at: number }).at).toBe(NOW)
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [ZED]: SELF })
+    expect(await mm($, 'view')).toBe(NOTHING)
+  })
+
+  test('[1] [2] the three lists first, then any client the feed names: an exact name, else every name that contains it', async ($, on) => {
+    const w = linkWorld(on)
+    // "acme" is Acme Roofing on the list and Acme Glass in the feed: the list wins, and it is stamped as before
+    expect(await mm($, 'link acme')).toBe('This thread is now Acme Roofing\'s. Showing Acme Roofing in the side pane.')
+    expect(w.stored['mm.acted']).toEqual({ [ACME]: { sid: SELF, at: NOW } })
+    expect(await mm($, 'link acme glass')).toBe(`This thread is now Acme Glass's. ${NOTHING}`)
+    expect(w.stored['mm.links']).toEqual({ [ACME_GLASS]: SELF })
+    // an exact short name over the names that contain it
+    expect(await mm($, 'link zen')).toBe(`This thread is now Zen's. ${NOTHING}`)
+    expect(await mm($, 'link garden')).toBe(`This thread is now Zen Garden Spa's. ${NOTHING}`)
+    expect(w.stored['mm.links']).toEqual({ [ZEN_GARDEN]: SELF })
+    // a ticket names its client too, whatever its date
+    expect(await mm($, 'link yew legal')).toBe(`This thread is now Yew Legal's. ${NOTHING}`)
+    expect(w.acted()).toEqual([])
+  })
+
+  test('[4] more than one client in the feed: the question, and nothing is written', async ($, on) => {
+    const w = linkWorld(on)
+    await mm($, '')
+    const before = snapshot(w)
+    expect(await mm($, 'link z')).toBe('More than one client matches "z": Zed Plumbing, Zen, Zen Garden Spa. Type more of the name.')
+    expect(await mm($, 'link abababab')).toBe(`More than one client matches "abababab": ${AB1}, ${AB2}. Type more of the name.`)
+    expect(snapshot(w)).toBe(before)
+  })
+
+  test('[3] [7] a project id: the whole id, or its first 8 characters; one known only from the feed\'s threads is named by its id', async ($, on) => {
+    const w = linkWorld(on)
+    expect(await mm($, `link ${ZED}`)).toBe(`This thread is now Zed Plumbing's. ${NOTHING}`)
+    expect(await mm($, 'link 66666666')).toBe(`This thread is now Zed Plumbing's. ${NOTHING}`)
+    expect(w.stored['mm.links']).toEqual({ [ZED]: SELF })
+    expect(await mm($, 'link 77777777')).toBe(`This thread is now client 77777777's. ${NOTHING}`)
+    expect(w.stored['mm.links']).toEqual({ [QUILL]: SELF })
+    // as a sentence names it, and the whole id of one of two that share their first 8 characters
+    expect(await mm($, 'link client 77777777')).toBe(`This thread is now client 77777777's. ${NOTHING}`)
+    expect(await mm($, `link ${AB2}`)).toBe(`This thread is now client abababab's. ${NOTHING}`)
+    expect(w.stored['mm.links']).toEqual({ [AB2]: SELF })
+    // a lead that is not 8 characters, or not an id the feed carries, names nobody
+    expect(await mm($, 'link 7777777')).toBe('No client named "7777777" is in your feed. /mm link takes a client\'s name or project id.')
+    expect(await mm($, 'link 12345678')).toBe('No client named "12345678" is in your feed. /mm link takes a client\'s name or project id.')
+  })
+
+  test('[7] a client known only by its id is named from the bridge\'s pin record, else from the name the bridge gave its thread', async ($, on) => {
+    const w = linkWorld(on, {
+      threads: [thread('local_q', '✓ Quill Accounting · clear 9 AM', 50)],
+      store: { 'mm.links': { [QUILL]: 'local_q' } },
+    })
+    expect(await mm($, 'link 77777777')).toBe(`This thread is now Quill Accounting's. ${NOTHING}`)
+    expect(w.stored['mm.links']).toEqual({ [QUILL]: SELF })
+    w.stored['mm.pins'] = { local_old: { projectId: QUILL, client: 'Quill & Sons', byUs: false } }
+    expect(await mm($, 'unlink')).toBe('This thread is no longer linked to a client.')
+    expect(await mm($, 'link 77777777')).toBe(`This thread is now Quill & Sons's. ${NOTHING}`)
+  })
+
+  test('nothing anywhere in the feed: /mm link says so; /mm start and /mm update still look at the lists alone', async ($, on) => {
+    const w = linkWorld(on)
+    await mm($, '')
+    const before = snapshot(w)
+    expect(await mm($, 'link nobody')).toBe('No client named "nobody" is in your feed. /mm link takes a client\'s name or project id.')
+    expect(await mm($, 'start Zed Plumbing')).toBe('No client matching "Zed Plumbing" needs you right now. /mm shows who does.')
+    expect(await mm($, 'update Zed Plumbing')).toBe('No client matching "Zed Plumbing" needs you right now. /mm shows who does.')
+    expect(await mm($, 'update 66666666')).toBe('No client matching "66666666" needs you right now. /mm shows who does.')
+    expect(snapshot(w)).toBe(before)
+    expect(w.acted()).toEqual([])
+  })
+
+  test('[5] the thread was named and pinned by us for the client it was: our pin comes off, its name says the new client is clear, and the pane stops showing the old client', async ($, on) => {
+    const w = linkWorld(on, { self: thread(SELF, 'Morning hub', 1), store: { 'mm.links': { [BOLT]: SELF } } })
+    expect(await mm($, 'view')).toBe('Showing Bolt Staffing in the side pane.')
+    expect(w.threads.get(SELF)).toMatchObject({ title: BOLT_TITLE, pinned: true })
+    expect(await mm($, 'link Zed Plumbing')).toBe(`This thread is now Zed Plumbing's. ${NOTHING}`)
+    expect(w.threads.get(SELF)).toMatchObject({ title: '✓ Zed Plumbing · clear 11 AM', pinned: false })
+    expect(w.stored['mm.pins']).toEqual({})
+    const ui = await pane($)
+    const all = await lines(ui)
+    expect(all).not.toContain('This thread: Bolt Staffing')
+    expect(await ui.find({ type: 'Markdown' })).toBeUndefined()
+    await ui.unmount()
+    // and /mm unlink gives the thread its own name back
+    await mm($, 'unlink')
+    expect(w.threads.get(SELF)?.title).toBe('Morning hub')
+  })
+
+  test('[6] the person-only rule holds: the tool links a client with nothing waiting in a thread that is nobody\'s, and is refused in one that is another client\'s', async ($, on) => {
+    const w = linkWorld(on, { store: { 'mm.links': { [BOLT]: SELF } }, self: thread(SELF, 'Bolt thread', 1) })
+    const before = snapshot(w)
+    expect(await tool($, 'link Zed Plumbing')).toBe('This thread is Bolt Staffing\'s. Only the person can move it: they type /mm link Zed Plumbing.')
+    expect(await tool($, 'link 77777777')).toBe('This thread is Bolt Staffing\'s. Only the person can move it: they type /mm link client 77777777.')
+    expect(snapshot(w)).toBe(before)
+    // what the refusal says to type works
+    expect(await mm($, 'link client 77777777')).toBe(`This thread is now client 77777777's. ${NOTHING}`)
+    await mm($, 'unlink')
+    w.stored['mm.unlinked'] = {}
+    w.stored['mm.links'] = {}
+    expect(await tool($, 'link Zed Plumbing')).toBe(`This thread is now Zed Plumbing's. ${NOTHING}`)
+    expect(w.stored['mm.links']).toEqual({ [ZED]: SELF })
+    expect(w.acted()).toEqual([])
   })
 })
