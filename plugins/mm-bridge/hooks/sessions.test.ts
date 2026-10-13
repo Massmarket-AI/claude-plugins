@@ -137,3 +137,125 @@ describe('F4: only the person moves a client, or undoes their own unlink', () =>
     expect((w.stored('mm.titles') as Record<string, string>).local_t1).toBeUndefined()
   })
 })
+
+describe('F2: a write the engine refuses midway leaves nothing half done', () => {
+  /** Client One's session ran in local_a and declared it alone: the sync links it by itself. */
+  const declaredAlone = (sole: boolean): Feed => ({
+    member: ME, role: 'founder', mail: [mail(1, 'Client One')], tickets: {},
+    threads: [{ project_id: pid(1), session_id: 'cli-a', last_activity_at: ago(1), sole }],
+  })
+  /** Whether the bridge noted a failed write where its errors go (its heartbeat file). */
+  const noted = (w: ReturnType<typeof fakeApp>, what: string) => w.written.some(f => f.text.includes('"writeError"') && f.text.includes(what))
+
+  test('a refused mm.auto write leaves no link that `sole: false` cannot let go (P2)', async () => {
+    const feed = declaredAlone(true)
+    const w = fakeApp(feed, [{ sessionId: 'local_p2hub' }, { sessionId: 'local_p2a', title: 'Pipeline speed work' }])
+    w.put('mm.threads', { 'cli-a': { app: 'local_p2a', at: Date.parse(ago(0)) } })
+    const hub = w.session('local_p2hub')
+    w.refuse('mm.auto', 1)
+    let failed = ''
+    await mm(hub, '').catch((err: unknown) => void (failed = String(err)))
+    expect(failed).toContain('Lock file is already being held')
+    // the link was never written without its auto record; what the sync did to the thread is on record
+    expect(linksOf(w)[pid(1)]).toBeUndefined()
+    expect((w.stored('mm.titles') as Record<string, string>).local_p2a).toBe('Pipeline speed work')
+    expect((w.stored('mm.pins') as Record<string, { byUs: boolean }>).local_p2a?.byUs).toBe(true)
+    // OW now says that session declared another project too: the thread is given back
+    feed.threads = [{ project_id: pid(1), session_id: 'cli-a', last_activity_at: ago(1), sole: false }]
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(linksOf(w)[pid(1)]).toBeUndefined()
+    expect(w.app.get('local_p2a')).toMatchObject({ title: 'Pipeline speed work', pinned: false })
+    expect((w.stored('mm.pins') as Record<string, unknown>).local_p2a).toBeUndefined()
+  })
+
+  test('a link the bridge makes by itself always has its auto record, so `sole: false` lets it go', async () => {
+    const feed = declaredAlone(true)
+    const w = fakeApp(feed, [{ sessionId: 'local_p2bhub' }, { sessionId: 'local_p2b', title: 'Pipeline speed work' }])
+    w.put('mm.threads', { 'cli-a': { app: 'local_p2b', at: Date.parse(ago(0)) } })
+    const hub = w.session('local_p2bhub')
+    // the links write itself refused: the auto record is there, the link is not
+    w.refuse('mm.links', 1)
+    await mm(hub, '').catch(() => undefined)
+    expect(linksOf(w)[pid(1)]).toBeUndefined()
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(linksOf(w)[pid(1)]).toBe('local_p2b')
+    expect((w.stored('mm.auto') as Record<string, { sid: string }>)[pid(1)]?.sid).toBe('local_p2b')
+    feed.threads = [{ project_id: pid(1), session_id: 'cli-a', last_activity_at: ago(1), sole: false }]
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(linksOf(w)[pid(1)]).toBeUndefined()
+    expect(w.app.get('local_p2b')).toMatchObject({ title: 'Pipeline speed work', pinned: false })
+  })
+
+  test('Update went, then the link write was refused: the second Update sends nothing, and the link is written again 1 to 3 seconds later (P6)', async () => {
+    const w = fakeApp(declaredAlone(true), [{ sessionId: 'local_p6hub' }, { sessionId: 'local_p6a', title: 'Client One work' }])
+    w.put('mm.threads', { 'cli-a': { app: 'local_p6a', at: Date.parse(ago(0)) } })
+    const hub = w.session('local_p6hub')
+    await mm(hub, '')
+    expect(linksOf(w)).toEqual({ [pid(1)]: 'local_p6a' })
+    // the write of the link after the message went is refused
+    w.refuse('mm.links', 1)
+    expect(await mm(hub, 'update Client One')).toContain('Sent to Client One\'s thread')
+    expect(w.sends().length).toBe(1)
+    expect(noted(w, 'update: the link')).toBe(true)
+    // what the thread now has was written first: the row reads Open, and the second Update sends nothing
+    expect((w.stored('mm.sent') as Record<string, { sid: string }>)[pid(1)]?.sid).toBe('local_p6a')
+    expect(await mm(hub, 'update Client One')).toBe('Client One\'s thread already has this. Open "22h left Client One reply" under Pinned.')
+    expect(w.sends().length).toBe(1)
+    // the check a moment later: the person's link, claimed and stamped
+    await w.advance(3_100)
+    expect(linksOf(w)).toEqual({ [pid(1)]: 'local_p6a' })
+    expect(w.stored('mm.auto')).toEqual({})
+    expect((w.stored('mm.acted') as Record<string, { sid: string }>)[pid(1)]?.sid).toBe('local_p6a')
+  })
+
+  test('Update went, then even the record of it was refused: this session still sends nothing twice, and the record is written again', async () => {
+    const w = fakeApp(declaredAlone(true), [{ sessionId: 'local_p6bhub' }, { sessionId: 'local_p6b', title: 'Client One work' }])
+    w.put('mm.threads', { 'cli-a': { app: 'local_p6b', at: Date.parse(ago(0)) } })
+    const hub = w.session('local_p6bhub')
+    await mm(hub, '')
+    w.refuse('mm.sent', 1)
+    expect(await mm(hub, 'update Client One')).toContain('Sent to Client One\'s thread')
+    expect(noted(w, 'update: what the thread now has')).toBe(true)
+    // the writes after it were each made on their own
+    expect(linksOf(w)).toEqual({ [pid(1)]: 'local_p6b' })
+    expect((w.stored('mm.acted') as Record<string, { sid: string }>)[pid(1)]?.sid).toBe('local_p6b')
+    expect(await mm(hub, 'update Client One')).toContain('already has this')
+    expect(w.sends().length).toBe(1)
+    await w.advance(3_100)
+    expect((w.stored('mm.sent') as Record<string, { sid: string }>)[pid(1)]?.sid).toBe('local_p6b')
+  })
+
+  test('a refused title write keeps the thread\'s own name: it is not renamed until its name is on record', async () => {
+    const feed: Feed = { member: ME, role: 'founder', mail: [mail(1, 'Client One')], tickets: {}, threads: [] }
+    const w = fakeApp(feed, [{ sessionId: 'local_tthub' }, { sessionId: 'local_tt', title: 'My own name' }])
+    w.put('mm.links', { [pid(1)]: 'local_tt' })
+    const hub = w.session('local_tthub')
+    w.refuse('mm.titles', 1)
+    await mm(hub, '').catch(() => undefined)
+    expect(w.app.get('local_tt')).toMatchObject({ title: 'My own name', pinned: false })
+    // the next sync keeps its name first, then renames and pins it
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect((w.stored('mm.titles') as Record<string, string>).local_tt).toBe('My own name')
+    expect(w.app.get('local_tt')).toMatchObject({ title: '🟡 22h left · Client One · reply', pinned: true })
+    // and /mm unlink gives it back
+    await mm(w.session('local_tt'), 'unlink')
+    expect(w.app.get('local_tt')).toMatchObject({ title: 'My own name', pinned: false })
+  })
+
+  test('Start: the chip\'s record refused is noted, and written again 1 to 3 seconds later', async () => {
+    const feed: Feed = { member: ME, role: 'founder', mail: [mail(1, 'Client One')], tickets: {}, threads: [] }
+    const w = fakeApp(feed, [{ sessionId: 'local_sthub' }])
+    const hub = w.session('local_sthub')
+    w.refuse('mm.chips', 1)
+    expect(await mm(hub, 'start Client One')).toBe('A chip for Client One is ready here: click Start on it.')
+    expect(noted(w, 'start: the chip record')).toBe(true)
+    await w.advance(3_100)
+    const chips = w.stored('mm.chips') as Array<{ projectId: string; threadId: string }>
+    expect(chips.map(c => [c.projectId, c.threadId])).toEqual([[pid(1), 'local_sthub']])
+    expect(w.calls.filter(c => c.tool === 'spawn_task').length).toBe(1)
+  })
+})

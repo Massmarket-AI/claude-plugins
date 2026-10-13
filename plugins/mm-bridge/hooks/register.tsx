@@ -220,6 +220,22 @@ const pressing = new Map<string, number>()
 let pressCount = 0
 /** The one sync this session owes after a reply draft was sent or discarded in it (askSync): its timer, or none. */
 let askTimer: { cancel: () => void } | null = null
+/**
+ * What this session's Update sent into a thread, by client and thread: the kickoff's signature. Asked before
+ * every Update beside what is stored, so a second press never sends the same kickoff into the same thread,
+ * even when the store refused every write after the first went (review of 79cbc596, F2).
+ */
+const sentHere = new Map<string, string>()
+/** The chips this session minted from a press, by client and what they carry: a second press mints none, whatever the store kept. */
+const mintedHere = new Set<string>()
+
+/**
+ * A write that failed after the person's act went (an Update's message, a chip): noted where the bridge's
+ * other errors go, the heartbeat file the timer's and registration's errors go to. Never swallowed silently.
+ */
+async function noteFailure($: EngineInterface, what: string, err: unknown): Promise<void> {
+  await beat($, { ok: false, writeError: short(`${what}: ${errorText(err)}`, 300) })
+}
 
 const textOf = (r: Mcp) => (r.content ?? []).filter(c => c.type === 'text').map(c => c.text ?? '').join('\n')
 const short = (s: string, n = 200) => s.replace(/\s+/g, ' ').slice(0, n)
@@ -424,14 +440,16 @@ const copyOf = <T,>(v: T): T => JSON.parse(JSON.stringify(v ?? null)) ?? v
  * the map as the pass read it, `after` as the pass left it. An entry the pass did not change is left as the
  * store has it now, and so is one another session changed since the pass read it: a sync never takes back a
  * link, a pin or a record written while it ran (it sees it on its next pass). Answers whether it changed
- * anything.
+ * anything. `only` makes just the entries it set (`set`) or just the ones it removed (`delete`): a record
+ * another depends on is written before it and removed after it (F2).
  */
-function applyChanges<V>(fresh: Record<string, V>, before: Readonly<Record<string, V>>, after: Readonly<Record<string, V>>): boolean {
+function applyChanges<V>(fresh: Record<string, V>, before: Readonly<Record<string, V>>, after: Readonly<Record<string, V>>, only?: 'set' | 'delete'): boolean {
   let changed = false
   for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
     const had = Object.hasOwn(before, k) ? before[k] : undefined
     const has = Object.hasOwn(after, k) ? after[k] : undefined
     if (sameValue(had, has)) continue
+    if ((only === 'set' && has === undefined) || (only === 'delete' && has !== undefined)) continue
     const now = Object.hasOwn(fresh, k) ? fresh[k] : undefined
     if (!sameValue(now, had)) continue
     if (has === undefined) delete fresh[k]
@@ -908,10 +926,34 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   let writes = 0
   const rename = async (s: AppThread, title: string): Promise<void> => {
     // The thread's own name is kept from before the first time we rename it, so /mm unlink can give it back.
-    if (titles[s.sessionId] === undefined && s.title && !isOurTitle(s.title)) titles[s.sessionId] = s.title
-    await mcpJson($, 'ccd_session_mgmt', 'set_session_title', { session_id: s.sessionId, title })
+    // ⛔ Stored BEFORE the app is asked to rename (review of 79cbc596, F2): a pass that fails after the rename
+    // still leaves the name to give back. (A name another session stored first for the thread is kept.)
+    const sid = s.sessionId
+    const own = s.title
+    if (titles[sid] === undefined && own && !isOurTitle(own)) {
+      await patchStore<Record<string, string>>($, 'mm.titles', {}, fresh => {
+        if (fresh[sid] !== undefined) return false
+        fresh[sid] = own
+      })
+      titles[sid] = own
+      was.titles[sid] = own
+    }
+    await mcpJson($, 'ccd_session_mgmt', 'set_session_title', { session_id: sid, title })
     s.title = title
     writes++
+  }
+  /**
+   * A pin record stored at once, BEFORE the app is asked to rename or pin the thread it is about (F2): a
+   * pass that fails after those calls leaves the record, so a later sync takes our pin off and gives the
+   * name back. Nothing is written when the store already has this record.
+   */
+  const recordPin = async (sid: string, record: Pin): Promise<void> => {
+    if (sameValue(pins[sid], record)) return
+    await patchStore<Record<string, Pin>>($, 'mm.pins', {}, fresh => {
+      fresh[sid] = record
+    })
+    pins[sid] = record
+    was.pins[sid] = copyOf(record)
   }
 
   // A thread its client has left for a new one started from the bridge's chip (linkFromMarker put it on
@@ -953,16 +995,18 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   for (const [sid, it] of want) {
     const s = live.get(sid)
     if (!s || writes >= MAX_WRITES) continue
+    // The record first, as the thread stands (a pin the person put on stays theirs), so a failed rename
+    // leaves a record to give the name back by; then, just before we pin it, the record that the pin is
+    // ours. (Recorded as ours any earlier, a rename that failed would read later as the person's unpin.)
+    const record = (byUs: boolean): Pin => ({ projectId: it.projectId, client: it.client, byUs })
+    await recordPin(sid, record(s.pinned ? (pins[sid]?.byUs ?? false) : false))
     const title = titleFor(it, now)
     if (s.title !== title) await rename(s, title)
-    const already = pins[sid]
     if (!s.pinned) {
+      await recordPin(sid, record(true))
       await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: sid, pinned: true })
       s.pinned = true
       writes++
-      pins[sid] = { projectId: it.projectId, client: it.client, byUs: true }
-    } else {
-      pins[sid] = { projectId: it.projectId, client: it.client, byUs: already?.byUs ?? false }
     }
   }
 
@@ -1082,10 +1126,16 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const had = Object.keys(fresh).length
     return Object.keys(capped(fresh)).length !== had || changed
   }
+  // ⛔ In this order (review of 79cbc596, F2), so that a write the engine refuses midway leaves nothing half
+  // done: what makes a link the bridge's own (its auto record) and the names to give back are written
+  // BEFORE the links, and taken away only AFTER them. A link the bridge made never stands without its auto
+  // record, so it can always be let go; one it lets go keeps its record until the link itself is gone.
+  await patchStore<Auto>($, 'mm.auto', {}, (fresh, stored) => applyChanges(fresh, was.auto, auto, 'set') || !stored)
+  await patchStore<Record<string, string>>($, 'mm.titles', {}, fresh => applyChanges(fresh, was.titles, titles, 'set'))
   await patchStore<Record<string, string>>($, 'mm.links', {}, (fresh, stored) => applyChanges(fresh, was.links, links) || !stored)
   await patchStore<Record<string, Pin>>($, 'mm.pins', {}, (fresh, stored) => applyChanges(fresh, was.pins, pins) || !stored)
+  await patchStore<Auto>($, 'mm.auto', {}, fresh => applyChanges(fresh, was.auto, auto, 'delete'))
   await patchStore<Record<string, string>>($, 'mm.titles', {}, (fresh, stored) => keepNewest(fresh, was.titles, titles) || !stored)
-  await patchStore<Auto>($, 'mm.auto', {}, (fresh, stored) => applyChanges(fresh, was.auto, auto) || !stored)
   await patchStore<Record<string, Unpinned>>($, 'mm.unpinned', {}, (fresh, stored) => keepNewest(fresh, was.unpinned, unpinned) || !stored)
   await $.store.set('mm.last', last)
   await showQueue($, member, items, rows, want.size, now, folds)
@@ -1472,7 +1522,8 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
   // ⛔ One chip per client. The button, with a chip for this client carrying this already in this thread:
   //    nothing is minted.
   const before = await chipsOf($, now)
-  if (!typed && me && before.some(c => c.projectId === it.projectId && !c.superseded && c.threadId === me && c.signature === signature)) {
+  const minted = `${it.projectId}\n${me}\n${signature}`
+  if (!typed && me && (before.some(c => c.projectId === it.projectId && !c.superseded && c.threadId === me && c.signature === signature) || mintedHere.has(minted))) {
     return `A chip for ${it.client} is already here: click Start on it.`
   }
   // A client that already has a thread: the new one is asked to look at how the old one ended (handoverText).
@@ -1483,22 +1534,35 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
     prompt,
   })) as Mcp
   if (r.isError) return `Could not create the chip: ${short(textOf(r))}`
-  try {
-    // The chip shows in this thread only, so the record says which thread: the person is told where it
-    // is from any other, and this thread's session withdraws it once it is no longer wanted. Any earlier
-    // chip for the client, here or in another thread, is superseded by this one.
-    const answer = textOf(r)
-    const taskId = /\btask_id:\s*(task_[A-Za-z0-9]{1,40})/.exec(answer)?.[1] ?? /\b(task_[0-9a-f]{6,40})\b/.exec(answer)?.[1] ?? ''
-    const had = (await storeGet<Record<string, string>>($, 'mm.links', {}))[it.projectId]
-    await patchChips($, now, chips => {
+  mintedHere.add(minted)
+  // The chip shows in this thread only, so the record says which thread: the person is told where it is from
+  // any other, and this thread's session withdraws it once it is no longer wanted. Any earlier chip for the
+  // client, here or in another thread, is superseded by this one.
+  // ⛔ The chip's record FIRST, then the rest, each on its own: a write the engine refuses is noted where the
+  // bridge's errors go and written again by the check 1 to 3 seconds later (review of 79cbc596, F2). The chip
+  // is there either way; with no record its thread links like one started by hand.
+  const answer = textOf(r)
+  const taskId = /\btask_id:\s*(task_[A-Za-z0-9]{1,40})/.exec(answer)?.[1] ?? /\b(task_[0-9a-f]{6,40})\b/.exec(answer)?.[1] ?? ''
+  const had = (await storeGet<Record<string, string>>($, 'mm.links', {}).catch(() => ({}) as Record<string, string>))[it.projectId]
+  const chip: Chip = { projectId: it.projectId, signature, taskId, threadId: me, at: now, prompt, ...(had ? { had } : {}) }
+  const record = () =>
+    patchChips($, now, chips => {
       for (const c of chips) if (c.projectId === it.projectId) c.superseded = true
-      return [...chips, { projectId: it.projectId, signature, taskId, threadId: me, at: now, prompt, ...(had ? { had } : {}) }]
+      return [...chips, chip]
     })
-    // The person asked for this client: a pin they took off its thread may come back.
-    await pinAgain($, had)
-  } catch {
-    // the chip is there either way; its thread then links like one started by hand
+  const step = async (what: string, write: () => Promise<unknown>): Promise<void> => {
+    try {
+      await write()
+    } catch (err) {
+      await noteFailure($, `start: ${what}`, err)
+    }
   }
+  await step('the chip record', record)
+  // The person asked for this client: a pin they took off its thread may come back.
+  await step('the pin coming back', () => pinAgain($, had))
+  settleLater($, me || it.projectId, async () => {
+    if (!(await chipsOf($, now)).some(c => sameChip(c, chip))) await step('the chip record, again', record)
+  })
   return `A chip for ${it.client} is ready here: click Start on it.`
 }
 
@@ -1676,7 +1740,12 @@ async function updateThread($: EngineInterface, feed: Feed, it: QueueItem, pass:
   if (refused) return refused
   // The thread already has what is waiting now: nothing is sent twice. (Its row draws no Update button;
   // this is the typed command, or a row drawn before another thread's Update went.)
-  if (pass.last.recs[it.projectId]?.state === 'current') {
+  // ⛔ Asked of what is stored too, and of what this session sent (F2): a second press never sends the same
+  // kickoff into the same thread, whatever became of the writes after the first one went.
+  const signature = signatureOf(it)
+  const sent = (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[it.projectId]
+  const has = (sent && sent.sid === target.sid && hasWaiting(sent.sig, it)) || sentHere.get(`${it.projectId}\n${target.sid}`) === signature
+  if (pass.last.recs[it.projectId]?.state === 'current' || has) {
     return `${it.client}'s thread already has this. Open "${cleanTitle(pass.live.get(target.sid)?.title ?? target.title)}" under Pinned.`
   }
   const here = target.sid === (await selfId($))
@@ -1698,23 +1767,56 @@ async function updateThread($: EngineInterface, feed: Feed, it: QueueItem, pass:
     return failed(errorText(err))
   }
 
-  // The message went. Only now: the link, the unlink record, the stamp, what the thread now has, and the
-  // pin and the name.
-  let thread = pass.live.get(target.sid)
-  try {
-    await forgetUnlink($, target.sid)
+  // The message went. Only now: what the thread now has, the unlink record, the link, the claim, the stamp,
+  // and the pin and the name.
+  // ⛔ What the thread now has FIRST (review of 79cbc596, F2): while that is what would be sent, its row reads
+  // Open thread, not Update, and a second press sends nothing. Then each other write on its own: one the
+  // engine refuses does not stop the next, is noted where the bridge's errors go, and is written again by the
+  // check 1 to 3 seconds later. None of it holds back the answer: the message is in the thread either way.
+  const pid = it.projectId
+  const sid = target.sid
+  const at = await $.clock.now()
+  sentHere.set(`${pid}\n${sid}`, signature)
+  const step = async (what: string, write: () => Promise<unknown>): Promise<void> => {
+    try {
+      await write()
+    } catch (err) {
+      await noteFailure($, `update: ${what}`, err)
+    }
+  }
+  const linkIt = () =>
     // over a fresh copy: the pass before the send may be seconds old
-    await patchStore<Record<string, string>>($, 'mm.links', {}, fresh => {
-      fresh[it.projectId] = target.sid
+    patchStore<Record<string, string>>($, 'mm.links', {}, fresh => {
+      fresh[pid] = sid
     })
-    await claim($, it.projectId, target.sid)
-    // The person acted on this thread: it is pinned first, and the cap of 8 does not unpin it for a day.
-    await stamp($, it.projectId, target.sid)
-    // What the thread has now: while this is what would be sent, its row reads Open thread, not Update.
-    await putSent($, it.projectId, { sid: target.sid, sig: signatureOf(it), at: await $.clock.now() })
-    thread = (await reconcile($, feed, pass.pairs)).live.get(target.sid) ?? thread
-  } catch {
-    // the message is in the thread either way; the next sync pins and names it
+  await step('what the thread now has', () => putSent($, pid, { sid, sig: signature, at }))
+  await step('the unlink record', () => forgetUnlink($, sid))
+  await step('the link', linkIt)
+  await step('the claim', () => claim($, pid, sid))
+  // The person acted on this thread: it is pinned first, and the cap of 8 does not unpin it for a day.
+  await step('the stamp', () => stamp($, pid, sid))
+  // Checked again once, 1 to 3 seconds later, as a marker's link is: what is missing is written again. A
+  // link another thread holds by the person's hand since, or an unlink the person made since, is left.
+  settleLater($, sid, async () => {
+    if (!(await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]) await step('what the thread now has, again', () => putSent($, pid, { sid, sig: signature, at }))
+    const unlinkedAt = (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))[sid]
+    if (unlinkedAt !== undefined) {
+      if (unlinkedAt > at) return
+      await step('the unlink record, again', () => forgetUnlink($, sid))
+    }
+    const holder = (await storeGet<Record<string, string>>($, 'mm.links', {}))[pid]
+    const auto = await storeGet<Auto>($, 'mm.auto', {})
+    if (holder !== sid && (holder === undefined || auto[pid]?.sid === holder)) await step('the link, again', linkIt)
+    if ((await storeGet<Record<string, string>>($, 'mm.links', {}))[pid] !== sid) return
+    if (auto[pid]) await step('the claim, again', () => claim($, pid, sid))
+    if ((await storeGet<Acted>($, 'mm.acted', {}))[pid]?.sid !== sid) await step('the stamp, again', () => stamp($, pid, sid))
+  })
+  let thread = pass.live.get(sid)
+  try {
+    thread = (await reconcile($, feed, pass.pairs)).live.get(sid) ?? thread
+  } catch (err) {
+    // the next sync pins and names it
+    await noteFailure($, 'update: the sync after it', err)
   }
   if (here) return `Picking up ${it.client} in this thread.`
   // The toast says it went. Update also takes the person there when the app can be told to open the
