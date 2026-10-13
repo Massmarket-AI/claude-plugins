@@ -887,11 +887,13 @@ describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the 
     // pinned and named for his task, never as a reply
     expect(titleFor(it, MON)).toBe('🔴 1h left · Acme Roofing · task')
     expect(it.dueAt).toBe(et('2026-10-12 18:00'))
-    // the kickoff and the note word it as a package a teammate holds: show what is waiting, no prep, no second reply
-    expect(kickoffText(it)).toContain('Builder B picked up the reply drafts (package aaaaaaaa) and has 2 not sent yet. Load the client\'s project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply.')
-    expect(kickoffText(it)).not.toContain('rebuild the drafts')
-    expect(noteText(it, FOUNDER)).toContain('Do not write a second reply: ask Builder B.')
-    expect(noteText(it, FOUNDER)).not.toContain('pick the package up')
+    // the kickoff and the note treat it as a package a teammate holds (show what is waiting, no prep, no second
+    // reply), in words for a package nobody picked up (Opus, 10-13)
+    expect(kickoffText(it)).toBe(
+      `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}): Builder B has the reply drafts (package aaaaaaaa), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`,
+    )
+    expect(kickoffText(it)).not.toContain('picked up')
+    expect(noteText(it, FOUNDER)).toBe('0 client messages waiting on our reply and 1 committed task due; Builder B has the reply drafts (package aaaaaaaa), and they are marked out of date. Do not write a second reply: ask Builder B.')
     expect(draftsLine(it)).toBe('_Builder B has these drafts. Their reminder lists what is still open._')
   })
 
@@ -899,10 +901,16 @@ describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the 
     const it = buildLists(asFounder({ drafts: [pkg({ status: 'stale' })], mail: [theirMail('2026-10-12 10:30')] }), MON).teammate[0] as QueueItem
     expect(it).toMatchObject({ kind: 'reply', messages: 1, theirs: 'Builder B' })
     const note = noteText(it, FOUNDER)
-    expect(note).toBe('1 client message waiting on our reply and 0 committed tasks due; Builder B picked up the reply drafts for this client (package aaaaaaaa) and has 2 drafts not sent yet. Do not write a second reply: ask Builder B.')
+    expect(note).toBe('1 client message waiting on our reply and 0 committed tasks due; Builder B has the reply drafts (package aaaaaaaa), and they are marked out of date. Do not write a second reply: ask Builder B.')
     expect(note).not.toContain('pick the package up')
-    expect(kickoffText(it)).toContain('Do not run prep and do not draft a second reply. Send nothing without my go.')
-    expect(kickoffText(it)).not.toContain('rebuild the drafts')
+    expect(kickoffText(it)).toBe(
+      `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}): Builder B has the reply drafts (package aaaaaaaa), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`,
+    )
+    // a package a teammate actually picked up keeps the held words exactly
+    const held = buildLists(asFounder({ drafts: [pkg(pickedUp('J.Smith@example.com'))], mail: [{ ...theirMail('2026-10-12 10:30'), project_owner_email: FOUNDER }] }), MON).teammate[0] as QueueItem
+    expect(held?.open?.state).toBe('held_by_other')
+    expect(kickoffText(held)).toContain(': J Smith picked up the reply drafts (package aaaaaaaa) and has 1 not sent yet. Load the client\'s project skill first')
+    expect(noteText(held, FOUNDER)).toContain('; J Smith picked up the reply drafts for this client (package aaaaaaaa) and has 1 draft not sent yet. Do not write a second reply: ask J Smith.')
     expect(handoverText(it, { sid: 'local_0f1e2d3c-aaaa-4bbb-8ccc-000000000001', title: 'Roof quote' })).toContain('Before showing me what is due')
     // his own client's stale package keeps the wording that rebuilds the drafts, as before
     const own = buildLists(asFounder({ drafts: [pkg({ status: 'stale', project_owner_email: FOUNDER })], mail: [{ ...theirMail('2026-10-12 10:30'), project_owner_email: FOUNDER }] }), MON).queue[0] as QueueItem
