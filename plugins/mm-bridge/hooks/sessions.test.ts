@@ -674,6 +674,98 @@ describe('R5: every running thread mints its own copy of a client\'s chip', () =
   })
 })
 
+// ======================================================================== 0.5.3
+
+describe('0.5.3: a chip for a new thread is spent once the person goes on in the client\'s own thread (Rob, 10-14)', () => {
+  const start = (t: unknown) => hooks['session.start']?.(t, { cwd: '/w', surface: 'desktop', isInteractive: false }, next)
+  /**
+   * Client Seven One, a client message an hour old, linked to a long thread (70% of its context): a new thread is
+   * due (R3), in sixteen running threads. (Thread ids of each test's own: the bridge's module is one for the file.)
+   */
+  const crucialShape = (tag: string) => {
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(71, 'Client Seven One', 1)] }
+    const LINKED = `local_ch_${tag}_linked`
+    const others = Array.from({ length: 15 }, (_, i) => `local_ch_${tag}_${i + 1}`)
+    const w = fakeApp(feed, [{ sessionId: LINKED, title: 'Meeting context' }, ...others.map(sessionId => ({ sessionId }))], [], { every: true })
+    w.put('mm.links', { [pid(71)]: LINKED })
+    w.put('mm.ctx', { [LINKED]: { tokensUsed: 700_000, contextWindow: 1_000_000, percentUsed: 70, at: NOW - 3_600_000 } })
+    const threads = [LINKED, ...others].map(id => w.session(id))
+    return { w, feed, threads, LINKED, linked: threads[0], hub: threads[1] }
+  }
+  const spawned = (w: ReturnType<typeof fakeApp>) => w.calls.filter(c => c.tool === 'spawn_task')
+  const dismissed = (w: ReturnType<typeof fakeApp>) => w.calls.filter(c => c.tool === 'dismiss_task').map(c => String(c.args.task_id))
+  const human = { kind: 'composer' }
+  /** Sixteen threads' work at one moment runs to its end (the fake app's own wait is sized for a few). */
+  const settle = async () => {
+    for (let i = 0; i < 50_000; i++) await Promise.resolve()
+  }
+
+  test('sixteen copies; the person writes in the linked thread; every thread withdraws its own on its next chips pass; none minted again; a newer client message mints again', async () => {
+    const { w, feed, threads, LINKED, linked, hub } = crucialShape('a')
+    await mm(hub, '')
+    for (const t of threads) await start(t)
+    await w.advance(4_000)
+    await settle()
+    expect(spawned(w).length).toBe(16)
+    // (sixteen threads writing their records at once: each thread's own are written back 1 to 3 seconds on, F4)
+    await w.advance(3_100)
+    await settle()
+    const chips = (w.stored('mm.chips') ?? []) as Array<{ taskId: string; had?: string; auto?: boolean }>
+    expect(chips.length).toBe(16)
+    expect(chips.every(c => c.had === LINKED && c.auto)).toBe(true)
+    // the person goes on in the client's own thread
+    await hooks['prompt.submit']?.(linked, { text: 'Go on with the meeting notes.', origin: human }, next)
+    expect(w.stored('mm.claimedHere')).toEqual({ [pid(71)]: { sid: LINKED, at: NOW + 7_100, newest: { mail: NOW - 3_600_000, pkg: 0, task: 0 } } })
+    // every running thread's next chips pass (15 seconds after it started) withdraws its own copy
+    await w.advance(7_900)
+    await settle()
+    expect(dismissed(w).sort()).toEqual(chips.map(c => c.taskId).sort())
+    // and the minute's ticks mint none again; a record another thread's write put back goes with no second withdrawal
+    for (let i = 0; i < 3; i++) {
+      await w.advance(60_000)
+      await settle()
+    }
+    expect(spawned(w).length).toBe(16)
+    expect(w.stored('mm.chips')).toEqual([])
+    expect(dismissed(w).length).toBe(16)
+    // a newer client message: the claim no longer holds, and the next tick mints again
+    feed.mail?.push({ ...mail(71, 'Client Seven One', 0), message_id_key: 'm71-newer', received_at: new Date(w.now()).toISOString() })
+    await mm(hub, '')
+    await w.advance(60_000)
+    await settle()
+    expect(spawned(w).length).toBe(32)
+  })
+
+  test('a kickoff or a message from anywhere but the person claims nothing; nor a message in a thread the client is not linked to', async () => {
+    const { w, threads, linked, hub } = crucialShape('b')
+    await mm(hub, '')
+    for (const t of threads) await start(t)
+    await w.advance(4_000)
+    await hooks['prompt.submit']?.(linked, { text: 'A note from another session.', origin: { kind: 'peer' } }, next)
+    await hooks['prompt.submit']?.(linked, { text: `[mm-link ${pid(71)}] Pick up the reply drafts.`, origin: { kind: 'sdk' } }, next)
+    await hooks['prompt.submit']?.(hub, { text: 'Something else.', origin: human }, next)
+    expect(w.stored('mm.claimedHere')).toBeUndefined()
+    await w.advance(11_000)
+    expect(dismissed(w)).toEqual([])
+  })
+
+  test('R4 is not touched: a client with no thread keeps its chips whatever the person writes', async () => {
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(72, 'Client Seven Two', 1)] }
+    const w = fakeApp(feed, [{ sessionId: 'local_r4a' }, { sessionId: 'local_r4b' }], [], { every: true })
+    const [a, b] = ['local_r4a', 'local_r4b'].map(id => w.session(id))
+    await mm(a, '')
+    await start(a)
+    await start(b)
+    await w.advance(4_000)
+    expect(spawned(w).length).toBe(2)
+    await hooks['prompt.submit']?.(a, { text: 'Hello.', origin: human }, next)
+    await w.advance(60_000)
+    expect(w.stored('mm.claimedHere')).toBeUndefined()
+    expect(dismissed(w)).toEqual([])
+    expect(spawned(w).length).toBe(2)
+  })
+})
+
 describe('R13: in a thread that does not sync, the refresh-failed line never goes while the pane shows the old list', () => {
   test('the line goes with the list drawn again from the newer sync', async () => {
     const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], drafts: [], mail: [mail(61, 'Client Six One')] }

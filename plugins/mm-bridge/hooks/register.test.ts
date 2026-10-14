@@ -5200,3 +5200,177 @@ describe('fix round 1: the reviewer\'s findings', () => {
     expect(w.stored['mm.last']).toEqual(newer)
   })
 })
+
+// ======================================================================== 0.5.3: the clear sweep
+
+describe('0.5.3: a cleared client\'s thread is unpinned once per clear, whatever record there is (Opus, 10-14)', () => {
+  const DUNE = '44444444-4444-4444-4444-444444444444'
+  const ELM = '55555555-5555-4555-8555-555555555555'
+  const INTERNAL_OPS = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
+  const DUNE_CLEAR = '✓ Dune Freight · clear 5:27 AM'
+  const ELM_CLEAR = '✓ Elm Optics Insurance · clear 8:17 PM'
+  /** The two live shapes of 10-14: cleared under 0.5.1, still linked, no pin record, pinned in the app. */
+  const liveShapes = (on: On) =>
+    world(on, {
+      threads: [thread('local_d', DUNE_CLEAR, 30, { pinned: true }), thread('local_e', ELM_CLEAR, 40, { pinned: true })],
+      store: { 'mm.links': { [DUNE]: 'local_d', [ELM]: 'local_e' } },
+    })
+  const pinWrites = (w: { writes: () => string[] }) => w.writes().filter(c => c.startsWith('set_pinned'))
+  const BOTH_UNPINNED = ['set_pinned | local_d | false', 'set_pinned | local_e | false']
+
+  test('the two live shapes (linked, cleared, no pin record, pinned) are unpinned once, their names and links kept, and the clears recorded', async ($, on) => {
+    const w = liveShapes(on)
+    expect(w.stored['mm.pins']).toBeUndefined()
+    await mm($, '')
+    expect(w.threads.get('local_d')).toMatchObject({ title: DUNE_CLEAR, pinned: false })
+    expect(w.threads.get('local_e')).toMatchObject({ title: ELM_CLEAR, pinned: false })
+    expect(pinWrites(w)).toEqual(BOTH_UNPINNED)
+    expect(w.stored['mm.cleared']).toEqual({ local_d: NOW, local_e: NOW })
+    expect(w.stored['mm.links']).toEqual({ [DUNE]: 'local_d', [ELM]: 'local_e' })
+    // once: the next syncs write nothing more to them
+    for (let i = 0; i < 3; i++) {
+      await w.clock.advance(5 * 60_000)
+      await mm($, '')
+    }
+    expect(pinWrites(w)).toEqual(BOTH_UNPINNED)
+  })
+
+  test('a thread the person pins again after its client cleared stays pinned, sync after sync', async ($, on) => {
+    const w = liveShapes(on)
+    await mm($, '')
+    ;(w.threads.get('local_d') as Thread).pinned = true
+    for (let i = 0; i < 3; i++) {
+      await w.clock.advance(5 * 60_000)
+      await mm($, '')
+    }
+    expect(w.threads.get('local_d')).toMatchObject({ title: DUNE_CLEAR, pinned: true })
+    expect(pinWrites(w)).toEqual(BOTH_UNPINNED)
+  })
+
+  test('a new need, then a clear: unpinned again, once; pinned again by the person after that clear, it stays', async ($, on) => {
+    const w = liveShapes(on)
+    await mm($, '')
+    ;(w.threads.get('local_d') as Thread).pinned = true
+    // something new for Dune: its record goes
+    await w.clock.advance(HOUR)
+    w.setFeed(feed({ mail: [mailFor(DUNE, 'Dune Freight', 0.5)] as never }))
+    await mm($, '')
+    expect(w.threads.get('local_d')?.pinned).toBe(true)
+    expect(w.stored['mm.cleared']).toEqual({ local_e: NOW })
+    // it clears again: unpinned, and named clear
+    await w.clock.advance(HOUR)
+    w.setFeed(feed())
+    await mm($, '')
+    expect(w.threads.get('local_d')).toMatchObject({ title: '✓ Dune Freight · clear 1 PM', pinned: false })
+    expect(pinWrites(w).filter(c => c.includes('local_d'))).toEqual(['set_pinned | local_d | false', 'set_pinned | local_d | false'])
+    expect(w.stored['mm.cleared']).toEqual({ local_e: NOW, local_d: NOW + 2 * HOUR })
+    // pinned again by the person after this clear: it stays
+    ;(w.threads.get('local_d') as Thread).pinned = true
+    for (let i = 0; i < 2; i++) {
+      await w.clock.advance(5 * 60_000)
+      await mm($, '')
+    }
+    expect(w.threads.get('local_d')?.pinned).toBe(true)
+    expect(pinWrites(w).filter(c => c.includes('local_d')).length).toBe(2)
+  })
+
+  for (const [label, read] of [
+    ['a feed with no internal flag', feed()],
+    ['a feed whose rows carry the flag (so its known ids are not listed by it)', feed({ mail: (feed().mail ?? []).map(m => ({ ...m, internal: false })) as never })],
+  ] as Array<[string, Feed]>) {
+    test(`R18: an internal project's thread, pinned with nothing waiting and no pin record, is untouched: ${label}`, async ($, on) => {
+      const w = world(on, { feed: read, threads: [thread('local_i', 'Ops notes', 1, { pinned: true })], store: { 'mm.links': { [INTERNAL_OPS]: 'local_i' } } })
+      await mm($, '')
+      await w.clock.advance(5 * 60_000)
+      await mm($, '')
+      expect(w.threads.get('local_i')).toMatchObject({ title: 'Ops notes', pinned: true })
+      expect(pinWrites(w)).toEqual([])
+      expect(w.stored['mm.cleared']).toBeUndefined()
+    })
+  }
+
+  test('R18: a project the feed flags internal keeps the person\'s pin once its item clears, on every later sync too', async ($, on) => {
+    const OWN = '66666666-6666-4666-8666-666666666666'
+    const task = { ticket_id: 'to', project_id: OWN, project_name: 'Our Tools', title: 'Fix it', due_at: new Date(NOW + 3 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME, internal: true }
+    const w = world(on, {
+      feed: { member: ME, role: 'builder', drafts: [], mail: [], tickets: { due_today: [task] as never }, threads: [] },
+      threads: [thread('local_o', 'Tools notes', 1, { pinned: true })],
+      store: { 'mm.links': { [OWN]: 'local_o' } },
+    })
+    await mm($, '')
+    expect((w.stored['mm.pins'] as Record<string, unknown>).local_o).toMatchObject({ projectId: OWN, byUs: false, internal: true })
+    w.setFeed({ member: ME, role: 'builder', drafts: [], mail: [], tickets: {}, threads: [] })
+    for (let i = 0; i < 3; i++) {
+      await w.clock.advance(5 * 60_000)
+      await mm($, '')
+    }
+    expect(w.threads.get('local_o')).toMatchObject({ title: 'Tools notes', pinned: true })
+    expect(pinWrites(w)).toEqual([])
+  })
+
+  for (const [label, read] of [
+    ['under Older', feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 24 * 8)] as never })],
+    [
+      'on the list, further out than the pin\'s window',
+      feed({ drafts: [], mail: [], tickets: { due_soon: [{ ticket_id: 'tb', project_id: BOLT, project_name: 'Bolt Staffing', title: 'Plan', due_at: new Date(NOW + 96 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME }] } }),
+    ],
+  ] as Array<[string, Feed]>) {
+    test(`a thread linked to a client still waiting (${label}) keeps the person's pin`, async ($, on) => {
+      const w = world(on, { feed: read, threads: [thread('local_b', 'Staffing plan', 20, { pinned: true })], store: { 'mm.links': { [BOLT]: 'local_b' } } })
+      await mm($, '')
+      await w.clock.advance(5 * 60_000)
+      await mm($, '')
+      expect(w.threads.get('local_b')?.pinned).toBe(true)
+      expect(pinWrites(w)).toEqual([])
+      expect(w.stored['mm.cleared']).toBeUndefined()
+    })
+  }
+})
+
+describe('0.5.3: a thread\'s chips pass runs every 15 seconds; minting and the feed stay on the minute\'s tick', () => {
+  const chip = (projectId: string, n: number, threadId: string, over: Record<string, unknown> = {}) => ({ projectId, signature: `sig-${n}`, taskId: chipId(n), threadId, at: NOW - HOUR, prompt: `prompt-${n}`, ...over })
+
+  test('a chip whose client got a thread is withdrawn by the pass 15 seconds in, before the minute\'s tick', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], mail: [] }) })
+    await tickOnce($, w)
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP])
+    w.stored['mm.links'] = { [CEDAR]: 'local_other' }
+    // 14 seconds in: not yet
+    await w.clock.advance(10_000)
+    expect(w.dismissed()).toEqual([])
+    // 15 seconds in: the pass
+    await w.clock.advance(1_000)
+    expect(w.dismissed()).toEqual([chipId(1)])
+    expect(w.stored['mm.chips']).toEqual([])
+    // and the minute's tick withdraws nothing twice
+    await w.clock.advance(60_000)
+    expect(w.dismissed()).toEqual([chipId(1)])
+  })
+
+  test('the pass reads no feed and mints nothing: a new need is minted on the minute\'s tick', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: {} }), store: { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR } } })
+    await tickOnce($, w)
+    // a sync in this thread (another session holds the lease) puts Cedar on record, with no thread
+    w.setFeed(feed({ drafts: [], mail: [] }))
+    await mm($, '')
+    const fetches = closeouts(w)
+    // the passes at 15, 30 and 45 seconds: no chip, no feed call
+    await w.clock.advance(52_000)
+    expect(w.acted()).toEqual([])
+    expect(closeouts(w)).toBe(fetches)
+    // the minute's tick mints it
+    await w.clock.advance(4_000)
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP])
+    expect(closeouts(w)).toBe(fetches)
+  })
+
+  test('a withdrawal that failed is left to the minute\'s tick: the pass does not try it again', async ($, on) => {
+    const w = world(on, { dismissFails: true, store: { 'mm.chips': [chip(CEDAR, 31, SELF, { superseded: true })] } })
+    await tickOnce($, w)
+    expect(w.dismissed()).toEqual([chipId(31)])
+    await w.clock.advance(45_000)
+    expect(w.dismissed()).toEqual([chipId(31)])
+    await w.clock.advance(15_000)
+    expect(w.dismissed()).toEqual([chipId(31), chipId(31)])
+  })
+})

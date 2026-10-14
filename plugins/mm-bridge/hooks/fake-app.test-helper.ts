@@ -41,8 +41,10 @@ export const next = (e: unknown) => e
 /**
  * The app and its store. `threads` are the app's open threads; `unlisted` ones are open but left out of its
  * list (asked for by id). Each thread's `$` has a session id of its own, `cli:<thread>`.
+ * `every`: the clock's repeating timers run too (a session's minute tick and its 15-second chips pass); left
+ * out, only its one-off timers do, as before.
  */
-export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessionId: string }>, unlisted: readonly string[] = []) {
+export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessionId: string }>, unlisted: readonly string[] = [], opts: { every?: boolean } = {}) {
   const stored: Record<string, string> = {}
   /** Sets of `key` refused next: `skip` sets first go through, then `times` are refused. */
   const refusing = { key: '', times: 0, skip: 0 }
@@ -126,7 +128,17 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           timers.push(timer)
           return { cancel: () => void (timer.done = true) }
         },
-        every: () => ({ cancel: () => undefined }),
+        every: (ms: number, fn: () => void) => {
+          if (!opts.every) return { cancel: () => undefined }
+          let cancelled = false
+          const fire = () => {
+            if (cancelled) return
+            timers.push({ at: time + ms, fn: fire, done: false })
+            fn()
+          }
+          timers.push({ at: time + ms, fn: fire, done: false })
+          return { cancel: () => void (cancelled = true) }
+        },
       },
       session: {
         id: async () => `cli:${self}`,
