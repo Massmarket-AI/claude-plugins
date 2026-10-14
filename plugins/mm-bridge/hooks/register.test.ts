@@ -82,6 +82,8 @@ type WorldOptions = {
   setView?: 'ok' | 'refused'
   /** The app takes this long to answer `spawn_task` (R10: Start that said nothing). */
   spawnTakesMs?: number
+  /** The app takes this long to answer `set_view` (fix round 1, L11). */
+  setViewTakesMs?: number
 }
 
 function world(on: On, opts: WorldOptions = {}) {
@@ -128,6 +130,7 @@ function world(on: On, opts: WorldOptions = {}) {
     // As the app answers a session asking for its own usage: the account's plan, and the session's context window.
     if (e.tool === 'get_usage') return text(opts.usage ? opts.usage() : { plan: { status: 'ok', plan: PLAN_MARK }, context: { session: 'self', status: 'unavailable' } })
     // As the app answers a chip being minted, and one being withdrawn.
+    if (e.tool === 'set_view' && opts.setViewTakesMs) await clock.sleep(opts.setViewTakesMs)
     if (e.tool === 'set_view') return opts.setView === 'refused' ? refused('set_view is not available here.') : text({ group_by: 'date', sort_by: 'recency' })
     if (e.tool === 'spawn_task' && opts.spawnTakesMs) await clock.sleep(opts.spawnTakesMs)
     if (e.tool === 'spawn_task') return text(`Noted (position ${++chipsMinted}, task_id: task_${String(chipsMinted).padStart(8, '0')}). A chip is showing for the user. If this suggestion becomes stale or superseded, call dismiss_task with this task_id.`)
@@ -3657,7 +3660,8 @@ describe('(s) nothing drops off silently: Older', () => {
     // the band counts the one that needs the person now (R9: by name, with no thread, its chip here)
     await tickOnce($, w)
     const band = await bandOf($)
-    expect(await lines(band)).toEqual(['Needs you: 0 pinned · 1 with no thread: Bolt Staffing. Open a thread for Bolt Staffing (due Tue 9 AM): a chip is waiting in this thread.'])
+    // (fix round 1, F6: and how many wait under Older)
+    expect(await lines(band)).toEqual(['Needs you: 0 pinned · 1 with no thread: Bolt Staffing · 1 older overdue. Open a thread for Bolt Staffing (due Tue 9 AM): a chip is waiting in this thread.'])
     await band.unmount()
   })
 
@@ -4614,12 +4618,81 @@ describe('R6 and R11: a route call that can close something re-pulls the feed, a
     await mm($, '')
     expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0, made: NOW } })
     await w.clock.advance(2 * HOUR)
-    const later = declaredMore()
-    later.drafts = (later.drafts ?? []).map(d => ({ ...d, last_outbound_at: new Date(NOW + 2 * HOUR - 60_000).toISOString() }))
+    // the send, two hours on, by a Gmail script: the feed shows it, and this thread's own session at work on the
+    // client at that moment (fix round 1, F1: a send is tied to the thread by its session's activity)
+    const sent = new Date(NOW + 2 * HOUR - 60_000).toISOString()
+    const later = feed({ threads: [{ ...declared(ACME, SELF_CLI, 1), last_activity_at: sent, sole: false }] })
+    later.drafts = (later.drafts ?? []).map(d => ({ ...d, last_outbound_at: sent }))
     w.setFeed(later)
     await mm($, '')
     expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
     expect(w.stored['mm.auto']).toEqual({})
+  })
+
+  // Fix round 1, F1 (the reviewer's P6): a send that cannot be tied to the thread proves nothing about it
+  const PIPE_CLI = 'cli-pipe'
+  const cedarOnly = (threads: NonNullable<Feed['threads']>, ticketOver: Record<string, unknown> = {}): Feed => ({
+    member: ME, role: 'builder', drafts: [], mail: [], threads,
+    tickets: { due_today: [{ ticket_id: 't1', project_id: CEDAR, project_name: 'Cedar Dental', title: 'Send the intake form', due_at: new Date(NOW + 5 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME, ...ticketOver }] },
+  })
+  const pipeline = (on: On) => world(on, { feed: cedarOnly([declared(CEDAR, PIPE_CLI, 1)]), threads: [thread('local_p', 'Pipeline speed', 1)], store: { 'mm.threads': { [PIPE_CLI]: { app: 'local_p', at: NOW } } } })
+  const elsewhere = { last_outbound_at: new Date(NOW + 30 * 60_000).toISOString() }
+
+  test('P6a: a send to the client from elsewhere (the thread\'s session was not at work on it), then sole:false: let go, and Update sends nothing into it', async ($, on) => {
+    const w = pipeline(on)
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [CEDAR]: 'local_p' })
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([declared(CEDAR, PIPE_CLI, 1)], elsewhere))
+    await mm($, '')
+    expect(w.stored['mm.auto']).toMatchObject({ [CEDAR]: { sid: 'local_p' } })
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([{ ...declared(CEDAR, PIPE_CLI, 1), sole: false }], elsewhere))
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.threads.get('local_p')).toMatchObject({ title: 'Pipeline speed', pinned: false })
+    await mm($, 'update Cedar')
+    expect(sends(w)).toEqual([])
+  })
+
+  test('P6b: sole:false and an untied newer send in the same sync: B3 wins, let go', async ($, on) => {
+    const w = pipeline(on)
+    await mm($, '')
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([{ ...declared(CEDAR, PIPE_CLI, 1), sole: false }], elsewhere))
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+  })
+
+  test('P6c: no send, sole:false: let go', async ($, on) => {
+    const w = pipeline(on)
+    await mm($, '')
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([{ ...declared(CEDAR, PIPE_CLI, 1), sole: false }]))
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+  })
+
+  test('a send tied by the session\'s activity, but the thread\'s marker names another client: not tied, let go', async ($, on) => {
+    const sent = new Date(NOW + 2 * HOUR).toISOString()
+    const w = world(on, { feed: cedarOnly([declared(CEDAR, PIPE_CLI, 1)]), threads: [thread('local_p', 'Pipeline speed', 1)], store: { 'mm.threads': { [PIPE_CLI]: { app: 'local_p', at: NOW } } } })
+    await mm($, '')
+    w.stored['mm.marked'] = { local_p: BOLT }
+    await w.clock.advance(2 * HOUR)
+    w.setFeed(cedarOnly([{ ...declared(CEDAR, PIPE_CLI, 1), last_activity_at: sent }], { last_outbound_at: sent }))
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+  })
+
+  test('F1 (a): a Gmail send run in the thread itself makes its link the person\'s, with no gateway route', async ($, on) => {
+    const w = linkedByItself(on)
+    await mm($, '')
+    const gmail = `python3 - <<'EOF'\nservice.users().messages().send(userId="me", body=msg).execute()\nEOF`
+    await bash($, gmail)
+    expect(w.stored['mm.auto']).toEqual({})
+    w.setFeed(declaredMore())
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
   })
 
   test('R11: a link made by itself with no send since it was made (our last send is older) is let go, as before', async ($, on) => {
@@ -4946,5 +5019,115 @@ describe('R18: an internal project\'s thread is the person\'s to pin', () => {
     w.setFeed(feed({ mail: [] }))
     await mm($, '')
     expect(w.threads.get('local_b')).toMatchObject({ title: '✓ Bolt Staffing · clear 11 AM', pinned: false })
+  })
+})
+
+// ======================================================================== fix round 1 (review of e832775b)
+
+describe('fix round 1: the reviewer\'s findings', () => {
+  const INTERNAL_OPS = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
+  const iTicket = { ticket_id: 'ti', project_id: INTERNAL_OPS, project_name: 'Massmarket AI', title: 'Fix tracker', due_at: new Date(NOW + 3 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME }
+  const SENT_AT = ago(0.25)
+  const CHECKED = { last_outbound_at: SENT_AT, checked_send_at: SENT_AT, checked_at: ago(0.1), still_open: ['the logo file'], answered: [] }
+
+  test('F2 (P1a): Claim reads the feed first, and a thread the bridge linked by itself that B3 lets go there gets nothing', async ($, on) => {
+    const w = acmeWorld(on, { feed: acmeFeed(CHECKED) })
+    await mm($, '')
+    expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { sid: 'local_a' } })
+    const ui = await pane($)
+    expect(await buttonsOf(ui, ACME)).toEqual(['Claim in this thread', 'Drafts'])
+    w.setFeed(acmeFeed(CHECKED, [{ ...declared(ACME, 'cli-acme', 30), sole: false }]))
+    await ui.press({ key: `claim:${ACME}` })
+    expect(sends(w)).toEqual([])
+    expect(w.toasts.at(-1)).toBe(GONE)
+    await ui.unmount()
+  })
+
+  test('F5 (P8): a client listed only by a start_now task: its chip, started, links its thread; /mm link knows it', async ($, on) => {
+    const st = { ticket_id: 'ts', project_id: CEDAR, project_name: 'Cedar Dental', title: 'Build the intake flow', due_at: new Date(NOW + 72 * HOUR).toISOString(), start_by_at: new Date(NOW + 2 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME }
+    const w = world(on, { feed: { member: ME, role: 'builder', drafts: [], mail: [], tickets: { start_now: [st] }, threads: [] }, threads: [] })
+    await tickOnce($, w)
+    const chip = w.minted()[0]
+    expect(chip?.args.title).toBe('Cedar Dental: reply to the client')
+    expect((w.stored['mm.last'] as { projects: string[] }).projects).toContain(CEDAR)
+    await $.prompt.submit({ text: String(chip?.args.prompt), wait: false, origin: { kind: 'sdk' } } as never)
+    expect(w.stored['mm.links']).toEqual({ [CEDAR]: SELF })
+  })
+
+  test('F6 (P7a): with the person\'s own clients under Older, the band never reads all clear', async ($, on) => {
+    world(on, { feed: feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 24 * 8)] as never }), store: { 'mm.lease': { owner: 'x', until: NOW + 24 * HOUR } } })
+    await mm($, '')
+    const band = await bandOf($)
+    expect(await lines(band)).toEqual(['Nothing due in the next 24 hours · 1 older overdue.'])
+    await band.unmount()
+  })
+
+  test('L7 (P7b): a client linked since the last sync, due within the window: Needs you, not all clear', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], mail: [] }), threads: [], store: { 'mm.lease': { owner: 'x', until: NOW + 24 * HOUR } } })
+    await mm($, '')
+    w.stored['mm.links'] = { [CEDAR]: 'local_new' }
+    await mm($, 'status')
+    const band = await bandOf($)
+    expect(await lines(band)).toEqual(['Needs you: 0 pinned.'])
+    await band.unmount()
+  })
+
+  test('L8 (P3a): an internal project with a dated task gets no chip by itself', async ($, on) => {
+    const w = world(on, { feed: { member: ME, role: 'builder', drafts: [], mail: [], tickets: { due_today: [iTicket] }, threads: [] }, threads: [] })
+    await tickOnce($, w)
+    expect(w.minted()).toEqual([])
+  })
+
+  test('L8 (P3b): an internal thread the bridge pinned for a dated task is unpinned by it when the task clears, and gets its own title back', async ($, on) => {
+    const w = world(on, { feed: { member: ME, role: 'builder', drafts: [], mail: [], tickets: { due_today: [iTicket] }, threads: [] }, threads: [thread('local_i', 'Ops notes', 1)], store: { 'mm.links': { [INTERNAL_OPS]: 'local_i' } } })
+    await mm($, '')
+    expect(w.threads.get('local_i')).toMatchObject({ title: '🔴 3h left · Massmarket AI · task', pinned: true })
+    w.setFeed({ member: ME, role: 'builder', drafts: [], mail: [], tickets: {}, threads: [] })
+    await mm($, '')
+    expect(w.threads.get('local_i')).toMatchObject({ title: 'Ops notes', pinned: false })
+  })
+
+  test('L10: a second message to a client while the first is still going out is refused, with its line', async ($, on) => {
+    const w = acmeWorld(on, { sendTakesMs: 60_000 })
+    await mm($, '')
+    const ui = await pane($)
+    void ui.press({ key: `update:${ACME}` })
+    await w.clock.advance(1_000)
+    const typed = mm($, 'update acme roofing')
+    await w.clock.advance(1_000)
+    expect(await typed).toBe('A message to Acme Roofing\'s thread is still going out. Check that thread before pressing again.')
+    await w.clock.advance(60_000)
+    expect(sends(w).length).toBe(1)
+    await ui.unmount()
+  })
+
+  test('L11: a set_view answer that comes after the wait, and worked, is recorded then', async ($, on) => {
+    const w = world(on, { firstRun: true, setViewTakesMs: 20_000, feed: feed({ drafts: [], mail: [], tickets: {} }) })
+    await tickOnce($, w)
+    await w.clock.advance(15_000)
+    expect(w.stored['mm.viewSet']).toBeUndefined()
+    await w.clock.advance(5_000)
+    expect(w.stored['mm.viewSet']).toEqual({ at: NOW + 4_000, version: '0.5.2' })
+  })
+
+  test('L12: a sync that fails marks the sync on record failed, but not one another session wrote meanwhile', async ($, on) => {
+    const old = { at: NOW - 10 * 60_000, member: ME, items: [], pinned: 0, recs: {} }
+    const w = world(on, { store: { 'mm.last': old }, feedStatus: () => 503 })
+    await tickOnce($, w)
+    expect((w.stored['mm.last'] as { error?: string }).error).toContain('closeout HTTP 503')
+  })
+
+  test('L12: a newer sync written while this one failed is left with no error', async ($, on) => {
+    const old = { at: NOW - 10 * 60_000, member: ME, items: [], pinned: 0, recs: {} }
+    const newer = { at: NOW + 1, member: ME, items: [], pinned: 0, recs: {} }
+    const w: { stored: Record<string, unknown> } = world(on, {
+      store: { 'mm.last': old },
+      feedStatus: () => {
+        w.stored['mm.last'] = newer
+        return 503
+      },
+    })
+    await tickOnce($, w as never)
+    expect(w.stored['mm.last']).toEqual(newer)
   })
 })

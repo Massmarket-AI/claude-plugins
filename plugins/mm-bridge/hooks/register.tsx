@@ -3,14 +3,14 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { MmBand, MmFolds, MmNotice, MmQueue, MmView } from '../types'
 
 import {
-  MAIL_LOOKBACK_HOURS, buildLists, byDue, checkingTitle, internalProjects, lastOutbound, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, needsLine, noteText, pinsNow,
+  MAIL_LOOKBACK_HOURS, buildLists, byDue, checkingTitle, internalProjects, isClientSend, lastOutbound, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, needsLine, noteText, pinsNow,
   threadTitle, titleFor, withHolder,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
   CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, signatureOf, staleCopySentence, startKickoff, threadLength, threadLink, threadRows, titleSuggestion,
-  REFRESH_FAILED, bandText,
+  REFRESH_FAILED, bandText, chipTitle,
 } from './threads'
 import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, Row, RowButton, RowState, Sent } from './threads'
 
@@ -172,6 +172,8 @@ const NO_THREAD_LIST = 'The app\'s thread list is not available here.'
 const MAKING_CHIP = (client: string) => `Making a chip for ${client}…`
 /** R10: what it says when the app does not answer that in APP_WAIT_MS. */
 const NO_ANSWER = (client: string) => `The app did not answer in 15 seconds, so no chip was made. Type /mm start ${client} in any thread.`
+/** (fix round 1, L10) What a second message to a client says while the first is still going out. */
+const STILL_GOING = (client: string) => `A message to ${client}'s thread is still going out. Check that thread before pressing again.`
 /** R10 (Opus, 10-13, decision 1): what Update or Claim says when the app has not confirmed its message in APP_WAIT_MS. */
 const NOT_CONFIRMED = (client: string) => `The app has not confirmed the message to ${client}'s thread yet. Check that thread before pressing again.`
 /** R15: said once in the pane, the time the thread list's view is changed on this machine. */
@@ -297,6 +299,13 @@ const sentHere = new Map<string, string>()
 const mintedHere = new Set<string>()
 /** The chip mints in flight in this session (thread, client, signature): a second is not started while one waits for the app. */
 const minting = new Set<string>()
+/**
+ * Fix round 1, F4: every chip this session minted, by thread, client, id and time (`chipKey`), as this session
+ * knows it, whatever the store lost to another session's write: a record missing from the store is written back
+ * (the 1 to 3 second check, and every tick), never minted again, and still withdrawn. Forgotten once withdrawn.
+ */
+const ownChips = new Map<string, Chip>()
+const chipKey = (c: Chip): string => `${c.threadId}\n${c.projectId}\n${c.taskId}\n${c.at}`
 /**
  * R10, by session: no chip is minted by itself before `until` (the app did not answer one, or refused it), and
  * `atTurn`, the next turn in the thread tries again (the app did not answer one outside a turn). (Keyed by the
@@ -497,7 +506,8 @@ function feedProjects(feed: Feed): string[] {
   }
   for (const m of feed.mail ?? []) add(m.project_id)
   for (const d of feed.drafts ?? []) add(d.project_id)
-  for (const k of [feed.tickets?.overdue, feed.tickets?.due_today, feed.tickets?.due_soon]) for (const t of k ?? []) add(t.project_id)
+  // (fix round 1, F5) `start_now` too
+  for (const k of [feed.tickets?.overdue, feed.tickets?.due_today, feed.tickets?.due_soon, feed.tickets?.start_now]) for (const t of k ?? []) add(t.project_id)
   for (const t of Array.isArray(feed.threads) ? feed.threads : []) add(t?.project_id)
   return [...ids]
 }
@@ -921,8 +931,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   /** (R18) The internal projects, and whether a pin record is on one: the bridge never unpins such a thread. */
   const internal = internalProjects(feed)
   const internalPin = (pin: Pin | undefined): boolean => Boolean(pin && (pin.internal === true || internal.has(pin.projectId)))
-  /** (R18) What an unpin becomes on an internal client's thread: none. */
-  const unpinFor = (it: QueueItem, unpin: 'ours' | 'any'): 'ours' | 'any' | false => (it.internal || internal.has(it.projectId) ? false : unpin)
+  /** (R18; fix round 1, L8) What an unpin becomes on an internal project's thread: only a pin the bridge put there comes off. */
+  const unpinFor = (it: QueueItem, unpin: 'ours' | 'any'): 'ours' | 'any' | false => (it.internal || internal.has(it.projectId) ? 'ours' : unpin)
   /** A pin record for a client: (R18) marked when the client is internal. */
   const pinOf = (it: QueueItem, byUs: boolean): Pin => ({ projectId: it.projectId, client: it.client, byUs, ...(it.internal || internal.has(it.projectId) ? { internal: true as const } : {}) })
   const unlinked = await storeGet<Record<string, number>>($, 'mm.unlinked', {})
@@ -991,10 +1001,10 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
       if (unseen.has(a.sid)) continue
       // When the link was made: a record an older version made is dated the first time this version sees it.
       if (typeof a.made !== 'number' || !Number.isFinite(a.made)) a.made = now
-      // ⛔ R11: a link the bridge made that has been used for a send (our outbound to the client newer than the
-      // moment it was made, while that thread was the client's) is the person's from here on: never let go by
-      // B3 again. Only a never-used one may be.
-      else if ((outs.get(pid) ?? 0) > a.made) {
+      // ⛔ R11 (fix round 1, F1): a link the bridge made that has been used for a send TIED TO THIS THREAD is the
+      // person's from here on, never let go by B3 again (`sendTied`). A send it cannot tie to the thread (a
+      // teammate's, Lane-2's, a script in another thread) proves nothing, and B3's evidence wins over it.
+      else if (sendTied(pid, a, outs, feedThreads, pairs, marked)) {
         delete auto[pid]
         continue
       }
@@ -1142,7 +1152,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   for (const sid of undone) {
     if (want.has(sid) || named.has(sid)) continue
     const s = live.get(sid)
-    if (s && pins[sid]?.byUs && !internalPin(pins[sid]) && s.pinned) {
+    if (s && pins[sid]?.byUs && s.pinned) {
       await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: sid, pinned: false })
       s.pinned = false
       writes++
@@ -1220,10 +1230,11 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
       // ⛔ The tick is for a client with nothing left in play for the person: in none of the lists.
       const still = [...items, ...quiet, ...checking].find(i => i.projectId === pin.projectId)
       const clear = stillTheirs && !still
-      // R18 (Rob, 2026-10-13: "I still keep it pinned, though"): an internal project's thread is never unpinned
-      // by the bridge, and once its item clears it gets its own name back, not a tick
+      // R18 (Rob, 2026-10-13: "I still keep it pinned, though"): the person's pin on an internal project's thread
+      // stays (fix round 1, L8: the bridge takes off only a pin it put there), and once its item clears the
+      // thread gets its own name back, not a tick
       const inside = internalPin(pin)
-      if (!inside && (pin.byUs || clear) && s.pinned) {
+      if ((pin.byUs || (clear && !inside)) && s.pinned) {
         await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: sid, pinned: false })
         s.pinned = false
         writes++
@@ -1330,6 +1341,31 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   await storeLast($, feed, last)
   await showQueue($, member, items, rows, want.size, now, folds)
   return { last, live, pairs, listed: true, unseen }
+}
+
+/** R11: within this long before our send, the thread's session working on the client ties the send to it. */
+const SEND_TIE_MS = 30 * 60_000
+
+/**
+ * R11 (Opus, fix round 1, F1): whether our newest send to a client is tied to the thread the bridge linked it
+ * to by itself: the send is newer than the moment the link was made, and the feed shows that thread's own
+ * session at work on that client within SEND_TIE_MS before it. OW's `threads[].last_activity_at` is per session
+ * and project: "that project's newest row in the session" (onboarding-wizard src/lib/ext/closeout-threads.ts,
+ * the header's WHICH SESSIONS and `threadsFromSessionRows`). ⛔ Never when the thread's [mm-link] marker names
+ * another client. (A send the thread's own session ran is tied in the hook instead: `claimUsed`.)
+ */
+function sendTied(
+  pid: string,
+  a: { sid: string; made?: number },
+  outs: ReadonlyMap<string, number>,
+  feedThreads: readonly FeedThread[],
+  pairs: Pairs,
+  marked: Readonly<Record<string, string>>,
+): boolean {
+  const out = outs.get(pid) ?? 0
+  if (!(typeof a.made === 'number' && out > a.made)) return false
+  if (marked[a.sid] !== undefined && marked[a.sid] !== pid) return false
+  return feedThreads.some(t => t.project_id === pid && pairs[t.session_id]?.app === a.sid && Date.parse(t.last_activity_at) >= out - SEND_TIE_MS)
 }
 
 /** The sync record a pass made, stored; and, when the pass was over the feed this session read last, kept with it (recentFeed). */
@@ -1689,12 +1725,14 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
   const update = items.find(i => recOf(i.projectId)?.state === 'update' && linkedTarget(i) && pinsNow(i, now))
   const text = bandText({
     pinned: Number(last.pinned) || 0,
-    pinsNow: items.some(i => !isFresh(last, i.projectId) && pinsNow(i, now)),
+    // (fix round 1, L7) anything due within the window, with a thread or not, says Needs you
+    pinsNow: items.some(i => pinsNow(i, now)),
     noThread: noThread.map(i => ({ client: cleanName(i.client), due: clockText(i.dueAt, now) })),
     chipHere: Boolean(one && me && chips.some(c => c.projectId === one.projectId && c.threadId === me && !c.superseded)),
     stillOpen: stillOpen ? cleanName(stillOpen.client) : undefined,
     update: update ? cleanName(update.client) : undefined,
     stale: Boolean(last.error) || !(Number.isFinite(last.at) && now - last.at <= STALE_SYNC_MS),
+    older: Array.isArray(last.older) ? last.older.length : 0,
   })
   if (!text) return nothing
   // In a waiting client's thread the line carries the button that opens its part of the pane.
@@ -1744,19 +1782,26 @@ async function setViewOnce($: EngineInterface): Promise<void> {
   if (tried && now - tried < DAY_MS) return
   viewTried.add(id)
   await $.store.set('mm.viewTry', now)
+  const done = async (): Promise<void> => {
+    await $.store.set('mm.viewSet', { at: now, version: VIEW_VERSION })
+    await say($, VIEW_NOTICE, false)
+  }
   let set = false
   try {
-    const r = await within($, $.mcp.call('ccd_sidebar', 'set_view', { group_by: 'date', sort_by: 'recency' }) as Promise<Mcp>)
+    const call = $.mcp.call('ccd_sidebar', 'set_view', { group_by: 'date', sort_by: 'recency' }) as Promise<Mcp>
+    const r = await within($, call)
     set = r.ok && !r.value.isError
+    // (fix round 1, L11) an answer that comes after the wait, and says it worked, is recorded then
+    if (!r.ok) void call.then(late => (late.isError ? undefined : done()), () => undefined).catch(() => undefined)
   } catch {
     set = false
   }
-  if (!set) return
-  await $.store.set('mm.viewSet', { at: now, version: VIEW_VERSION })
-  await say($, VIEW_NOTICE, false)
+  if (set) await done()
 }
 
 async function tick($: EngineInterface): Promise<void> {
+  /** (fix round 1, L12) The sync this tick ran failed: the time of the sync on record it was to replace. */
+  let failed: { at: number | null } | null = null
   try {
     if ((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) !== 'claude-desktop') return
     await recordSelf($)
@@ -1775,7 +1820,14 @@ async function tick($: EngineInterface): Promise<void> {
       // Due every SYNC_MS, and at once when a thread asked since the last one (a reply draft was sent or
       // discarded there: `askSync`).
       const asked = Number(await storeGet<number>($, 'mm.ask', 0)) || 0
-      if (!last || now - last.at >= SYNC_MS || asked > last.at) await sync($)
+      if (!last || now - last.at >= SYNC_MS || asked > last.at) {
+        try {
+          await sync($)
+        } catch (err) {
+          failed = { at: last?.at ?? null }
+          throw err
+        }
+      }
       // R15: the thread list's view, once on this machine
       await setViewOnce($).catch(() => {})
     }
@@ -1787,8 +1839,13 @@ async function tick($: EngineInterface): Promise<void> {
     await clearRefreshFailed($)
     await beat($, { ok: true })
   } catch (err) {
-    const last = await storeGet<Last | null>($, 'mm.last', null)
-    if (last) await $.store.set('mm.last', { ...last, error: short(String(err), 300) })
+    // (fix round 1, L12) the sync on record says it failed only when the sync itself did, and only while no
+    // other session has synced since (its `at` unchanged): anything else that goes wrong in a tick is the
+    // heartbeat's to say, and never makes the band read a working sync as stale
+    if (failed) {
+      const last = await storeGet<Last | null>($, 'mm.last', null)
+      if (last && last.at === failed.at) await $.store.set('mm.last', { ...last, error: short(String(err), 300) })
+    }
     $.ui.status(`MM: error, /mm status`)
     await refreshBand($)
     await beat($, { ok: false, tickError: short(String(err), 300) })
@@ -1953,12 +2010,31 @@ function ownerName(projectId: string, items: readonly QueueItem[], pin: Pin | un
 
 /** 0.5.1's title for a chip that opens a new thread for a client. (A stale package a teammate has is worded as one a teammate holds: M2.) */
 function startTitle(it: QueueItem): string {
-  return `${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : 'reply to the client'}`
+  return chipTitle(`${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : 'reply to the client'}`)
 }
 
 /** 0.5.1's line under that title. */
 function startTldr(it: QueueItem, now: number): string {
   return `${it.client} needs you: ${needsLine(it, now)}. Start this to open a thread for that client with the drafts or the messages waiting.`
+}
+
+/**
+ * Fix round 1, F4: the chips on record, with this thread's own that the store lost written back first (as this
+ * session knows them), so that a lost record never causes a second chip. Old ones this session remembers are
+ * forgotten after CHIP_KEEP_MS, as the store's are.
+ */
+async function ownChipsWritten($: EngineInterface, me: string, now: number): Promise<Chip[]> {
+  for (const [k, c] of ownChips) if (now - c.at > CHIP_KEEP_MS) ownChips.delete(k)
+  const chips = await chipsOf($, now)
+  const lost = [...ownChips.values()].filter(c => c.threadId === me && !chips.some(s => sameChip(s, c)))
+  if (!lost.length) return chips
+  await patchChips($, now, fresh => {
+    const add = lost.filter(c => !fresh.some(f => sameChip(f, c)))
+    return add.length ? [...fresh, ...add] : false
+  }).catch(() => {})
+  // a dozen threads ticking together can take this write away too: looked at again 1 to 3 seconds on
+  scheduleOwnCheck($, me)
+  return [...chips, ...lost]
 }
 
 /** One chip to mint: for which client and need, what it carries, and in which thread. */
@@ -2021,6 +2097,10 @@ async function recordChip($: EngineInterface, m: MintSpec, answer: string): Prom
     projectId: it.projectId, signature, taskId, threadId: me, at: now, prompt: m.prompt,
     ...(had ? { had } : {}), ...(m.auto ? { auto: true as const } : {}), ...(m.need === 'long' ? { need: 'long' as const } : {}),
   }
+  const key = chipKey(chip)
+  // this thread's own earlier chips for the client are superseded, in this session's own record too
+  for (const [k, c] of ownChips) if (c.threadId === me && c.projectId === it.projectId) ownChips.set(k, { ...c, superseded: true })
+  ownChips.set(key, chip)
   const record = () =>
     patchChips($, now, chips => {
       for (const c of chips) if (c.projectId === it.projectId && c.threadId === me) c.superseded = true
@@ -2042,21 +2122,47 @@ async function recordChip($: EngineInterface, m: MintSpec, answer: string): Prom
   // The person asked for this client: a pin they took off its thread may come back. (A chip the thread minted
   // by itself is nobody's act.)
   if (!m.auto) await step('the pin coming back', () => pinAgain($, had))
-  // Checked again 1 to 3 seconds later, and written again ONLY when the first write failed: a record that
-  // was written and is gone now was spent (a thread started from the chip took the client), withdrawn or
-  // superseded, and is never written back. Nor is one whose client has since moved to another thread.
-  if (!recorded) {
-    settleLater($, me || it.projectId, async () => {
-      const linked = (await storeGet<Record<string, string>>($, 'mm.links', {}))[it.projectId]
-      if ((linked !== undefined && linked !== had) || (await chipsOf($, now)).some(c => sameChip(c, chip))) {
-        mintedHere.delete(minted)
-        return
-      }
-      await step('the chip record, again', async () => {
-        await record()
-        mintedHere.delete(minted)
+  // Fix round 1, F4: ALWAYS checked again 1 to 3 seconds later (a dozen threads that mint together can take
+  // each other's writes away): this thread's records missing then are written back, all in one write.
+  scheduleOwnCheck($, me)
+}
+
+/** F4: the threads whose check of their own chip records is waiting in this session. */
+const ownCheck = new Set<string>()
+
+/**
+ * Fix round 1, F4: 1 to 3 seconds on (spread by the thread's id and the round), this thread's own chip records
+ * the store lost are written back, as this session knows them, in ONE write (a thread's chips never race each
+ * other); and when it wrote any, it looks again on a later round, up to five, until none is missing. Not a
+ * record this thread withdrew (it is no longer its own), and not one whose client has since moved to another
+ * thread (the tick withdraws that one). A spent record is never missing: spending marks it superseded.
+ */
+function scheduleOwnCheck($: EngineInterface, me: string, round = 0): void {
+  if (!me || (round === 0 && ownCheck.has(me))) return
+  ownCheck.add(me)
+  const check = async (): Promise<void> => {
+    ownCheck.delete(me)
+    const now = await $.clock.now()
+    const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+    const chips = await chipsOf($, now)
+    const own = [...ownChips.values()].filter(c => c.threadId === me)
+    for (const c of own) if (chips.some(s => sameChip(s, c))) mintedHere.delete(`${c.projectId}\n${me}\n${c.signature}`)
+    const lost = own.filter(c => !chips.some(s => sameChip(s, c)) && (links[c.projectId] === undefined || links[c.projectId] === c.had))
+    if (!lost.length) return
+    try {
+      await patchChips($, now, fresh => {
+        const add = lost.filter(c => !fresh.some(f => sameChip(f, c)))
+        return add.length ? [...fresh, ...add] : false
       })
-    })
+    } catch (err) {
+      await noteFailure($, 'start: the chip record, again', err)
+    }
+    if (round < 4) scheduleOwnCheck($, me, round + 1)
+  }
+  try {
+    $.clock.after(settleMs(round ? `${me}#${round}` : me), () => void check().catch(() => ownCheck.delete(me)))
+  } catch {
+    ownCheck.delete(me)
   }
 }
 
@@ -2075,7 +2181,9 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
   //    thread (or one on its way): nothing is minted.
   const before = await chipsOf($, now)
   const minted = `${it.projectId}\n${me}\n${signature}`
-  if (!typed && me && (before.some(c => c.projectId === it.projectId && !c.superseded && c.threadId === me && c.signature === signature) || mintedHere.has(minted) || minting.has(minted))) {
+  // (F4) this session's own chip the store lost counts as here; one the store holds is judged as the store has it
+  const ownLive = [...ownChips.values()].some(c => c.threadId === me && c.projectId === it.projectId && !c.superseded && c.signature === signature && !before.some(s => sameChip(s, c)))
+  if (!typed && me && (before.some(c => c.projectId === it.projectId && !c.superseded && c.threadId === me && c.signature === signature) || ownLive || mintedHere.has(minted) || minting.has(minted))) {
     return `A chip for ${it.client} is already here: click Start on it.`
   }
   // A client that already has a thread: the new one is asked to look at how the old one ended (handoverText).
@@ -2102,7 +2210,8 @@ function needsOf(last: Last, links: Readonly<Record<string, string>>, titles: Re
   const items = (Array.isArray(last.items) ? last.items : []).slice().sort(byDue)
   for (const it of items) {
     if (out.length >= AUTO_CHIPS_MAX) break
-    if (!isUuid(it.projectId) || !pinsNow(it, now)) continue
+    // (fix round 1, L8) an internal project never gets a chip by itself
+    if (!isUuid(it.projectId) || !pinsNow(it, now) || it.internal) continue
     const rec = storedRec(last, it.projectId)
     if (!rec) continue
     const target = rec.target && !rec.target.suggested && THREAD_ID.test(rec.target.sid) ? rec.target : undefined
@@ -2112,7 +2221,7 @@ function needsOf(last: Last, links: Readonly<Record<string, string>>, titles: Re
     if (fast?.state === 'still_open' && target) {
       const percent = freshPercent(readings[target.sid], now)
       if (percent === undefined || percent < LONG_CONTEXT_PERCENT) continue
-      out.push({ it, signature, need: 'long', title: `${it.client}: start a new thread (this one is at ${Math.round(percent)}%)`, tldr: startTldr(it, now), prompt: startKickoff(it, replaces, now) })
+      out.push({ it, signature, need: 'long', title: chipTitle(`${it.client}: start a new thread (this one is at ${Math.round(percent)}%)`), tldr: startTldr(it, now), prompt: startKickoff(it, replaces, now) })
       continue
     }
     if (rec.state !== 'start') continue
@@ -2143,7 +2252,7 @@ async function chipsTick($: EngineInterface, atTurn = false): Promise<void> {
   await withdrawChips($, needs)
   const id = await instanceId($)
   if (!needs || (!atTurn && now < (mintPause.get(id)?.until ?? 0))) return
-  const chips = await chipsOf($, now)
+  const chips = await ownChipsWritten($, me, now)
   for (const n of needs) {
     const key = `${n.it.projectId}\n${me}\n${n.signature}`
     if (minting.has(key) || mintedHere.has(key)) continue
@@ -2206,7 +2315,8 @@ async function withdrawChips($: EngineInterface, needs: readonly Need[] | null =
   if (!me) return
   const now = await $.clock.now()
   const chips = await chipsOf($, now)
-  const mine = chips.filter(c => c.threadId === me)
+  // (fix round 1, F4) this thread's own chips the store lost are still this thread's to withdraw
+  const mine = [...chips.filter(c => c.threadId === me), ...[...ownChips.values()].filter(c => c.threadId === me && !chips.some(s => sameChip(s, c)))]
   if (!mine.length) return
   const links = await storeGet<Record<string, string>>($, 'mm.links', {})
   // With no sync on record there is no saying who still needs the person: no chip is withdrawn for that.
@@ -2236,8 +2346,11 @@ async function withdrawChips($: EngineInterface, needs: readonly Need[] | null =
     else {
       c.tries = (c.tries ?? 0) + 1
       if (c.tries >= DISMISS_TRIES) forget.add(c)
+      const own = ownChips.get(chipKey(c))
+      if (own) ownChips.set(chipKey(c), { ...own, tries: c.tries })
     }
   }
+  for (const c of forget) ownChips.delete(chipKey(c))
   if (!changed) return
   // over a fresh copy: another thread may have minted or claimed a chip while this one was calling
   await patchChips($, now, fresh =>
@@ -2339,6 +2452,34 @@ async function takenOver(
 }
 
 /**
+ * (S2, M1, B3) Before a press sends (Update, Claim): whether the thread its row showed is still the client's, by
+ * the feed just read. A link the person made always is. A thread the bridge linked by itself, or one the row
+ * offered with no link, is the client's only while the feed's rows for its sessions say so (B3; a link used for
+ * a send tied to it stays, R11), and while no newer thread of the client's has taken it (`takenOver`).
+ */
+async function stillTheClients(
+  $: EngineInterface,
+  projectId: string,
+  target: { sid: string; title: string; suggested: boolean },
+  linked: string | undefined,
+  links: Readonly<Record<string, string>>,
+  read: Feed,
+  pass: Pass,
+): Promise<boolean> {
+  const auto = await storeGet<Auto>($, 'mm.auto', {})
+  const own = auto[projectId]
+  if (linked === target.sid && own?.sid !== target.sid) return true
+  const rows = feedThreadsOf(read)
+  const pairs = await storeGet<Pairs>($, 'mm.threads', {})
+  const marked = await storeGet<Record<string, string>>($, 'mm.marked', {})
+  if (linked === target.sid) return autoLinkFate(projectId, target.sid, rows, pairs, marked) !== 'goes' || (own !== undefined && sendTied(projectId, own, lastOutbound(read), rows, pairs, marked))
+  return (
+    (target.suggested ? !declaredOther(projectId, target.sid, rows, pairs, marked) : onlyClients(projectId, target.sid, rows, pairs, marked)) &&
+    !(await takenOver($, projectId, target, links, rows, pairs, marked, pass.live.get(target.sid)))
+  )
+}
+
+/**
  * Update thread: the client's thread gets the kickoff as a message, which starts a model turn there, and
  * is then linked, pinned and named. The app refuses to bring a thread forward unless this thread started
  * it (ccd_window.open_session_in), so the answer says which pinned thread to open.
@@ -2411,18 +2552,7 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
     const fresh = [...lists.queue, ...lists.teammate, ...lists.older].find(i => i.projectId === it.projectId)
     if (!fresh) return { said: `${it.client} has nothing waiting now. The list has been refreshed.`, after: async () => void (await reconcile($, read)) }
     cur = fresh
-    const auto = await storeGet<Auto>($, 'mm.auto', {})
-    if (linked !== target.sid || auto[it.projectId]?.sid === target.sid) {
-      const rows = feedThreadsOf(read)
-      const pairs = await storeGet<Pairs>($, 'mm.threads', {})
-      const marked = await storeGet<Record<string, string>>($, 'mm.marked', {})
-      const still =
-        linked === target.sid
-          ? autoLinkFate(it.projectId, target.sid, rows, pairs, marked) !== 'goes'
-          : (target.suggested ? !declaredOther(it.projectId, target.sid, rows, pairs, marked) : onlyClients(it.projectId, target.sid, rows, pairs, marked)) &&
-            !(await takenOver($, it.projectId, target, links, rows, pairs, marked, pass.live.get(target.sid)))
-      if (!still) return { said: THREAD_GONE, after: async () => void (await reconcile($, read)) }
-    }
+    if (!(await stillTheClients($, it.projectId, target, linked, links, read, pass))) return { said: THREAD_GONE, after: async () => void (await reconcile($, read)) }
   }
   // The thread already has what is waiting now: nothing is sent twice. (Its row draws no Update button;
   // this is the typed command, or a row drawn before another thread's Update went.)
@@ -2444,6 +2574,7 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
     // (here: the client's thread is this one, and the app's send does not take the sending thread, so the
     // kickoff goes in here as the person's own prompt; only a press reaches this)
     const why = await sendInto($, it.client, it.projectId, here, target.sid, text)
+    if (why !== null && typeof why === 'object') return { said: why.busy }
     if (why !== null) return failed(why)
   } catch (err) {
     return failed(errorText(err))
@@ -2555,7 +2686,9 @@ async function showThread($: EngineInterface, it: QueueItem, pass: Pass, shown: 
  * not answered in APP_WAIT_MS, the pane says so (NOT_CONFIRMED) and the send is still waited for; while it is in
  * flight the client's press stays held (`sending`), so a second press never sends it again.
  */
-async function sendInto($: EngineInterface, client: string, projectId: string, here: boolean, sid: string, text: string): Promise<string | null> {
+async function sendInto($: EngineInterface, client: string, projectId: string, here: boolean, sid: string, text: string): Promise<string | null | { busy: string }> {
+  // (fix round 1, L10) one message to a client at a time: a typed /mm update, or the other button, while one is going out
+  if (sending.has(projectId)) return { busy: STILL_GOING(client) }
   sending.add(projectId)
   try {
     if (here) {
@@ -2611,6 +2744,8 @@ async function claimThread($: EngineInterface, feed: Feed | null, it: QueueItem,
     const fresh = buildLists(read, await $.clock.now()).queue.find(i => i.projectId === it.projectId)
     if (!fresh) return { said: `${it.client} has nothing waiting now. The list has been refreshed.`, after: async () => void (await reconcile($, read)) }
     cur = fresh
+    // (fix round 1, F2) Update's guard, on the same feed: B3 and a newer thread of the client's
+    if (!(await stillTheClients($, it.projectId, target, linked, links, read, pass))) return { said: THREAD_GONE, after: async () => void (await reconcile($, read)) }
   }
   const now = await $.clock.now()
   const fast = fastState(cur, now)
@@ -2628,6 +2763,7 @@ async function claimThread($: EngineInterface, feed: Feed | null, it: QueueItem,
   const failed = (why: string): Answer => ({ said: `Could not send to ${it.client}'s thread: ${why}` })
   try {
     const why = await sendInto($, it.client, pid, here, sid, text)
+    if (why !== null && typeof why === 'object') return { said: why.busy }
     if (why !== null) return failed(why)
   } catch (err) {
     return failed(errorText(err))
@@ -3257,10 +3393,12 @@ export const register: Register = on => {
     const answer = await next(e)
     try {
       const finished = !answer.deny && !answer.isError
-      if (finished && isClosingRoute((e as { command?: unknown }).command)) {
+      const command = (e as { command?: unknown }).command
+      if (finished && (isClosingRoute(command) || isClientSend(command))) {
         // R6: the feed is read again at once
         await askSync($)
-        // R11: a link this thread has by itself is the person's from here on: it was used for a send
+        // R11: a link this thread has by itself is the person's from here on: this thread's own session sent
+        // (a gateway route, or, fix round 1 F1, a Gmail or HighLevel send it ran itself)
         await claimUsed($)
       }
     } catch {

@@ -445,6 +445,11 @@ export function claimText(client: string, at: number, items: readonly string[], 
   return `Still open for ${client} after our reply of ${clockText(at, now)}: ${items.join('; ')}. Load the client's project skill first, then follow client-reply-prep §9: show me what is still open and the drafts for it, and wait for me. Send nothing without my go.`
 }
 
+/** (fix round 1, L13) A chip's title is at most this many characters. */
+export const CHIP_TITLE_MAX = 60
+/** A chip's title, cut to CHIP_TITLE_MAX characters (the last one an ellipsis when it was cut). */
+export const chipTitle = (title: string): string => (title.length > CHIP_TITLE_MAX ? `${title.slice(0, CHIP_TITLE_MAX - 1)}…` : title)
+
 /**
  * R5 (Rob, 2026-10-13): the sentence a kickoff carries when the client already has a linked thread other than
  * the one starting (a chip copy started after another copy, or another thread, took the client): that thread
@@ -712,6 +717,8 @@ export type BandFacts = {
   update?: string | undefined
   /** The last sync failed, or is older than STALE_SYNC_MS: never an all-clear from it. */
   stale: boolean
+  /** (fix round 1, F6) The person's own clients listed under Older: more than 3 business days overdue. */
+  older?: number
 }
 
 /**
@@ -728,12 +735,16 @@ export type BandFacts = {
  */
 export function bandText(f: BandFacts): string {
   const out: string[] = []
+  const older = Number(f.older) || 0
   let first = ''
   if (f.noThread.length) first = `Needs you: ${f.pinned} pinned · ${f.noThread.length} with no thread: ${f.noThread.map(n => n.client).join(', ')}.`
   else if (f.pinsNow || f.pinned > 0 || f.stillOpen) first = `Needs you: ${f.pinned} pinned.`
-  else if (!f.stale) first = 'Nothing needs you in the next 24 hours.'
+  // (fix round 1, F6) never all clear while the person's own clients wait under Older
+  else if (!f.stale) first = older > 0 ? `Nothing due in the next 24 hours · ${older} older overdue.` : 'Nothing needs you in the next 24 hours.'
   // R8, when no client without a thread comes before it
   if (first && !f.noThread.length && f.stillOpen) first = `${first.replace(/\.$/, '')} · ${f.stillOpen} still open after your reply.`
+  // F6: the other forms say how many wait under Older
+  if (first.startsWith('Needs you:') && older > 0) first = `${first.replace(/\.$/, '')} · ${older} older overdue.`
   if (first) out.push(first)
   const one = f.noThread.length === 1 ? f.noThread[0] : undefined
   if (one) out.push(f.chipHere ? `Open a thread for ${one.client} (due ${one.due}): a chip is waiting in this thread.` : `Open a thread for ${one.client} (due ${one.due}): type /mm start ${one.client}.`)

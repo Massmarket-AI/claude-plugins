@@ -3,7 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import { businessMsBetween, subtractBusinessMs } from './business-time'
 import {
   MAIL_LOOKBACK_HOURS, NOBODY, WINDOW_AHEAD_MS, WINDOW_BACK_MS, buildLists, buildQueue, cleanName, cleanText, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockLead, clockText, draftsLine, dueLine, holdBanner,
-  CHECK_WAIT_MS, checkingTitle, fastState, whenText, holdSentence, holderName, isClosingRoute, isDraftDone, isUuid, needsLine, noteText, pinsNow, shortName, stillOpenTitle, threadTitle, titleFor, titleNames, withTeammate,
+  CHECK_WAIT_MS, checkingTitle, fastState, internalProjects, isClientSend, whenText, holdSentence, holderName, isClosingRoute, isDraftDone, isUuid, needsLine, noteText, pinsNow, shortName, stillOpenTitle, threadTitle, titleFor, titleNames, withTeammate,
 } from './queue'
 import type { Feed, QueueItem } from './queue'
 import { handoverText, kickoffText, waitingText } from './threads'
@@ -1374,17 +1374,73 @@ describe('R17: an item with no due time', () => {
 describe('R18: an internal project', () => {
   const now = et('2026-10-12 11:00')
   const CORE = '3e439f40-a17f-48e2-bcfe-723af5b741fc'
-  test('by id (no flag in the feed yet) or by the feed\'s own flag: marked internal, and its mail has no clock', async () => {
-    const f = feed({ mail: [mailAt(CORE, 'Massmarket Core Snapshot', '2026-10-12 09:00'), { ...mailAt(P2, 'Bolt Staffing', '2026-10-12 09:30'), internal: true }, mailAt(P3, 'Cedar Dental', '2026-10-12 10:00')] })
+  test('by id while no row carries the flag: marked internal, and its mail has no clock', async () => {
+    const f = feed({ mail: [mailAt(CORE, 'Massmarket Core Snapshot', '2026-10-12 09:00'), mailAt(P3, 'Cedar Dental', '2026-10-12 10:00')] })
     const q = buildQueue(f, now)
-    // (the two with nothing due last, in the feed's order)
-    expect(q.map(i => [i.projectId, Boolean(i.internal), Boolean(i.noDue)])).toEqual([[P3, false, false], [CORE, true, true], [P2, true, true]])
+    expect(q.map(i => [i.projectId, Boolean(i.internal), Boolean(i.noDue)])).toEqual([[P3, false, false], [CORE, true, true]])
     expect(titleFor(q[1] as QueueItem, now)).toBe('🟡 Massmarket Core Snapshot · reply')
+  })
+
+  test('L9: once a row carries the flag, the feed alone says: internal:false on the internal-ops id is a client', async () => {
+    const OPS = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
+    const f = feed({ mail: [{ ...mailAt(OPS, 'Ops', '2026-10-12 09:00'), internal: false }, { ...mailAt(P2, 'Bolt Staffing', '2026-10-12 09:30'), internal: true }, mailAt(CORE, 'Massmarket Core Snapshot', '2026-10-12 10:00')] })
+    expect([...internalProjects(f)]).toEqual([P2])
+    const q = buildQueue(f, now)
+    expect(q.map(i => [i.projectId, Boolean(i.internal)])).toEqual([[OPS, false], [CORE, false], [P2, true]])
   })
   test('a task a person dated on an internal project keeps its clock', async () => {
     const f = feed({ tickets: { due_today: [committed(CORE, 'Massmarket Core Snapshot', at('2026-10-12 16:00'))] } })
     const [it] = buildQueue(f, now)
     expect(titleFor(it as QueueItem, now)).toBe('🔴 5h left · Massmarket Core Snapshot · task')
     expect(pinsNow(it as QueueItem, now)).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------- fix round 1 (review of e832775b)
+
+describe('F3: never "checking" while something else of the client\'s still needs the person', () => {
+  const now = et('2026-10-12 15:00')
+  const pkgRow = (over: Record<string, unknown>) => ({
+    package_id: 'aaaaaaaa-8888-4888-8888-888888888888', project_id: P1, project_name: 'Acme Roofing — Pat', status: 'prepared', covers_through: at('2026-10-12 09:52'),
+    drafts_ready: 1, drafts_unsent: 1, flagged_for_rob: false, picked_up_by: null, picked_up_at: null, project_owner_email: ME, last_outbound_at: at('2026-10-12 14:30'), ...over,
+  })
+  test('P5a: a client message that arrived after our send, and a task due in 3 hours: listed, not checking', async () => {
+    const f = feed({
+      drafts: [pkgRow({})],
+      mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 14:45')],
+      tickets: { due_today: [committed(P1, 'Acme Roofing — Pat', at('2026-10-12 18:00'))] },
+    })
+    const l = buildLists(f, now)
+    expect(l.queue.map(i => i.projectId)).toEqual([P1])
+    expect(l.checking).toEqual([])
+    // each alone is enough
+    expect(buildLists(feed({ drafts: [pkgRow({})], mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 14:45')] }), now).checking).toEqual([])
+    expect(buildLists(feed({ drafts: [pkgRow({})], tickets: { due_today: [committed(P1, 'Acme Roofing — Pat', at('2026-10-12 18:00'))] } }), now).checking).toEqual([])
+  })
+  test('P5b: a package I hold with a draft not sent stays on my list after a send', async () => {
+    const f = feed({ drafts: [pkgRow({ status: 'picked_up', picked_up_by: ME, picked_up_at: at('2026-10-12 13:00') })] })
+    const l = buildLists(f, now)
+    expect(l.queue.map(i => i.projectId)).toEqual([P1])
+    expect(l.checking).toEqual([])
+  })
+})
+
+describe('F1 (a): a client email or message sent from the thread itself', () => {
+  test('Gmail, spelled whole, split or through the client library; HighLevel; the send script', async () => {
+    for (const command of [
+      'curl -s -X POST https://gmail.googleapis.com/gmail/v1/users/me/messages/send -d @m.json',
+      "python3 - <<'EOF'\nGMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me'\ncall(tok, 'POST', GMAIL + '/drafts/send', body)\nEOF",
+      "python3 send.py <<'EOF'\nservice.users().messages().send(userId='me', body=msg).execute()\nEOF",
+      'curl -X POST https://services.leadconnectorhq.com/conversations/messages -d @sms.json',
+      'python3 scripts/send-client-email.py --to client@example.com',
+    ]) expect(isClientSend(command), command).toBe(true)
+  })
+  test('⛔ a draft, a read, or talk about sending is not one', async () => {
+    for (const command of [
+      "python3 - <<'EOF'\nservice.users().drafts().create(userId='me', body=d).execute()\nEOF",
+      'curl -s https://gmail.googleapis.com/gmail/v1/users/me/messages?q=from:x',
+      'grep -rn "messages/send" docs/',
+      'git commit -m "the email was sent"',
+    ]) expect(isClientSend(command), command).toBe(false)
   })
 })

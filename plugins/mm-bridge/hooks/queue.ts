@@ -367,17 +367,24 @@ export function pinsNow(it: Pick<QueueItem, 'dueAt'> & { actBy?: number }, now: 
   return at <= now || businessWithin(now, at, WINDOW_AHEAD_MS)
 }
 
-/** (R18) The internal projects: INTERNAL_PROJECTS, and every project a feed row marks `internal: true`. */
+/**
+ * (R18) The internal projects. Every project a feed row marks `internal: true`; and (fix round 1, L9)
+ * INTERNAL_PROJECTS only while no row of the feed carries the flag at all (a boolean either way): once OW sends
+ * it, the feed alone says.
+ */
 export function internalProjects(feed: Feed): Set<string> {
-  const out = new Set(INTERNAL_PROJECTS)
+  const flagged = new Set<string>()
+  let carries = false
   const add = (row: { project_id?: string | null; internal?: boolean } | null | undefined): void => {
-    if (row && row.internal === true && isUuid(row.project_id)) out.add(row.project_id)
+    if (!row || typeof row.internal !== 'boolean') return
+    carries = true
+    if (row.internal && isUuid(row.project_id)) flagged.add(row.project_id)
   }
   for (const m of feed.mail ?? []) add(m)
   for (const d of feed.drafts ?? []) add(d)
   const t = feed.tickets ?? {}
   for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? [], t.start_now ?? []]) for (const tk of k) add(tk)
-  return out
+  return carries ? flagged : new Set(INTERNAL_PROJECTS)
 }
 
 /** Every client's newest `last_outbound_at`, from every row of it the feed gives one on, in ms. */
@@ -428,10 +435,20 @@ export function fastOf(c: PackageCheck | null | undefined, lastOut: number, now:
   return null
 }
 
-/** fastOf for a client as the lists hold it. (The founder's package that waits for his OK is somebody else's send: never.) */
+/**
+ * fastOf for a client as the lists hold it. (The founder's package that waits for his OK is somebody else's
+ * send: never.) Fix round 1, F3: never `checking` while something else of the client's still needs the person
+ * whatever our send answered: a client message that arrived after it, a committed task, or a package they hold
+ * with a draft not sent.
+ */
 export function fastState(it: QueueItem, now: number): Fast | null {
   if (it.kind === 'ok') return null
-  return fastOf(it.check ?? null, Number(it.lastOut) || 0, now)
+  const fast = fastOf(it.check ?? null, Number(it.lastOut) || 0, now)
+  if (fast?.state !== 'checking') return fast
+  const o = it.open ?? null
+  const newerMail = (Number(it.newest?.mail) || 0) > fast.at
+  if (newerMail || it.tasks > 0 || (o?.state === 'held_by_me' && o.unsent > 0)) return null
+  return fast
 }
 
 /** R8: the thread's name while the server checks our send: `✓ Acme Legal · sent 3 PM · checking`. */
@@ -478,7 +495,8 @@ export function feedClients(feed: Feed): KnownClient[] {
   for (const m of feed.mail ?? []) add(m?.project_id, m?.project_name)
   for (const d of feed.drafts ?? []) add(d?.project_id, d?.project_name)
   const t = feed.tickets ?? {}
-  for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? []]) for (const tk of k) add(tk?.project_id, tk?.project_name)
+  // (fix round 1, F5) `start_now` too: a client listed only by a task that must start now is a client the feed names
+  for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? [], t.start_now ?? []]) for (const tk of k) add(tk?.project_id, tk?.project_name)
   return [...out.values()]
 }
 
@@ -992,3 +1010,30 @@ export function isClosingRoute(command: unknown): boolean {
 
 /** The name 0.5.1 gave it (a reply draft was sent or discarded); the same test now. */
 export const isDraftDone = isClosingRoute
+
+// ---------------------------------------------------------------- a client email or message sent from this thread
+
+/**
+ * The shapes of a command that sends a client email or message straight from a thread (R11, fix round 1, F1:
+ * the F&I send of 2026-10-13 was a Gmail script, no gateway route): Gmail's send endpoints, spelled whole, split
+ * (a quoted send path beside the Gmail host) or through the Google client library; HighLevel's conversation
+ * message and email send; and the Massmarket send script. The same shapes the send gate knows
+ * (global-config/hooks/send-gate.js, PATTERNS).
+ */
+const CLIENT_SEND: ReadonlyArray<{ path: RegExp; also?: RegExp }> = [
+  { path: /gmail\.googleapis\.com\/gmail\/v1\/users\/[^/\s'"]+\/(?:drafts|messages)\/send/i },
+  { path: /["'`]\/(?:messages|drafts)\/send\b/i, also: /gmail\.googleapis\.com/i },
+  { path: /\busers\(\)\s*\.\s*(?:messages|drafts)\(\)\s*\.\s*send\s*\(|\busers\.(?:messages|drafts)\.send\s*\(/i },
+  { path: /services\.leadconnectorhq\.com\/conversations\/messages/i, also: /\bPOST\b|\.post\(|method['"]?\s*[:=]\s*['"`]?POST/i },
+  { path: /services\.leadconnectorhq\.com\/emails\/[^\s'"]*send/i },
+  { path: /\bsend-client-email\.py\b/ },
+]
+
+/**
+ * Whether a shell command sends a client email or message itself. ⛔ As with isClosingRoute: yes or no, and
+ * nothing of the command is kept, logged or passed on.
+ */
+export function isClientSend(command: unknown): boolean {
+  if (typeof command !== 'string' || command.length > 200_000) return false
+  return CLIENT_SEND.some(s => s.path.test(command) && (!s.also || s.also.test(command)))
+}

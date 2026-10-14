@@ -6,7 +6,7 @@ import {
   CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, LONG_CONTEXT_TOKENS, LONG_THREAD_ROWS, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLength, threadLink, threadRows, titleLooksLike, titleSuggestion, waitingText,
-  REFRESH_FAILED, bandText, claimText, isStillOpenRow, staleCopySentence, startKickoff,
+  CHIP_TITLE_MAX, REFRESH_FAILED, bandText, chipTitle, claimText, isStillOpenRow, staleCopySentence, startKickoff,
 } from './threads'
 import type { AppThread, ClientThread, Pairs, Platform } from './threads'
 
@@ -1204,5 +1204,34 @@ describe('R4 and R8: the rows', () => {
     expect(rowButtons(long)).toEqual(['drafts'])
     // no thread to claim it in: the row is an ordinary one
     expect(rowFor(it, fresh, NOW, { needsYou: true }).stillOpen).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------- fix round 1 (review of e832775b)
+
+describe('F6: the band counts the person\'s clients under Older', () => {
+  const base = { pinned: 0, pinsNow: false, noThread: [], chipHere: false, stale: false }
+  test('nothing due in the window, older overdue: never all clear', async () => {
+    expect(bandText({ ...base, older: 2 })).toBe('Nothing due in the next 24 hours · 2 older overdue.')
+  })
+  test('the other forms say it at the end of their first line', async () => {
+    expect(bandText({ ...base, pinned: 1, pinsNow: true, older: 3 })).toBe('Needs you: 1 pinned · 3 older overdue.')
+    expect(bandText({ ...base, pinned: 1, pinsNow: true, stillOpen: 'Cedar Dental', older: 1 })).toBe('Needs you: 1 pinned · Cedar Dental still open after your reply · 1 older overdue.')
+    expect(bandText({ ...base, noThread: [{ client: 'Acme Roofing', due: '3 PM' }], chipHere: true, older: 1 })).toBe(
+      'Needs you: 0 pinned · 1 with no thread: Acme Roofing · 1 older overdue. Open a thread for Acme Roofing (due 3 PM): a chip is waiting in this thread.',
+    )
+  })
+  test('a stale read: the refresh-failed line, never an all-clear', async () => {
+    expect(bandText({ ...base, older: 2, stale: true })).toBe(REFRESH_FAILED)
+  })
+})
+
+describe('L13: a chip\'s title is at most 60 characters', () => {
+  test('cut, with an ellipsis', async () => {
+    expect(CHIP_TITLE_MAX).toBe(60)
+    expect(chipTitle('Acme Roofing: review the reply drafts')).toBe('Acme Roofing: review the reply drafts')
+    const long = chipTitle('Thirty Two Character Client Name: start a new thread (this one is at 70%)')
+    expect(long.length).toBe(60)
+    expect(long.endsWith('…')).toBe(true)
   })
 })

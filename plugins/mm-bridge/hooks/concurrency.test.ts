@@ -55,6 +55,8 @@ function hooksOf(): Record<string, Hook> {
 
 type WorldOptions = {
   seed: number
+  /** More threads the app has, recently active (fix round 1, F4: a dozen of a test's own). */
+  extra?: string[]
 }
 
 /**
@@ -77,6 +79,7 @@ function world(opts: WorldOptions) {
   app.set('local_poller', thread('local_poller', 'Morning hub'))
   for (let n = 1; n <= 8; n++) app.set(OLD_THREAD(n), thread(OLD_THREAD(n), `Old client ${n} work`, { lastActivityAt: ago(30 + n) }))
   for (let n = 1; n <= N; n++) app.set(NEW_THREAD(n), thread(NEW_THREAD(n), `Chip ${n}`, { lastActivityAt: ago(0) }))
+  for (const id of opts.extra ?? []) app.set(id, thread(id, `Thread ${id}`, { lastActivityAt: ago(0) }))
   // the app's list holds its most recent threads: the older ones are asked for by id, which takes a while
   const unlisted = new Set([...app.keys()].filter(id => id.startsWith('local_old_')))
 
@@ -92,6 +95,9 @@ function world(opts: WorldOptions) {
     ],
   }
   const text = (value: unknown): Mcp => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }], isError: false })
+  /** The thread each chip was minted in, in order (the n-th has the id `task_<n>`), and the chips withdrawn. */
+  const spawned: string[] = []
+  const dismissed: string[] = []
 
   const session = (cli: string, self: string) => {
     const state = new Map<string, unknown>()
@@ -124,6 +130,14 @@ function world(opts: WorldOptions) {
           if (tool === 'set_session_title' && t) t.title = String(args.title)
           if (tool === 'set_pinned' && t) t.pinned = Boolean(args.pinned)
           if (tool === 'get_usage') return text({ context: { status: 'unavailable' } })
+          if (tool === 'spawn_task') {
+            spawned.push(self)
+            return text(`Noted (task_id: task_${String(spawned.length).padStart(8, '0')}).`)
+          }
+          if (tool === 'dismiss_task') {
+            dismissed.push(String(args.task_id))
+            return text('Dismissed.')
+          }
           return text('ok')
         },
       },
@@ -164,6 +178,8 @@ function world(opts: WorldOptions) {
   }
 
   return {
+    spawned,
+    dismissed,
     session,
     stored: (key: string) => (stored[key] === undefined ? undefined : JSON.parse(stored[key] as string)),
     put: (key: string, value: unknown) => void (stored[key] = JSON.stringify(value)),
@@ -291,4 +307,32 @@ describe('B1: a dozen threads started at once against one store, with a sync run
     expect((w.stored('mm.links') as Record<string, string>)[fresh(1)]).toBeUndefined()
     expect(w.stored('mm.unlinked')).toEqual({ [NEW_THREAD(1)]: NOW })
   })
+})
+
+// Fix round 1, F4 (review of e832775b): every running thread mints its own chips (R5), and a dozen that tick at once
+// write the one `mm.chips` record over each other. Each thread's own records come back, and nothing is minted twice.
+describe('F4: chip records when a dozen threads tick at once', () => {
+  const tickAll = async (w: ReturnType<typeof world>, threads: unknown[]) => {
+    await Promise.all(threads.map(t => hooks['session.start']?.(t, { cwd: '/work', surface: 'desktop', isInteractive: false }, next)))
+    await w.advance(4_000)
+    await w.advance(3_100)
+  }
+  for (const seed of [1, 7, 42, 99, 2026, 1013, 5, 11]) {
+    test(`twelve threads mint five each at once: 60 records, and the next tick mints none again (seed ${seed})`, async () => {
+      // (thread ids of this test's own: the bridge's module is one for the whole file, as each app thread's is one per thread)
+      const ids = Array.from({ length: N }, (_, i) => `local_f4_${seed}_${i + 1}`)
+      const w = world({ seed, extra: ids })
+      await before(w)
+      const threads = ids.map((id, i) => w.session(`cli-f4-${seed}-${i + 1}`, id))
+      await tickAll(w, threads)
+      expect(w.spawned.length).toBe(60)
+      const recs = () => ((w.stored('mm.chips') ?? []) as Array<{ taskId: string; threadId: string }>).filter(r => ids.includes(r.threadId))
+      expect(recs().length).toBe(60)
+      await w.advance(60_000)
+      await tickAll(w, threads)
+      expect(w.spawned.length).toBe(60)
+      expect(new Set(recs().map(r => r.taskId)).size).toBe(60)
+      expect(w.dismissed).toEqual([])
+    })
+  }
 })
