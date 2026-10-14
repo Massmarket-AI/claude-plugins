@@ -44,6 +44,17 @@
  * does not change whose turn it is; a scheduled task's prompt is recognised by
  * its whole text; and an agent can be fixed at its own start (SubagentStart).
  *
+ * Task cards from `start_session` (0.11.7, 2026-10-14): the desktop app update
+ * of 2026-10-14 took `spawn_task` out of NEW sessions and added `start_session`
+ * (`initiation: "own_initiative"` leaves a proposal card the person starts).
+ * The mint instruction names `start_session` first and `spawn_task` as the
+ * fallback for a session that still has it; the `delivered_chip` producer acks
+ * either one (a `start_session` only when it left a proposal card); a session a
+ * card opened is read past the app's "Background … Task:" wrapper for the
+ * bridge's marker; and the chip-feed and worklog requests say which hook build,
+ * which mm-hooks plugin build and which auto-update setting sent them
+ * (`X-MM-Client`, `X-MM-Plugin`, `X-MM-Autoupdate`).
+ *
  * Identity: reuses the SAME per-member `team_auth_tokens` UUID already handed
  * out for the Chrome extension (rollout/slips/), via env var MM_TRACKER_TOKEN.
  * No new credential to mint or distribute.
@@ -106,6 +117,91 @@ function resolveToken() {
 
 const TOKEN = resolveToken();
 const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
+
+// ───────────────────────────────────────────────────────────────────────────
+// ⛔ WHICH BUILD IS SPEAKING (0.11.7, 2026-10-14). The team health check of
+// 2026-10-14 could only INFER that 4 of 7 members ran an old hook: OW recorded
+// no hook version, no mm-hooks plugin version and no auto-update setting. So
+// the chip-feed GET and every worklog POST carry three headers, which the ext
+// auth path (src/lib/ext/auth.ts, stampHookVersion) writes to the member's
+// team_auth_tokens row (migration 280):
+//
+//   X-MM-Client      `mm-hook/<HOOK_VERSION>`, always
+//   X-MM-Plugin      `mm-hooks/<semver>`, only when ~/.claude/mm-hooks/
+//                    plugin-sync.json (written by the mm-hooks plugin's
+//                    sync-hook.js) names a version; absent otherwise
+//   X-MM-Autoupdate  `1` when FORCE_AUTOUPDATE_PLUGINS is set in this
+//                    process's environment, `0` when it is not
+//
+// ⛔ BUMP HOOK_VERSION WITH EVERY RELEASE OF THIS FILE. It is the only place
+// the number lives; the comments above (0.11.4, 0.11.5, 0.11.6) are history.
+// It must stay `<major>.<minor>.<patch>`: the server stores nothing else.
+//
+// ⛔ NOTHING HERE CAN FAIL A REQUEST. The file read is bounded, parsed in a
+// try, validated, and read at most once per run; any problem drops the one
+// header it would have produced and nothing else.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** This file's release. See the block above: bump it with every release. */
+const HOOK_VERSION = "0.11.7";
+
+/** What a plugin-sync.json may say as its version: digits and dots, three parts. */
+const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
+
+/** A plugin-sync.json bigger than this is not read (the real one is ~200 bytes). */
+const PLUGIN_SYNC_MAX_BYTES = 16384;
+
+/** undefined = not read yet this run; null = read, and it names no version. */
+let PLUGIN_SYNC_VERSION;
+
+/**
+ * The mm-hooks plugin build that last synced this hook, from
+ * `<home>/.claude/mm-hooks/plugin-sync.json`, or null. Read at most once per
+ * run; a missing, oversized, unreadable or malformed file, a file naming
+ * another plugin, or a version that is not `<major>.<minor>.<patch>` is null.
+ * Never throws.
+ */
+function mmHooksPluginVersion() {
+  if (PLUGIN_SYNC_VERSION !== undefined) return PLUGIN_SYNC_VERSION;
+  PLUGIN_SYNC_VERSION = null;
+  try {
+    const file = path.join(os.homedir(), ".claude", "mm-hooks", "plugin-sync.json");
+    const st = fs.statSync(file);
+    if (!st.isFile() || st.size > PLUGIN_SYNC_MAX_BYTES) return PLUGIN_SYNC_VERSION;
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return PLUGIN_SYNC_VERSION;
+    if (parsed.plugin !== undefined && parsed.plugin !== "mm-hooks") return PLUGIN_SYNC_VERSION;
+    const version = typeof parsed.version === "string" ? parsed.version.trim() : "";
+    if (PLUGIN_SYNC_VERSION_RE.test(version)) PLUGIN_SYNC_VERSION = version;
+  } catch {
+    /* no file, or not ours to read: no header */
+  }
+  return PLUGIN_SYNC_VERSION;
+}
+
+/**
+ * True when FORCE_AUTOUPDATE_PLUGINS is set: present and not empty, and not
+ * one of the words that mean off ("0", "false", "no", "off", any case).
+ */
+function forceAutoupdateSet(env) {
+  const raw = (env || process.env).FORCE_AUTOUPDATE_PLUGINS;
+  if (typeof raw !== "string") return false;
+  const value = raw.trim().toLowerCase();
+  return value !== "" && ["0", "false", "no", "off"].indexOf(value) === -1;
+}
+
+/** The three build headers for a chip-feed or worklog request. Never throws. */
+function hookClientHeaders() {
+  const out = { "X-MM-Client": `mm-hook/${HOOK_VERSION}` };
+  try {
+    const plugin = mmHooksPluginVersion();
+    if (plugin) out["X-MM-Plugin"] = `mm-hooks/${plugin}`;
+    out["X-MM-Autoupdate"] = forceAutoupdateSet() ? "1" : "0";
+  } catch {
+    /* the headers are telemetry; the request goes out without them */
+  }
+  return out;
+}
 // Matches CHIP_FETCH_TIMEOUT_MS (2026-09-23). Both calls cross the same
 // iad1 -> us-west-2 path to the same database, and a 4s budget here was the
 // one bound left inside the range a slow minute produces. An aborted POST is
@@ -573,10 +669,14 @@ async function postWorklog({ contentMd, title, source, declarations }, deadlineA
   try {
     const res = await fetch(WORKLOG_URL, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${TOKEN}`,
-      },
+      headers: Object.assign(
+        {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${TOKEN}`,
+        },
+        // Which hook, plugin and auto-update setting sent this (0.11.7).
+        hookClientHeaders(),
+      ),
       // ⛔ Belt and braces: every worklog line is scrubbed here too, so a
       // future call site that forgets scrubAndTruncate still cannot put a
       // credential on the wire. Cheap (~14us on a 160-byte line) and it runs
@@ -3510,7 +3610,8 @@ async function fetchChipFeed() {
   try {
     const res = await fetch(CHIP_FEED_URL, {
       method: "GET",
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      // Which hook, plugin and auto-update setting sent this (0.11.7).
+      headers: Object.assign({ Authorization: `Bearer ${TOKEN}` }, hookClientHeaders()),
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -3685,6 +3786,36 @@ function chipSuppressedLines(payload) {
 }
 
 /**
+ * ⛔ THE TWO CARD TOOLS (0.11.7, 2026-10-14). The desktop app update of
+ * 2026-10-14 took `spawn_task` out of NEW sessions and added `start_session`;
+ * a session opened before the update still has `spawn_task` and no
+ * `start_session`. A feed task becomes a card with `start_session` and
+ * `initiation: "own_initiative"` (a proposal card: nothing runs until the person
+ * starts it, the same contract a chip had) where that tool exists, and with
+ * `spawn_task` where it does not. Never `user_asked`: that starts a session at
+ * once, and the person did not ask for one. The model can see which tool it
+ * has, so the hook names both and picks neither (isDesktopSession is unchanged).
+ *
+ * Read out of the app bundle (Claude.app, build of 2026-10-13), not assumed:
+ *   - `context` defaults to "fresh", and a fresh proposal is REFUSED unless it
+ *     carries a `background` of at least 80 characters. So every mint
+ *     instruction hands the session CHIP_CARD_BACKGROUND to pass verbatim, and
+ *     names `context: "fresh"`: a "fork" would copy this whole session's
+ *     conversation into the new one.
+ *   - a proposal cannot carry `cwd`, a host, an environment or a preset.
+ *   - the first message the started card sends its new session is
+ *     "Background (from the session that started this one):\n<background>\n\nTask:\n<prompt>"
+ *     (see TURN_ORIGIN_SIDE_FRESH_PREFIX below).
+ *   - the result of a proposal reads `Proposed "<title>" (task_id: task_…)`;
+ *     a `user_asked` start reads `Started session …` and names no task id.
+ *   - `dismiss_task` withdraws a proposal by that task id, as it withdrew a
+ *     chip, and a session can see and withdraw only the ones it made.
+ */
+const CHIP_CARD_BACKGROUND =
+  "A Massmarket task from the signed OW task feed, queued for the person who starts this card. " +
+  "Everything this session needs is in the task text below: read it in full and follow it as written.";
+
+/**
  * The OPEN-TASK LIST and the CLEANUP rule — what a session is told about the
  * tasks that are already live in its queue.
  *
@@ -3775,8 +3906,8 @@ function chipReconcileLines(payload) {
       "### Your open tasks, for awareness (do NOT mint these)",
       "",
       "These tasks are live in your queue and already have a chip or a running thread.",
-      "They are listed so this session knows what is urgent. Do not call `spawn_task`",
-      "for any of them: `spawn_task` always adds a new chip, so minting one again",
+      "They are listed so this session knows what is urgent. Do not call `start_session`",
+      "or `spawn_task` for any of them: each call adds a new card, so minting one again",
       "duplicates it.",
       "",
     );
@@ -3800,9 +3931,9 @@ function chipReconcileLines(payload) {
       // under each entry ARE the urgent line and the pending list.
       //
       // The fenced block is there to be READ. Since 2026-10-02 it is never
-      // passed to `spawn_task`: a task in this list already has a chip or a
-      // running thread, and minting it again adds a second chip (see the
-      // measurement in the docblock above).
+      // passed to `spawn_task` (nor, since 2026-10-14, to `start_session`): a
+      // task in this list already has a chip or a running thread, and minting
+      // it again adds a second card (see the measurement in the docblock above).
       //
       // A payload from before this shipped carries no packet, so the entry still
       // renders as the bare fingerprint line it always did — degraded, never
@@ -3843,8 +3974,9 @@ function chipReconcileLines(payload) {
     "### Cleanup: only the chips THIS session minted",
     "",
     "A session can see and dismiss only the chips it minted itself. The pending list",
-    "in a `spawn_task` response covers this session's chips and nothing else, and",
-    "`dismiss_task` refuses a chip that another session minted. So:",
+    "in a `start_session` or `spawn_task` response covers this session's cards and",
+    "nothing else, and `dismiss_task` (it withdraws a proposal card and a chip alike)",
+    "refuses one that another session minted. So:",
     "",
     "- If THIS session minted a chip earlier and its task has left your queue (it is",
     "  not a chip to mint in this block and not an open task listed above), call",
@@ -3931,9 +4063,14 @@ function chipTopUpLines(payload) {
       "   could auto-start work in a tab the person is not looking at. Then POST the",
       "   confirmation below with `delivered_warm_thread`.",
       "3. **If it does NOT exist, the send fails, or you cannot confirm it landed:**",
-      "   mint exactly ONE chip with `spawn_task` — `title` = the fallback chip title",
-      "   given, `prompt` = the same note verbatim. The `PostToolUse` hook records",
-      "   `delivered_chip` for that chip itself, item roster included — do NOT ack it",
+      "   mint exactly ONE card: call `start_session` with `initiation: \"own_initiative\"`,",
+      "   `context: \"fresh\"`, `title` = the fallback chip title given, `prompt` = the",
+      "   same note verbatim, and `background` = this line, verbatim:",
+      `   "${CHIP_CARD_BACKGROUND}"`,
+      "   If this session has no `start_session` tool, call `spawn_task` with the same",
+      "   title and prompt instead (`tldr` = one plain-English sentence).",
+      "   Never use `user_asked` here. The `PostToolUse` hook records",
+      "   `delivered_chip` for that card itself, item roster included — do NOT ack it",
       "   by hand. ⛔ Never finish this step having done neither. The item must end up",
       "   somewhere a human will see it.",
       "4. ⛔ Do NOT mint a chip for the client group itself. It is already claimed and",
@@ -3942,9 +4079,10 @@ function chipTopUpLines(payload) {
       "For the WARM-THREAD path (step 2) the confirmation POST below is yours and it",
       "is the ONLY thing that stops that top-up repeating — it carries the item",
       "fingerprints you actually delivered. Send it AFTER the delivery succeeded —",
-      "never before, and never for an item you did not deliver. (Step 3's chip needs",
-      "nothing from you: a `spawn_task` is a tool call the hook can SEE, whereas a",
-      "warm-thread send is not, which is exactly why one is automatic and one is not.)",
+      "never before, and never for an item you did not deliver. (Step 3's card needs",
+      "nothing from you: a `start_session` or `spawn_task` call is a tool call the hook",
+      "can SEE, whereas a warm-thread send is not, which is exactly why one is",
+      "automatic and one is not.)",
       "An un-confirmed top-up is re-announced next session, which is the intended",
       "failure mode: repeating beats losing.",
       "",
@@ -4003,8 +4141,10 @@ function chipTopUpLines(payload) {
 
 /**
  * Render the verified feed into the instruction block the in-session agent
- * reads. The agent — not this hook — mints the chips via the app's `spawn_task`
- * tool, one per candidate.
+ * reads. The agent — not this hook — mints the cards, one per candidate: with
+ * the app's `start_session` (`initiation: "own_initiative"`), or with
+ * `spawn_task` in a session that has no `start_session` (see the block above
+ * CHIP_CARD_BACKGROUND).
  *
  * The server queue is the truth, and the server decides what to serve and what
  * to serve again. So a session mints exactly what the feed lists under
@@ -4078,8 +4218,8 @@ function renderChipContext(payload) {
       "",
       `Your ranked queue has no unheld work right now (${held} task(s) already in flight).`,
       hasTopUps
-        ? "Nothing NEW to mint, and nothing to re-mint. Do NOT call `spawn_task` for any task in the open-task list below: every call adds another chip, even for a task that already has one. The one exception is a top-up's fallback chip, minted only as step 3 of the top-up steps says."
-        : "Nothing NEW to mint, and nothing to re-mint. Do NOT call `spawn_task` for any task listed below: every call adds another chip, even for a task that already has one.",
+        ? "Nothing NEW to mint, and nothing to re-mint. Do NOT call `start_session` or `spawn_task` for any task in the open-task list below: every call adds another card, even for a task that already has one. The one exception is a top-up's fallback chip, minted only as step 3 of the top-up steps says."
+        : "Nothing NEW to mint, and nothing to re-mint. Do NOT call `start_session` or `spawn_task` for any task listed below: every call adds another card, even for a task that already has one.",
       "A session can only see and dismiss the chips it minted itself, so there is no",
       "surface-wide cleanup to do from here.",
       "",
@@ -4100,19 +4240,32 @@ function renderChipContext(payload) {
     "this session minted a chip earlier whose task has left your queue, dismiss it",
     "(see Cleanup below).",
     "",
-    `**Mint.** For EACH task below, call the \`spawn_task\``,
-    "tool once — `title` = the chip title given, `prompt` = the brief given verbatim,",
-    "`tldr` = one plain-English sentence. Then STOP and let the person choose. Do not",
-    "start any of the work yourself, and do not mint anything not listed here.",
+    // ⛔ THE INSTRUCTION'S CORE IS OPUS'S WORDING (2026-10-14). Two additions the
+    // app bundle forced, both measured (see the block above CHIP_CARD_BACKGROUND):
+    // the `context` + `background` pair, without which every proposal is
+    // refused, and the marker parenthesis made conditional, because a feed
+    // brief does not begin with an `[mm-link …]` marker today.
+    "**Mint.** Your first action: for each task below, call `start_session` with",
+    "`initiation: \"own_initiative\"` and the title and prompt exactly as given (when",
+    "the prompt starts with an `[mm-link …]` marker, that marker stays first), plus",
+    "`context: \"fresh\"` and `background` = the background line given below, verbatim",
+    "(the app refuses a proposal without it). If this session has no `start_session`",
+    "tool, call `spawn_task` with the same title, tldr and prompt instead (`tldr` = one",
+    "plain-English sentence). Never use `user_asked` here: the person starts each card",
+    "themselves. Then stop. Do not start any of the work yourself, and do not mint",
+    "anything not listed here. Every task listed gets its card, however many there",
+    "are: they are this person's queued work, not suggestions of your own.",
     "If THIS session already minted a chip for a task's fingerprint, skip it. You cannot",
     "see chips other sessions minted; the feed holds a task back while it is freshly",
     "showing elsewhere, and serves it again only if nobody claimed it.",
     "",
+    `**Background line** (the \`background\` for every \`start_session\` below): ${CHIP_CARD_BACKGROUND}`,
+    "",
     "**The card's arrival records itself — do NOT ack it by hand.** The",
-    "`PostToolUse` half of this same hook watches for your `spawn_task` call and",
-    "writes `delivered_chip` for the fingerprint it recognises, in code, with no",
-    "step for you. A second POST would double-count the surface and can retire a",
-    "live chip early, so leave it alone.",
+    "`PostToolUse` half of this same hook watches for your `start_session` or",
+    "`spawn_task` call and writes `delivered_chip` for the fingerprint it recognises,",
+    "in code, with no step for you. A second POST would double-count the surface and",
+    "can retire a live chip early, so leave it alone.",
     "",
     "This used to be your job and that was the wrong place for it: an instruction",
     "is not a producer. A model may or may not comply and non-compliance is silent,",
@@ -4121,7 +4274,9 @@ function renderChipContext(payload) {
     "forever. One client group was minted 77 times in four hours.",
     "",
     "**Keep the flow going (unconditional):** whenever a task here is CLAIMED, fetch",
-    "`GET /api/ext/chip-feed` again and mint whatever new head it returns — every",
+    "`GET /api/ext/chip-feed` again and mint whatever new head it returns, the same",
+    "way (`start_session` with `initiation: \"own_initiative\"`, or `spawn_task` where",
+    "this session has no `start_session`; never `user_asked`) — every",
     "time, with no due-date or capacity reasoning of your own. Two or more running",
     "threads is the target shape, not the exception; a person should only be idle",
     "when the queue is genuinely empty. Never withhold a chip to make someone finish",
@@ -4603,7 +4758,10 @@ function composeSessionContext(instruction, block, tail) {
 //   2. PostToolUse watches for a `spawn_task` — matched on the tool name ENDING
 //      in `spawn_task`, because in practice it arrives MCP-namespaced
 //      (`mcp__ccd_session__spawn_task`, verified against prod worklog rows) and
-//      bare in principle.
+//      bare in principle — or, since 0.11.7, a `start_session` that left a
+//      proposal card (`initiation: "own_initiative"`, no `proposal_id`; see
+//      cardDeliveryTool). A `user_asked` start, an offer, or the start of an
+//      existing card is not a feed card reaching the person, and is not acked.
 //   3. The fingerprint is read out of the tool input and INTERSECTED with that
 //      served set. The intersection is what makes this deterministic rather
 //      than a guess: a `spawn_task` carrying no served fingerprint belongs to
@@ -4835,8 +4993,61 @@ async function postChipEvent(body, deadlineAt) {
   }
 }
 
+/** The id the app gives a chip or a proposal card: `task_` and a short token. */
+const APP_TASK_ID_RE = /^task_[A-Za-z0-9]{4,64}$/;
+
 /**
- * Fire `delivered_chip` when a `spawn_task` just minted one of OUR chips.
+ * The app's task id in a card tool's result text: `(task_id: task_…)`, as both
+ * `spawn_task` ("Noted (position N, task_id: …)") and a `start_session`
+ * proposal ("Proposed "<title>" (task_id: …)") write it.
+ */
+const APP_TASK_ID_IN_TEXT_RE = /\btask_id:\s*(task_[A-Za-z0-9]{4,64})\b/;
+
+/**
+ * Which card tool this PostToolUse is, when the call put a FEED card in front
+ * of the person: "spawn_task", "start_session", or null.
+ *
+ *   spawn_task     always a chip on screen (matched on the name's END, bare
+ *                  today, MCP-namespaced in practice — as before 0.11.7)
+ *   start_session  ONLY `initiation: "own_initiative"` with no `proposal_id`:
+ *                  the proposal card, the one shape that is a chip's
+ *                  replacement. ⛔ Never `user_asked` (a session started at
+ *                  once, which the mint instruction forbids for feed tasks), an
+ *                  `offer` (a task the person named themselves), or a call
+ *                  with `proposal_id` (it starts a card that is already there,
+ *                  and was acked when it was proposed).
+ */
+function cardDeliveryTool(payload) {
+  const name = String((payload && payload.tool_name) || "");
+  if (/spawn_task$/.test(name)) return "spawn_task";
+  if (!/start_session$/.test(name)) return null;
+  const input = payload.tool_input;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  if (input.initiation !== "own_initiative") return null;
+  if (typeof input.proposal_id === "string" && input.proposal_id.trim()) return null;
+  return "start_session";
+}
+
+/**
+ * The app's task id for the card this call made, or null: a `task_id` key on
+ * the result object, or `task_id: task_…` in its text. Never throws.
+ */
+function appTaskIdFrom(toolResponse) {
+  try {
+    if (toolResponse && typeof toolResponse === "object" && !Array.isArray(toolResponse)) {
+      const direct = typeof toolResponse.task_id === "string" ? toolResponse.task_id.trim() : "";
+      if (APP_TASK_ID_RE.test(direct)) return direct;
+    }
+    const m = APP_TASK_ID_IN_TEXT_RE.exec(collectStringLeaves(toolResponse, [], 0).join("\n"));
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fire `delivered_chip` when a `spawn_task` just minted one of OUR chips, or a
+ * `start_session` just left one of OUR tasks as a proposal card.
  *
  * Mutates `state` (the caller saves it) so one-ack-per-fingerprint survives
  * across tool calls within the session. Never throws. `deadlineAt` is the
@@ -4844,10 +5055,26 @@ async function postChipEvent(body, deadlineAt) {
  */
 async function ackDeliveredChip(payload, state, deadlineAt) {
   try {
-    // Liberal on the name: bare today, namespaced in practice, either fine.
-    if (!/spawn_task$/.test(String(payload.tool_name || ""))) return;
+    const tool = cardDeliveryTool(payload);
+    if (!tool) return;
     if (!toolCallSucceeded(payload)) return;
     if (state.chipAckFailures >= MAX_CHIP_ACK_FAILURES) return;
+
+    const appTaskId = appTaskIdFrom(payload.tool_response);
+    // ⛔ A `start_session` whose result SAYS something must say it made a card.
+    // Every proposal result names its task id; a result with text and no id
+    // was refused or did something else, and recording a delivery for it would
+    // be a fabricated event. A result with no text at all is a shape this hook
+    // cannot read, and is treated the way toolCallSucceeded treats an unknown
+    // shape: as a success, because a missed ack recreates the blindness this
+    // producer exists to end.
+    if (
+      tool === "start_session" &&
+      !appTaskId &&
+      collectStringLeaves(payload.tool_response, [], 0).some((s) => s.trim())
+    ) {
+      return;
+    }
 
     const served = servedChipMap(payload.session_id);
     if (served.size === 0) return;
@@ -4869,10 +5096,20 @@ async function ackDeliveredChip(payload, state, deadlineAt) {
       {
         event: "delivered_chip",
         task_fingerprint: fingerprint,
+        // "chip" for both tools: a proposal card is the chip's replacement, and
+        // every reader of this event counts a delivery the same way. Which tool
+        // made it rides in `meta.card_tool`.
         channel: "chip",
         // What the card actually SAID, straight off the tool call.
         task_title: rawTitle ? scrubAndTruncate(rawTitle, 200) : undefined,
-        meta: entry.meta,
+        // The served entry's meta (a top-up's roster) is kept exactly; the tool
+        // and, when the result named it, the app's own id for the card are added.
+        meta: Object.assign(
+          {},
+          entry.meta,
+          { card_tool: tool },
+          appTaskId ? { app_task_id: appTaskId } : {},
+        ),
       },
       deadlineAt,
     );
@@ -5609,7 +5846,9 @@ function sessionTitleFor(payload, state) {
 // the app can stamp a chip's first prompt as the person's. So a stamped entry
 // whose text begins with that marker is "auto" whatever its stamp says. The
 // pattern is the plugin's own (hooks/register.tsx MARKER): the very start of the
-// text, a lower-case uuid.
+// text, a lower-case uuid. Since 0.11.7 the start of the text includes the start
+// of the task inside the wrapper the desktop app puts around the first message
+// of a session `start_session` opened (TURN_ORIGIN_SIDE_FRESH_PREFIX).
 //
 // ⛔ THE SCHEDULED-TASK WRAPPER (review R4). `human` does not always mean typed:
 // the app starts a scheduled task's session with the task's prompt wrapped in
@@ -5689,6 +5928,28 @@ const TURN_ORIGIN_STAMP_KEY = '"turnOrigin"';
 /** The mm-bridge kickoff marker, at the very start of a prompt (the plugin's own pattern). */
 const TURN_ORIGIN_MARKER_RE =
   /^\[mm-link [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\]/;
+
+/**
+ * ⛔ A SESSION THAT `start_session` OPENED (0.11.7, 2026-10-14). The desktop app
+ * does not hand such a session its prompt as written: it wraps it. Read out of
+ * the app bundle, and seen on Rob's Mac the same day (first entry stamped
+ * `sdk`):
+ *
+ *   context "fresh"  "Background (from the session that started this one):\n"
+ *                    + <background> + "\n\nTask:\n" + <prompt>
+ *   context "fork"   "Task (from the session that started this one):\n" + <prompt>
+ *
+ * (A fresh start with an empty background, and a `spawn_task` chip, pass the
+ * prompt through bare.) So a card whose prompt begins with the bridge's marker
+ * opens a session whose first entry does NOT begin with it, and the marker rule
+ * above would miss every one of them. turnEntryStartsWithMarker() reads the
+ * marker at the start of the TASK part: right after the fork wrapper, or right
+ * after a "\n\nTask:\n" that follows the fresh wrapper. Only those two exact
+ * openings are read through; anything else is tested as it always was.
+ */
+const TURN_ORIGIN_SIDE_FRESH_PREFIX = "Background (from the session that started this one):\n";
+const TURN_ORIGIN_SIDE_FORK_PREFIX = "Task (from the session that started this one):\n";
+const TURN_ORIGIN_SIDE_TASK_SEPARATOR = "\n\nTask:\n";
 
 /**
  * The wrapper the app puts around a scheduled task's prompt:
@@ -6060,13 +6321,37 @@ function isScheduledTaskPrompt(text) {
 }
 
 /**
+ * True when the text begins with the bridge's marker — at the very start, or at
+ * the start of the task inside the wrapper the app puts around the first
+ * message of a session `start_session` opened (see TURN_ORIGIN_SIDE_FRESH_PREFIX).
+ * The background of a fresh start is free text and may hold the separator
+ * itself, so every "\n\nTask:\n" after the wrapper is tried in turn. Never throws.
+ */
+function turnEntryStartsWithMarker(text) {
+  if (typeof text !== "string" || !text) return false;
+  if (TURN_ORIGIN_MARKER_RE.test(text)) return true;
+  if (text.startsWith(TURN_ORIGIN_SIDE_FORK_PREFIX)) {
+    return TURN_ORIGIN_MARKER_RE.test(text.slice(TURN_ORIGIN_SIDE_FORK_PREFIX.length));
+  }
+  if (!text.startsWith(TURN_ORIGIN_SIDE_FRESH_PREFIX)) return false;
+  const sep = TURN_ORIGIN_SIDE_TASK_SEPARATOR;
+  let at = text.indexOf(sep, TURN_ORIGIN_SIDE_FRESH_PREFIX.length);
+  while (at !== -1) {
+    if (TURN_ORIGIN_MARKER_RE.test(text.slice(at + sep.length, at + sep.length + 64))) return true;
+    at = text.indexOf(sep, at + 1);
+  }
+  return false;
+}
+
+/**
  * True when a prompt's own words say the SYSTEM wrote it, whatever its stamp
- * says: the bridge's kickoff marker at the very start of the text, or a text
- * that is, whole, the app's scheduled-task wrapper.
+ * says: the bridge's kickoff marker at the very start of the text (or of the
+ * task the app's start_session wrapper carries), or a text that is, whole, the
+ * app's scheduled-task wrapper.
  */
 function turnEntryAutoByText(row) {
   const text = turnEntryText(row);
-  return TURN_ORIGIN_MARKER_RE.test(text) || isScheduledTaskPrompt(text);
+  return turnEntryStartsWithMarker(text) || isScheduledTaskPrompt(text);
 }
 
 /**
