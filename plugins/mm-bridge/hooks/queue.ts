@@ -388,7 +388,7 @@ export function internalProjects(feed: Feed): Set<string> {
 }
 
 /** Every client's newest `last_outbound_at`, from every row of it the feed gives one on, in ms. */
-export function lastOutbound(feed: Feed): Map<string, number> {
+function lastOutbound(feed: Feed): Map<string, number> {
   const out = new Map<string, number>()
   const add = (pid: unknown, at: unknown): void => {
     const t = typeof at === 'string' ? ms(at) : NaN
@@ -1010,30 +1010,3 @@ export function isClosingRoute(command: unknown): boolean {
 
 /** The name 0.5.1 gave it (a reply draft was sent or discarded); the same test now. */
 export const isDraftDone = isClosingRoute
-
-// ---------------------------------------------------------------- a client email or message sent from this thread
-
-/**
- * The shapes of a command that sends a client email or message straight from a thread (R11, fix round 1, F1:
- * the F&I send of 2026-10-13 was a Gmail script, no gateway route): Gmail's send endpoints, spelled whole, split
- * (a quoted send path beside the Gmail host) or through the Google client library; HighLevel's conversation
- * message and email send; and the Massmarket send script. The same shapes the send gate knows
- * (global-config/hooks/send-gate.js, PATTERNS).
- */
-const CLIENT_SEND: ReadonlyArray<{ path: RegExp; also?: RegExp }> = [
-  { path: /gmail\.googleapis\.com\/gmail\/v1\/users\/[^/\s'"]+\/(?:drafts|messages)\/send/i },
-  { path: /["'`]\/(?:messages|drafts)\/send\b/i, also: /gmail\.googleapis\.com/i },
-  { path: /\busers\(\)\s*\.\s*(?:messages|drafts)\(\)\s*\.\s*send\s*\(|\busers\.(?:messages|drafts)\.send\s*\(/i },
-  { path: /services\.leadconnectorhq\.com\/conversations\/messages/i, also: /\bPOST\b|\.post\(|method['"]?\s*[:=]\s*['"`]?POST/i },
-  { path: /services\.leadconnectorhq\.com\/emails\/[^\s'"]*send/i },
-  { path: /\bsend-client-email\.py\b/ },
-]
-
-/**
- * Whether a shell command sends a client email or message itself. ⛔ As with isClosingRoute: yes or no, and
- * nothing of the command is kept, logged or passed on.
- */
-export function isClientSend(command: unknown): boolean {
-  if (typeof command !== 'string' || command.length > 200_000) return false
-  return CLIENT_SEND.some(s => s.path.test(command) && (!s.also || s.also.test(command)))
-}

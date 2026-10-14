@@ -4586,7 +4586,7 @@ describe('R4 and R5: a chip minted by itself for a client that needs a new threa
   })
 })
 
-describe('R6 and R11: a route call that can close something re-pulls the feed, and a link used for a send is the person\'s', () => {
+describe('R6 and R11: a route call that can close something re-pulls the feed, and makes an automatic link in its thread the person\'s; a send by any other path never does', () => {
   const helper = 'node ~/.claude/skills/team-api-gateway/scripts/mm-api.mjs'
   const NO_REPLY = `${helper} ext POST /reply-package/no-reply --body '{"project_id":"p","covers_through":"t","reason":"thanks"}'`
   const bash = ($: Engine, command: string) => $.tool.call({ tool: 'Bash', command } as never)
@@ -4612,24 +4612,44 @@ describe('R6 and R11: a route call that can close something re-pulls the feed, a
     expect(w.stored['mm.links']).toEqual({})
   })
 
-  // R11 widened (Opus, 10-13): any send counts, a Gmail script's too, once the feed shows it
-  test('R11, the F&I shape: linked by itself at T0, our send two hours later by no route at all, then the session declares another project: the link stays', async ($, on) => {
+  // ⛔ R11 (final round, 10-14): a send is never evidence. Only a closing route that worked in the thread, or the
+  // person's own act, makes a link the bridge made the person's.
+  const GMAIL_SCRIPT = `python3 - <<'EOF'\nservice.users().messages().send(userId="me", body=msg).execute()\nEOF`
+
+  test('R11, the F&I shape: linked by itself at T0, a Gmail-script send two hours later run in the thread, then the session declares another project: released', async ($, on) => {
     const w = linkedByItself(on)
     await mm($, '')
     expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0, made: NOW } })
     await w.clock.advance(2 * HOUR)
-    // the send, two hours on, by a Gmail script: the feed shows it, and this thread's own session at work on the
-    // client at that moment (fix round 1, F1: a send is tied to the thread by its session's activity)
+    // the send, two hours on, by a Gmail script run in this thread: the hook sees it and claims nothing
+    await bash($, GMAIL_SCRIPT)
+    expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { sid: SELF } })
+    // the feed shows the send, and this thread's own session at work on the client at that moment, with sole:false
+    const sent = new Date(NOW + 2 * HOUR - 60_000).toISOString()
+    const later = feed({ threads: [{ ...declared(ACME, SELF_CLI, 1), last_activity_at: sent, sole: false }] })
+    later.drafts = (later.drafts ?? []).map(d => ({ ...d, last_outbound_at: sent }))
+    w.setFeed(later)
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.stored['mm.auto']).toEqual({})
+    expect(w.threads.get(SELF)?.pinned).toBe(false)
+  })
+
+  test('R11, the F&I shape closed through a route: a reply-draft/sent call in the thread claims the link, and sole:false then leaves it', async ($, on) => {
+    const w = linkedByItself(on)
+    await mm($, '')
+    await w.clock.advance(2 * HOUR)
+    await bash($, `${helper} ext POST /reply-draft/sent --body-file sent.json`)
+    expect(w.stored['mm.auto']).toEqual({})
     const sent = new Date(NOW + 2 * HOUR - 60_000).toISOString()
     const later = feed({ threads: [{ ...declared(ACME, SELF_CLI, 1), last_activity_at: sent, sole: false }] })
     later.drafts = (later.drafts ?? []).map(d => ({ ...d, last_outbound_at: sent }))
     w.setFeed(later)
     await mm($, '')
     expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
-    expect(w.stored['mm.auto']).toEqual({})
   })
 
-  // Fix round 1, F1 (the reviewer's P6): a send that cannot be tied to the thread proves nothing about it
+  // The reviewer's P6: a send from elsewhere proves nothing about the thread
   const PIPE_CLI = 'cli-pipe'
   const cedarOnly = (threads: NonNullable<Feed['threads']>, ticketOver: Record<string, unknown> = {}): Feed => ({
     member: ME, role: 'builder', drafts: [], mail: [], threads,
@@ -4655,7 +4675,7 @@ describe('R6 and R11: a route call that can close something re-pulls the feed, a
     expect(sends(w)).toEqual([])
   })
 
-  test('P6b: sole:false and an untied newer send in the same sync: B3 wins, let go', async ($, on) => {
+  test('P6b: sole:false and a newer send in the same sync: B3 wins, let go', async ($, on) => {
     const w = pipeline(on)
     await mm($, '')
     await w.clock.advance(HOUR)
@@ -4673,7 +4693,7 @@ describe('R6 and R11: a route call that can close something re-pulls the feed, a
     expect(w.stored['mm.links']).toEqual({})
   })
 
-  test('a send tied by the session\'s activity, but the thread\'s marker names another client: not tied, let go', async ($, on) => {
+  test('a marker naming another client never claims: with a send and the session at work on the client, let go', async ($, on) => {
     const sent = new Date(NOW + 2 * HOUR).toISOString()
     const w = world(on, { feed: cedarOnly([declared(CEDAR, PIPE_CLI, 1)]), threads: [thread('local_p', 'Pipeline speed', 1)], store: { 'mm.threads': { [PIPE_CLI]: { app: 'local_p', at: NOW } } } })
     await mm($, '')
@@ -4684,15 +4704,64 @@ describe('R6 and R11: a route call that can close something re-pulls the feed, a
     expect(w.stored['mm.links']).toEqual({})
   })
 
-  test('F1 (a): a Gmail send run in the thread itself makes its link the person\'s, with no gateway route', async ($, on) => {
+  test('a Gmail send run in the thread itself does not make its link the person\'s: released on sole:false', async ($, on) => {
     const w = linkedByItself(on)
     await mm($, '')
-    const gmail = `python3 - <<'EOF'\nservice.users().messages().send(userId="me", body=msg).execute()\nEOF`
-    await bash($, gmail)
-    expect(w.stored['mm.auto']).toEqual({})
+    await bash($, GMAIL_SCRIPT)
+    expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { sid: SELF } })
     w.setFeed(declaredMore())
     await mm($, '')
-    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+    expect(w.stored['mm.links']).toEqual({})
+  })
+
+  test('a HighLevel send or the send script run in the thread claims nothing either', async ($, on) => {
+    const w = linkedByItself(on)
+    await mm($, '')
+    await bash($, 'curl -X POST https://services.leadconnectorhq.com/conversations/messages -d @sms.json')
+    await bash($, 'python3 scripts/send-client-email.py --to client@example.com')
+    expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { sid: SELF } })
+    w.setFeed(declaredMore())
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+  })
+
+  // The reviewer's round 2 (R2-F1a/b): a teammate's send, then the thread is used again on the client
+  const TEAMMATE_SEND = { last_outbound_at: new Date(NOW + 30 * 60_000).toISOString() }
+  const pipeRow = (lastActivity: number, over: Record<string, unknown> = {}) => ({ project_id: CEDAR, session_id: PIPE_CLI, last_activity_at: new Date(NOW + lastActivity).toISOString(), ...over })
+
+  test('R2-F1a: a teammate\'s send at +30m, the thread used again on the client at +90m, then it loads another skill: released, and Update sends nothing into it', async ($, on) => {
+    const w = pipeline(on)
+    await mm($, '')
+    expect(w.stored['mm.auto']).toMatchObject({ [CEDAR]: { sid: 'local_p', made: NOW } })
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([declared(CEDAR, PIPE_CLI, 1)], TEAMMATE_SEND))
+    await mm($, '')
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([pipeRow(90 * 60_000)], TEAMMATE_SEND))
+    await mm($, '')
+    expect(w.stored['mm.auto']).toMatchObject({ [CEDAR]: { sid: 'local_p' } })
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([pipeRow(150 * 60_000, { sole: false })], TEAMMATE_SEND))
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.threads.get('local_p')).toMatchObject({ title: 'Pipeline speed', pinned: false })
+    await mm($, 'update Cedar')
+    expect(sends(w)).toEqual([])
+  })
+
+  test('R2-F1b: the sync that first sees sole:false also sees the client\'s rows written after the teammate\'s send: released, and Update sends nothing into it', async ($, on) => {
+    const w = pipeline(on)
+    await mm($, '')
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([declared(CEDAR, PIPE_CLI, 1)], TEAMMATE_SEND))
+    await mm($, '')
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([pipeRow(115 * 60_000, { sole: false })], TEAMMATE_SEND))
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.stored['mm.auto']).toEqual({})
+    await mm($, 'update Cedar')
+    expect(sends(w)).toEqual([])
   })
 
   test('R11: a link made by itself with no send since it was made (our last send is older) is let go, as before', async ($, on) => {

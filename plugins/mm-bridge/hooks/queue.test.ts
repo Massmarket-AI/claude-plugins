@@ -3,7 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import { businessMsBetween, subtractBusinessMs } from './business-time'
 import {
   MAIL_LOOKBACK_HOURS, NOBODY, WINDOW_AHEAD_MS, WINDOW_BACK_MS, buildLists, buildQueue, cleanName, cleanText, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockLead, clockText, draftsLine, dueLine, holdBanner,
-  CHECK_WAIT_MS, checkingTitle, fastState, internalProjects, isClientSend, whenText, holdSentence, holderName, isClosingRoute, isDraftDone, isUuid, needsLine, noteText, pinsNow, shortName, stillOpenTitle, threadTitle, titleFor, titleNames, withTeammate,
+  CHECK_WAIT_MS, checkingTitle, fastState, internalProjects, whenText, holdSentence, holderName, isClosingRoute, isDraftDone, isUuid, needsLine, noteText, pinsNow, shortName, stillOpenTitle, threadTitle, titleFor, titleNames, withTeammate,
 } from './queue'
 import type { Feed, QueueItem } from './queue'
 import { handoverText, kickoffText, waitingText } from './threads'
@@ -1422,25 +1422,5 @@ describe('F3: never "checking" while something else of the client\'s still needs
     const l = buildLists(f, now)
     expect(l.queue.map(i => i.projectId)).toEqual([P1])
     expect(l.checking).toEqual([])
-  })
-})
-
-describe('F1 (a): a client email or message sent from the thread itself', () => {
-  test('Gmail, spelled whole, split or through the client library; HighLevel; the send script', async () => {
-    for (const command of [
-      'curl -s -X POST https://gmail.googleapis.com/gmail/v1/users/me/messages/send -d @m.json',
-      "python3 - <<'EOF'\nGMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me'\ncall(tok, 'POST', GMAIL + '/drafts/send', body)\nEOF",
-      "python3 send.py <<'EOF'\nservice.users().messages().send(userId='me', body=msg).execute()\nEOF",
-      'curl -X POST https://services.leadconnectorhq.com/conversations/messages -d @sms.json',
-      'python3 scripts/send-client-email.py --to client@example.com',
-    ]) expect(isClientSend(command), command).toBe(true)
-  })
-  test('⛔ a draft, a read, or talk about sending is not one', async () => {
-    for (const command of [
-      "python3 - <<'EOF'\nservice.users().drafts().create(userId='me', body=d).execute()\nEOF",
-      'curl -s https://gmail.googleapis.com/gmail/v1/users/me/messages?q=from:x',
-      'grep -rn "messages/send" docs/',
-      'git commit -m "the email was sent"',
-    ]) expect(isClientSend(command), command).toBe(false)
   })
 })

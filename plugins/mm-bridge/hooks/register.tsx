@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { MmBand, MmFolds, MmNotice, MmQueue, MmView } from '../types'
 
 import {
-  MAIL_LOOKBACK_HOURS, buildLists, byDue, checkingTitle, internalProjects, isClientSend, lastOutbound, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, needsLine, noteText, pinsNow,
+  MAIL_LOOKBACK_HOURS, buildLists, byDue, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, needsLine, noteText, pinsNow,
   threadTitle, titleFor, withHolder,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
@@ -995,19 +995,13 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // cannot be seen is left as it is. A link the person made is not in `auto`, and is never undone here.
   const undone: string[] = []
   if (!known) {
-    // R11 (Opus, 10-13): our outbound to the client, by any path (a Gmail script too), as the feed has it
-    const outs = lastOutbound(feed)
     for (const [pid, a] of Object.entries(auto)) {
       if (unseen.has(a.sid)) continue
       // When the link was made: a record an older version made is dated the first time this version sees it.
       if (typeof a.made !== 'number' || !Number.isFinite(a.made)) a.made = now
-      // ⛔ R11 (fix round 1, F1): a link the bridge made that has been used for a send TIED TO THIS THREAD is the
-      // person's from here on, never let go by B3 again (`sendTied`). A send it cannot tie to the thread (a
-      // teammate's, Lane-2's, a script in another thread) proves nothing, and B3's evidence wins over it.
-      else if (sendTied(pid, a, outs, feedThreads, pairs, marked)) {
-        delete auto[pid]
-        continue
-      }
+      // ⛔ R11 (final round, 10-14): a send is never evidence here. A link the bridge made becomes the person's
+      // only through a closing route that succeeded in its own thread (`claimUsed`) or the person's own act (a
+      // press, a typed /mm command, an [mm-link] marker); either one takes it out of `auto` before this loop.
       const fate = autoLinkFate(pid, a.sid, feedThreads, pairs, marked)
       if (fate === 'stays') {
         a.miss = 0
@@ -1341,31 +1335,6 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   await storeLast($, feed, last)
   await showQueue($, member, items, rows, want.size, now, folds)
   return { last, live, pairs, listed: true, unseen }
-}
-
-/** R11: within this long before our send, the thread's session working on the client ties the send to it. */
-const SEND_TIE_MS = 30 * 60_000
-
-/**
- * R11 (Opus, fix round 1, F1): whether our newest send to a client is tied to the thread the bridge linked it
- * to by itself: the send is newer than the moment the link was made, and the feed shows that thread's own
- * session at work on that client within SEND_TIE_MS before it. OW's `threads[].last_activity_at` is per session
- * and project: "that project's newest row in the session" (onboarding-wizard src/lib/ext/closeout-threads.ts,
- * the header's WHICH SESSIONS and `threadsFromSessionRows`). ⛔ Never when the thread's [mm-link] marker names
- * another client. (A send the thread's own session ran is tied in the hook instead: `claimUsed`.)
- */
-function sendTied(
-  pid: string,
-  a: { sid: string; made?: number },
-  outs: ReadonlyMap<string, number>,
-  feedThreads: readonly FeedThread[],
-  pairs: Pairs,
-  marked: Readonly<Record<string, string>>,
-): boolean {
-  const out = outs.get(pid) ?? 0
-  if (!(typeof a.made === 'number' && out > a.made)) return false
-  if (marked[a.sid] !== undefined && marked[a.sid] !== pid) return false
-  return feedThreads.some(t => t.project_id === pid && pairs[t.session_id]?.app === a.sid && Date.parse(t.last_activity_at) >= out - SEND_TIE_MS)
 }
 
 /** The sync record a pass made, stored; and, when the pass was over the feed this session read last, kept with it (recentFeed). */
@@ -1842,9 +1811,11 @@ async function tick($: EngineInterface): Promise<void> {
     // (fix round 1, L12) the sync on record says it failed only when the sync itself did, and only while no
     // other session has synced since (its `at` unchanged): anything else that goes wrong in a tick is the
     // heartbeat's to say, and never makes the band read a working sync as stale
-    if (failed) {
+    // (TypeScript narrows `failed` to null here, since it cannot see the assignment inside the inner catch)
+    const f = failed as { at: number | null } | null
+    if (f) {
       const last = await storeGet<Last | null>($, 'mm.last', null)
-      if (last && last.at === failed.at) await $.store.set('mm.last', { ...last, error: short(String(err), 300) })
+      if (last && last.at === f.at) await $.store.set('mm.last', { ...last, error: short(String(err), 300) })
     }
     $.ui.status(`MM: error, /mm status`)
     await refreshBand($)
@@ -1877,9 +1848,11 @@ async function askSync($: EngineInterface): Promise<void> {
 
 /**
  * R11 (Rob, 2026-10-13: the F&I thread lost its link when its session also declared the internal-ops project):
- * a route call that can close something worked in this thread, so a link the bridge made by itself for this
- * thread has been used for a send. It is the person's from here on (`claim`): a session that also declares
- * another project no longer lets it go (only a never-used link the bridge made is released by B3).
+ * a route call that can close something (the R6 routes: `isClosingRoute`) worked in this thread, so a link the
+ * bridge made by itself for this thread has been used to close a reply. It is the person's from here on
+ * (`claim`): a session that also declares another project no longer lets it go. ⛔ (final round, 10-14) This and
+ * the person's own act are the only two ways: a send by any other path (a Gmail script, an HL call) claims
+ * nothing, and B3 releases a link no route or act has claimed.
  */
 async function claimUsed($: EngineInterface): Promise<void> {
   const me = (await knownSelf($)) || (await selfId($))
@@ -2454,8 +2427,8 @@ async function takenOver(
 /**
  * (S2, M1, B3) Before a press sends (Update, Claim): whether the thread its row showed is still the client's, by
  * the feed just read. A link the person made always is. A thread the bridge linked by itself, or one the row
- * offered with no link, is the client's only while the feed's rows for its sessions say so (B3; a link used for
- * a send tied to it stays, R11), and while no newer thread of the client's has taken it (`takenOver`).
+ * offered with no link, is the client's only while the feed's rows for its sessions say so (B3; ⛔ a send is
+ * never evidence, R11 final round), and while no newer thread of the client's has taken it (`takenOver`).
  */
 async function stillTheClients(
   $: EngineInterface,
@@ -2472,7 +2445,7 @@ async function stillTheClients(
   const rows = feedThreadsOf(read)
   const pairs = await storeGet<Pairs>($, 'mm.threads', {})
   const marked = await storeGet<Record<string, string>>($, 'mm.marked', {})
-  if (linked === target.sid) return autoLinkFate(projectId, target.sid, rows, pairs, marked) !== 'goes' || (own !== undefined && sendTied(projectId, own, lastOutbound(read), rows, pairs, marked))
+  if (linked === target.sid) return autoLinkFate(projectId, target.sid, rows, pairs, marked) !== 'goes'
   return (
     (target.suggested ? !declaredOther(projectId, target.sid, rows, pairs, marked) : onlyClients(projectId, target.sid, rows, pairs, marked)) &&
     !(await takenOver($, projectId, target, links, rows, pairs, marked, pass.live.get(target.sid)))
@@ -3394,11 +3367,11 @@ export const register: Register = on => {
     try {
       const finished = !answer.deny && !answer.isError
       const command = (e as { command?: unknown }).command
-      if (finished && (isClosingRoute(command) || isClientSend(command))) {
+      if (finished && isClosingRoute(command)) {
         // R6: the feed is read again at once
         await askSync($)
-        // R11: a link this thread has by itself is the person's from here on: this thread's own session sent
-        // (a gateway route, or, fix round 1 F1, a Gmail or HighLevel send it ran itself)
+        // R11: a link this thread has by itself is the person's from here on: a closing route worked in this
+        // thread. ⛔ Only a route: a send by any other path (a Gmail script, an HL call) claims nothing.
         await claimUsed($)
       }
     } catch {
