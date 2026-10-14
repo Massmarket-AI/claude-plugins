@@ -737,7 +737,7 @@ export type BandFacts = {
    * R4: clients on the list due within that window with no thread at all, soonest first, with their due times, and
    * (0.5.4, C3) the thread their one chip is in, as `threadTitleShort` names it, when there is one.
    */
-  noThread: Array<{ client: string; due: string; chipIn?: string | undefined }>
+  noThread: Array<{ client: string; due: string; chipIn?: string | undefined; chipHere?: boolean | undefined }>
   /** (0.5.4, C2) The other threads that hold a chip for a client of the person's with a thread, one entry each, by name. */
   chipsElsewhere?: string[]
   /** (0.5.5) A later mm-bridge installed on this machine than the one this thread runs: its version. */
@@ -767,7 +767,8 @@ export type BandFacts = {
  *   chips of clients with a thread, elsewhere (C2) ` · a chip is ready in <thread>` on the first line, or
  *                                                  ` · chips ready in <n> threads` for more than one
  *   a client with no thread whose chip exists (C3) `🔴 <client> has no thread (due <due>): its chip is in <thread>.`,
- *                                                  in every thread, for each such client
+ *                                                  in every thread, for each such client; (0.5.6) in any thread but
+ *                                                  that one, followed by ` Press Start thread in the pane to bring it here.`
  * (0.5.5, Rob 10-14, verbatim) A later mod installed than this thread runs: ` · A newer Claude mod (<version>) is
  * installed: quit and reopen Claude to load it.` at the end of the first line (of the last, when there is no first).
  */
@@ -790,8 +791,12 @@ export function bandText(f: BandFacts): string {
   const newer = f.newer ? `A newer Claude mod (${f.newer}) is installed: quit and reopen Claude to load it.` : ''
   if (first && newer) first = `${first.replace(/\.$/, '')} · ${newer}`
   if (first) out.push(first)
-  // (0.5.4, C3) each client with no thread whose one chip exists: where it is
-  for (const n of f.noThread) if (n.chipIn) out.push(`🔴 ${n.client} has no thread (due ${n.due}): its chip is in ${n.chipIn}.`)
+  // (0.5.4, C3) each client with no thread whose one chip exists: where it is; (0.5.6) and, in any other thread
+  // than that one, that Start thread brings it here
+  for (const n of f.noThread) {
+    if (!n.chipIn) continue
+    out.push(`🔴 ${n.client} has no thread (due ${n.due}): its chip is in ${n.chipIn}.${n.chipHere ? '' : ' Press Start thread in the pane to bring it here.'}`)
+  }
   const one = f.noThread.length === 1 ? f.noThread[0] : undefined
   if (one && !one.chipIn) out.push(`Open a thread for ${one.client} (due ${one.due}): type /mm start ${one.client}.`)
   else if (!f.noThread.length && !f.stillOpen && f.update) out.push(`An update is ready to claim in the ${f.update} thread.`)

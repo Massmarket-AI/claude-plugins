@@ -1407,8 +1407,10 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const chip = rec.state === 'start' ? liveChip(chips, it.projectId) : undefined
     if (!chip) return rec
     if (chip.threadId === me) return { ...rec, reason: 'the chip is ready here' }
+    // (0.5.6, Rob 10-14: "Start in the thread that I click it on") Start here moves it: the row says so
     const holder = live.get(chip.threadId)
-    return holder ? { ...rec, reason: `a chip is waiting in "${cleanTitle(holder.title)}"` } : rec
+    const where = holder ? cleanTitle(holder.title) : chip.place
+    return where ? { ...rec, reason: `its chip is in "${where}"; Start thread moves it here` } : rec
   }
 
   // R2: each client's recommendation. A title that merely looks like the client is offered only when the
@@ -1892,7 +1894,7 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
     pinned: Number(last.pinned) || 0,
     // (fix round 1, L7) anything due within the window, with a thread or not, says Needs you
     pinsNow: items.some(i => pinsNow(i, now)),
-    noThread: noThread.map(i => ({ client: cleanName(i.client), due: clockText(i.dueAt, now), chipIn: chipIn(i.projectId) })),
+    noThread: noThread.map(i => ({ client: cleanName(i.client), due: clockText(i.dueAt, now), chipIn: chipIn(i.projectId), chipHere: Boolean(me) && liveChip(chips, i.projectId)?.threadId === me })),
     chipsElsewhere: [...elsewhere.values()],
     stillOpen: stillOpen ? cleanName(stillOpen.client) : undefined,
     update: update ? cleanName(update.client) : undefined,
@@ -2394,9 +2396,40 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
   }
   // A client that already has a thread: the new one is asked to look at how the old one ended (handoverText).
   const prompt = startKickoff(it, await replaced($, it, pass), now)
+  // (0.5.6, Rob 10-14: "Start in the thread that I click it on") the client's chip in another thread, moved here
+  const elsewhere = before.filter(c => c.projectId === it.projectId && !c.superseded && c.threadId !== me)
   const made = await mintChip($, { it, signature, need: 'start', auto: false, title: startTitle(it), tldr: startTldr(it, now), prompt, me, now })
   if (!made.made) return made.why === 'no-answer' ? NO_ANSWER(it.client) : `Could not create the chip: ${short(made.text)}`
-  return `A chip for ${it.client} is ready here: click Start on it.`
+  // (0.5.6) where it is, as the band and the other threads' rows name it: asked for after the answer, never before it
+  void placeChip($, me, it.projectId, now).catch(() => {})
+  if (!elsewhere.length) return `A chip for ${it.client} is ready here: click Start on it.`
+  // Only once the one here is made: the other is superseded, and the thread it is in withdraws it on its next
+  // chips pass (a chip can be withdrawn only by the thread that minted it).
+  await patchChips($, now, fresh => {
+    for (const f of fresh) if (elsewhere.some(c => sameChip(c, f))) f.superseded = true
+    return fresh
+  }).catch(err => noteFailure($, 'start: the chip moved here', err))
+  // its thread's name: as the pass saw it, as the chip was minted with, else as the app says it now
+  const from = elsewhere.at(-1) as Chip
+  let title = cleanTitle(pass.live.get(from.threadId)?.title ?? '') || from.place || ''
+  if (!title) {
+    const found = await lookup($, from.threadId)
+    title = typeof found === 'object' ? cleanTitle(found.title ?? '') : ''
+  }
+  return `A chip for ${it.client} is ready here: click Start on it. The one in "${title || 'another thread'}" is withdrawn.`
+}
+
+/** (0.5.6) A chip the person made here, given the name of the thread it is in once the app says it (`ownPlace`). */
+async function placeChip($: EngineInterface, me: string, projectId: string, at: number): Promise<void> {
+  const place = await ownPlace($)
+  if (!place) return
+  await patchChips($, await $.clock.now(), fresh => {
+    const mine = fresh.filter(c => c.threadId === me && c.projectId === projectId && c.at === at && !c.place)
+    if (!mine.length) return false
+    for (const c of mine) c.place = place
+    return fresh
+  })
+  for (const [k, c] of ownChips) if (c.threadId === me && c.projectId === projectId && c.at === at) ownChips.set(k, { ...c, place })
 }
 
 /** One chip a thread mints by itself: for a client, a need, and what it carries. `place`: the thread it is in, as the band names it. */
@@ -2442,9 +2475,11 @@ function needsFor(last: Last, w: ChipWorld, now: number): Need[] {
     if (!rec) continue
     const signature = signatureOf(it)
     const linked = w.links[it.projectId]
-    // A chip the person made (Start thread, /mm start) stands for the client's one chip: anywhere for a client with
-    // no thread, in its own thread for one with a thread. Nothing is minted beside it, and it is never replaced.
-    if (w.chips.some(c => c.projectId === it.projectId && !c.auto && !c.superseded && (linked === undefined || c.threadId === w.me))) continue
+    // A chip the person made (Start thread, /mm start) stands for the client's one chip, and nothing is minted beside
+    // it: for a client with no thread, wherever it is; in this thread, always; and (0.5.6: Start moves the chip to the
+    // thread it is pressed in) in another thread while it carries what is waiting now. The bridge cannot see a chip the
+    // person dismissed, so one for something older never holds back the client's own thread once something new comes.
+    if (w.chips.some(c => c.projectId === it.projectId && !c.auto && !c.superseded && (linked === undefined || c.threadId === w.me || c.signature === signature))) continue
     if (linked === undefined) {
       // C3: a client with no linked thread, when its recommendation is a new thread
       if (rec.state !== 'start' || noThreadHolder(it.projectId, w, now) !== w.me) continue

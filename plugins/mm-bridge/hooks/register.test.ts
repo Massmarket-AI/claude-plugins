@@ -680,8 +680,9 @@ describe('R3: the buttons on each row', () => {
     const said = 'A chip for Cedar Dental is ready here: click Start on it.'
     expect(await lines(ui)).toContain(said)
     expect(w.toasts).toEqual([said])
-    // the chip is on record: which client, what it carries, the app's id for it, and the thread it shows in
-    expect(w.stored['mm.chips']).toEqual([{ projectId: CEDAR, signature: `${CEDAR_KICKOFF}\n\n`, taskId: chipId(1), threadId: SELF, at: NOW, prompt: CEDAR_KICKOFF }])
+    // the chip is on record: which client, what it carries, the app's id for it, and the thread it shows in, with
+    // (0.5.6) that thread's name as the band and the other threads' rows give it
+    expect(w.stored['mm.chips']).toEqual([{ projectId: CEDAR, signature: `${CEDAR_KICKOFF}\n\n`, taskId: chipId(1), threadId: SELF, at: NOW, prompt: CEDAR_KICKOFF, place: 'Morning hub' }])
     // Start links and pins nothing, and sends nothing
     expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a' })
     expect(w.threads.get('local_t')).toMatchObject({ title: 'Bolt Staffing: invoice question', pinned: false })
@@ -2830,27 +2831,39 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
     expect(w.acted().length).toBe(5)
   })
 
-  // R5 (0.5.2): every running thread keeps its own copy of a client's chip. A copy in another thread is that
-  // thread's: this one never supersedes or withdraws it.
-  test('a chip waiting in another thread: the row says where; Start here mints one here, and the other thread keeps its own copy', async ($, on) => {
+  // (0.5.6, Rob 10-14: "Start in the thread that I click it on") Start moves the client's chip to the thread it is
+  // pressed in: the other thread's is superseded, and that thread withdraws it on its own pass (only the thread that
+  // minted a chip can withdraw it).
+  test('a chip waiting in another thread: the row says where and that Start moves it; Start here mints one here and supersedes the other', async ($, on) => {
     const w = world(on, { store: { 'mm.chips': [chip(CEDAR, 9, 'local_other', { signature: `${CEDAR_KICKOFF}\n\n`, prompt: CEDAR_KICKOFF })] } })
     await mm($, '')
     const ui = await pane($)
-    expect(await lines(ui)).toContain('1 task due · Start thread: a chip is waiting in "Unrelated notes"')
+    expect(await lines(ui)).toContain('1 task due · Start thread: its chip is in "Unrelated notes"; Start thread moves it here')
     expect(await buttonsOf(ui, CEDAR)).toEqual(['Start thread', 'Drafts'])
     await ui.press({ key: `start:${CEDAR}` })
-    expect(w.toasts.at(-1)).toBe('A chip for Cedar Dental is ready here: click Start on it.')
+    expect(w.toasts.at(-1)).toBe('A chip for Cedar Dental is ready here: click Start on it. The one in "Unrelated notes" is withdrawn.')
     expect(await lines(ui)).toContain('1 task due · Start thread: the chip is ready here')
     expect((w.stored['mm.chips'] as Array<{ taskId: string; threadId: string; superseded?: boolean }>).map(c => [c.taskId, c.threadId, Boolean(c.superseded)])).toEqual([
-      [chipId(9), 'local_other', false],
+      [chipId(9), 'local_other', true],
       [chipId(1), SELF, false],
     ])
     await ui.unmount()
-    // a chip is withdrawn from the thread that minted it: this one leaves the other thread's to that thread
+    // this thread withdraws nothing of the other's: that thread does, on its own pass
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
     expect(w.dismissed()).toEqual([])
-    expect((w.stored['mm.chips'] as Array<{ threadId: string; taskId: string }>).filter(c => c.threadId === 'local_other').map(c => c.taskId)).toEqual([chipId(9)])
+    // and no other chip for Cedar is minted beside the person's here, by the timer or otherwise
+    expect(w.minted().filter(c => String(c.args.title).startsWith('Cedar Dental')).length).toBe(1)
+  })
+
+  test('(0.5.6) a typed /mm start moves it the same way', async ($, on) => {
+    const w = world(on, { store: { 'mm.chips': [chip(CEDAR, 9, 'local_other', { signature: `${CEDAR_KICKOFF}\n\n`, prompt: CEDAR_KICKOFF })] } })
+    await mm($, '')
+    expect(await mm($, 'start cedar dental')).toBe('A chip for Cedar Dental is ready here: click Start on it. The one in "Unrelated notes" is withdrawn.')
+    expect((w.stored['mm.chips'] as Array<{ taskId: string; superseded?: boolean }>).map(c => [c.taskId, Boolean(c.superseded)])).toEqual([
+      [chipId(9), true],
+      [chipId(1), false],
+    ])
   })
 
   test('the minting session withdraws its own chips: one superseded, one whose client has since a thread, one whose client no longer needs the person', async ($, on) => {
@@ -5493,5 +5506,91 @@ describe('0.5.5: the band says when a later mod is installed than this thread ru
     expect(isNewerVersion('1.0.0', '1.0.0')).toBe(false)
     expect(isNewerVersion('1.0', '0.9.0')).toBe(false)
     expect(isNewerVersion('latest', '0.9.0')).toBe(false)
+  })
+})
+
+// ======================================================================== 0.5.6
+
+describe('0.5.6: a thread started from a chip is a sub-session of the thread that held it (Rob, 10-14); nothing reads the parent', () => {
+  /** The parent linked to Acme; the child, started from a chip in it, linked to Bolt. */
+  const family = (on: On) =>
+    world(on, {
+      threads: [thread('local_par', 'Parent work', 2), { ...thread('local_kid', 'Child work', 1), parentSessionId: 'local_par' } as Thread],
+      store: { 'mm.links': { [ACME]: 'local_par', [BOLT]: 'local_kid' } },
+    })
+
+  test('the parent\'s client clears: the parent is unpinned and named clear; the child keeps its pin, its name and its link, then and on the syncs after', async ($, on) => {
+    const w = family(on)
+    await mm($, '')
+    expect(w.threads.get('local_par')).toMatchObject({ title: ACME_TITLE, pinned: true })
+    expect(w.threads.get('local_kid')).toMatchObject({ title: BOLT_TITLE, pinned: true })
+    const before = w.writes().length
+    w.setFeed(feed({ drafts: [] }))
+    await mm($, '')
+    expect(w.threads.get('local_par')).toMatchObject({ title: '✓ Acme Roofing · clear 11 AM', pinned: false })
+    expect(w.threads.get('local_kid')).toMatchObject({ title: BOLT_TITLE, pinned: true })
+    // the clear sweep on the syncs after touches the child no more
+    for (let i = 0; i < 2; i++) {
+      await w.clock.advance(5 * 60_000)
+      await mm($, '')
+    }
+    expect(w.threads.get('local_kid')).toMatchObject({ title: BOLT_TITLE, pinned: true })
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_par', [BOLT]: 'local_kid' })
+    // nothing was written to the child once its parent's client cleared
+    expect(w.writes().slice(before).filter(c => c.includes('local_kid'))).toEqual([])
+  })
+
+  test('the child\'s client clears: the parent keeps its pin and its client', async ($, on) => {
+    const w = family(on)
+    await mm($, '')
+    w.setFeed(feed({ mail: [] }))
+    await mm($, '')
+    expect(w.threads.get('local_kid')).toMatchObject({ title: '✓ Bolt Staffing · clear 11 AM', pinned: false })
+    expect(w.threads.get('local_par')).toMatchObject({ title: ACME_TITLE, pinned: true })
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_par', [BOLT]: 'local_kid' })
+  })
+})
+
+describe('0.5.6 (Opus gate): a chip the person made holds back the auto chips only while it can stand for them', () => {
+  type ChipRec = { projectId: string; signature: string; taskId: string; threadId: string; at: number; prompt: string; auto?: true; superseded?: true }
+  const acmeChips = (w: { minted: () => Call[] }) => w.minted().filter(c => String(c.args.title).includes('Acme Roofing'))
+  /** Acme is this thread's; the timer mints its Do it here chip, and the person then moves Acme's chip to another thread with Start there. */
+  const movedAway = async ($: Engine, on: On) => {
+    const w = world(on, { feed: acmeFeed(), store: { 'mm.links': { [ACME]: SELF } } })
+    await tickOnce($, w)
+    expect(acmeChips(w).length).toBe(1)
+    const chips = w.stored['mm.chips'] as ChipRec[]
+    const mine = chips.find(c => c.projectId === ACME) as ChipRec
+    // what Start in local_other leaves on record: its own chip, carrying what is waiting now, and this thread's superseded
+    w.stored['mm.chips'] = [...chips.map(c => (c.projectId === ACME ? { ...c, superseded: true as const } : c)), { projectId: ACME, signature: mine.signature, taskId: 'task_00000099', threadId: 'local_other', at: NOW + 4_000, prompt: mine.prompt }]
+    return w
+  }
+
+  test('moved away from the linked thread, carrying what is waiting now: the linked thread mints no chip of its own beside it', async ($, on) => {
+    const w = await movedAway($, on)
+    const own = (w.stored['mm.chips'] as ChipRec[]).find(c => c.projectId === ACME && c.threadId === SELF)?.taskId
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(acmeChips(w).length).toBe(1)
+    // its own, superseded, it withdrew
+    expect(w.dismissed()).toEqual([own])
+  })
+
+  test('the same chip once something new comes for the client: the linked thread mints its chip again (a chip the person dismissed is not seen)', async ($, on) => {
+    const w = await movedAway($, on)
+    await w.clock.advance(60_000)
+    expect(acmeChips(w).length).toBe(1)
+    // a newer package for Acme: what is waiting now is something else
+    w.setFeed(acmeFeed({ covers_through: ago(1) }))
+    await mm($, '')
+    await w.clock.advance(60_000)
+    expect(acmeChips(w).length).toBe(2)
+    expect(acmeChips(w).at(-1)?.args.title).toBe(ACME_HERE_CHIP.args.title)
+  })
+
+  test('a client with no thread: a chip the person made anywhere holds back every auto chip for it, whatever it carries', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], mail: [] }), store: { 'mm.chips': [{ projectId: CEDAR, signature: 'something older', taskId: 'task_00000088', threadId: 'local_other', at: NOW - HOUR, prompt: 'an older prompt' }] } })
+    await tickOnce($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(w.minted().filter(c => String(c.args.title).includes('Cedar Dental'))).toEqual([])
   })
 })

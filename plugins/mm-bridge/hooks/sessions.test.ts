@@ -913,6 +913,52 @@ describe('0.5.3 claim in place, as 0.5.4 has it: the long thread\'s own fresh-th
   })
 })
 
+// ======================================================================== 0.5.6
+
+describe('0.5.6: Start moves the chip to the thread it is pressed in (Rob, 10-14: "Start in the thread that I click it on")', () => {
+  test('the chip in Y; Start pressed in X: X mints, Y\'s is superseded and Y withdraws it on its pass; one live chip; again in X: already here; a third thread says where it is now', async () => {
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(81, 'Client Eight One', 1)] }
+    const [Y, X, Z] = ['local_mvy', 'local_mvx', 'local_mvz']
+    const w = fakeApp(feed, [{ sessionId: Y, title: 'Deviate Media HighLevel Build' }, { sessionId: X, title: 'Where I am' }, { sessionId: Z, title: 'Elsewhere' }], [], { every: true })
+    const [ys, xs, zs] = [Y, X, Z].map(id => w.session(id))
+    // Y polls: with no prompt of the person's anywhere yet, the client's one chip is minted there (C3)
+    w.put('mm.lease', { owner: `cli:${Y}`, until: NOW + 24 * 3_600_000 })
+    await mm(ys, '')
+    for (const s of [ys, xs, zs]) await startIn(s)
+    await w.advance(4_000)
+    await settleAll()
+    expect(liveChips(w).map(c => c.threadId)).toEqual([Y])
+    const notice = () => (w.view(X, 'notice') as { text: string } | undefined)?.text
+    // the person, in X, presses Start for the client
+    await mm(xs, '')
+    expect(await press(xs, `start:${pid(81)}`)).toBe(true)
+    await settleAll()
+    expect(notice()).toBe('A chip for Client Eight One is ready here: click Start on it. The one in "Deviate Media HighLevel Build" is withdrawn.')
+    // Y withdraws its own on its next pass; exactly one live chip, X's
+    await w.advance(15_000)
+    await settleAll()
+    expect(liveChips(w).map(c => c.threadId)).toEqual([X])
+    expect(dismissedIn(w).length).toBe(1)
+    // pressed again in X: it is here already
+    expect(await press(xs, `start:${pid(81)}`)).toBe(true)
+    await settleAll()
+    expect(notice()).toBe('A chip for Client Eight One is already here: click Start on it.')
+    // no chip is minted beside the person's, in any thread, on the ticks that follow
+    for (let i = 0; i < 3; i++) {
+      await w.advance(60_000)
+      await settleAll()
+    }
+    expect(spawnedIn(w).length).toBe(2)
+    expect(liveChips(w).map(c => c.threadId)).toEqual([X])
+    // a third thread: the band says where the chip is and that Start brings it there; the row says the same
+    expect((w.view(Z, 'band') as { text: string }).text).toMatch(/🔴 Client Eight One has no thread \(due [^)]+\): its chip is in Where I am\. Press Start thread in the pane to bring it here\./)
+    expect((w.view(X, 'band') as { text: string }).text).toMatch(/its chip is in Where I am\.(?! Press)/)
+    await mm(zs, '')
+    const rows = (w.view(Z, 'queue') as { rows: Array<{ projectId: string; reason: string }> }).rows
+    expect(rows.find(r => r.projectId === pid(81))?.reason).toBe('its chip is in "Where I am"; Start thread moves it here')
+  })
+})
+
 describe('R13: in a thread that does not sync, the refresh-failed line never goes while the pane shows the old list', () => {
   test('the line goes with the list drawn again from the newer sync', async () => {
     const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], drafts: [], mail: [mail(61, 'Client Six One')] }
