@@ -1215,7 +1215,7 @@ describe('F6: the band counts the person\'s clients under Older', () => {
   test('the other forms say it at the end of their first line', async () => {
     expect(bandText({ ...base, pinned: 1, pinsNow: true, older: 3 })).toBe('Needs you: 1 pinned · 3 older overdue.')
     expect(bandText({ ...base, pinned: 1, pinsNow: true, stillOpen: 'Cedar Dental', older: 1 })).toBe('Needs you: 1 pinned · Cedar Dental still open after your reply · 1 older overdue.')
-    expect(bandText({ ...base, noThread: [{ client: 'Acme Roofing', due: '3 PM', chipIn: 'Morning hub' }], older: 1 })).toBe(
+    expect(bandText({ ...base, noThread: [{ client: 'Acme Roofing', due: '3 PM', chipIn: 'Morning hub', chipHere: true }], older: 1 })).toBe(
       'Needs you: 0 pinned · 1 with no thread: Acme Roofing · 1 older overdue. 🔴 Acme Roofing has no thread (due 3 PM): its chip is in Morning hub.',
     )
   })
@@ -1239,8 +1239,9 @@ describe('0.5.4 (Rob, 10-14, "yes chips"): the band says where a client\'s one c
     expect(bandText({ ...base, chipsElsewhere: ['Acme Roofing'] })).toBe('Nothing needs you in the next 24 hours.')
   })
   test('C3: each client with no thread whose chip exists, in every thread; one with no chip yet keeps the command', async () => {
-    expect(bandText({ ...base, noThread: [{ client: 'Cedar Dental', due: '4 PM', chipIn: 'Morning hub' }, { client: 'Dune Freight', due: 'Tue 9 AM', chipIn: 'Acme Roofing' }] })).toBe(
-      'Needs you: 0 pinned · 2 with no thread: Cedar Dental, Dune Freight. 🔴 Cedar Dental has no thread (due 4 PM): its chip is in Morning hub. 🔴 Dune Freight has no thread (due Tue 9 AM): its chip is in Acme Roofing.',
+    // (0.5.6, verbatim) in a thread that does not hold the chip, how to bring it there; in the one that does, not
+    expect(bandText({ ...base, noThread: [{ client: 'Cedar Dental', due: '4 PM', chipIn: 'Morning hub', chipHere: true }, { client: 'Dune Freight', due: 'Tue 9 AM', chipIn: 'Acme Roofing' }] })).toBe(
+      'Needs you: 0 pinned · 2 with no thread: Cedar Dental, Dune Freight. 🔴 Cedar Dental has no thread (due 4 PM): its chip is in Morning hub. 🔴 Dune Freight has no thread (due Tue 9 AM): its chip is in Acme Roofing. Press Start thread in the pane to bring it here.',
     )
     expect(bandText({ ...base, noThread: [{ client: 'Cedar Dental', due: '4 PM' }] })).toBe(
       'Needs you: 0 pinned · 1 with no thread: Cedar Dental. Open a thread for Cedar Dental (due 4 PM): type /mm start Cedar Dental.',
