@@ -907,6 +907,24 @@ export function clientInTitle(title: string): string {
   return lead ? (parts[1]?.trim() ?? '') : first
 }
 
+/** (0.5.4) The most characters of a thread's own name the band gives. */
+const SHORT_TITLE_MAX = 40
+
+/**
+ * (0.5.4, C2/C3) A thread's name as the band gives it: for a name of the bridge's, the client it is for (its clock
+ * changes by the hour); for any other, the name itself, cleaned and cut to SHORT_TITLE_MAX characters.
+ */
+export function threadTitleShort(title: unknown): string {
+  const raw = typeof title === 'string' ? title : ''
+  // (our marks, read before the name is cleaned: cleaning takes them off)
+  if (/^(?:\d{2}\s+)?[🔴🟡✓]\s/u.test(raw)) {
+    const client = cleanName(clientInTitle(raw))
+    if (client) return client
+  }
+  const t = cleanTitle(raw)
+  return t.length > SHORT_TITLE_MAX ? `${t.slice(0, SHORT_TITLE_MAX - 1)}…` : t
+}
+
 /** A session title names this client when, stripped of our marks, it starts with the client's name. */
 export function titleNames(title: string, client: string): boolean {
   const bare = clientInTitle(title).toLowerCase()

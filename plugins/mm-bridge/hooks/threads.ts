@@ -707,10 +707,13 @@ export type BandFacts = {
   pinned: number
   /** Whether anything on the list pins now (past, or within the next 24 business hours). */
   pinsNow: boolean
-  /** R4: clients on the list due within that window with no thread at all, soonest first, with their due times. */
-  noThread: Array<{ client: string; due: string }>
-  /** Whether this thread holds a chip for the one client with no thread (R9's first line). */
-  chipHere: boolean
+  /**
+   * R4: clients on the list due within that window with no thread at all, soonest first, with their due times, and
+   * (0.5.4, C3) the thread their one chip is in, as `threadTitleShort` names it, when there is one.
+   */
+  noThread: Array<{ client: string; due: string; chipIn?: string | undefined }>
+  /** (0.5.4, C2) The other threads that hold a chip for a client of the person's with a thread, one entry each, by name. */
+  chipsElsewhere?: string[]
   /** R8: the first client still open after our reply, with a thread to claim it in. */
   stillOpen?: string | undefined
   /** R9: the first client whose pinned thread has an update ready to claim. */
@@ -732,10 +735,16 @@ export type BandFacts = {
  *   nothing within 24 business hours, no client    `Nothing needs you in the next 24 hours.`
  *   without a thread
  *   the last read failed or is stale               0.5.1's refresh-failed line, and never the all-clear one
+ * (0.5.4, Rob 10-14 "yes chips", verbatim) A client's chip is in one thread only:
+ *   chips of clients with a thread, elsewhere (C2) ` · a chip is ready in <thread>` on the first line, or
+ *                                                  ` · chips ready in <n> threads` for more than one
+ *   a client with no thread whose chip exists (C3) `🔴 <client> has no thread (due <due>): its chip is in <thread>.`,
+ *                                                  in every thread, for each such client
  */
 export function bandText(f: BandFacts): string {
   const out: string[] = []
   const older = Number(f.older) || 0
+  const elsewhere = f.chipsElsewhere ?? []
   let first = ''
   if (f.noThread.length) first = `Needs you: ${f.pinned} pinned · ${f.noThread.length} with no thread: ${f.noThread.map(n => n.client).join(', ')}.`
   else if (f.pinsNow || f.pinned > 0 || f.stillOpen) first = `Needs you: ${f.pinned} pinned.`
@@ -745,9 +754,13 @@ export function bandText(f: BandFacts): string {
   if (first && !f.noThread.length && f.stillOpen) first = `${first.replace(/\.$/, '')} · ${f.stillOpen} still open after your reply.`
   // F6: the other forms say how many wait under Older
   if (first.startsWith('Needs you:') && older > 0) first = `${first.replace(/\.$/, '')} · ${older} older overdue.`
+  // (0.5.4, C2) where the chips of the person's clients with a thread are, when not here
+  if (first.startsWith('Needs you:') && elsewhere.length) first = `${first.replace(/\.$/, '')} · ${elsewhere.length === 1 ? `a chip is ready in ${elsewhere[0]}` : `chips ready in ${elsewhere.length} threads`}.`
   if (first) out.push(first)
+  // (0.5.4, C3) each client with no thread whose one chip exists: where it is
+  for (const n of f.noThread) if (n.chipIn) out.push(`🔴 ${n.client} has no thread (due ${n.due}): its chip is in ${n.chipIn}.`)
   const one = f.noThread.length === 1 ? f.noThread[0] : undefined
-  if (one) out.push(f.chipHere ? `Open a thread for ${one.client} (due ${one.due}): a chip is waiting in this thread.` : `Open a thread for ${one.client} (due ${one.due}): type /mm start ${one.client}.`)
+  if (one && !one.chipIn) out.push(`Open a thread for ${one.client} (due ${one.due}): type /mm start ${one.client}.`)
   else if (!f.noThread.length && !f.stillOpen && f.update) out.push(`An update is ready to claim in the ${f.update} thread.`)
   if (f.stale) out.push(REFRESH_FAILED)
   return out.join(' ')
