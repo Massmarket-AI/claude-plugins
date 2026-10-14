@@ -142,6 +142,21 @@ const CHIP_GEN = 4
 const ALIVE_MS = 5 * 60_000
 /** (0.5.4, C3) A no-thread client's chip moves to the thread the person works in once they have worked elsewhere this long. */
 const HANDOVER_MS = 10 * 60_000
+/** (0.5.7) How long a session goes by its last look at which session tools the app gives it (`sessionTools`). */
+const TOOLS_EVERY_MS = 5 * 60_000
+/** (0.5.7, Rob 10-14: start threads by itself) The most threads this machine starts by itself in an hour, and in a day. */
+const AUTO_STARTS_PER_HOUR = 4
+const AUTO_STARTS_PER_DAY = 20
+/** (0.5.7) A thread a session is about to start by itself is that session's alone this long (`mm.starting`). */
+const STARTING_MS = 2 * 60_000
+/** (0.5.7) A band note (a thread started by itself, the hourly cap) shows in every thread this long. */
+const NOTE_SHOW_MS = 15 * 60_000
+/**
+ * (0.5.7) What start_session's `background` carries, which a "fresh" session requires (at least 80 characters, the
+ * app's own schema): the brief itself is the client's kickoff, unchanged.
+ */
+const START_BACKGROUND =
+  'Opened by the Massmarket bridge (mm-bridge) for one client on the Needs-you list. The brief is the kickoff the bridge sends that client\'s thread; its [mm-link] marker links this thread to the client.'
 /** R10: how long a press, or a chip minted by itself, waits for the app before it says so. */
 const APP_WAIT_MS = 15_000
 /** R10: after the app did not answer a chip, or refused one, this thread mints none by itself for this long (or until its next turn). */
@@ -182,6 +197,8 @@ const PERSON_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge', 'sdk'
 const NO_THREAD_LIST = 'The app\'s thread list is not available here.'
 /** R10: what a press that makes a chip says before it asks the app for anything. */
 const MAKING_CHIP = (client: string) => `Making a chip for ${client}…`
+/** (0.5.7) The same, where Start opens the thread itself (start_session). */
+const STARTING_THREAD = (client: string) => `Starting ${client}'s thread…`
 /** R10: what it says when the app does not answer that in APP_WAIT_MS. */
 const NO_ANSWER = (client: string) => `The app did not answer in 15 seconds, so no chip was made. Type /mm start ${client} in any thread.`
 /** (fix round 1, L10) What a second message to a client says while the first is still going out. */
@@ -1902,6 +1919,8 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
     older: Array.isArray(last.older) ? last.older.length : 0,
     // (0.5.5) what this session's last look found (`checkVersions`): no call from here
     newer: newerMod.get(await instanceId($))?.version || undefined,
+    // (0.5.7) the notes of the last NOTE_SHOW_MS
+    notes: (await storeGet<BandNote[]>($, 'mm.notes', [])).filter(n => n && typeof n.text === 'string' && now - n.at < NOTE_SHOW_MS).map(n => n.text),
   })
   if (!text) return { text: '', at: last.at }
   // In a waiting client's thread the line carries the button that opens its part of the pane.
@@ -2246,7 +2265,7 @@ async function ownChipsWritten($: EngineInterface, me: string, now: number): Pro
 
 /** One chip to mint: for which client and need, what it carries, and in which thread. */
 type MintSpec = { it: QueueItem; signature: string; need: 'start' | 'long' | 'here'; auto: boolean; title: string; tldr: string; prompt: string; me: string; now: number; place?: string | undefined }
-type Minted = { made: true } | { made: false; why: 'no-answer' } | { made: false; why: 'refused'; text: string }
+type Minted = { made: true } | { made: false; why: 'no-answer' } | { made: false; why: 'refused' | 'no-tool'; text: string }
 
 /**
  * Mints one chip and records it. R10 (Rob, 2026-10-13: Start on ELV Capital Homes said nothing and made no chip,
@@ -2260,9 +2279,31 @@ async function mintChip($: EngineInterface, m: MintSpec): Promise<Minted> {
   minting.add(key)
   let call: Promise<Mcp>
   let answered: { ok: true; value: Mcp } | { ok: false }
+  // (0.5.7) the app's chip (spawn_task), or where the app has only start_session, its proposal card (own_initiative):
+  // it shows like a chip, starts nothing until the person starts it, and is withdrawn the same way (dismiss_task)
+  const ask = (proposal: boolean): Promise<Mcp> =>
+    (proposal
+      ? $.mcp.call('ccd_session', 'start_session', { initiation: 'own_initiative', title: m.title, prompt: m.prompt, context: 'fresh', background: START_BACKGROUND })
+      : $.mcp.call('ccd_session', 'spawn_task', { title: m.title, tldr: m.tldr, prompt: m.prompt })) as Promise<Mcp>
   try {
-    call = $.mcp.call('ccd_session', 'spawn_task', { title: m.title, tldr: m.tldr, prompt: m.prompt }) as Promise<Mcp>
-    answered = await within($, call)
+    const tools = await sessionTools($)
+    let proposal = !tools.spawn && tools.start
+    try {
+      call = ask(proposal)
+      answered = await within($, call)
+    } catch (err) {
+      // the tool the app no longer (or does not yet) gives this session: the other one (for a chip the person
+      // asked for, Start opens the thread instead: `startThread`)
+      if (!noTool(err)) throw err
+      await sawTools($, proposal ? { start: false, spawn: true } : { start: true, spawn: false })
+      if (!m.auto) {
+        minting.delete(key)
+        return { made: false, why: 'no-tool', text: errorText(err) }
+      }
+      proposal = !proposal
+      call = ask(proposal)
+      answered = await within($, call)
+    }
   } catch (err) {
     minting.delete(key)
     return { made: false, why: 'refused', text: errorText(err) }
@@ -2283,6 +2324,284 @@ async function mintChip($: EngineInterface, m: MintSpec): Promise<Minted> {
   if (answered.value.isError) return { made: false, why: 'refused', text: textOf(answered.value) }
   await recordChip($, m, textOf(answered.value))
   return { made: true }
+}
+
+// ---------------------------------------------------------------- (0.5.7) starting a thread with start_session
+
+/**
+ * (0.5.7, Rob 10-14 13:20 ET: "Could not create the chip: ... no connected MCP tool "spawn_task"") Which of the app's
+ * two ways this session has: `start_session` (the app since 10-14, beside list_start_targets and hand_off_to_session)
+ * or `spawn_task` (before it). Read from `$.tool.list()` (EngineInterface.tool.list: the tools the model can call now,
+ * MCP ones as `mcp__<server>__<tool>`), at most once in TOOLS_EVERY_MS for a session; never from a version. A listing
+ * that names neither says nothing: spawn_task first, as before 0.5.7, and the app's "no connected MCP tool" answer
+ * then says which it is (`noTool`, `sawTools`).
+ */
+const toolsSeen = new Map<string, { start: boolean; spawn: boolean; at: number }>()
+async function sessionTools($: EngineInterface): Promise<{ start: boolean; spawn: boolean }> {
+  const id = await instanceId($)
+  const now = await $.clock.now()
+  const was = toolsSeen.get(id)
+  if (was && now - was.at < TOOLS_EVERY_MS) return was
+  let names: string[] = []
+  try {
+    names = (await $.tool.list()).map(t => t.name)
+  } catch {
+    // no listing: as one that names neither
+  }
+  const start = names.includes('mcp__ccd_session__start_session')
+  const spawn = names.includes('mcp__ccd_session__spawn_task')
+  const seen = start || spawn ? { start, spawn, at: now } : { start: false, spawn: true, at: now }
+  toolsSeen.set(id, seen)
+  return seen
+}
+async function sawTools($: EngineInterface, tools: { start: boolean; spawn: boolean }): Promise<void> {
+  toolsSeen.set(await instanceId($), { ...tools, at: await $.clock.now() })
+}
+/** The engine's word for a call to a tool the app does not give this session. */
+const noTool = (err: unknown): boolean => /no connected MCP tool/i.test(errorText(err))
+
+/** What start_session answered for a thread started now: the new thread's id when the answer gives it. */
+type StartedNow = { ok: true; sid?: string | undefined } | { ok: false; why: 'refused' | 'no-answer' | 'no-tool'; text: string }
+
+/**
+ * (0.5.7) Starts the client's thread now: `start_session` with `initiation: "user_asked"`, for a person's Start (the
+ * person pressing it is the user asking) and for a thread the bridge starts by itself on Rob's standing instruction
+ * (Rob, 10-14 ~13:35 ET: "we can automatically start the new thread"). Never for anything else. Its answer, the app's
+ * own (Claude.app, 10-14): `Started session "<title>" (session_id: local_…, name: …). …`.
+ */
+async function startNow($: EngineInterface, title: string, prompt: string): Promise<StartedNow> {
+  let cwd = ''
+  try {
+    cwd = await $.session.cwd()
+  } catch {
+    // no word on this session's folder: the app's default, where this session runs
+  }
+  const args = { initiation: 'user_asked', title, prompt, context: 'fresh', background: START_BACKGROUND, use_worktree: false, wake_when_done: false, ...(cwd ? { cwd } : {}) }
+  let answered: { ok: true; value: Mcp } | { ok: false }
+  try {
+    answered = await within($, $.mcp.call('ccd_session', 'start_session', args) as Promise<Mcp>)
+  } catch (err) {
+    if (noTool(err)) {
+      await sawTools($, { start: false, spawn: true })
+      return { ok: false, why: 'no-tool', text: errorText(err) }
+    }
+    return { ok: false, why: 'refused', text: errorText(err) }
+  }
+  if (!answered.ok) return { ok: false, why: 'no-answer', text: `the app did not answer in ${APP_WAIT_MS / 1000} seconds` }
+  const text = textOf(answered.value)
+  if (answered.value.isError) return { ok: false, why: 'refused', text }
+  const sid = /\bsession_id:\s*(local_[A-Za-z0-9_-]{1,100})/.exec(text)?.[1]
+  return { ok: true, sid }
+}
+
+/**
+ * (0.5.7) A thread just started for a client, by the person's Start or by itself: every chip or proposal for the client
+ * in any thread is superseded (each thread withdraws its own on its next pass; this one now), and, when the app gave
+ * the new thread's id, it is linked, claimed and stamped at once (the person's act: pinned first), and a sync a second
+ * on pins and names it. With no id, the kickoff's [mm-link] marker links it on its first turn, as a chip's does: a
+ * record of what it was started with lets it take the client from the thread the client had (`linkFromMarker`).
+ */
+async function adoptStarted($: EngineInterface, it: QueueItem, sid: string | undefined, prompt: string, me: string, now: number): Promise<void> {
+  const pid = it.projectId
+  const had = (await storeGet<Record<string, string>>($, 'mm.links', {}))[pid]
+  await patchChips($, now, fresh => {
+    for (const c of fresh) if (c.projectId === pid) c.superseded = true
+    if (!sid) fresh.push({ projectId: pid, signature: signatureOf(it), taskId: '', threadId: me, at: now, prompt, ...(had ? { had } : {}) })
+    return fresh
+  }).catch(err => noteFailure($, 'start: the chips it replaces', err))
+  void chipsPass($)
+  if (!sid) return
+  const step = async (what: string, write: () => Promise<unknown>): Promise<void> => {
+    try {
+      await write()
+    } catch (err) {
+      await noteFailure($, `start: ${what}`, err)
+    }
+  }
+  await step('the link', () =>
+    patchStore<Record<string, string>>($, 'mm.links', {}, fresh => {
+      fresh[pid] = sid
+    }),
+  )
+  await step('the unlink record', () => forgetUnlink($, sid))
+  await step('the claim', () => claim($, pid, sid))
+  await step('the stamp', () => stamp($, pid, sid))
+  await askSync($).catch(() => {})
+}
+
+// ---------------------------------------------------------------- (0.5.7) threads the bridge starts by itself
+
+/**
+ * (0.5.7, Rob 10-14 ~13:35 ET: "If there's something from a client and there's no thread for it, or a thread needs to
+ * be started fresh, we can automatically start the new thread, unpin the old one, and the team members see no
+ * disruption") A thread started by itself, on record (`mm.autostarts`, every session's, the last day's): for which
+ * client and what it carried (`sig`, a short hash of the signature), why, by which thread, and whether the app
+ * started it (`ok`: null while it is being asked).
+ */
+type AutoStart = { at: number; pid: string; client: string; sig: string; kind: string; by: string; ok: boolean | null; reason: string }
+/** A line the band shows in every thread for NOTE_SHOW_MS: a thread started by itself, the hourly cap reached. */
+type BandNote = { text: string; at: number; key: string }
+
+/** (0.5.7) Whether threads start by themselves on this computer: on unless the person typed /mm auto off. */
+async function autoStartOn($: EngineInterface): Promise<boolean> {
+  const v = await storeGet<{ on?: unknown } | null>($, 'mm.autostart', null)
+  return v?.on !== false
+}
+
+/** (0.5.7) A short, stable name for a signature (FNV-1a, 32 bits): what the record and the log say a start carried. */
+function sigHash(s: string): string {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(16).padStart(8, '0')
+}
+
+/** (0.5.7) The starts this session has claimed and not yet finished: a second tick does not claim one again. */
+const autoInFlight = new Set<string>()
+
+/**
+ * (0.5.7) What becomes of a need for a new thread (C3, or a thread 60% full) where the app gives start_session and
+ * auto-start is on:
+ *   skip    it is started, or being started (here or by another session: its claim in `mm.starting`), or a thread
+ *           already has what it would carry
+ *   card    the app refused to start it: the card instead
+ *   capped  this machine started AUTO_STARTS_PER_HOUR in the last hour, or AUTO_STARTS_PER_DAY in the last day: the card
+ *   start   claimed here (`mm.starting`, a lease per client and signature) and started once the claim has held
+ *           (`autoStart`): two sessions that claim it together never both start it
+ */
+async function autoVerdict($: EngineInterface, n: Need, me: string, now: number): Promise<'skip' | 'card' | 'capped' | 'start'> {
+  const pid = n.it.projectId
+  const sig = sigHash(n.signature)
+  const key = `${pid}\n${sig}`
+  if (autoInFlight.has(key)) return 'skip'
+  const tries = (await storeGet<AutoStart[]>($, 'mm.autostarts', [])).filter(t => t && typeof t === 'object')
+  const these = tries.filter(t => t.pid === pid && t.sig === sig)
+  if (these.some(t => t.ok !== false)) return 'skip'
+  if (these.length) return 'card'
+  const given = (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]
+  if (given && given.sig === n.signature) return 'skip'
+  const claimed = (await storeGet<Record<string, { owner?: string; until?: number }>>($, 'mm.starting', {}))[key]
+  if (claimed && claimed.owner !== me && Number(claimed.until) > now) return 'skip'
+  const started = tries.filter(t => t.ok !== false)
+  if (started.filter(t => now - t.at < 3_600_000).length >= AUTO_STARTS_PER_HOUR || started.filter(t => now - t.at < DAY_MS).length >= AUTO_STARTS_PER_DAY) return 'capped'
+  let mine = false
+  await patchStore<Record<string, { owner?: string; until?: number }>>($, 'mm.starting', {}, fresh => {
+    for (const [k, v] of Object.entries(fresh)) if (!v || !(Number(v.until) > now)) delete fresh[k]
+    const held = fresh[key]
+    if (held && held.owner !== me) return false
+    fresh[key] = { owner: me, until: now + STARTING_MS }
+    mine = true
+  })
+  if (!mine) return 'skip'
+  autoInFlight.add(key)
+  $.clock.after(settleMs(`${me}#${key}`), () => void autoStart($, n, me, key).finally(() => autoInFlight.delete(key)))
+  return 'start'
+}
+
+/**
+ * (0.5.7) Starts the client's thread by itself, once this session's claim has held (another session's write since
+ * means that session starts it): `start_session` user_asked, with the kickoff a chip would carry. Recorded before the
+ * app is asked, so no other session starts it meanwhile, and logged either way (`logAuto`). Started: linked and pinned
+ * as a person's Start does it (`adoptStarted`), and for a thread 60% full, this old thread unpinned and named
+ * `<its name> · moved` (`moveAway`); the band says so once. Refused: the card instead, at once.
+ */
+async function autoStart($: EngineInterface, n: Need, me: string, key: string): Promise<void> {
+  const pid = n.it.projectId
+  const sig = sigHash(n.signature)
+  try {
+    const now = await $.clock.now()
+    const claimed = (await storeGet<Record<string, { owner?: string }>>($, 'mm.starting', {}))[key]
+    if (claimed?.owner !== me) return
+    if (!(await autoStartOn($)) || !(await sessionTools($)).start) return
+    // checked again, now that the claim has held
+    const tries = (await storeGet<AutoStart[]>($, 'mm.autostarts', [])).filter(t => t && typeof t === 'object')
+    if (tries.some(t => t.pid === pid && t.sig === sig)) return
+    const started = tries.filter(t => t.ok !== false)
+    if (started.filter(t => now - t.at < 3_600_000).length >= AUTO_STARTS_PER_HOUR || started.filter(t => now - t.at < DAY_MS).length >= AUTO_STARTS_PER_DAY) return
+    const entry: AutoStart = { at: now, pid, client: cleanName(n.it.client), sig, kind: n.kind, by: me, ok: null, reason: n.kind === 'fresh' ? 'its thread is 60% full or more' : 'no thread' }
+    await patchStore<AutoStart[]>($, 'mm.autostarts', [], list => {
+      list.push(entry)
+      list.splice(0, list.length, ...list.filter(t => t && now - Number(t.at) <= DAY_MS).slice(-200))
+    })
+    const title = startTitle(n.it)
+    const answer = await startNow($, title, n.prompt)
+    await patchStore<AutoStart[]>($, 'mm.autostarts', [], list => {
+      const e = list.find(t => t && t.pid === pid && t.sig === sig && t.at === now && t.by === me)
+      if (!e) return false
+      e.ok = answer.ok
+      if (!answer.ok) e.reason = `${e.reason}; not started: ${short(answer.text, 160)}`
+    }).catch(() => {})
+    await logAuto($, `${answer.ok ? 'started' : 'not started'} ${entry.client} (${pid}) sig ${sig}: ${entry.reason}${answer.ok ? '' : `; ${short(answer.text, 160)}`}`)
+    if (!answer.ok) {
+      // the card instead (where start_session itself is gone, the next tick makes the app's chip)
+      if (answer.why !== 'no-tool') await mintChip($, { ...n, auto: true, me, now: await $.clock.now() })
+      return
+    }
+    if (n.kind === 'fresh') await moveAway($, me, pid)
+    await adoptStarted($, n.it, answer.sid, n.prompt, me, now)
+    await bandNote($, `Started ${entry.client}'s thread: it is under Pinned.`, `started\n${key}`)
+  } catch (err) {
+    await noteFailure($, 'auto start', err)
+  } finally {
+    await patchStore<Record<string, { owner?: string }>>($, 'mm.starting', {}, fresh => {
+      if (fresh[key]?.owner !== me) return false
+      delete fresh[key]
+    }).catch(() => {})
+  }
+}
+
+/**
+ * (0.5.7) The thread a fresh one replaces, when it is this one: unpinned, named as it is with ` · moved`, and its pin
+ * record and kept name dropped, so no later pass names or pins it again. ⛔ Only while it is still this client's thread:
+ * a thread linked to another client is never touched.
+ */
+async function moveAway($: EngineInterface, me: string, pid: string): Promise<void> {
+  if (ownerOf(me, await storeGet<Record<string, string>>($, 'mm.links', {})) !== pid) return
+  const self = asThread(await desktopOnly(() => mcpJsonWithin($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' }), null))
+  if (self?.pinned) await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: me, pinned: false })
+  const title = self?.title ?? ''
+  if (title && !title.endsWith(' · moved')) await mcpJson($, 'ccd_session_mgmt', 'set_session_title', { session_id: me, title: `${title} · moved` })
+  await patchStore<Record<string, Pin>>($, 'mm.pins', {}, pins => {
+    if (!(me in pins)) return false
+    delete pins[me]
+  })
+  await patchStore<Record<string, string>>($, 'mm.titles', {}, titles => {
+    if (!(me in titles)) return false
+    delete titles[me]
+  })
+}
+
+/** (0.5.7) A line for the band, in every thread, for NOTE_SHOW_MS, once for its `key`. */
+async function bandNote($: EngineInterface, text: string, key: string): Promise<void> {
+  const now = await $.clock.now()
+  await patchStore<BandNote[]>($, 'mm.notes', [], list => {
+    if (list.some(n => n && n.key === key && now - n.at < NOTE_SHOW_MS)) return false
+    list.push({ text, at: now, key })
+    list.splice(0, list.length, ...list.filter(n => n && now - n.at < NOTE_SHOW_MS).slice(-10))
+  }).catch(() => {})
+  await refreshBand($)
+}
+
+/**
+ * (0.5.7) One line in the bridge's notice log (`~/.claude/mm-hooks/bridge-notices.log`, the last 500 lines) for every
+ * thread started by itself, or not started: the client, what it carried and why, so it can be audited.
+ */
+async function logAuto($: EngineInterface, line: string): Promise<void> {
+  try {
+    const path = `${await home($)}/.claude/mm-hooks/bridge-notices.log`
+    let had = ''
+    try {
+      had = await $.fs.read(path)
+    } catch {
+      // a first line
+    }
+    const lines = `${had}${new Date(await $.clock.now()).toISOString()} ${line}\n`.split('\n').filter(Boolean).slice(-500)
+    await $.fs.write(path, `${lines.join('\n')}\n`)
+  } catch {
+    // the log is for audit: its failure stops nothing
+  }
 }
 
 /**
@@ -2375,8 +2694,9 @@ function scheduleOwnCheck($: EngineInterface, me: string, round = 0): void {
 }
 
 /**
- * Start thread. The app gives a plugin no way to open a new thread with a first message (no start_session
- * tool on this build), so this mints a chip whose prompt is the kickoff, and the person clicks Start on it.
+ * Start thread. (0.5.7) Where the app gives this session `start_session` (the app since 10-14), the client's thread
+ * is opened at once with the kickoff as its first message (`startNow`). Where it gives only `spawn_task` (before
+ * that), this mints a chip whose prompt is the kickoff, and the person clicks Start on it.
  * `typed` is the person's own /mm start <client>: it always mints. The chip on record for this thread may
  * be one the person dismissed, which the bridge cannot see; the new one supersedes it.
  * R10: the press has already said it is making the chip (`press`); the app is given APP_WAIT_MS to answer.
@@ -2385,6 +2705,24 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
   const now = await $.clock.now()
   const me = await selfId($)
   const signature = signatureOf(it)
+  // (0.5.7, Rob 10-14: "can we just straight start sessions now?") Where the app gives this session start_session,
+  // Start opens the client's thread at once, with the kickoff a chip would carry. Where it does not, the chip below.
+  const openNow = async (): Promise<string | null> => {
+    const title = startTitle(it)
+    const prompt = startKickoff(it, await replaced($, it, pass), now)
+    const started = await startNow($, title, prompt)
+    if (started.ok) {
+      await adoptStarted($, it, started.sid, prompt, me, now)
+      return `Started ${it.client}'s thread: "${title}". It is under Pinned.`
+    }
+    // (the app's own sentence, without its last full stop: the line has its own)
+    if (started.why !== 'no-tool') return `Could not start ${it.client}'s thread: ${short(started.text).replace(/\.+$/, '')}. Type /mm start ${it.client} to try again.`
+    return null
+  }
+  if ((await sessionTools($)).start) {
+    const said = await openNow()
+    if (said !== null) return said
+  }
   // ⛔ One chip per client in a thread. The button, with a chip for this client carrying this already in this
   //    thread (or one on its way): nothing is minted.
   const before = await chipsOf($, now)
@@ -2399,6 +2737,8 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
   // (0.5.6, Rob 10-14: "Start in the thread that I click it on") the client's chip in another thread, moved here
   const elsewhere = before.filter(c => c.projectId === it.projectId && !c.superseded && c.threadId !== me)
   const made = await mintChip($, { it, signature, need: 'start', auto: false, title: startTitle(it), tldr: startTldr(it, now), prompt, me, now })
+  // (0.5.7) the app no longer gives this session spawn_task: Start opens the thread
+  if (!made.made && made.why === 'no-tool') return (await openNow()) ?? `Could not create the chip: ${short(made.text)}`
   if (!made.made) return made.why === 'no-answer' ? NO_ANSWER(it.client) : `Could not create the chip: ${short(made.text)}`
   // (0.5.6) where it is, as the band and the other threads' rows name it: asked for after the answer, never before it
   void placeChip($, me, it.projectId, now).catch(() => {})
@@ -2433,7 +2773,17 @@ async function placeChip($: EngineInterface, me: string, projectId: string, at: 
 }
 
 /** One chip a thread mints by itself: for a client, a need, and what it carries. `place`: the thread it is in, as the band names it. */
-type Need = { it: QueueItem; signature: string; need: 'start' | 'long' | 'here'; title: string; tldr: string; prompt: string; place?: string | undefined }
+type Need = {
+  it: QueueItem
+  signature: string
+  need: 'start' | 'long' | 'here'
+  title: string
+  tldr: string
+  prompt: string
+  place?: string | undefined
+  /** (0.5.7) For whom: a client with no thread (C3), a new thread for one whose thread is 60% full (R3, R8), or its kickoff run in its own thread. */
+  kind: 'nothread' | 'fresh' | 'here'
+}
 
 /** (0.5.4) What one thread knows, from the store, to decide which chips are its own to hold. */
 type ChipWorld = {
@@ -2485,7 +2835,7 @@ function needsFor(last: Last, w: ChipWorld, now: number): Need[] {
       if (rec.state !== 'start' || noThreadHolder(it.projectId, w, now) !== w.me) continue
       const target = rec.target && !rec.target.suggested && THREAD_ID.test(rec.target.sid) ? rec.target : undefined
       const replaces = target ? { sid: target.sid, title: w.titles[target.sid] || target.title } : undefined
-      out.push({ it, signature, need: 'start', title: startTitle(it), tldr: startTldr(it, now), prompt: startKickoff(it, replaces, now) })
+      out.push({ it, signature, need: 'start', title: startTitle(it), tldr: startTldr(it, now), prompt: startKickoff(it, replaces, now), kind: 'nothread' })
       continue
     }
     // C1: only the client's own thread; C2: every other thread mints nothing for it
@@ -2496,7 +2846,7 @@ function needsFor(last: Last, w: ChipWorld, now: number): Need[] {
     const place = cleanName(it.client)
     if (percent !== undefined && percent >= LONG_CONTEXT_PERCENT && (fast?.state === 'still_open' || rec.state === 'start' || rec.state === 'update')) {
       const replaces = { sid: w.me, title: w.titles[w.me] || rec.target?.title || '' }
-      out.push({ it, signature, need: fast?.state === 'still_open' ? 'long' : 'start', title: freshTitle(it, percent), tldr: freshTldr(it, now), prompt: startKickoff(it, replaces, now), place })
+      out.push({ it, signature, need: fast?.state === 'still_open' ? 'long' : 'start', title: freshTitle(it, percent), tldr: freshTldr(it, now), prompt: startKickoff(it, replaces, now), place, kind: 'fresh' })
       continue
     }
     // still open after our reply, under 60%: Claim in this thread, in the pane
@@ -2505,7 +2855,7 @@ function needsFor(last: Last, w: ChipWorld, now: number): Need[] {
     if (rec.state === 'current') continue
     const given = w.sent[it.projectId]
     if (given && given.sid === w.me && hasWaiting(given.sig, it)) continue
-    out.push({ it, signature, need: 'here', title: hereTitle(it), tldr: hereTldr(it, now), prompt: kickoffText(it), place })
+    out.push({ it, signature, need: 'here', title: hereTitle(it), tldr: hereTldr(it, now), prompt: kickoffText(it), place, kind: 'here' })
   }
   return out
 }
@@ -2553,12 +2903,24 @@ async function chipsTick($: EngineInterface, atTurn = false): Promise<void> {
   const id = await instanceId($)
   if (!needs || (!atTurn && now < (mintPause.get(id)?.until ?? 0))) return
   const chips = await ownChipsWritten($, me, now)
+  const tools = await sessionTools($)
+  const auto = await autoStartOn($)
   /** (C3) this thread's own name, as the band gives it, asked for once and only when a no-thread client's chip is to be minted here */
   let place: string | undefined
   for (const n of needs) {
     const key = `${n.it.projectId}\n${me}\n${n.signature}`
     if (minting.has(key) || mintedHere.has(key)) continue
     if (chips.some(c => c.threadId === me && c.projectId === n.it.projectId && sameNeed(c, n))) continue
+    // (0.5.7) where the app gives only start_session, a client's kickoff run in its own thread has no card: the pane's
+    // Update does it there
+    if (n.kind === 'here' && !tools.spawn) continue
+    // (0.5.7, Rob 10-14) a new thread, for a client with none or one whose thread is 60% full: started by itself,
+    // within the hourly and daily caps; past them, or where the app refused it, the card below
+    if (n.kind !== 'here' && tools.start && auto) {
+      const verdict = await autoVerdict($, n, me, now)
+      if (verdict === 'start' || verdict === 'skip') continue
+      if (verdict === 'capped') await bandNote($, `${cleanName(n.it.client)}: started threads paused for this hour; its card is ready to start.`, `capped\n${n.it.projectId}\n${sigHash(n.signature)}`)
+    }
     if (n.place === undefined && place === undefined) place = await ownPlace($)
     const made = await mintChip($, { ...n, auto: true, me, now, place: n.place ?? place })
     if (made.made) continue
@@ -2582,7 +2944,8 @@ async function storedNeeds($: EngineInterface, now: number): Promise<Need[] | nu
   if (!me || !fresh || !last) return null
   const lease = await storeGet<{ owner?: string } | null>($, 'mm.lease', null)
   const pairs = await storeGet<Pairs>($, 'mm.threads', {})
-  const poller = lease && typeof lease.owner === 'string' ? (pairs[lease.owner]?.app ?? '') : ''
+  // (a lease that has run out names nobody: its holder has stopped ticking)
+  const poller = lease && typeof lease.owner === 'string' && !(Number((lease as { until?: unknown }).until) < now) ? (pairs[lease.owner]?.app ?? '') : ''
   const chips = await chipsOf($, now)
   return needsFor(
     last,
@@ -2782,6 +3145,10 @@ async function withdrawNow($: EngineInterface, me: string, needs: readonly Need[
     if (done) {
       forget.add(c)
       withdrawnHere.set(chipKey(c), c.at)
+    } else if (!ownChips.has(chipKey(c))) {
+      // (0.5.7) a chip this session did not mint (an earlier session of this thread's, as from before the app's
+      // update of 10-14, whose dismiss_task may not know its id): one try, then it is only forgotten
+      forget.add(c)
     } else {
       c.tries = (c.tries ?? 0) + 1
       if (c.tries >= DISMISS_TRIES) forget.add(c)
@@ -3376,7 +3743,7 @@ async function press($: EngineInterface, verb: Verb, row: Row): Promise<void> {
   let answer: Answer
   try {
     // R10: a press that makes a chip says so before it asks the app for anything
-    if (verb === 'start') await say($, MAKING_CHIP(row.client), false).catch(() => {})
+    if (verb === 'start') await say($, (await sessionTools($)).start ? STARTING_THREAD(row.client) : MAKING_CHIP(row.client), false).catch(() => {})
     answer = await act($, verb, row)
   } catch (err) {
     answer = { said: errorText(err) }
@@ -3449,6 +3816,12 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
     await $.store.set('mm.paused', verb === 'pause')
     return verb === 'pause' ? 'Paused on this computer: no pins or renames until /mm resume.' : 'Resumed.'
   }
+  // (0.5.7) whether threads start by themselves on this computer (on unless turned off)
+  if (verb === 'auto') {
+    if (arg !== 'on' && arg !== 'off') return `Auto-start is ${(await autoStartOn($)) ? 'on' : 'off'} on this computer. Type /mm auto off or /mm auto on.`
+    await $.store.set('mm.autostart', { on: arg === 'on' })
+    return arg === 'on' ? 'Auto-start is on: a client\'s new thread starts by itself.' : 'Auto-start is off: a client\'s new thread waits as a card for you to start.'
+  }
   if (verb === 'status') {
     const last = await storeGet<Last | null>($, 'mm.last', null)
     const lease = await storeGet<{ owner: string; until: number } | null>($, 'mm.lease', null)
@@ -3463,6 +3836,7 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       `pins you took off: ${off}`,
       `poller: ${lease?.owner === (await instanceId($)) ? 'this thread' : 'another thread'}`,
       `paused: ${Boolean(await $.store.get('mm.paused'))}`,
+      `auto-start: ${(await autoStartOn($)) ? 'on' : 'off'}`,
       `last error: ${last?.error ?? 'none'}`,
     ].join('\n')
   }

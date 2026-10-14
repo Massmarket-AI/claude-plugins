@@ -742,6 +742,8 @@ export type BandFacts = {
   chipsElsewhere?: string[]
   /** (0.5.5) A later mm-bridge installed on this machine than the one this thread runs: its version. */
   newer?: string | undefined
+  /** (0.5.7) Lines the band shows in every thread for a while: a thread started by itself, the hourly cap reached. */
+  notes?: string[]
   /** R8: the first client still open after our reply, with a thread to claim it in. */
   stillOpen?: string | undefined
   /** R9: the first client whose pinned thread has an update ready to claim. */
@@ -800,6 +802,8 @@ export function bandText(f: BandFacts): string {
   const one = f.noThread.length === 1 ? f.noThread[0] : undefined
   if (one && !one.chipIn) out.push(`Open a thread for ${one.client} (due ${one.due}): type /mm start ${one.client}.`)
   else if (!f.noThread.length && !f.stillOpen && f.update) out.push(`An update is ready to claim in the ${f.update} thread.`)
+  // (0.5.7) a thread started by itself, the hourly cap reached: for a while, in every thread
+  for (const note of f.notes ?? []) out.push(note)
   if (f.stale) out.push(REFRESH_FAILED)
   // (with no first line, after the last one there is)
   if (newer && !first) {
