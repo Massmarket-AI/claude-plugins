@@ -2475,10 +2475,11 @@ function needsFor(last: Last, w: ChipWorld, now: number): Need[] {
     if (!rec) continue
     const signature = signatureOf(it)
     const linked = w.links[it.projectId]
-    // A chip the person made (Start thread, /mm start) stands for the client's one chip, in whichever thread they made
-    // it (0.5.6: Start moves the chip to the thread it is pressed in). Nothing is minted beside it, in any thread, and
-    // it is never replaced.
-    if (w.chips.some(c => c.projectId === it.projectId && !c.auto && !c.superseded)) continue
+    // A chip the person made (Start thread, /mm start) stands for the client's one chip, and nothing is minted beside
+    // it: for a client with no thread, wherever it is; in this thread, always; and (0.5.6: Start moves the chip to the
+    // thread it is pressed in) in another thread while it carries what is waiting now. The bridge cannot see a chip the
+    // person dismissed, so one for something older never holds back the client's own thread once something new comes.
+    if (w.chips.some(c => c.projectId === it.projectId && !c.auto && !c.superseded && (linked === undefined || c.threadId === w.me || c.signature === signature))) continue
     if (linked === undefined) {
       // C3: a client with no linked thread, when its recommendation is a new thread
       if (rec.state !== 'start' || noThreadHolder(it.projectId, w, now) !== w.me) continue

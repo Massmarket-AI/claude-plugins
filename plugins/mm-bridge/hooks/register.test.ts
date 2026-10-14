@@ -5550,3 +5550,47 @@ describe('0.5.6: a thread started from a chip is a sub-session of the thread tha
     expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_par', [BOLT]: 'local_kid' })
   })
 })
+
+describe('0.5.6 (Opus gate): a chip the person made holds back the auto chips only while it can stand for them', () => {
+  type ChipRec = { projectId: string; signature: string; taskId: string; threadId: string; at: number; prompt: string; auto?: true; superseded?: true }
+  const acmeChips = (w: { minted: () => Call[] }) => w.minted().filter(c => String(c.args.title).includes('Acme Roofing'))
+  /** Acme is this thread's; the timer mints its Do it here chip, and the person then moves Acme's chip to another thread with Start there. */
+  const movedAway = async ($: Engine, on: On) => {
+    const w = world(on, { feed: acmeFeed(), store: { 'mm.links': { [ACME]: SELF } } })
+    await tickOnce($, w)
+    expect(acmeChips(w).length).toBe(1)
+    const chips = w.stored['mm.chips'] as ChipRec[]
+    const mine = chips.find(c => c.projectId === ACME) as ChipRec
+    // what Start in local_other leaves on record: its own chip, carrying what is waiting now, and this thread's superseded
+    w.stored['mm.chips'] = [...chips.map(c => (c.projectId === ACME ? { ...c, superseded: true as const } : c)), { projectId: ACME, signature: mine.signature, taskId: 'task_00000099', threadId: 'local_other', at: NOW + 4_000, prompt: mine.prompt }]
+    return w
+  }
+
+  test('moved away from the linked thread, carrying what is waiting now: the linked thread mints no chip of its own beside it', async ($, on) => {
+    const w = await movedAway($, on)
+    const own = (w.stored['mm.chips'] as ChipRec[]).find(c => c.projectId === ACME && c.threadId === SELF)?.taskId
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(acmeChips(w).length).toBe(1)
+    // its own, superseded, it withdrew
+    expect(w.dismissed()).toEqual([own])
+  })
+
+  test('the same chip once something new comes for the client: the linked thread mints its chip again (a chip the person dismissed is not seen)', async ($, on) => {
+    const w = await movedAway($, on)
+    await w.clock.advance(60_000)
+    expect(acmeChips(w).length).toBe(1)
+    // a newer package for Acme: what is waiting now is something else
+    w.setFeed(acmeFeed({ covers_through: ago(1) }))
+    await mm($, '')
+    await w.clock.advance(60_000)
+    expect(acmeChips(w).length).toBe(2)
+    expect(acmeChips(w).at(-1)?.args.title).toBe(ACME_HERE_CHIP.args.title)
+  })
+
+  test('a client with no thread: a chip the person made anywhere holds back every auto chip for it, whatever it carries', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], mail: [] }), store: { 'mm.chips': [{ projectId: CEDAR, signature: 'something older', taskId: 'task_00000088', threadId: 'local_other', at: NOW - HOUR, prompt: 'an older prompt' }] } })
+    await tickOnce($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(w.minted().filter(c => String(c.args.title).includes('Cedar Dental'))).toEqual([])
+  })
+})
