@@ -381,7 +381,7 @@ export function internalProjects(feed: Feed): Set<string> {
 }
 
 /** Every client's newest `last_outbound_at`, from every row of it the feed gives one on, in ms. */
-function lastOutbound(feed: Feed): Map<string, number> {
+export function lastOutbound(feed: Feed): Map<string, number> {
   const out = new Map<string, number>()
   const add = (pid: unknown, at: unknown): void => {
     const t = typeof at === 'string' ? ms(at) : NaN

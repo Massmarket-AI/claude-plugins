@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { MmBand, MmFolds, MmNotice, MmQueue, MmView } from '../types'
 
 import {
-  MAIL_LOOKBACK_HOURS, buildLists, byDue, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, needsLine, noteText, pinsNow,
+  MAIL_LOOKBACK_HOURS, buildLists, byDue, checkingTitle, internalProjects, lastOutbound, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, needsLine, noteText, pinsNow,
   threadTitle, titleFor, withHolder,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
@@ -172,6 +172,8 @@ const NO_THREAD_LIST = 'The app\'s thread list is not available here.'
 const MAKING_CHIP = (client: string) => `Making a chip for ${client}…`
 /** R10: what it says when the app does not answer that in APP_WAIT_MS. */
 const NO_ANSWER = (client: string) => `The app did not answer in 15 seconds, so no chip was made. Type /mm start ${client} in any thread.`
+/** R10 (Opus, 10-13, decision 1): what Update or Claim says when the app has not confirmed its message in APP_WAIT_MS. */
+const NOT_CONFIRMED = (client: string) => `The app has not confirmed the message to ${client}'s thread yet. Check that thread before pressing again.`
 /** R15: said once in the pane, the time the thread list's view is changed on this machine. */
 const VIEW_NOTICE = 'Your thread list is now grouped by date, newest activity first, with pinned threads on top. Change it any time from the sidebar\'s filter menu.'
 const THREAD_GONE = 'That thread is no longer available. The list has been refreshed.'
@@ -245,7 +247,7 @@ type Chip = {
  * A link the bridge made by itself and the person has not acted on: its thread, how many syncs in a row
  * the feed has not listed it, and when the last of those was counted.
  */
-type Auto = Record<string, { sid: string; miss: number; at?: number }>
+type Auto = Record<string, { sid: string; miss: number; at?: number; made?: number }>
 /** What the app's record of a thread said when it was opened: its modified time then, and the session id if it gave one. */
 type Records = Record<string, { m: number; cli?: string }>
 /**
@@ -303,6 +305,8 @@ const minting = new Set<string>()
 const mintPause = new Map<string, { until: number; atTurn: boolean }>()
 /** R15: the sessions that tried the view change already. */
 const viewTried = new Set<string>()
+/** The clients whose message (Update, Claim) is in flight in this session: their press stays held until the app answers it. */
+const sending = new Set<string>()
 /**
  * The feed this session read last: when, and the sync record the pass over it stored (`wrote`, as stored). A
  * press takes it again only while it is younger than FEED_REUSE_MS AND the store still holds that very
@@ -908,7 +912,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const last: Last = { at: now, member, items, ...also, pinned: before?.pinned ?? 0, recs, projects }
     await storeLast($, feed, last)
     const rowsOf = (list: readonly QueueItem[], needsYou = false): Row[] => list.map(it => rowFor(it, recs[it.projectId] as Recommendation, now, { needsYou }))
-    await showQueue($, member, items, rowsOf(items, true), last.pinned, now, { teammate: rowsOf(lists.teammate), older: rowsOf(lists.older) })
+    await showQueue($, member, items, rowsOf(items, true), last.pinned, now, { teammate: rowsOf(lists.teammate), older: rowsOf(lists.older), checking: rowsOf(checking) })
     return { last, live, pairs: known ?? {}, listed: false, unseen: new Set() }
   }
 
@@ -981,8 +985,19 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // cannot be seen is left as it is. A link the person made is not in `auto`, and is never undone here.
   const undone: string[] = []
   if (!known) {
+    // R11 (Opus, 10-13): our outbound to the client, by any path (a Gmail script too), as the feed has it
+    const outs = lastOutbound(feed)
     for (const [pid, a] of Object.entries(auto)) {
       if (unseen.has(a.sid)) continue
+      // When the link was made: a record an older version made is dated the first time this version sees it.
+      if (typeof a.made !== 'number' || !Number.isFinite(a.made)) a.made = now
+      // ⛔ R11: a link the bridge made that has been used for a send (our outbound to the client newer than the
+      // moment it was made, while that thread was the client's) is the person's from here on: never let go by
+      // B3 again. Only a never-used one may be.
+      else if ((outs.get(pid) ?? 0) > a.made) {
+        delete auto[pid]
+        continue
+      }
       const fate = autoLinkFate(pid, a.sid, feedThreads, pairs, marked)
       if (fate === 'stays') {
         a.miss = 0
@@ -1008,7 +1023,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const sid = autoLinkFor(it.projectId, links, feedThreads, pairs, live, unlinked, marked)
     if (!sid) continue
     links[it.projectId] = sid
-    auto[it.projectId] = { sid, miss: 0 }
+    auto[it.projectId] = { sid, miss: 0, made: now }
   }
 
   // The threads that should be pinned now. R1 (0.5.2, Rob 2026-10-13: "Pinned is something the server
@@ -1275,9 +1290,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     return rowFor(it, chipLine(it, rec), now, { needsYou, percent: target ? freshPercent(readings[target], now) : undefined })
   }
   const rows = items.map(it => rowOf(it, true))
-  const folds = { teammate: lists.teammate.map(it => rowOf(it)), older: lists.older.map(it => rowOf(it)) }
-  // (R8) a client being checked keeps a recommendation on record, for a press or a command about it
-  for (const it of checking) rowOf(it)
+  // (R8, Opus decision 2) a client being checked is under `Checking your reply`, with a recommendation on record
+  const folds = { teammate: lists.teammate.map(it => rowOf(it)), older: lists.older.map(it => rowOf(it)), checking: checking.map(it => rowOf(it)) }
 
   // A thread whose link was dropped in this pass loses its context reading with it. (Written over a fresh
   // copy: each session writes its own reading there, and may have since this pass began.)
@@ -1335,7 +1349,7 @@ async function storeLast($: EngineInterface, feed: Feed, last: Last): Promise<vo
  * neither is counted. `syncedAt` is when the list was worked out: the list drawn from a stored sync says that
  * sync's time, not the time it was drawn.
  */
-async function showQueue($: EngineInterface, member: string, items: QueueItem[], rows: Row[], pinned: number, now: number, folds: { teammate: Row[]; older: Row[] }, syncedAt = now): Promise<void> {
+async function showQueue($: EngineInterface, member: string, items: QueueItem[], rows: Row[], pinned: number, now: number, folds: { teammate: Row[]; older: Row[]; checking?: Row[] }, syncedAt = now): Promise<void> {
   const queue: MmQueue = {
     // (R1: no cap on pins any more; the header counts the list)
     header: items.length ? `Needs you now (${items.length})` : 'Nothing needs you right now.',
@@ -1343,6 +1357,7 @@ async function showQueue($: EngineInterface, member: string, items: QueueItem[],
     note: `Updated ${new Date(syncedAt).toISOString().slice(11, 16)} UTC for ${member}. ${PANE_SENTENCE}`,
     ...(folds.teammate.length ? { teammate: folds.teammate } : {}),
     ...(folds.older.length ? { older: folds.older } : {}),
+    ...(folds.checking?.length ? { checking: folds.checking } : {}),
   }
   await $.state.set(QUEUE, queue)
   const { value: notice } = await $.state.get(NOTICE)
@@ -1420,7 +1435,7 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
   const at = Number.isFinite(last.at) ? last.at : now
   const rowsOf = (items: readonly QueueItem[], needsYou = false): Row[] => items.map(it => rowFor(it, storedRec(last, it.projectId) ?? recommend([], undefined, at), at, { needsYou }))
   const items = list(last.items)
-  await showQueue($, memberText(last.member), items, rowsOf(items, true), Number(last.pinned) || 0, now, { teammate: rowsOf(list(last.teammate)), older: rowsOf(list(last.older)) }, at)
+  await showQueue($, memberText(last.member), items, rowsOf(items, true), Number(last.pinned) || 0, now, { teammate: rowsOf(list(last.teammate)), older: rowsOf(list(last.older)), checking: rowsOf(list(last.checking)) }, at)
 }
 
 /** The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that waits for his OK. */
@@ -2426,15 +2441,10 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
   const failed = (why: string): Answer => ({ said: `Could not send to ${it.client}'s thread: ${why}` })
   const text = kickoffText(cur, { update: true })
   try {
-    if (here) {
-      // The client's thread is this one, and the app's send does not take the sending thread: the kickoff
-      // goes in here as the person's own prompt. Only a press reaches this.
-      const r = (await $.prompt.submit({ text, asUser: true })) as { drop?: string } | undefined
-      if (r?.drop) return failed(short(r.drop))
-    } else {
-      const r = (await $.mcp.call('ccd_session_mgmt', 'send_message', { session_id: target.sid, message: text })) as Mcp
-      if (r.isError) return failed(short(textOf(r)))
-    }
+    // (here: the client's thread is this one, and the app's send does not take the sending thread, so the
+    // kickoff goes in here as the person's own prompt; only a press reaches this)
+    const why = await sendInto($, it.client, it.projectId, here, target.sid, text)
+    if (why !== null) return failed(why)
   } catch (err) {
     return failed(errorText(err))
   }
@@ -2540,6 +2550,32 @@ async function showThread($: EngineInterface, it: QueueItem, pass: Pass, shown: 
 }
 
 /**
+ * The one send of Update and Claim: into this thread as the person's own prompt, or into another with the app's
+ * send. Answers why it failed, or null when it went. R10 (Opus, 10-13, decision 1): no cutoff. When the app has
+ * not answered in APP_WAIT_MS, the pane says so (NOT_CONFIRMED) and the send is still waited for; while it is in
+ * flight the client's press stays held (`sending`), so a second press never sends it again.
+ */
+async function sendInto($: EngineInterface, client: string, projectId: string, here: boolean, sid: string, text: string): Promise<string | null> {
+  sending.add(projectId)
+  try {
+    if (here) {
+      const call = $.prompt.submit({ text, asUser: true }) as Promise<{ drop?: string } | undefined>
+      const first = await within($, call)
+      if (!first.ok) await say($, NOT_CONFIRMED(client)).catch(() => {})
+      const r = first.ok ? first.value : await call
+      return r?.drop ? short(r.drop) : null
+    }
+    const call = $.mcp.call('ccd_session_mgmt', 'send_message', { session_id: sid, message: text }) as Promise<Mcp>
+    const first = await within($, call)
+    if (!first.ok) await say($, NOT_CONFIRMED(client)).catch(() => {})
+    const r = first.ok ? first.value : await call
+    return r.isError ? short(textOf(r)) : null
+  } finally {
+    sending.delete(projectId)
+  }
+}
+
+/**
  * R8, Claim in this thread (Rob, 2026-10-13): the server's check of our reply left items open, and the client's
  * thread is under 60% of its context. The Claim message (claimText, Rob's words) goes into THAT thread, the one
  * the row showed, and starts a model turn there: show what is still open and its drafts, and wait. Update's
@@ -2591,13 +2627,8 @@ async function claimThread($: EngineInterface, feed: Feed | null, it: QueueItem,
   const here = sid === (await selfId($))
   const failed = (why: string): Answer => ({ said: `Could not send to ${it.client}'s thread: ${why}` })
   try {
-    if (here) {
-      const r = (await $.prompt.submit({ text, asUser: true })) as { drop?: string } | undefined
-      if (r?.drop) return failed(short(r.drop))
-    } else {
-      const r = (await $.mcp.call('ccd_session_mgmt', 'send_message', { session_id: sid, message: text })) as Mcp
-      if (r.isError) return failed(short(textOf(r)))
-    }
+    const why = await sendInto($, it.client, pid, here, sid, text)
+    if (why !== null) return failed(why)
   } catch (err) {
     return failed(errorText(err))
   }
@@ -2762,8 +2793,9 @@ async function press($: EngineInterface, verb: Verb, row: Row): Promise<void> {
   const mine = ++pressCount
   if (held) {
     pressing.set(row.projectId, mine)
+    // (a message still in flight keeps the hold until the app answers it: decision 1, Opus 10-13)
     $.clock.after(PRESS_HOLD_MS, () => {
-      if (pressing.get(row.projectId) === mine) pressing.delete(row.projectId)
+      if (pressing.get(row.projectId) === mine && !sending.has(row.projectId)) pressing.delete(row.projectId)
     })
   }
   let answer: Answer

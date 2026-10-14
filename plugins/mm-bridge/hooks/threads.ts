@@ -19,7 +19,7 @@
 import { businessMsBetween } from './business-time'
 import type { MmRow } from '../types'
 
-import { MAY_NEED_OK, NOBODY, cleanTitle, clockText, decidesText, fastState, hasDue, holdSentence, noThreadTitle, pinsNow, stillOpenTitle, titleFor, titleNames, withHolder, withTeammate } from './queue'
+import { MAY_NEED_OK, NOBODY, checkingTitle, cleanTitle, clockText, decidesText, fastState, hasDue, holdSentence, noThreadTitle, pinsNow, stillOpenTitle, titleFor, titleNames, withHolder, withTeammate } from './queue'
 import type { FeedThread, QueueItem } from './queue'
 
 const HOUR = 3_600_000
@@ -568,7 +568,9 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: Ro
   const still = fast?.state === 'still_open' && rec.target && !rec.target.suggested ? fast : null
   // R4: on the Needs-you list, no thread of any kind, and due within the pin's window
   const noThread = !withMate && opts.needsYou === true && rec.fresh === true && pinsNow(it, now)
-  const title = noThread ? noThreadTitle(it, now) : still ? stillOpenTitle(it.client) : titleFor(it, now)
+  // R8: the server is checking our reply: the row is named as its thread is
+  const checking = !withMate && fast?.state === 'checking' ? fast : null
+  const title = checking ? checkingTitle(it.client, checking.at, now) : noThread ? noThreadTitle(it, now) : still ? stillOpenTitle(it.client) : titleFor(it, now)
   // (the founder) a package flagged for his OK that a teammate has, theirs to decide until its reply is due:
   // the row's sentence is followed by Opus's words, R2. A row with no sentence (a prepared package) gets no
   // line of them alone: its title and waiting text already say it (Opus, 10-13).
@@ -585,14 +587,15 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: Ro
     ...(withMate && it.theirs ? { theirs: true } : {}),
     // R8: what is still open, drawn under the row, and whether its one action is Claim in this thread
     ...(still ? { stillOpen: [...still.items], claim: !(typeof opts.percent === 'number' && opts.percent >= LONG_CONTEXT_PERCENT) } : {}),
+    ...(checking ? { checking: true as const } : {}),
   }
 }
 
 /** R8: a row whose client's reply left items open (the server's check). */
 export const isStillOpenRow = (row: Row): boolean => Array.isArray(row.stillOpen) && row.stillOpen.length > 0
 
-/** A row under `With a teammate`: not the viewer's to act on. */
-const notMine = (row: Row): boolean => Boolean(row.note) || row.theirs === true
+/** A row under `With a teammate`, or (R8) under `Checking your reply`: not the viewer's to act on now. */
+const notMine = (row: Row): boolean => Boolean(row.note) || row.theirs === true || row.checking === true
 
 /**
  * The buttons on a row: ONE action, chosen by its state, then Drafts (Rob, 2026-10-12: "it should be
@@ -643,26 +646,32 @@ export function rowGroups(rows: readonly Row[]): Array<{ heading: string; rows: 
   ].filter(g => g.rows.length > 0)
 }
 
-export type Fold = 'teammate' | 'older'
+export type Fold = 'checking' | 'teammate' | 'older'
+
+/** The groups under the list as a pane holds them. */
+export type Folds = { checking?: readonly Row[]; teammate?: readonly Row[]; older?: readonly Row[] }
 
 /**
- * The two groups under the list, in the order they are drawn: `With a teammate (n)`, then `Older (n)`.
- * Each is closed until the person opens it, and one with nobody in it is not drawn. Their rows are numbered
- * on from the list's. Nobody in them is pinned, and the header does not count them.
+ * The groups under the list, in the order they are drawn: (0.5.2, R8, Opus decision 2) `Checking your reply
+ * (n)`, then `With a teammate (n)`, then `Older (n)`. Each is closed until the person opens it, and one with
+ * nobody in it is not drawn. Their rows are numbered on from the list's. Nobody in them is pinned, and the
+ * header does not count them.
  */
-export function foldGroups(queue: { rows: readonly Row[]; teammate?: readonly Row[]; older?: readonly Row[] }): Array<{ key: Fold; heading: string; rows: Array<{ row: Row; n: number }> }> {
+export function foldGroups(queue: { rows: readonly Row[] } & Folds): Array<{ key: Fold; heading: string; rows: Array<{ row: Row; n: number }> }> {
+  const checking = Array.isArray(queue.checking) ? queue.checking : []
   const teammate = Array.isArray(queue.teammate) ? queue.teammate : []
   const older = Array.isArray(queue.older) ? queue.older : []
   const numbered = (group: readonly Row[], from: number) => group.map((row, i) => ({ row, n: from + i + 1 }))
   const groups: Array<{ key: Fold; heading: string; rows: Array<{ row: Row; n: number }> }> = [
-    { key: 'teammate', heading: `With a teammate (${teammate.length})`, rows: numbered(teammate, queue.rows.length) },
-    { key: 'older', heading: `Older (${older.length})`, rows: numbered(older, queue.rows.length + teammate.length) },
+    { key: 'checking', heading: `Checking your reply (${checking.length})`, rows: numbered(checking, queue.rows.length) },
+    { key: 'teammate', heading: `With a teammate (${teammate.length})`, rows: numbered(teammate, queue.rows.length + checking.length) },
+    { key: 'older', heading: `Older (${older.length})`, rows: numbered(older, queue.rows.length + checking.length + teammate.length) },
   ]
   return groups.filter(g => g.rows.length > 0)
 }
 
-/** The pane as plain text, one line per thing drawn: for tests and for a surface that draws no buttons. `folds` are the two groups under the list, each drawn open. */
-export function paneText(rows: readonly Row[], header: string, note: string, folds: { teammate?: readonly Row[]; older?: readonly Row[] } = {}): string {
+/** The pane as plain text, one line per thing drawn: for tests and for a surface that draws no buttons. `folds` are the groups under the list, each drawn open. */
+export function paneText(rows: readonly Row[], header: string, note: string, folds: Folds = {}): string {
   const out = [header]
   const draw = (row: Row, lead: string): void => {
     out.push('', `${lead} ${row.title}`, `   ${rowDetail(row)}`)
