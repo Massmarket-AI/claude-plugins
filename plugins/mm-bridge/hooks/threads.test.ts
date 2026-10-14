@@ -7,6 +7,7 @@ import {
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLength, threadLink, threadRows, titleLooksLike, titleSuggestion, waitingText,
   CHIP_TITLE_MAX, REFRESH_FAILED, bandText, chipTitle, claimText, isStillOpenRow, staleCopySentence, startKickoff,
+  LABEL_MAX, buttonLabel,
 } from './threads'
 import type { AppThread, ClientThread, Pairs, Platform } from './threads'
 
@@ -1250,6 +1251,28 @@ describe('0.5.4 (Rob, 10-14, "yes chips"): the band says where a client\'s one c
     expect(threadTitleShort('✓ Black Stone · clear 5:27 AM')).toBe('Black Stone')
     expect(threadTitleShort('Morning hub')).toBe('Morning hub')
     expect(threadTitleShort('A thread whose own name runs on well past forty characters')).toBe('A thread whose own name runs on well pa…')
+  })
+})
+
+describe('0.5.5: a row says "this thread" only in the thread it acts on (Rob, 10-14)', () => {
+  const row = { projectId: 'p', client: 'Black-Peak', title: 't', waiting: 'drafts ready', state: 'update' as const, reason: 'new since this thread was updated', target: 'local_bp', stillOpen: ['the logo file'], claim: true }
+  test('Claim: "this thread" in the client\'s own thread; anywhere else the client\'s thread, cut to fit', async () => {
+    expect(buttonLabel('claim', row, 'local_bp')).toBe('Claim in this thread')
+    expect(buttonLabel('claim', row, 'local_bo')).toBe('Claim in Black-Peak\'s thread')
+    // a thread that does not know its own id says which thread, too
+    expect(buttonLabel('claim', row, undefined)).toBe('Claim in Black-Peak\'s thread')
+    const long = buttonLabel('claim', { ...row, client: 'Thirty Two Character Client Name Inc' }, 'local_bo')
+    expect(long.length).toBeLessThanOrEqual(LABEL_MAX)
+    expect(long).toBe('Claim in Thirty Two Character…\'s thread')
+    // the other buttons never say "this thread"
+    for (const verb of ['update', 'start', 'open', 'drafts'] as const) expect(buttonLabel(verb, row, 'local_bo')).toBe(LABEL[verb])
+  })
+  test('a row\'s reason: "this thread" in its own thread, the client\'s thread anywhere else', async () => {
+    const plain = { ...row, stillOpen: undefined, claim: undefined }
+    expect(rowDetail(plain, 'local_bp')).toBe('drafts ready · Update thread: new since this thread was updated')
+    expect(rowDetail(plain, 'local_bo')).toBe('drafts ready · Update thread: new since Black-Peak\'s thread was updated')
+    expect(paneText([row], 'H', 'N', {}, 'local_bo')).toContain('[ Claim in Black-Peak\'s thread ] [ Drafts ]')
+    expect(paneText([row], 'H', 'N', {}, 'local_bp')).toContain('[ Claim in this thread ] [ Drafts ]')
   })
 })
 

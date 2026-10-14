@@ -3,12 +3,12 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { MmBand, MmFolds, MmNotice, MmQueue, MmView } from '../types'
 
 import {
-  INTERNAL_PROJECTS, MAIL_LOOKBACK_HOURS, buildLists, byDue, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, needsLine, noteText, pinsNow,
+  INTERNAL_PROJECTS, MAIL_LOOKBACK_HOURS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, needsLine, noteText, pinsNow,
   threadTitle, threadTitleShort, titleFor, withHolder,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
-  CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
+  CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, signatureOf, staleCopySentence, startKickoff, threadLength, threadLink, threadRows, titleSuggestion,
   REFRESH_FAILED, bandText, chipTitle,
 } from './threads'
@@ -439,6 +439,64 @@ async function mcpJsonWithin($: EngineInterface, server: string, tool: string, a
 
 async function home($: EngineInterface): Promise<string> {
   return (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? ''
+}
+
+// ---------------------------------------------------------------- (0.5.5) a newer mod installed on this machine
+
+/** How often a thread looks for a newer mod. */
+const VERSION_EVERY_MS = 5 * 60_000
+/** The newest mm-bridge on this machine, by session, when it is later than this thread's own VERSION ('' otherwise), and when that was looked for. */
+const newerMod = new Map<string, { version: string; at: number }>()
+
+/**
+ * (0.5.5, Rob 10-14: the band "could also say when there's an update and they need to restart their Claude Code")
+ * Whether a later mm-bridge than the one this thread runs (VERSION) is installed on this machine. Two ways, both
+ * read, the later version wins:
+ *   (a) the plugin cache: the version folders beside this plugin's own (`$.plugin.root`, the engine's word for the
+ *       directory holding plugin.json, whose parent holds one folder per installed version), listed with `$.fs.list`;
+ *       else `~/.claude/plugins/cache/massmarket/mm-bridge`;
+ *   (b) the store: each running thread writes the version it runs (`mm.versions`); any reported in the last day.
+ * At most once in VERSION_EVERY_MS for a session. Nothing is called on the app.
+ */
+async function checkVersions($: EngineInterface): Promise<void> {
+  const now = await $.clock.now()
+  const id = await instanceId($)
+  const was = newerMod.get(id)
+  if (was && now - was.at < VERSION_EVERY_MS) return
+  const me = await knownSelf($)
+  const versions = await storeGet<Record<string, { version?: unknown; at?: unknown }>>($, 'mm.versions', {})
+  if (me && (versions[me]?.version !== VERSION || !(now - Number(versions[me]?.at) < DAY_MS / 24))) {
+    await patchStore<Record<string, { version?: unknown; at?: unknown }>>($, 'mm.versions', {}, fresh => {
+      fresh[me] = { version: VERSION, at: now }
+      for (const [sid, v] of Object.entries(fresh)) if (!v || !(now - Number(v.at) <= DAY_MS)) delete fresh[sid]
+    }).catch(() => {})
+  }
+  let newest = VERSION
+  for (const v of await installedVersions($)) if (isNewerVersion(v, newest)) newest = v
+  for (const v of Object.values(versions)) if (v && now - Number(v.at) <= DAY_MS && isNewerVersion(v.version, newest)) newest = String(v.version)
+  newerMod.set(id, { version: newest === VERSION ? '' : newest, at: now })
+}
+
+/** (0.5.5, way (a)) The versions of mm-bridge in the plugin cache: the folder names that are versions. [] when it cannot be listed. */
+async function installedVersions($: EngineInterface): Promise<string[]> {
+  const dirs: string[] = []
+  try {
+    const root = String($.plugin.root ?? '')
+    const last = root.split(/[\\/]/).pop() ?? ''
+    if (isVersion(last)) dirs.push(root.slice(0, root.length - last.length - 1))
+  } catch {
+    // no word on this plugin's own folder: the usual place below
+  }
+  const h = await home($)
+  if (h) dirs.push(`${h}/.claude/plugins/cache/massmarket/mm-bridge`)
+  for (const dir of dirs) {
+    try {
+      return (await $.fs.list(dir)).filter(e => e.kind === 'dir' && isVersion(e.name)).map(e => e.name)
+    } catch {
+      // the next place
+    }
+  }
+  return []
 }
 
 async function token($: EngineInterface): Promise<string> {
@@ -1840,6 +1898,8 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
     update: update ? cleanName(update.client) : undefined,
     stale: Boolean(last.error) || !(Number.isFinite(last.at) && now - last.at <= STALE_SYNC_MS) || ownFailed,
     older: Array.isArray(last.older) ? last.older.length : 0,
+    // (0.5.5) what this session's last look found (`checkVersions`): no call from here
+    newer: newerMod.get(await instanceId($))?.version || undefined,
   })
   if (!text) return { text: '', at: last.at }
   // In a waiting client's thread the line carries the button that opens its part of the pane.
@@ -1924,6 +1984,8 @@ async function tick($: EngineInterface): Promise<void> {
     }
     // (0.5.4, C3) this thread is running
     await noteSeen($, false).catch(() => {})
+    // (0.5.5) a later mod installed on this machine than the one this thread runs
+    await checkVersions($).catch(() => {})
     // this session's own context reading, at most once in five minutes
     await recordContext($)
     const now = await $.clock.now()
@@ -3800,10 +3862,12 @@ export const register: Register = on => {
     // Nothing synced yet, or a value an older version of this plugin left in this session.
     const hasList = Boolean(queue && Array.isArray(queue.rows))
     if (!hasList && !client.text) return <Text dimColor>{CHECKING}</Text>
+    // (0.5.5) the thread drawing this pane, as the timer already learnt it: a row says "this thread" only of it
+    const here = await knownSelf($)
     const drawRow = (row: Row, lead: string) => (
       <Box flexDirection="column" marginTop={1}>
         <Text>{`${lead} ${row.title}`}</Text>
-        <Text dimColor>{rowDetail(row)}</Text>
+        <Text dimColor>{rowDetail(row, here)}</Text>
         {row.note ? <Text dimColor>{row.note}</Text> : null}
         {isStillOpenRow(row) ? (row.stillOpen as string[]).map(item => <Text dimColor>{`- ${item}`}</Text>) : null}
         <Box flexDirection="row" gap={1}>
@@ -3811,7 +3875,7 @@ export const register: Register = on => {
             verb === 'drafts' ? (
               <Button key={`${verb}:${row.projectId}`} label={LABEL[verb]} onPress={() => void press($, verb, row)} />
             ) : (
-              <Button key={`${verb}:${row.projectId}`} label={LABEL[verb]} variant="primary" onPress={() => void press($, verb, row)} />
+              <Button key={`${verb}:${row.projectId}`} label={buttonLabel(verb, row, here)} variant="primary" onPress={() => void press($, verb, row)} />
             ),
           )}
         </Box>

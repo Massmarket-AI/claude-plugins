@@ -615,11 +615,34 @@ export function rowButtons(row: Row): RowButton[] {
   return [state === 'current' ? 'open' : state, 'drafts']
 }
 
-/** The second line of a row: what is waiting, then the action and its reason, or when the thread was updated. A row with no action: what is waiting. */
-export function rowDetail(row: Row): string {
+/**
+ * The second line of a row: what is waiting, then the action and its reason, or when the thread was updated. A row with no action: what is waiting.
+ * `here` (0.5.5): the thread drawing the pane. A reason that says "this thread" says so only there: anywhere else it names the client's thread.
+ */
+export function rowDetail(row: Row, here?: string): string {
   if (notMine(row) || isStillOpenRow(row)) return row.waiting
   const state = rowState(row)
-  return state === 'current' ? `${row.waiting} · ${row.reason}` : `${row.waiting} · ${LABEL[state]}: ${row.reason}`
+  const reason = row.reason === UPDATED_HERE && !isHere(row, here) ? `new since ${row.client}'s thread was updated` : row.reason
+  return state === 'current' ? `${row.waiting} · ${reason}` : `${row.waiting} · ${LABEL[state]}: ${reason}`
+}
+
+/** The reason recommend gives a thread that was updated before and has something newer since. */
+const UPDATED_HERE = 'new since this thread was updated'
+/** (0.5.5) Whether the thread a row acts on is the thread drawing the pane. */
+const isHere = (row: Row, here: string | undefined): boolean => Boolean(here) && row.target === here
+/** (0.5.5) The most characters of a button's label. */
+export const LABEL_MAX = 40
+
+/**
+ * (0.5.5, Rob 10-14: in the Buy Oklahoma thread's pane, Black-Peak's row offered "Claim in this thread", as if it would
+ * claim Black-Peak there) A row's button as it is drawn in the thread `here`: `Claim in this thread` only in the thread it
+ * acts on; in any other, `Claim in <client>'s thread`, the client's name cut to keep the label within LABEL_MAX.
+ */
+export function buttonLabel(verb: RowButton, row: Row, here: string | undefined): string {
+  if (verb !== 'claim' || isHere(row, here)) return LABEL[verb]
+  const room = LABEL_MAX - "Claim in 's thread".length
+  const client = row.client.length > room ? `${row.client.slice(0, room - 1).trimEnd()}…` : row.client
+  return `Claim in ${client}'s thread`
 }
 
 /**
@@ -675,14 +698,17 @@ export function foldGroups(queue: { rows: readonly Row[] } & Folds): Array<{ key
   return groups.filter(g => g.rows.length > 0)
 }
 
-/** The pane as plain text, one line per thing drawn: for tests and for a surface that draws no buttons. `folds` are the groups under the list, each drawn open. */
-export function paneText(rows: readonly Row[], header: string, note: string, folds: Folds = {}): string {
+/**
+ * The pane as plain text, one line per thing drawn: for tests and for a surface that draws no buttons. `folds` are the groups under the list, each drawn open.
+ * `here` (0.5.5): the thread drawing it, as for `rowDetail` and `buttonLabel`.
+ */
+export function paneText(rows: readonly Row[], header: string, note: string, folds: Folds = {}, here?: string): string {
   const out = [header]
   const draw = (row: Row, lead: string): void => {
-    out.push('', `${lead} ${row.title}`, `   ${rowDetail(row)}`)
+    out.push('', `${lead} ${row.title}`, `   ${rowDetail(row, here)}`)
     if (row.note) out.push(`   ${row.note}`)
     for (const item of isStillOpenRow(row) ? (row.stillOpen as string[]) : []) out.push(`   - ${item}`)
-    out.push(`   ${rowButtons(row).map(b => `[ ${LABEL[b]} ]`).join(' ')}`)
+    out.push(`   ${rowButtons(row).map(b => `[ ${buttonLabel(b, row, here)} ]`).join(' ')}`)
   }
   for (const group of rowGroups(rows)) {
     out.push('', group.heading)
@@ -714,6 +740,8 @@ export type BandFacts = {
   noThread: Array<{ client: string; due: string; chipIn?: string | undefined }>
   /** (0.5.4, C2) The other threads that hold a chip for a client of the person's with a thread, one entry each, by name. */
   chipsElsewhere?: string[]
+  /** (0.5.5) A later mm-bridge installed on this machine than the one this thread runs: its version. */
+  newer?: string | undefined
   /** R8: the first client still open after our reply, with a thread to claim it in. */
   stillOpen?: string | undefined
   /** R9: the first client whose pinned thread has an update ready to claim. */
@@ -740,6 +768,8 @@ export type BandFacts = {
  *                                                  ` · chips ready in <n> threads` for more than one
  *   a client with no thread whose chip exists (C3) `🔴 <client> has no thread (due <due>): its chip is in <thread>.`,
  *                                                  in every thread, for each such client
+ * (0.5.5, Rob 10-14, verbatim) A later mod installed than this thread runs: ` · A newer Claude mod (<version>) is
+ * installed: quit and reopen Claude to load it.` at the end of the first line (of the last, when there is no first).
  */
 export function bandText(f: BandFacts): string {
   const out: string[] = []
@@ -756,6 +786,9 @@ export function bandText(f: BandFacts): string {
   if (first.startsWith('Needs you:') && older > 0) first = `${first.replace(/\.$/, '')} · ${older} older overdue.`
   // (0.5.4, C2) where the chips of the person's clients with a thread are, when not here
   if (first.startsWith('Needs you:') && elsewhere.length) first = `${first.replace(/\.$/, '')} · ${elsewhere.length === 1 ? `a chip is ready in ${elsewhere[0]}` : `chips ready in ${elsewhere.length} threads`}.`
+  // (0.5.5) a later mod installed on this machine
+  const newer = f.newer ? `A newer Claude mod (${f.newer}) is installed: quit and reopen Claude to load it.` : ''
+  if (first && newer) first = `${first.replace(/\.$/, '')} · ${newer}`
   if (first) out.push(first)
   // (0.5.4, C3) each client with no thread whose one chip exists: where it is
   for (const n of f.noThread) if (n.chipIn) out.push(`🔴 ${n.client} has no thread (due ${n.due}): its chip is in ${n.chipIn}.`)
@@ -763,5 +796,10 @@ export function bandText(f: BandFacts): string {
   if (one && !one.chipIn) out.push(`Open a thread for ${one.client} (due ${one.due}): type /mm start ${one.client}.`)
   else if (!f.noThread.length && !f.stillOpen && f.update) out.push(`An update is ready to claim in the ${f.update} thread.`)
   if (f.stale) out.push(REFRESH_FAILED)
+  // (with no first line, after the last one there is)
+  if (newer && !first) {
+    const tail = out.pop()
+    out.push(tail ? `${tail.replace(/\.$/, '')} · ${newer}` : newer)
+  }
   return out.join(' ')
 }
