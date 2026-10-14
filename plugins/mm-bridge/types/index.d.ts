@@ -68,6 +68,8 @@ export type MmQueue = {
    */
   warning?: string
   warnedAt?: number
+  /** (0.5.4) The sync the list was drawn from: a thread drawn from an older one than the store holds draws it again. */
+  syncedAt?: number
 }
 
 /** Which of the two groups under the list the person has opened. */
@@ -81,7 +83,8 @@ export type MmNotice = { text: string; at: number }
  * `text` draws nothing. `drafts` is true in a thread that is a waiting client's: the line then carries a
  * second button that opens that client's pane.
  */
-export type MmBand = { text: string; drafts?: boolean }
+/** `at` (0.5.4): the sync the line was worked out from. */
+export type MmBand = { text: string; drafts?: boolean; at?: number }
 
 declare module 'claude-code' {
   interface PluginState {

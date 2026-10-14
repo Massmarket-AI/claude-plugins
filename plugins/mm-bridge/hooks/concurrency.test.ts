@@ -309,8 +309,10 @@ describe('B1: a dozen threads started at once against one store, with a sync run
   })
 })
 
-// Fix round 1, F4 (review of e832775b): every running thread mints its own chips (R5), and a dozen that tick at once
-// write the one `mm.chips` record over each other. Each thread's own records come back, and nothing is minted twice.
+// Fix round 1, F4 (review of e832775b): a dozen threads that tick at once write the one `mm.chips` record over each
+// other. (0.5.4, C3: Rob, 10-14, "yes chips") A client with no thread has ONE chip, in one thread: threads that
+// start together and each mint one come down to the copies of the one thread that holds them, on the next tick,
+// and nothing is minted again.
 describe('F4: chip records when a dozen threads tick at once', () => {
   const tickAll = async (w: ReturnType<typeof world>, threads: unknown[]) => {
     await Promise.all(threads.map(t => hooks['session.start']?.(t, { cwd: '/work', surface: 'desktop', isInteractive: false }, next)))
@@ -318,21 +320,31 @@ describe('F4: chip records when a dozen threads tick at once', () => {
     await w.advance(3_100)
   }
   for (const seed of [1, 7, 42, 99, 2026, 1013, 5, 11]) {
-    test(`twelve threads mint five each at once: 60 records, and the next tick mints none again (seed ${seed})`, async () => {
+    test(`twelve threads tick at once: the clients with no thread end with one chip each, five in all, in one thread; the next tick mints none (seed ${seed})`, async () => {
       // (thread ids of this test's own: the bridge's module is one for the whole file, as each app thread's is one per thread)
       const ids = Array.from({ length: N }, (_, i) => `local_f4_${seed}_${i + 1}`)
       const w = world({ seed, extra: ids })
       await before(w)
+      // the thread that polls is one of the twelve, as it is in the app: its session holds the lease, and its pair is on record
+      w.put('mm.lease', { owner: `cli-f4-${seed}-1`, until: NOW + HOUR })
+      w.put('mm.threads', { ...((w.stored('mm.threads') ?? {}) as Record<string, unknown>), [`cli-f4-${seed}-1`]: { app: ids[0], at: NOW } })
       const threads = ids.map((id, i) => w.session(`cli-f4-${seed}-${i + 1}`, id))
       await tickAll(w, threads)
-      expect(w.spawned.length).toBe(60)
-      const recs = () => ((w.stored('mm.chips') ?? []) as Array<{ taskId: string; threadId: string }>).filter(r => ids.includes(r.threadId))
-      expect(recs().length).toBe(60)
+      const live = () => ((w.stored('mm.chips') ?? []) as Array<{ taskId: string; threadId: string; projectId: string; superseded?: boolean }>).filter(r => ids.includes(r.threadId) && !r.superseded)
+      // the next tick: any copy minted beside the poller's is withdrawn
       await w.advance(60_000)
       await tickAll(w, threads)
-      expect(w.spawned.length).toBe(60)
-      expect(new Set(recs().map(r => r.taskId)).size).toBe(60)
-      expect(w.dismissed).toEqual([])
+      expect(live().length).toBe(5)
+      expect(new Set(live().map(r => r.projectId)).size).toBe(5)
+      expect([...new Set(live().map(r => r.threadId))]).toEqual([ids[0]])
+      // and the tick after mints nothing and withdraws nothing
+      const spawned = w.spawned.length
+      const dismissed = w.dismissed.length
+      await w.advance(60_000)
+      await tickAll(w, threads)
+      expect(w.spawned.length).toBe(spawned)
+      expect(w.dismissed.length).toBe(dismissed)
+      expect(live().length).toBe(5)
     })
   }
 })

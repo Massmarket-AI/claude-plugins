@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { buildLists, buildQueue } from './queue'
+import { buildLists, buildQueue, threadTitleShort } from './queue'
 import type { Feed, FeedThread, QueueItem } from './queue'
 import {
   CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, LONG_CONTEXT_TOKENS, LONG_THREAD_ROWS, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
@@ -1122,16 +1122,13 @@ describe('a teammate\'s own pane is byte-identical to 0.5.0 for the same feed', 
 // ---------------------------------------------------------------- 0.5.2
 
 describe('R9: the band line is the alert, and always the whole truth (Rob, 10-13: "yes band")', () => {
-  const base = { pinned: 0, pinsNow: false, noThread: [], chipHere: false, stale: false }
+  const base = { pinned: 0, pinsNow: false, noThread: [], stale: false }
   test('something pinned, nobody without a thread', async () => {
     expect(bandText({ ...base, pinned: 3, pinsNow: true })).toBe('Needs you: 3 pinned.')
   })
-  test('clients without a thread: named; one of them gets R9\'s line after it, with its chip here or the command', async () => {
+  test('clients without a thread: named; one of them with no chip yet gets R9\'s line after it, the command', async () => {
     expect(bandText({ ...base, pinned: 2, pinsNow: true, noThread: [{ client: 'Acme Roofing', due: '3 PM' }, { client: 'Bolt Staffing', due: 'Tue 9 AM' }] })).toBe(
       'Needs you: 2 pinned · 2 with no thread: Acme Roofing, Bolt Staffing.',
-    )
-    expect(bandText({ ...base, pinned: 1, pinsNow: true, noThread: [{ client: 'Acme Roofing', due: '3 PM' }], chipHere: true })).toBe(
-      'Needs you: 1 pinned · 1 with no thread: Acme Roofing. Open a thread for Acme Roofing (due 3 PM): a chip is waiting in this thread.',
     )
     expect(bandText({ ...base, noThread: [{ client: 'Acme Roofing', due: '3 PM' }] })).toBe(
       'Needs you: 0 pinned · 1 with no thread: Acme Roofing. Open a thread for Acme Roofing (due 3 PM): type /mm start Acme Roofing.',
@@ -1210,19 +1207,49 @@ describe('R4 and R8: the rows', () => {
 // ---------------------------------------------------------------- fix round 1 (review of e832775b)
 
 describe('F6: the band counts the person\'s clients under Older', () => {
-  const base = { pinned: 0, pinsNow: false, noThread: [], chipHere: false, stale: false }
+  const base = { pinned: 0, pinsNow: false, noThread: [], stale: false }
   test('nothing due in the window, older overdue: never all clear', async () => {
     expect(bandText({ ...base, older: 2 })).toBe('Nothing due in the next 24 hours · 2 older overdue.')
   })
   test('the other forms say it at the end of their first line', async () => {
     expect(bandText({ ...base, pinned: 1, pinsNow: true, older: 3 })).toBe('Needs you: 1 pinned · 3 older overdue.')
     expect(bandText({ ...base, pinned: 1, pinsNow: true, stillOpen: 'Cedar Dental', older: 1 })).toBe('Needs you: 1 pinned · Cedar Dental still open after your reply · 1 older overdue.')
-    expect(bandText({ ...base, noThread: [{ client: 'Acme Roofing', due: '3 PM' }], chipHere: true, older: 1 })).toBe(
-      'Needs you: 0 pinned · 1 with no thread: Acme Roofing · 1 older overdue. Open a thread for Acme Roofing (due 3 PM): a chip is waiting in this thread.',
+    expect(bandText({ ...base, noThread: [{ client: 'Acme Roofing', due: '3 PM', chipIn: 'Morning hub' }], older: 1 })).toBe(
+      'Needs you: 0 pinned · 1 with no thread: Acme Roofing · 1 older overdue. 🔴 Acme Roofing has no thread (due 3 PM): its chip is in Morning hub.',
     )
   })
   test('a stale read: the refresh-failed line, never an all-clear', async () => {
     expect(bandText({ ...base, older: 2, stale: true })).toBe(REFRESH_FAILED)
+  })
+})
+
+// ---------------------------------------------------------------- 0.5.4
+
+describe('0.5.4 (Rob, 10-14, "yes chips"): the band says where a client\'s one chip is (verbatim)', () => {
+  const base = { pinned: 0, pinsNow: false, noThread: [], stale: false }
+  test('C2: a chip in another thread, for a client with a thread: on the first line; more than one: how many threads', async () => {
+    expect(bandText({ ...base, pinned: 2, pinsNow: true, chipsElsewhere: ['Acme Roofing'] })).toBe('Needs you: 2 pinned · a chip is ready in Acme Roofing.')
+    expect(bandText({ ...base, pinned: 3, pinsNow: true, chipsElsewhere: ['Acme Roofing', 'Bolt Staffing'] })).toBe('Needs you: 3 pinned · chips ready in 2 threads.')
+    // after what the first line already says
+    expect(bandText({ ...base, pinned: 1, pinsNow: true, stillOpen: 'Cedar Dental', older: 1, chipsElsewhere: ['Acme Roofing'] })).toBe(
+      'Needs you: 1 pinned · Cedar Dental still open after your reply · 1 older overdue · a chip is ready in Acme Roofing.',
+    )
+    // never on an all-clear line
+    expect(bandText({ ...base, chipsElsewhere: ['Acme Roofing'] })).toBe('Nothing needs you in the next 24 hours.')
+  })
+  test('C3: each client with no thread whose chip exists, in every thread; one with no chip yet keeps the command', async () => {
+    expect(bandText({ ...base, noThread: [{ client: 'Cedar Dental', due: '4 PM', chipIn: 'Morning hub' }, { client: 'Dune Freight', due: 'Tue 9 AM', chipIn: 'Acme Roofing' }] })).toBe(
+      'Needs you: 0 pinned · 2 with no thread: Cedar Dental, Dune Freight. 🔴 Cedar Dental has no thread (due 4 PM): its chip is in Morning hub. 🔴 Dune Freight has no thread (due Tue 9 AM): its chip is in Acme Roofing.',
+    )
+    expect(bandText({ ...base, noThread: [{ client: 'Cedar Dental', due: '4 PM' }] })).toBe(
+      'Needs you: 0 pinned · 1 with no thread: Cedar Dental. Open a thread for Cedar Dental (due 4 PM): type /mm start Cedar Dental.',
+    )
+  })
+  test('a thread\'s name as the band gives it: the client of a name of the bridge\'s; any other name cleaned and cut to 40', async () => {
+    expect(threadTitleShort('🟡 21h left · Acme Roofing · reply ready')).toBe('Acme Roofing')
+    expect(threadTitleShort('✓ Black Stone · clear 5:27 AM')).toBe('Black Stone')
+    expect(threadTitleShort('Morning hub')).toBe('Morning hub')
+    expect(threadTitleShort('A thread whose own name runs on well past forty characters')).toBe('A thread whose own name runs on well pa…')
   })
 })
 
