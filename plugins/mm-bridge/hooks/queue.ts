@@ -907,6 +907,23 @@ export function clientInTitle(title: string): string {
   return lead ? (parts[1]?.trim() ?? '') : first
 }
 
+/** (0.5.5) A version as plugin.json states one: three whole numbers. Anything else (`0.6`, `latest`, `1.0.0-beta`) is no version here. */
+const SEMVER = /^(\d{1,4})\.(\d{1,4})\.(\d{1,6})$/
+export const isVersion = (v: unknown): v is string => typeof v === 'string' && SEMVER.test(v)
+
+/** (0.5.5) Whether `a` is a later version than `b`, by number, part by part (never by string: `0.10.0` is later than `0.9.0`). A malformed `a` never is. */
+export function isNewerVersion(a: unknown, b: unknown): boolean {
+  const x = typeof a === 'string' ? SEMVER.exec(a) : null
+  if (!x) return false
+  const y = typeof b === 'string' ? SEMVER.exec(b) : null
+  if (!y) return true
+  for (let i = 1; i <= 3; i++) {
+    const d = Number(x[i]) - Number(y[i])
+    if (d !== 0) return d > 0
+  }
+  return false
+}
+
 /** (0.5.4) The most characters of a thread's own name the band gives. */
 const SHORT_TITLE_MAX = 40
 

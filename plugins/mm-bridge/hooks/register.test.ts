@@ -3,6 +3,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine, FoundElement } from 'claude-code/testing'
 
 import type { Feed } from './queue'
+import { isNewerVersion } from './queue'
 import { PANE_SENTENCE, recommend } from './threads'
 
 // The bridge against a pretend desktop app, a pretend feed and a pretend store. Nothing here reaches the
@@ -2118,7 +2119,8 @@ describe('a row says Start, Update or Open: one action, chosen by what the threa
       w.setFeed(acmeFeed(change))
       await mm($, '')
       expect(await buttonsOf(ui, ACME), what).toEqual(['Update thread', 'Drafts'])
-      expect(await lines(ui), what).toContain('drafts ready · Update thread: new since this thread was updated')
+      // (0.5.5) drawn in another thread than Acme's: the reason names Acme's thread
+      expect(await lines(ui), what).toContain('drafts ready · Update thread: new since Acme Roofing\'s thread was updated')
       await ui.press({ key: `update:${ACME}` })
       expect(await buttonsOf(ui, ACME), what).toEqual(['Open thread', 'Drafts'])
       expect(await lines(ui), what).toContain('drafts ready · Thread updated 11:06 AM')
@@ -2141,7 +2143,7 @@ describe('a row says Start, Update or Open: one action, chosen by what the threa
     w.setFeed(more)
     await mm($, '')
     expect(await buttonsOf(ui, BOLT)).toEqual(['Update thread', 'Drafts'])
-    expect(await lines(ui)).toContain('3 messages waiting · Update thread: new since this thread was updated')
+    expect(await lines(ui)).toContain('3 messages waiting · Update thread: new since Bolt Staffing\'s thread was updated')
     await ui.unmount()
   })
 
@@ -2205,6 +2207,7 @@ describe('a row says Start, Update or Open: one action, chosen by what the threa
     await mm($, '')
     const ui = await pane($)
     expect(await buttonsOf(ui, CEDAR)).toEqual(['Update thread', 'Drafts'])
+    // (0.5.5) drawn in Cedar's own thread: "this thread" stays
     expect(await lines(ui)).toContain('1 task due · Update thread: new since this thread was updated')
     await ui.unmount()
   })
@@ -4913,7 +4916,8 @@ describe('R8: sent · checking, then clear or still open (Rob, 2026-10-13: "yes 
     expect(w.threads.get('local_a')).toMatchObject({ title: STILL, pinned: true })
     ui = await pane($)
     expect(await lines(ui)).toEqual(expect.arrayContaining([`3. ${STILL}`, '- the logo file', '- the Q4 dates']))
-    expect(await buttonsOf(ui, ACME)).toEqual(['Claim in this thread', 'Drafts'])
+    // (0.5.5) drawn in this thread, which is not Acme's: the button names the thread it acts on
+    expect(await buttonsOf(ui, ACME)).toEqual(['Claim in Acme Roofing\'s thread', 'Drafts'])
     // the band says it
     const band = await bandOf($)
     expect(await lines(band)).toEqual(['Needs you: 1 pinned · 2 with no thread: Cedar Dental, Bolt Staffing.'])
@@ -5148,7 +5152,7 @@ describe('fix round 1: the reviewer\'s findings', () => {
     await mm($, '')
     expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { sid: 'local_a' } })
     const ui = await pane($)
-    expect(await buttonsOf(ui, ACME)).toEqual(['Claim in this thread', 'Drafts'])
+    expect(await buttonsOf(ui, ACME)).toEqual(['Claim in Acme Roofing\'s thread', 'Drafts'])
     w.setFeed(acmeFeed(CHECKED, [{ ...declared(ACME, 'cli-acme', 30), sole: false }]))
     await ui.press({ key: `claim:${ACME}` })
     expect(sends(w)).toEqual([])
@@ -5416,5 +5420,78 @@ describe('0.5.3: a thread\'s chips pass runs every 15 seconds; minting and the f
     expect(w.dismissed()).toEqual([chipId(31)])
     await w.clock.advance(15_000)
     expect(w.dismissed()).toEqual([chipId(31), chipId(31)])
+  })
+})
+
+// ======================================================================== 0.5.5
+
+describe('0.5.5: a row says "this thread" only in the thread it acts on (Rob, 10-14: Black-Peak\'s Claim, drawn in the Buy Oklahoma thread)', () => {
+  const SENT_AT = ago(0.25)
+  const CHECKED = { last_outbound_at: SENT_AT, checked_send_at: SENT_AT, checked_at: ago(0.1), still_open: ['the logo file'], answered: [] }
+
+  test('in the client\'s own thread: Claim in this thread, and the press puts the message in here, as the person\'s prompt', async ($, on) => {
+    const w = world(on, { feed: acmeFeed(CHECKED), store: { 'mm.links': { [ACME]: SELF } } })
+    await mm($, '')
+    const ui = await pane($)
+    expect(await buttonsOf(ui, ACME)).toEqual(['Claim in this thread', 'Drafts'])
+    await ui.press({ key: `claim:${ACME}` })
+    expect(sends(w)).toEqual([])
+    expect(w.prompts.map(p => p.text)).toEqual([expect.stringMatching(/^Still open for Acme Roofing after our reply of /)])
+    await ui.unmount()
+  })
+
+  test('in another thread: Claim in <client>\'s thread, and the press sends to that thread only', async ($, on) => {
+    const w = acmeWorld(on, { feed: acmeFeed(CHECKED) })
+    await mm($, '')
+    const ui = await pane($)
+    expect(await buttonsOf(ui, ACME)).toEqual(['Claim in Acme Roofing\'s thread', 'Drafts'])
+    await ui.press({ key: `claim:${ACME}` })
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
+    expect(w.prompts).toEqual([])
+    await ui.unmount()
+  })
+})
+
+describe('0.5.5: the band says when a later mod is installed than this thread runs (Rob, 10-14 ~12:10 ET)', () => {
+  const CACHE = '/home/someone/.claude/plugins/cache/massmarket/mm-bridge'
+  const installed = (...versions: string[]) => Object.fromEntries(versions.map(v => [`${CACHE}/${v}/.claude-plugin/plugin.json`, { text: '{}', mtimeMs: 0 }]))
+  const NEWER = (v: string) => `A newer Claude mod (${v}) is installed: quit and reopen Claude to load it.`
+  const bandLines = async ($: Engine) => {
+    const band = await bandOf($)
+    const out = await lines(band)
+    await band.unmount()
+    return out
+  }
+
+  test('(a) a later version in the plugin cache: the line, at the end of the band\'s first line', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: {} }), files: installed('0.0.1', '9.0.0', '10.0.0-beta') })
+    await tickOnce($, w)
+    expect(await bandLines($)).toEqual([`Nothing needs you in the next 24 hours · ${NEWER('9.0.0')}`])
+  })
+
+  test('the version this thread runs, an older one, or a malformed one: no line', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: {} }), files: installed('0.0.1', '10.0', 'latest', '10.0.0-beta', 'v10.0.0') })
+    await tickOnce($, w)
+    expect(await bandLines($)).toEqual(['Nothing needs you in the next 24 hours.'])
+    // the version this thread runs, as it wrote it in the store: in the cache too, still no line
+    const mine = String((w.stored['mm.versions'] as Record<string, { version: string }>)[SELF]?.version)
+    expect(mine).toMatch(/^\d+\.\d+\.\d+$/)
+    w.stored['mm.versions'] = { ...(w.stored['mm.versions'] as Record<string, unknown>), local_other: { version: mine, at: NOW } }
+    await w.clock.advance(5 * 60_000)
+    expect(await bandLines($)).toEqual(['Nothing needs you in the next 24 hours.'])
+  })
+
+  test('(b) a thread on this machine reported a later version in the last day: the line; one reported two days ago: none', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: {} }), store: { 'mm.versions': { local_other: { version: '9.1.0', at: NOW - HOUR }, local_old: { version: '99.0.0', at: NOW - 48 * HOUR } } } })
+    await tickOnce($, w)
+    expect(await bandLines($)).toEqual([`Nothing needs you in the next 24 hours · ${NEWER('9.1.0')}`])
+  })
+
+  test('versions are compared by number, never as strings', async () => {
+    expect(isNewerVersion('0.10.0', '0.9.0')).toBe(true)
+    expect(isNewerVersion('0.9.0', '0.10.0')).toBe(false)
+    expect(isNewerVersion('1.0.0', '1.0.0')).toBe(false)
+    expect(isNewerVersion('1.0', '0.9.0')).toBe(false)
+    expect(isNewerVersion('latest', '0.9.0')).toBe(false)
   })
 })
