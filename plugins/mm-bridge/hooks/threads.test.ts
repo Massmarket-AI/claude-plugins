@@ -6,6 +6,7 @@ import {
   CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, LONG_CONTEXT_TOKENS, LONG_THREAD_ROWS, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLength, threadLink, threadRows, titleLooksLike, titleSuggestion, waitingText,
+  CHIP_TITLE_MAX, REFRESH_FAILED, bandText, chipTitle, claimText, isStillOpenRow, staleCopySentence, startKickoff,
 } from './threads'
 import type { AppThread, ClientThread, Pairs, Platform } from './threads'
 
@@ -1105,8 +1106,132 @@ describe('a teammate\'s own pane is byte-identical to 0.5.0 for the same feed', 
   test('the three lists, their rows, and the pane as text', async () => {
     const l = buildLists(TEAMMATE_FEED, NOW)
     const rowsOf = (items: readonly QueueItem[]) => items.map(it => rowFor(it, recommend([], undefined, NOW), NOW))
-    expect(JSON.stringify(l)).toBe(TEAMMATE_050.lists)
+    // (0.5.2) what is additive is set aside: each item's act-by time (R1), its newest send and its check (R8),
+    // and the list of clients being checked, which is empty for this feed (nothing in it carries a send)
+    const { checking, ...three } = l
+    expect(checking).toEqual([])
+    const as050 = (items: readonly QueueItem[]) => items.map(({ actBy: _a, lastOut: _o, check: _c, ...rest }) => rest)
+    expect(JSON.stringify({ queue: as050(three.queue), teammate: as050(three.teammate), older: as050(three.older) })).toBe(TEAMMATE_050.lists)
+    // every item acts by its due time (no task here has a start-by time)
+    for (const it of [...l.queue, ...l.teammate, ...l.older]) expect(it.actBy).toBe(it.dueAt)
     expect(JSON.stringify({ queue: rowsOf(l.queue), teammate: rowsOf(l.teammate), older: rowsOf(l.older) })).toBe(TEAMMATE_050.rows)
     expect(paneText(rowsOf(l.queue), 'H', 'N', { teammate: rowsOf(l.teammate), older: rowsOf(l.older) }).split('\n')).toEqual(TEAMMATE_050.pane)
+  })
+})
+
+// ---------------------------------------------------------------- 0.5.2
+
+describe('R9: the band line is the alert, and always the whole truth (Rob, 10-13: "yes band")', () => {
+  const base = { pinned: 0, pinsNow: false, noThread: [], chipHere: false, stale: false }
+  test('something pinned, nobody without a thread', async () => {
+    expect(bandText({ ...base, pinned: 3, pinsNow: true })).toBe('Needs you: 3 pinned.')
+  })
+  test('clients without a thread: named; one of them gets R9\'s line after it, with its chip here or the command', async () => {
+    expect(bandText({ ...base, pinned: 2, pinsNow: true, noThread: [{ client: 'Acme Roofing', due: '3 PM' }, { client: 'Bolt Staffing', due: 'Tue 9 AM' }] })).toBe(
+      'Needs you: 2 pinned · 2 with no thread: Acme Roofing, Bolt Staffing.',
+    )
+    expect(bandText({ ...base, pinned: 1, pinsNow: true, noThread: [{ client: 'Acme Roofing', due: '3 PM' }], chipHere: true })).toBe(
+      'Needs you: 1 pinned · 1 with no thread: Acme Roofing. Open a thread for Acme Roofing (due 3 PM): a chip is waiting in this thread.',
+    )
+    expect(bandText({ ...base, noThread: [{ client: 'Acme Roofing', due: '3 PM' }] })).toBe(
+      'Needs you: 0 pinned · 1 with no thread: Acme Roofing. Open a thread for Acme Roofing (due 3 PM): type /mm start Acme Roofing.',
+    )
+  })
+  test('a client still open after our reply: appended to the first line; a client without a thread comes before it', async () => {
+    expect(bandText({ ...base, pinned: 2, pinsNow: true, stillOpen: 'Cedar Dental' })).toBe('Needs you: 2 pinned · Cedar Dental still open after your reply.')
+    expect(bandText({ ...base, pinned: 2, pinsNow: true, stillOpen: 'Cedar Dental', noThread: [{ client: 'Acme Roofing', due: '3 PM' }, { client: 'Bolt Staffing', due: '4 PM' }] })).toBe(
+      'Needs you: 2 pinned · 2 with no thread: Acme Roofing, Bolt Staffing.',
+    )
+  })
+  test('an update ready on a pinned thread, when nothing more specific is', async () => {
+    expect(bandText({ ...base, pinned: 1, pinsNow: true, update: 'Bolt Staffing' })).toBe('Needs you: 1 pinned. An update is ready to claim in the Bolt Staffing thread.')
+    expect(bandText({ ...base, pinned: 1, pinsNow: true, update: 'Bolt Staffing', stillOpen: 'Cedar Dental' })).toBe('Needs you: 1 pinned · Cedar Dental still open after your reply.')
+  })
+  test('all clear, from a fresh read only: never from a stale or failed one', async () => {
+    expect(bandText(base)).toBe('Nothing needs you in the next 24 hours.')
+    expect(bandText({ ...base, stale: true })).toBe(REFRESH_FAILED)
+    expect(bandText({ ...base, pinned: 2, pinsNow: true, stale: true })).toBe(`Needs you: 2 pinned. ${REFRESH_FAILED}`)
+  })
+})
+
+describe('R8 and R5: the words a Claim and a stale chip copy carry (verbatim)', () => {
+  test('Claim in this thread', async () => {
+    expect(claimText('Acme Roofing', et('2026-10-12 14:30'), ['the logo file', 'Q4 dates'], et('2026-10-12 15:00'))).toBe(
+      'Still open for Acme Roofing after our reply of 2:30 PM: the logo file; Q4 dates. Load the client\'s project skill first, then follow client-reply-prep §9: show me what is still open and the drafts for it, and wait for me. Send nothing without my go.',
+    )
+  })
+  test('the stale copy\'s sentence', async () => {
+    expect(staleCopySentence('Acme Roofing')).toBe('If Acme Roofing already has a thread other than this one, tell me its name and stop: do not run prep, do not link this thread.')
+  })
+  test('the kickoff of a new thread is 0.5.1\'s start kickoff; a stale package with only what is still open carries the Claim words behind the marker', async () => {
+    const acme = item(ACME)
+    expect(startKickoff(acme, undefined, NOW)).toBe(kickoffText(acme))
+    const stale: Feed = {
+      member: ME, role: 'builder',
+      drafts: [{ package_id: PKG, project_id: ACME, project_name: 'Acme Roofing — Pat', status: 'stale', covers_through: at('2026-10-12 08:00'), drafts_ready: 1, project_owner_email: ME, checked_send_at: at('2026-10-12 10:00'), last_outbound_at: at('2026-10-12 10:00'), still_open: ['the logo file'] }],
+    }
+    const [it] = buildQueue(stale, NOW)
+    expect(startKickoff(it as QueueItem, { sid: 'local_old', title: 'Roof quote' }, NOW)).toBe(
+      `[mm-link ${ACME}] ${claimText('Acme Roofing', et('2026-10-12 10:00'), ['the logo file'], NOW)}\n\n${handoverText(it as QueueItem, { sid: 'local_old', title: 'Roof quote' })}`,
+    )
+  })
+})
+
+describe('R4 and R8: the rows', () => {
+  const fresh = recommend([], undefined, NOW)
+  test('R4: a client on the Needs-you list with no thread, due within 24 business hours: 🔴 NO THREAD, due <time>', async () => {
+    expect(rowFor(item(CEDAR), fresh, NOW, { needsYou: true }).title).toBe('🔴 NO THREAD · Cedar Dental · due 4 PM')
+    // not on the Needs-you list (a fold), or with a thread: the name it has always had
+    expect(rowFor(item(CEDAR), fresh, NOW).title).toBe('🔴 5h left · Cedar Dental · task')
+    // further out than the pin's window: no alarm
+    const later: Feed = { ...FEED, drafts: [], mail: [], tickets: { due_soon: [{ ticket_id: 't9', project_id: CEDAR, project_name: 'Cedar Dental', title: 'x', due_at: at('2026-10-14 16:00'), due_source: 'commitment', assignee_email: ME }] } }
+    const [far] = buildQueue(later, NOW)
+    expect(rowFor(far as QueueItem, fresh, NOW, { needsYou: true }).title).toBe('🟡 2d left · Cedar Dental · task')
+  })
+  test('R8: still open after our reply, with a thread: its name, its items under it, and Claim in this thread under 60% (none from 60%)', async () => {
+    const f: Feed = { ...FEED, drafts: [{ ...(FEED.drafts?.[0] as object), last_outbound_at: at('2026-10-12 10:00'), checked_send_at: at('2026-10-12 10:00'), still_open: ['the logo file'] } as never] }
+    const it = buildQueue(f, NOW).find(i => i.projectId === ACME) as QueueItem
+    const withThread = { state: 'update' as const, reason: 'thread from Sun, Oct 11 exists', target: { sid: 'local_a', title: 'Roof quote', suggested: false } }
+    const row = rowFor(it, withThread, NOW, { needsYou: true, percent: 55 })
+    expect(row).toMatchObject({ title: '🟡 Acme Roofing · still open after your reply', stillOpen: ['the logo file'], claim: true })
+    expect(isStillOpenRow(row)).toBe(true)
+    expect(rowButtons(row)).toEqual(['claim', 'drafts'])
+    expect(LABEL.claim).toBe('Claim in this thread')
+    expect(rowDetail(row)).toBe('drafts ready')
+    expect(paneText([row], 'H', 'N')).toContain('   - the logo file')
+    const long = rowFor(it, withThread, NOW, { needsYou: true, percent: 61 })
+    expect(long.claim).toBe(false)
+    expect(rowButtons(long)).toEqual(['drafts'])
+    // no thread to claim it in: the row is an ordinary one
+    expect(rowFor(it, fresh, NOW, { needsYou: true }).stillOpen).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------- fix round 1 (review of e832775b)
+
+describe('F6: the band counts the person\'s clients under Older', () => {
+  const base = { pinned: 0, pinsNow: false, noThread: [], chipHere: false, stale: false }
+  test('nothing due in the window, older overdue: never all clear', async () => {
+    expect(bandText({ ...base, older: 2 })).toBe('Nothing due in the next 24 hours · 2 older overdue.')
+  })
+  test('the other forms say it at the end of their first line', async () => {
+    expect(bandText({ ...base, pinned: 1, pinsNow: true, older: 3 })).toBe('Needs you: 1 pinned · 3 older overdue.')
+    expect(bandText({ ...base, pinned: 1, pinsNow: true, stillOpen: 'Cedar Dental', older: 1 })).toBe('Needs you: 1 pinned · Cedar Dental still open after your reply · 1 older overdue.')
+    expect(bandText({ ...base, noThread: [{ client: 'Acme Roofing', due: '3 PM' }], chipHere: true, older: 1 })).toBe(
+      'Needs you: 0 pinned · 1 with no thread: Acme Roofing · 1 older overdue. Open a thread for Acme Roofing (due 3 PM): a chip is waiting in this thread.',
+    )
+  })
+  test('a stale read: the refresh-failed line, never an all-clear', async () => {
+    expect(bandText({ ...base, older: 2, stale: true })).toBe(REFRESH_FAILED)
+  })
+})
+
+describe('L13: a chip\'s title is at most 60 characters', () => {
+  test('cut, with an ellipsis', async () => {
+    expect(CHIP_TITLE_MAX).toBe(60)
+    expect(chipTitle('Acme Roofing: review the reply drafts')).toBe('Acme Roofing: review the reply drafts')
+    const long = chipTitle('Thirty Two Character Client Name: start a new thread (this one is at 70%)')
+    expect(long.length).toBe(60)
+    expect(long.endsWith('…')).toBe(true)
   })
 })

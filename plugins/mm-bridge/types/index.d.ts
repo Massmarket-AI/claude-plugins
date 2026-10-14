@@ -38,6 +38,15 @@ export type MmRow = {
    * and sees through (0.5.1). Like a row with a `note`, it has the Drafts button and no action, sentence or not.
    */
   theirs?: boolean
+  /**
+   * (0.5.2, R8) What the server's check of our reply to the client found still open: drawn under the row. A
+   * row with these is named `🟡 <client> · still open after your reply`.
+   */
+  stillOpen?: string[]
+  /** (0.5.2, R8) With `stillOpen`: true when the row's one action is Claim in this thread (its thread is under 60% of its context). */
+  claim?: boolean
+  /** (0.5.2, R8) The server is checking our reply to this client: the row is under `Checking your reply`, named as its thread is, with Drafts alone. */
+  checking?: true
 }
 
 /**
@@ -51,6 +60,8 @@ export type MmQueue = {
   note: string
   teammate?: MmRow[]
   older?: MmRow[]
+  /** (0.5.2, R8) Clients whose reply the server is checking: a closed group `Checking your reply (n)`, never pinned or counted. */
+  checking?: MmRow[]
   /**
    * One line under the header when the refresh after a press failed: the list shown is the one last loaded.
    * Gone with the next list drawn from a sync that worked. `warnedAt` is when it failed.
@@ -60,7 +71,7 @@ export type MmQueue = {
 }
 
 /** Which of the two groups under the list the person has opened. */
-export type MmFolds = { teammate?: boolean; older?: boolean }
+export type MmFolds = { teammate?: boolean; older?: boolean; checking?: boolean }
 
 /** What the last button press did, shown above the list. */
 export type MmNotice = { text: string; at: number }

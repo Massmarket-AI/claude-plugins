@@ -639,3 +639,64 @@ describe('L3: a refresh that fails after a press shows in one line, until a sync
     expect((w.view(hubId, 'queue') as Queue | undefined)?.warning).toBeUndefined()
   })
 })
+
+// ======================================================================== 0.5.2
+
+describe('R5: every running thread mints its own copy of a client\'s chip', () => {
+  const start = (t: unknown) => hooks['session.start']?.(t, { cwd: '/w', surface: 'desktop', isInteractive: false }, next)
+  test('two threads, two copies; the first started takes the client; a copy started after does not link, and its kickoff ends with Rob\'s sentence; each thread withdraws its own', async () => {
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(51, 'Client Five One', 1)] }
+    const w = fakeApp(feed, [{ sessionId: 'local_r5a' }, { sessionId: 'local_r5b' }, { sessionId: 'local_r5n1' }, { sessionId: 'local_r5n2' }])
+    const [a, b, n1, n2] = ['local_r5a', 'local_r5b', 'local_r5n1', 'local_r5n2'].map(id => w.session(id))
+    await mm(a, '')
+    await start(a)
+    await start(b)
+    await w.advance(4_000)
+    const spawned = w.calls.filter(c => c.tool === 'spawn_task')
+    expect(spawned.length).toBe(2)
+    const chips = (w.stored('mm.chips') ?? []) as Array<{ threadId: string; taskId: string; auto?: boolean; prompt: string }>
+    expect(chips.map(c => [c.threadId, Boolean(c.auto)]).sort()).toEqual([['local_r5a', true], ['local_r5b', true]])
+    const prompt = String(spawned[0]?.args.prompt)
+    expect(spawned[1]?.args.prompt).toBe(prompt)
+    // the person clicks the copy in one thread: the new thread takes the client
+    await hooks['prompt.submit']?.(n1, { text: prompt, origin: { kind: 'sdk' } }, next)
+    expect(linksOf(w)).toEqual({ [pid(51)]: 'local_r5n1' })
+    // then the stale copy in the other: no link, and the sentence at the end of its kickoff
+    const asked = (await hooks['prompt.submit']?.(n2, { text: prompt, origin: { kind: 'sdk' } }, next)) as { text: string }
+    expect(asked.text).toBe(`${prompt}\n\nIf Client Five One already has a thread other than this one, tell me its name and stop: do not run prep, do not link this thread.`)
+    expect(linksOf(w)).toEqual({ [pid(51)]: 'local_r5n1' })
+    // each minting thread withdraws its own copy on its next tick
+    await start(a)
+    await start(b)
+    await w.advance(4_000)
+    const dismissed = w.calls.filter(c => c.tool === 'dismiss_task').map(c => String(c.args.task_id)).sort()
+    expect(dismissed).toEqual(chips.map(c => c.taskId).sort())
+  })
+})
+
+describe('R13: in a thread that does not sync, the refresh-failed line never goes while the pane shows the old list', () => {
+  test('the line goes with the list drawn again from the newer sync', async () => {
+    const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], drafts: [], mail: [mail(61, 'Client Six One')] }
+    const w = fakeApp(feed, [{ sessionId: 'local_r13hub' }])
+    const hub = w.session('local_r13hub')
+    await mm(hub, '')
+    await w.advance(61_000)
+    w.feedAnswers(503)
+    expect(await press(hub, `start:${pid(61)}`)).toBe(true)
+    for (let i = 0; i < 20_000; i++) await Promise.resolve()
+    expect((w.view('local_r13hub', 'queue') as { warning?: string } | undefined)?.warning).toBe('Couldn\'t refresh the list. Showing what was last loaded.')
+    // another thread's sync works and sees a second client
+    w.feedAnswers(200)
+    feed.mail?.push(mail(62, 'Client Six Two'))
+    await w.advance(1_000)
+    const other = w.session('local_r13other')
+    await mm(other, '')
+    w.put('mm.lease', { owner: 'cli:local_r13other', until: w.now() + 24 * 3_600_000 })
+    await hooks['session.start']?.(hub, { cwd: '/w', surface: 'desktop', isInteractive: false }, next)
+    await w.advance(4_000)
+    for (let i = 0; i < 20_000; i++) await Promise.resolve()
+    const queue = w.view('local_r13hub', 'queue') as { warning?: string; header: string }
+    expect(queue.warning).toBeUndefined()
+    expect(queue.header).toBe('Needs you now (2)')
+  })
+})

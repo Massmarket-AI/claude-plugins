@@ -76,13 +76,21 @@ type WorldOptions = {
   env?: Record<string, string>
   /** Runs at each app call, before it is answered: what another session does to the store while a pass waits on the app. */
   during?: (call: Call, stored: Record<string, unknown>) => void
+  /** (R15) This machine has not had the thread list's view changed yet. Left out, it has (`mm.viewSet` is on record). */
+  firstRun?: boolean
+  /** What the app answers `set_view` with: `ok` (left out), or `refused`. */
+  setView?: 'ok' | 'refused'
+  /** The app takes this long to answer `spawn_task` (R10: Start that said nothing). */
+  spawnTakesMs?: number
+  /** The app takes this long to answer `set_view` (fix round 1, L11). */
+  setViewTakesMs?: number
 }
 
 function world(on: On, opts: WorldOptions = {}) {
   const clock = mock.clock(on, { now: NOW })
   // A terminal session has no desktop app behind it: its session tools are not there to call.
   mock.env(on, opts.env ?? { CLAUDE_CODE_ENTRYPOINT: opts.terminal ? 'cli' : 'claude-desktop', HOME: '/home/someone' })
-  const stored: Record<string, unknown> = JSON.parse(JSON.stringify(opts.store ?? {}))
+  const stored: Record<string, unknown> = JSON.parse(JSON.stringify({ ...(opts.firstRun ? {} : { 'mm.viewSet': { at: 0, version: '0.5.2' } }), ...(opts.store ?? {}) }))
   on('store.get', (_$, e) => ({ value: stored[e.key] === undefined ? undefined : JSON.parse(JSON.stringify(stored[e.key])) }))
   on('store.set', (_$, e) => {
     stored[e.key] = JSON.parse(JSON.stringify(e.value))
@@ -122,6 +130,9 @@ function world(on: On, opts: WorldOptions = {}) {
     // As the app answers a session asking for its own usage: the account's plan, and the session's context window.
     if (e.tool === 'get_usage') return text(opts.usage ? opts.usage() : { plan: { status: 'ok', plan: PLAN_MARK }, context: { session: 'self', status: 'unavailable' } })
     // As the app answers a chip being minted, and one being withdrawn.
+    if (e.tool === 'set_view' && opts.setViewTakesMs) await clock.sleep(opts.setViewTakesMs)
+    if (e.tool === 'set_view') return opts.setView === 'refused' ? refused('set_view is not available here.') : text({ group_by: 'date', sort_by: 'recency' })
+    if (e.tool === 'spawn_task' && opts.spawnTakesMs) await clock.sleep(opts.spawnTakesMs)
     if (e.tool === 'spawn_task') return text(`Noted (position ${++chipsMinted}, task_id: task_${String(chipsMinted).padStart(8, '0')}). A chip is showing for the user. If this suggestion becomes stale or superseded, call dismiss_task with this task_id.`)
     if (e.tool === 'dismiss_task') return opts.dismissFails ? refused('Could not dismiss.') : text('Dismissed.')
     if (e.tool === 'send_message') {
@@ -216,10 +227,16 @@ function world(on: On, opts: WorldOptions = {}) {
     return next(e)
   })
 
-  /** What a sync must never call: a message into a thread, or a chip. */
+  /**
+   * What a sync must never call: a message into a thread, or a chip. (0.5.2, R4/R5: the TIMER mints a chip by
+   * itself for a client that needs a new thread, never a sync or a command: a test that runs the timer says
+   * which chips it expects.)
+   */
   const acted = () => calls.filter(c => c.tool === 'send_message' || c.tool === 'spawn_task')
+  /** The chips this session asked the app for. */
+  const minted = () => calls.filter(c => c.tool === 'spawn_task')
   return {
-    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, reads, lists, written, appended, ran, shell,
+    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, lists, written, appended, ran, shell,
     /** The app calls that change a thread: a rename, a pin, a message, a chip. (Reading this session's own usage, and withdrawing a chip, change none.) */
     writes: () => calls.filter(c => !['get_session', 'list_sessions', 'get_usage', 'dismiss_task'].includes(c.tool)).map(c => [c.tool, c.args.session_id ?? '', c.args.title ?? c.args.pinned ?? ''].join(' | ')),
     /** The chips this session asked the app to withdraw, by their ids. */
@@ -233,6 +250,13 @@ function world(on: On, opts: WorldOptions = {}) {
     },
   }
 }
+
+/** The messages a test's world sent into threads (0.5.2: the timer mints chips by itself, R4/R5; a message only ever goes from a press or a typed command). */
+const sends = (w: { acted: () => Call[] }) => w.acted().filter(c => c.tool === 'send_message')
+/** The app calls that change a thread, without the chips the timer mints by itself (R4/R5). */
+const threadWrites = (w: { writes: () => string[] }) => w.writes().filter(x => !x.startsWith('spawn_task |'))
+/** The titles of the chips this session minted, in order. */
+const chipTitles = (w: { acted: () => Call[] }) => w.acted().filter(c => c.tool === 'spawn_task').map(c => String(c.args.title))
 
 /** In the app's usage answer, beside the context: what the bridge must never read or keep. */
 const PLAN_MARK = 'PLAN-DO-NOT-KEEP'
@@ -264,6 +288,28 @@ const BOLT_KICKOFF = `[mm-link ${BOLT}] Bolt Staffing (Sam) (OW project ${BOLT})
 /** Acme's thread carries Acme's name, whatever the hours left on the test's clock by then. */
 const ACME_NAMED = /^🟡 \d+h left · Acme Roofing · reply ready$/
 const CEDAR_KICKOFF = `[mm-link ${CEDAR}] Cedar Dental (OW project ${CEDAR}) has 1 committed task(s) due Mon, Oct 12 4 PM ET. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`
+/** (0.5.2, R4) A client on the list with no thread at all, due within the pin's window: its row's name. */
+const CEDAR_FRESH = '🔴 NO THREAD · Cedar Dental · due 4 PM'
+const BOLT_FRESH = '🔴 NO THREAD · Bolt Staffing · due Tue 9 AM'
+/** Bolt's chip, as the timer mints it by itself (R4): Bolt has no thread either in a world with no threads. */
+const BOLT_AUTO_CHIP = {
+  server: 'ccd_session',
+  tool: 'spawn_task',
+  args: {
+    title: 'Bolt Staffing: reply to the client',
+    tldr: 'Bolt Staffing needs you: Bolt Staffing · reply due tomorrow 9 AM · 2 new. Start this to open a thread for that client with the drafts or the messages waiting.',
+    prompt: `[mm-link ${'22222222-2222-2222-2222-222222222222'}] Bolt Staffing (Sam) (OW project ${'22222222-2222-2222-2222-222222222222'}) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9 AM ET. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`,
+  },
+}
+/**
+ * (0.5.2, R4/R5) The chip the TIMER mints by itself in a thread for Cedar, the client with no thread, as the
+ * app is asked for it: 0.5.1's title, line and kickoff.
+ */
+const CEDAR_AUTO_CHIP = {
+  server: 'ccd_session',
+  tool: 'spawn_task',
+  args: { title: 'Cedar Dental: reply to the client', tldr: 'Cedar Dental needs you: Cedar Dental · task due 4 PM. Start this to open a thread for that client with the drafts or the messages waiting.', prompt: CEDAR_KICKOFF },
+}
 
 /** A thread's name as a sentence shows it: cleaned like any text that is not the bridge's own. */
 const ACME_SHOWN = '21h left Acme Roofing reply ready'
@@ -326,11 +372,13 @@ describe('R1: existing threads link themselves', () => {
     expect(w.threads.get(SELF)?.title).toBe(ACME_TITLE)
     expect(w.threads.get('local_b')?.pinned).toBe(true)
     expect(w.fetched.filter(u => u.includes('/closeout')).length).toBeGreaterThan(0)
-    expect(w.acted()).toEqual([])
+    // no message; and (0.5.2, R4) one chip, minted by the timer itself, for Cedar, the client with no thread
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP])
     expect(w.prompts).toEqual([])
   })
 
-  test('the same cap of 8 and "only unpin what we pinned" as a thread linked by hand', async ($, on) => {
+  // R14 (Rob, 2026-10-13): "Even if I manually pinned something, it should still unpin when it's cleared."
+  test('no cap; a thread the person pinned is remembered as theirs, and still unpinned once its client is clear (R14)', async ($, on) => {
     const w = world(on, {
       feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }),
       threads: [thread('local_a', 'Roof quote', 30, { pinned: true })],
@@ -340,10 +388,11 @@ describe('R1: existing threads link themselves', () => {
     // already pinned by the person: named, and remembered as theirs
     expect(w.writes()).toEqual([`set_session_title | local_a | ${ACME_TITLE}`])
     expect(w.stored['mm.pins']).toEqual({ local_a: { projectId: ACME, client: 'Acme Roofing', byUs: false } })
-    // the client stops needing the person: the name says so, and the person's own pin stays
+    // the client stops needing the person: the name says so, and (R14) the pin comes off, the person's too
     w.setFeed(feed({ drafts: [], threads: [declared(ACME, 'cli-acme', 30)] }))
     await mm($, '')
-    expect(w.threads.get('local_a')).toMatchObject({ pinned: true, title: '✓ Acme Roofing · clear 11 AM' })
+    expect(w.threads.get('local_a')).toMatchObject({ pinned: false, title: '✓ Acme Roofing · clear 11 AM' })
+    expect(w.stored['mm.pins']).toEqual({})
   })
 })
 
@@ -448,7 +497,7 @@ describe('R3: the buttons on each row', () => {
       expect(await lines(ui)).toEqual([
         'Needs you now (3)',
         'New: no thread yet (1)',
-        `◆ 1. ${CEDAR_TITLE}`,
+        `◆ 1. ${CEDAR_FRESH}`,
         '1 task due · Start thread: no thread yet',
         'In a thread (2)',
         `2. ${ACME_TITLE}`,
@@ -551,8 +600,10 @@ describe('R3: the buttons on each row', () => {
     await ui.unmount()
   })
 
-  test('a thread the person acted on stays pinned: nine clients, Update on the ninth, and the cap unpins a thread that linked itself instead', async ($, on) => {
-    // Nine clients, each with a thread that links itself. Client n is due n hours from now, so the ninth is last in line.
+  // R1 (0.5.2, Rob 2026-10-13: "A pin means needs you"): there is no cap. Every client due within the next 24
+  // business hours has its thread pinned, nine as well as eight.
+  test('R1: no cap: nine clients due within 24 business hours, nine threads pinned; Update on the ninth keeps it pinned', async ($, on) => {
+    // Nine clients, each with a thread that links itself. Client n is due n hours from now.
     const ids = Array.from({ length: 9 }, (_, i) => `4444444${i}-4444-4444-4444-444444444444`)
     const w = world(on, {
       feed: feed({
@@ -566,32 +617,23 @@ describe('R3: the buttons on each row', () => {
     })
     const pinned = () => ids.map((_, i) => (w.threads.get(`local_${i}`)?.pinned ? i : -1)).filter(i => i >= 0)
 
-    expect(await mm($, '')).toBe('9 clients need you; 8 threads pinned. The list is in the side pane.')
+    expect(await mm($, '')).toBe('9 clients need you; 9 threads pinned. The list is in the side pane.')
     expect(Object.keys(w.stored['mm.links'] as object)).toHaveLength(9)
-    expect(pinned()).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
-    expect(w.threads.get('local_8')).toMatchObject({ title: 'Thread 8', pinned: false })
+    expect(pinned()).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8])
+    expect(w.threads.get('local_8')).toMatchObject({ title: '🔴 9h left · Client 8 · task', pinned: true })
 
     const ui = await pane($)
-    expect((await lines(ui))[0]).toBe('Needs you now (9, the first 8 pin)')
+    expect((await lines(ui))[0]).toBe('Needs you now (9)')
     await ui.press({ key: `update:${ids[8]}` })
-    // the ninth is pinned and named; the eighth, which only linked itself, gave up its place
-    expect(pinned()).toEqual([0, 1, 2, 3, 4, 5, 6, 8])
-    expect(w.threads.get('local_8')).toMatchObject({ title: '🔴 9h left · Client 8 · task', pinned: true })
+    expect(pinned()).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8])
     expect(w.acted().map(c => c.args.session_id)).toEqual(['local_8'])
     expect(w.stored['mm.acted']).toEqual({ [ids[8] as string]: { sid: 'local_8', at: NOW } })
     await ui.unmount()
 
     // the next sync keeps it that way
     await w.clock.advance(6 * 60_000)
-    expect(await mm($, '')).toBe('9 clients need you; 8 threads pinned. The list is in the side pane.')
-    expect(pinned()).toEqual([0, 1, 2, 3, 4, 5, 6, 8])
-    // still its own name on the eighth: the bridge unpinned it, it did not unlink it
-    expect((w.stored['mm.links'] as Record<string, string>)[ids[7] as string]).toBe('local_7')
-
-    // a day later the press no longer holds the place: the cap goes back to the soonest eight
-    await w.clock.advance(24 * HOUR)
-    await mm($, '')
-    expect(pinned()).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
+    expect(await mm($, '')).toBe('9 clients need you; 9 threads pinned. The list is in the side pane.')
+    expect(pinned()).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8])
   })
 
   test('/mm link stamps this thread the same way; a chip\'s first message links its thread and never stamps', async ($, on) => {
@@ -650,7 +692,7 @@ describe('R3: the buttons on each row', () => {
     expect(await lines(ui)).not.toContain('This thread: Acme Roofing')
     expect((await lines(ui)).slice(-9)).toEqual([
       'New: no thread yet (1)',
-      `◆ 1. ${CEDAR_TITLE}`,
+      `◆ 1. ${CEDAR_FRESH}`,
       '1 task due · Start thread: no thread yet',
       'In a thread (2)',
       `2. ${ACME_TITLE}`,
@@ -772,7 +814,8 @@ describe('the app\'s own thread records: a thread links itself without being ope
       expect(w.fetched.join(' ')).not.toContain('cli-acme')
       // the heartbeat says how many pairs the records gave: a number, nothing from them
       expect(JSON.parse(w.written.at(-1)?.text ?? '{}')).toMatchObject({ appPairs: 1 })
-      expect(w.acted()).toEqual([])
+      // no message; (0.5.2, R4) the timer's own chips for the two clients with no thread, soonest due first
+      expect(w.acted()).toEqual([CEDAR_AUTO_CHIP, BOLT_AUTO_CHIP])
     })
   }
 
@@ -991,13 +1034,16 @@ describe('B1: Claude cannot start or update a thread (the mm tool, and a /mm tha
     const w = acmeThread(on)
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
-    expect(w.acted()).toEqual([])
+    // (0.5.2, R4) the timer's own chips for the clients with no thread, and no message
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP, BOLT_AUTO_CHIP])
     const ui = await pane($)
     await ui.press({ key: `update:${ACME}` })
     await ui.press({ key: `start:${BOLT}` })
-    expect(w.acted().length).toBe(2)
+    // Update sent its message; Start found the timer's chip for Bolt already here, and minted none
+    expect(sends(w).length).toBe(1)
+    expect(w.acted().length).toBe(3)
     for (let i = 0; i < 30; i++) await w.clock.advance(60_000)
-    expect(w.acted().length).toBe(2)
+    expect(w.acted().length).toBe(3)
     expect(w.prompts).toEqual([])
     await ui.unmount()
   })
@@ -1018,11 +1064,14 @@ describe('B2: one client\'s kickoff never goes into another client\'s thread', (
     expect(w.stored['mm.links']).toEqual({})
     expect(w.stored['mm.auto']).toEqual({})
     expect(w.threads.get(SELF)).toMatchObject({ title: 'One reused thread', pinned: false })
-    expect(w.writes()).toEqual([])
+    expect(threadWrites(w)).toEqual([])
+    // (0.5.2, R4) the timer's own chips for the three clients with no thread, soonest due first
+    expect(chipTitles(w)).toEqual(['Cedar Dental: reply to the client', 'Acme Roofing: review the reply drafts', 'Bolt Staffing: reply to the client'])
     // ⛔ and neither row offers it for Update (Opus, 2026-10-13): its sessions declared two clients
     let ui = await pane($)
-    expect(await lines(ui)).toContain('drafts ready · Start thread: no thread yet')
-    expect(await lines(ui)).toContain('2 messages waiting · Start thread: no thread yet')
+    // (each row's chip is here: the timer minted it, R4)
+    expect(await lines(ui)).toContain('drafts ready · Start thread: the chip is ready here')
+    expect(await lines(ui)).toContain('2 messages waiting · Start thread: the chip is ready here')
     expect((await buttons(ui)).map(b => b[0]).filter(k => k.startsWith('update:'))).toEqual([])
     await ui.unmount()
     // the person makes it Bolt's, typing /mm link in it: nothing is sent
@@ -1032,11 +1081,11 @@ describe('B2: one client\'s kickoff never goes into another client\'s thread', (
     expect(w.threads.get(SELF)?.pinned).toBe(true)
     // it is Bolt's now: Acme has no thread, no Update button, and nothing of Acme's goes into it
     ui = await pane($)
-    expect(await lines(ui)).toContain('drafts ready · Start thread: no thread yet')
+    expect(await lines(ui)).toContain('drafts ready · Start thread: the chip is ready here')
     expect((await buttons(ui)).map(b => b[0])).not.toContain(`update:${ACME}`)
     await ui.unmount()
     expect(await mm($, 'update acme roofing')).toBe('No thread for Acme Roofing yet: use /mm start Acme Roofing.')
-    expect(w.acted()).toEqual([])
+    expect(sends(w)).toEqual([])
     expect(w.stored['mm.links']).toEqual({ [BOLT]: SELF })
   })
 
@@ -1307,9 +1356,9 @@ describe('F4: no thread list, no target; nothing dropped on an odd answer', () =
     const from = all.indexOf('New: no thread yet (2)')
     expect(all.slice(from, from + 8)).toEqual([
       'New: no thread yet (2)',
-      `◆ 1. ${CEDAR_TITLE}`,
+      `◆ 1. ${CEDAR_FRESH}`,
       '1 task due · Start thread: no thread yet',
-      `◆ 2. ${BOLT_TITLE}`,
+      `◆ 2. ${BOLT_FRESH}`,
       '2 messages waiting · Start thread: no thread yet',
       'In a thread (1)',
       `3. ${ACME_TITLE}`,
@@ -1381,7 +1430,8 @@ describe('F4: no thread list, no target; nothing dropped on an odd answer', () =
     expect(w.stored['mm.pins']).toEqual({ ...kept['mm.pins'], [SELF]: { projectId: ACME, client: 'Acme Roofing', byUs: true } })
     expect(w.stored['mm.titles']).toEqual({ ...kept['mm.titles'], [SELF]: 'Morning hub' })
     expect(w.stored['mm.unlinked']).toEqual(kept['mm.unlinked'])
-    expect(w.acted()).toEqual([])
+    // no message; (0.5.2, R4) the timer's own chip for Cedar, the one client with no thread (Bolt's is one it cannot see)
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP])
     // its row has its actions, and Update picks it up here
     const ui = await pane($)
     expect((await buttons(ui)).filter(b => b[0].endsWith(ACME))).toEqual([[`update:${ACME}`, 'Update thread'], [`drafts:${ACME}`, 'Drafts']])
@@ -1791,7 +1841,7 @@ describe('F7: a link the bridge made by itself is undone when it stops being tru
       await mm($, '')
     }
     await mm($, '')
-    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0 } })
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0, made: expect.any(Number) } })
     expect(await mm($, 'view')).toBe('Showing Acme Roofing in the side pane.')
     expect(w.stored['mm.auto']).toEqual({})
     w.setFeed(hub)
@@ -1803,7 +1853,7 @@ describe('F7: a link the bridge made by itself is undone when it stops being tru
     w.stored['mm.unlinked'] = {}
     w.setFeed(start().feed)
     await mm($, '')
-    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0 } })
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0, made: expect.any(Number) } })
     await mm($, 'link Acme Roofing')
     expect(w.stored['mm.auto']).toEqual({})
     w.setFeed(hub)
@@ -1816,7 +1866,7 @@ describe('F7: a link the bridge made by itself is undone when it stops being tru
     w.stored['mm.acted'] = {}
     w.setFeed(start().feed)
     await mm($, '')
-    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0 } })
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0, made: expect.any(Number) } })
     const ui = await pane($)
     await ui.press({ key: `update:${ACME}` })
     await ui.unmount()
@@ -1935,7 +1985,8 @@ describe('F9: a thread that linked itself gets the pin and the name, and nothing
     expect(w.appended).toEqual([])
     expect(w.opened).toEqual([])
     expect(w.fetched.filter(u => u.includes('/reply-package'))).toEqual([])
-    expect(w.acted()).toEqual([])
+    // no message; (0.5.2, R4) the timer's own chips for the two clients with no thread
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP, BOLT_AUTO_CHIP])
     expect(w.prompts).toEqual([])
 
     // the person asks for it here: the one pane opens, with this client's part on top, and the note is added, once
@@ -1974,7 +2025,8 @@ describe('F9: a thread that linked itself gets the pin and the name, and nothing
     expect(w.appended.length).toBe(1)
     // one read of the package, in this thread's own session, for the whole of it
     expect(w.fetched.filter(u => u.includes('/reply-package')).length).toBe(1)
-    expect(w.acted()).toEqual([])
+    // no message; (0.5.2, R4) the timer's own chips for the two clients with no thread
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP, BOLT_AUTO_CHIP])
     // the band is the way in: it names this thread's client and carries the Drafts button
     const band = await $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'AbovePrompt', props: BAND_PROPS })
     expect(await buttons(band)).toEqual([['mm-open-list', 'Open list'], ['mm-open-drafts', 'Drafts']])
@@ -2113,8 +2165,8 @@ describe('a row says Start, Update or Open: one action, chosen by what the threa
     await $.prompt.submit({ text: CEDAR_KICKOFF, wait: false, origin: { kind: 'sdk' } } as never)
     expect(w.stored['mm.links']).toEqual({ [CEDAR]: SELF })
     expect(w.stored['mm.sent']).toEqual({ [CEDAR]: { sid: SELF, sig: `${CEDAR_KICKOFF}\n\n`, at: NOW } })
-    // the chip is spent
-    expect(w.stored['mm.chips']).toEqual([])
+    // the chip is spent: (0.5.2, R5) every copy of it is superseded, for each thread that minted one to withdraw
+    expect((w.stored['mm.chips'] as Array<{ superseded?: boolean }>).map(c => c.superseded)).toEqual([true])
     await mm($, '')
     const ui = await pane($)
     expect(await buttonsOf(ui, CEDAR)).toEqual(['Open thread', 'Drafts'])
@@ -2290,7 +2342,8 @@ describe('starts a program: the system\'s opener takes the person to the thread'
     await band.unmount()
     await ui.unmount()
     expect(w.ran).toEqual([])
-    expect(w.acted().map(c => c.tool)).toEqual(['spawn_task'])
+    // the timer's own chips for Cedar and Bolt (R4); Start on Cedar found its chip already here
+    expect(w.acted().map(c => c.tool)).toEqual(['spawn_task', 'spawn_task'])
   })
 
   test('Update pressed inside the client\'s own thread: the person is already there, and nothing is opened', async ($, on) => {
@@ -2383,7 +2436,10 @@ describe('a press shows that it worked, and cannot fire twice', () => {
     await ui.unmount()
   })
 
-  test('the hold is for one client, and ends after thirty seconds if the first press never returns', async ($, on) => {
+  // R10 (Opus, 10-13, decision 1): no cutoff on a message. The hold lasts while the app has not answered it,
+  // and after 15 seconds the line says so; 0.5.1 let the hold go after 30 seconds and a second press sent twice.
+  test('the hold is for one client; a message the app has not confirmed in 15 s is said so, and its press stays held until the app answers', async ($, on) => {
+    const NOT_CONFIRMED = 'The app has not confirmed the message to Acme Roofing\'s thread yet. Check that thread before pressing again.'
     const w = acmeWorld(on, { sendTakesMs: 120_000 })
     await mm($, '')
     const ui = await pane($)
@@ -2392,19 +2448,19 @@ describe('a press shows that it worked, and cannot fire twice', () => {
     // another client's row is not held
     await ui.press({ key: `start:${CEDAR}` })
     expect(w.acted().map(c => c.tool)).toEqual(['send_message', 'spawn_task'])
-    // Acme's is, for thirty seconds
-    await ui.press({ key: `update:${ACME}` })
-    await w.clock.advance(28_000)
-    await ui.press({ key: `update:${ACME}` })
-    expect(w.acted().filter(c => c.tool === 'send_message').length).toBe(1)
-    await w.clock.advance(1_500)
+    // fifteen seconds and no answer: the line says so
+    await w.clock.advance(15_000)
+    expect(await lines(ui)).toContain(NOT_CONFIRMED)
+    expect(w.toasts).toContain(NOT_CONFIRMED)
+    // past thirty seconds the press is still held: no second message
+    await w.clock.advance(20_000)
     await ui.press({ key: `update:${ACME}` })
     await w.clock.advance(100)
-    expect(w.acted().filter(c => c.tool === 'send_message').length).toBe(2)
-    // both deliveries land before the test ends, so no press is left running when its world is taken down
-    await w.clock.advance(121_000)
-    expect(w.acted().filter(c => c.tool === 'send_message').length).toBe(2)
-    expect(w.toasts.filter(t => t === 'Sent to Acme Roofing\'s thread.').length).toBeGreaterThan(0)
+    expect(sends(w).length).toBe(1)
+    // the app answers: it went, once
+    await w.clock.advance(90_000)
+    expect(sends(w).length).toBe(1)
+    expect(w.toasts.filter(t => t === 'Sent to Acme Roofing\'s thread.').length).toBe(1)
     await ui.unmount()
   })
 })
@@ -2631,7 +2687,8 @@ describe('a new thread takes over from an old one', () => {
     expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
     expect(w.stored['mm.released']).toEqual(['local_a'])
     expect(w.stored['mm.sent']).toEqual({ [ACME]: { sid: SELF, sig: signature, at: NOW } })
-    expect(w.stored['mm.chips']).toEqual([])
+    // the chip is spent: (0.5.2, R5) every copy of it is superseded, for each thread that minted one to withdraw
+    expect((w.stored['mm.chips'] as Array<{ superseded?: boolean }>).map(c => c.superseded)).toEqual([true])
     // the hook itself touched no thread
     expect(w.writes()).toEqual([])
     // the next sync gives the old thread back, and the new one is the client's
@@ -2718,37 +2775,45 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
     await w.clock.advance(4_000)
     await mm($, '')
     const ui = await pane($)
-    await ui.press({ key: `start:${CEDAR}` })
-    // the person dismissed that chip by hand, which the bridge cannot see: the button still says it is here
+    // (0.5.2, R4/R5) the timer minted this thread's own chips for the three clients with no thread, soonest due first
+    expect(chipTitles(w)).toEqual(['Cedar Dental: reply to the client', 'Acme Roofing: review the reply drafts', 'Bolt Staffing: reply to the client'])
+    // the person dismissed Cedar's by hand, which the bridge cannot see: the button still says it is here
     await ui.press({ key: `start:${CEDAR}` })
     expect(w.toasts.at(-1)).toBe('A chip for Cedar Dental is already here: click Start on it.')
-    expect(w.acted().map(c => c.tool)).toEqual(['spawn_task'])
-    // typed, it mints another, and the one on record is superseded
+    expect(w.acted().length).toBe(3)
+    // typed, it mints another, and this thread's own one on record is superseded
     expect(await mm($, 'start cedar dental')).toBe('A chip for Cedar Dental is ready here: click Start on it.')
-    expect(w.acted().map(c => c.tool)).toEqual(['spawn_task', 'spawn_task'])
-    expect((w.stored['mm.chips'] as Array<{ taskId: string; superseded?: boolean }>).map(c => [c.taskId, Boolean(c.superseded)])).toEqual([[chipId(1), true], [chipId(2), false]])
+    expect(w.acted().length).toBe(4)
+    expect((w.stored['mm.chips'] as Array<{ taskId: string; superseded?: boolean }>).map(c => [c.taskId, Boolean(c.superseded)])).toEqual([
+      [chipId(1), true],
+      [chipId(2), false],
+      [chipId(3), false],
+      [chipId(4), false],
+    ])
     // typed again: another, every time
     expect(await mm($, 'start cedar dental')).toBe('A chip for Cedar Dental is ready here: click Start on it.')
-    expect(w.acted().length).toBe(3)
+    expect(w.acted().length).toBe(5)
     // the button, now: the newest chip is here
     await ui.press({ key: `start:${CEDAR}` })
     expect(w.toasts.at(-1)).toBe('A chip for Cedar Dental is already here: click Start on it.')
-    expect(w.acted().length).toBe(3)
+    expect(w.acted().length).toBe(5)
     expect(await lines(ui)).toContain('1 task due · Start thread: the chip is ready here')
     await ui.unmount()
-    // this session withdraws the two that were superseded on its next tick, and keeps the live one
+    // this session withdraws the two that were superseded on its next tick, keeps the live ones, and mints no
+    // other for Cedar: the newest typed one carries what the timer would
     await w.clock.advance(60_000)
-    expect(w.dismissed()).toEqual([chipId(1), chipId(2)])
-    expect((w.stored['mm.chips'] as Array<{ taskId: string }>).map(c => c.taskId)).toEqual([chipId(3)])
+    expect(w.dismissed()).toEqual([chipId(1), chipId(4)])
+    expect((w.stored['mm.chips'] as Array<{ taskId: string }>).map(c => c.taskId)).toEqual([chipId(2), chipId(3), chipId(5)])
+    expect(w.acted().length).toBe(5)
     // Claude's tool still cannot start one
     expect(await tool($, 'start cedar dental')).toContain('Only the person can do this')
-    expect(w.acted().length).toBe(3)
+    expect(w.acted().length).toBe(5)
   })
 
-  test('a chip waiting in another thread: the row says where; Start here mints one here and supersedes it; this session never withdraws the other\'s', async ($, on) => {
+  // R5 (0.5.2): every running thread keeps its own copy of a client's chip. A copy in another thread is that
+  // thread's: this one never supersedes or withdraws it.
+  test('a chip waiting in another thread: the row says where; Start here mints one here, and the other thread keeps its own copy', async ($, on) => {
     const w = world(on, { store: { 'mm.chips': [chip(CEDAR, 9, 'local_other', { signature: `${CEDAR_KICKOFF}\n\n`, prompt: CEDAR_KICKOFF })] } })
-    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
-    await w.clock.advance(4_000)
     await mm($, '')
     const ui = await pane($)
     expect(await lines(ui)).toContain('1 task due · Start thread: a chip is waiting in "Unrelated notes"')
@@ -2757,14 +2822,15 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
     expect(w.toasts.at(-1)).toBe('A chip for Cedar Dental is ready here: click Start on it.')
     expect(await lines(ui)).toContain('1 task due · Start thread: the chip is ready here')
     expect((w.stored['mm.chips'] as Array<{ taskId: string; threadId: string; superseded?: boolean }>).map(c => [c.taskId, c.threadId, Boolean(c.superseded)])).toEqual([
-      [chipId(9), 'local_other', true],
+      [chipId(9), 'local_other', false],
       [chipId(1), SELF, false],
     ])
     await ui.unmount()
     // a chip is withdrawn from the thread that minted it: this one leaves the other thread's to that thread
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
     expect(w.dismissed()).toEqual([])
-    expect((w.stored['mm.chips'] as unknown[]).length).toBe(2)
+    expect((w.stored['mm.chips'] as Array<{ threadId: string; taskId: string }>).filter(c => c.threadId === 'local_other').map(c => c.taskId)).toEqual([chipId(9)])
   })
 
   test('the minting session withdraws its own chips: one superseded, one whose client has since a thread, one whose client no longer needs the person', async ($, on) => {
@@ -2775,35 +2841,46 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
         'mm.links': { [BOLT]: 'local_b' },
         'mm.chips': [
           // mine, and no longer wanted, each for its own reason
-          chip(CEDAR, 1, SELF, { superseded: true }),
-          chip(BOLT, 2, SELF),
-          chip(GONE_CLIENT, 3, SELF),
-          // mine, and still wanted: Acme needs the person and has no thread
-          chip(ACME, 4, SELF),
+          chip(CEDAR, 11, SELF, { superseded: true }),
+          chip(BOLT, 12, SELF),
+          chip(GONE_CLIENT, 13, SELF),
+          // mine, and wanted as long as nothing newer for Acme comes: Acme needs the person and has no thread
+          chip(ACME, 14, SELF),
           // another thread's, in the same three states: not this session's to withdraw
-          chip(CEDAR, 5, 'local_other', { superseded: true }),
-          chip(BOLT, 6, 'local_other'),
-          chip(GONE_CLIENT, 7, 'local_other'),
+          chip(CEDAR, 15, 'local_other', { superseded: true }),
+          chip(BOLT, 16, 'local_other'),
+          chip(GONE_CLIENT, 17, 'local_other'),
           // the live chip for Cedar, in another thread
-          chip(CEDAR, 8, 'local_other'),
+          chip(CEDAR, 18, 'local_other'),
         ],
       },
     })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
-    expect(w.dismissed()).toEqual([chipId(1), chipId(2), chipId(3)])
-    expect((w.stored['mm.chips'] as Array<{ taskId: string }>).map(c => c.taskId)).toEqual([chipId(4), chipId(5), chipId(6), chipId(7), chipId(8)])
-    // and nothing more on later ticks
+    expect(w.dismissed()).toEqual([chipId(11), chipId(12), chipId(13)])
+    // (0.5.2, R5) and this thread mints its own chips for Cedar and Acme, the two with no thread: Acme's new one
+    // carries what is waiting now, and supersedes the older one here
+    expect(chipTitles(w)).toEqual(['Cedar Dental: reply to the client', 'Acme Roofing: review the reply drafts'])
+    expect((w.stored['mm.chips'] as Array<{ taskId: string; superseded?: boolean }>).map(c => [c.taskId, Boolean(c.superseded)])).toEqual([
+      [chipId(14), true],
+      [chipId(15), true],
+      [chipId(16), false],
+      [chipId(17), false],
+      [chipId(18), false],
+      [chipId(1), false],
+      [chipId(2), false],
+    ])
+    // the superseded one goes on the next tick, and nothing more after that
     for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
-    expect(w.dismissed()).toEqual([chipId(1), chipId(2), chipId(3)])
-    expect(w.acted()).toEqual([])
+    expect(w.dismissed()).toEqual([chipId(11), chipId(12), chipId(13), chipId(14)])
+    expect(w.acted().length).toBe(2)
   })
 
   test('a chip whose client was linked to a thread when it was minted is withdrawn only once the client is linked to another', async ($, on) => {
     // Acme's long thread minted the chip: Acme was linked to that thread then, and still is
     const w = world(on, {
       threads: [thread('local_a', 'Roof quote', 30)],
-      store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.chips': [chip(ACME, 1, SELF, { had: 'local_a' })] },
+      store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.chips': [chip(ACME, 21, SELF, { had: 'local_a' })] },
     })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
@@ -2812,8 +2889,8 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
     // the client moves to the new thread
     w.stored['mm.links'] = { [ACME]: 'local_other' }
     await w.clock.advance(60_000)
-    expect(w.dismissed()).toEqual([chipId(1)])
-    expect(w.stored['mm.chips']).toEqual([])
+    expect(w.dismissed()).toEqual([chipId(21)])
+    expect((w.stored['mm.chips'] as Array<{ projectId: string }>).filter(c => c.projectId === ACME)).toEqual([])
   })
 
   test('with no sync on record, a chip is not withdrawn for its client being off the list; a superseded one still is', async ($, on) => {
@@ -2830,17 +2907,19 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
   })
 
   test('a withdrawal that fails is tried on five ticks, then the chip is forgotten', async ($, on) => {
-    const w = world(on, { dismissFails: true, store: { 'mm.chips': [chip(CEDAR, 1, SELF, { superseded: true })] } })
+    const w = world(on, { dismissFails: true, store: { 'mm.chips': [chip(CEDAR, 31, SELF, { superseded: true })] } })
+    /** The old chip's record, if it is still on record. */
+    const old = () => (w.stored['mm.chips'] as Array<{ taskId: string; tries?: number }>).filter(c => c.taskId === chipId(31))
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
-    expect(w.dismissed()).toEqual([chipId(1)])
-    expect((w.stored['mm.chips'] as Array<{ tries?: number }>).map(c => c.tries)).toEqual([1])
+    expect(w.dismissed()).toEqual([chipId(31)])
+    expect(old().map(c => c.tries)).toEqual([1])
     for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
     expect(w.dismissed().length).toBe(4)
-    expect((w.stored['mm.chips'] as Array<{ tries?: number }>).map(c => c.tries)).toEqual([4])
+    expect(old().map(c => c.tries)).toEqual([4])
     await w.clock.advance(60_000)
     expect(w.dismissed().length).toBe(5)
-    expect(w.stored['mm.chips']).toEqual([])
+    expect(old()).toEqual([])
     for (let i = 0; i < 5; i++) await w.clock.advance(60_000)
     expect(w.dismissed().length).toBe(5)
   })
@@ -2875,38 +2954,42 @@ describe('the band above the prompt: the way to the list from any thread', () =>
       store: { 'mm.threads': { ...PAIRS, 'cli-cedar': { app: 'local_c', at: NOW } } },
     })
     await started($, w)
-    expect(await drawn($)).toEqual({ texts: ['Needs you: 3 clients'], buttons: [['mm-open-list', 'Open list']] })
+    // (0.5.2, R9) how many are pinned, then the most specific alert: an update ready on a pinned thread
+    expect(await drawn($)).toEqual({ texts: ['Needs you: 3 pinned. An update is ready to claim in the Cedar Dental thread.'], buttons: [['mm-open-list', 'Open list']] })
   })
 
-  test('some with no thread yet: the line counts them out', async ($, on) => {
+  test('some with no thread yet: the line names them (R4, R9)', async ($, on) => {
     const w = acmeWorld(on)
     await started($, w)
-    expect(await drawn($)).toEqual({ texts: ['Needs you: 3 clients · 2 with no thread yet'], buttons: [['mm-open-list', 'Open list']] })
+    expect(await drawn($)).toEqual({ texts: ['Needs you: 1 pinned · 2 with no thread: Cedar Dental, Bolt Staffing.'], buttons: [['mm-open-list', 'Open list']] })
   })
 
   test('in a waiting client\'s thread: which client and what is due, and a second button for its drafts', async ($, on) => {
     const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }) })
     await started($, w)
     expect(await drawn($)).toEqual({
-      texts: ['Needs you: 3 clients · 2 with no thread yet · this thread: Acme Roofing · reply ready due tomorrow 8 AM'],
+      texts: ['Needs you: 1 pinned · 2 with no thread: Cedar Dental, Bolt Staffing.'],
       buttons: [['mm-open-list', 'Open list'], ['mm-open-drafts', 'Drafts']],
     })
   })
 
-  test('one client: singular', async ($, on) => {
+  test('one client with no thread: R9\'s line, and its chip is here (the timer minted it)', async ($, on) => {
     const w = world(on, { feed: feed({ drafts: [], mail: [] }) })
     await started($, w)
-    expect((await drawn($)).texts).toEqual(['Needs you: 1 client · 1 with no thread yet'])
+    expect((await drawn($)).texts).toEqual(['Needs you: 0 pinned · 1 with no thread: Cedar Dental. Open a thread for Cedar Dental (due 4 PM): a chip is waiting in this thread.'])
   })
 
   test('Open list opens the Needs-you pane in this thread, by the person\'s press; it sends nothing', async ($, on) => {
     const w = acmeWorld(on)
     await started($, w)
+    const before = w.acted().length
     const band = await bandOf($)
     await band.press({ key: 'mm-open-list' })
     await band.unmount()
     expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Needs you' }])
-    expect(w.acted()).toEqual([])
+    // the press sent nothing and made no chip (the timer's own chips came before it)
+    expect(w.acted().length).toBe(before)
+    expect(sends(w)).toEqual([])
     expect(w.prompts).toEqual([])
     const ui = await pane($)
     expect((await lines(ui))[0]).toBe('Needs you now (3)')
@@ -2925,16 +3008,16 @@ describe('the band above the prompt: the way to the list from any thread', () =>
     for (let i = 0; i < 12; i++) await w.clock.advance(60_000)
     expect(w.fetched.length).toBe(fetchedBefore)
     const callsBefore = w.calls.length
-    expect((await drawn($)).texts).toEqual(['Needs you: 3 clients · 3 with no thread yet'])
+    expect((await drawn($)).texts).toEqual(['Needs you: 0 pinned · 3 with no thread: Cedar Dental, Acme Roofing, Bolt Staffing.'])
     // drawing it called nothing
     expect(w.calls.length).toBe(callsBefore)
     expect(w.fetched.length).toBe(fetchedBefore)
   })
 
-  test('nothing is drawn when nobody needs the person', async ($, on) => {
+  test('nobody needs the person: the line says so, from a sync that worked and is fresh (R9)', async ($, on) => {
     const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: {} }) })
     await started($, w)
-    expect(await drawn($)).toEqual({ texts: [], buttons: [] })
+    expect(await drawn($)).toEqual({ texts: ['Nothing needs you in the next 24 hours.'], buttons: [['mm-open-list', 'Open list']] })
   })
 
   test('nothing is drawn while the bridge is paused, and it comes back on resume', async ($, on) => {
@@ -2978,7 +3061,7 @@ describe('the band above the prompt: the way to the list from any thread', () =>
     const w = acmeWorld(on)
     await started($, w)
     const band = await $.ui.mount({ plugin: 'mm-bridge', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
-    expect(await lines(band)).toEqual(['Needs you: 3 clients · 2 with no thread yet'])
+    expect(await lines(band)).toEqual(['Needs you: 1 pinned · 2 with no thread: Cedar Dental, Bolt Staffing.'])
     expect(await buttons(band)).toEqual([['mm-open-list', 'Open list']])
     await band.unmount()
   })
@@ -2997,9 +3080,9 @@ describe('one pane: this thread\'s client on top, the list under it', () => {
       'This thread: Acme Roofing',
       'Needs you now (3)',
       'New: no thread yet (2)',
-      `◆ 1. ${CEDAR_TITLE}`,
+      `◆ 1. ${CEDAR_FRESH}`,
       '1 task due · Start thread: no thread yet',
-      `◆ 2. ${BOLT_TITLE}`,
+      `◆ 2. ${BOLT_FRESH}`,
       '2 messages waiting · Start thread: no thread yet',
       'In a thread (1)',
       `3. ${ACME_TITLE}`,
@@ -3009,7 +3092,7 @@ describe('one pane: this thread\'s client on top, the list under it', () => {
     expect((await ui.find({ type: 'Markdown' }))?.text).toBe('## Acme Roofing\n\n1. What the client sent')
     // looking at the list is not acting on the link: no note in a thread that linked itself
     expect(w.appended).toEqual([])
-    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0 } })
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0, made: expect.any(Number) } })
     await ui.unmount()
   })
 
@@ -3045,7 +3128,8 @@ describe('one pane: this thread\'s client on top, the list under it', () => {
     await w.clock.advance(4_000)
     for (let i = 0; i < 30; i++) await w.clock.advance(60_000)
     expect(w.opened).toEqual([])
-    expect(w.acted()).toEqual([])
+    // no message; (0.5.2, R4) the timer's own chip for Cedar, the one client with no thread
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP])
     expect(w.prompts).toEqual([])
   })
 })
@@ -3109,7 +3193,7 @@ describe('F10: a reply package someone picked up stays in the panel, with who ho
     expect(w.appended[1]).toContain('with 1 draft not sent yet; the five-part pickup view is in the side pane. 1 client message arrived after that draft was written: read the package again and revise the open draft, never write a second email.')
     expect(await viewText($, 'Acme Roofing')).toBe(`> **You picked this up** (Mon 10 AM). 1 draft not sent yet. 1 client message arrived after it was written.\n\n## Acme Roofing\n\n1. What the client sent`)
     // and through all of it nothing was sent, started or submitted
-    expect(w.acted()).toEqual([])
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP, BOLT_AUTO_CHIP])
     expect(w.prompts).toEqual([])
   })
 
@@ -3139,7 +3223,9 @@ describe('F10: a reply package someone picked up stays in the panel, with who ho
     // (a new thread for it is the typed command)
     await mm($, 'start bolt staffing')
     await ui.unmount()
+    // (the timer's own chip for Cedar, the client with no thread, came first: R4)
     expect(w.acted()).toEqual([
+      CEDAR_AUTO_CHIP,
       {
         server: 'ccd_session', tool: 'spawn_task',
         args: {
@@ -3220,7 +3306,7 @@ describe('(m)(n)(o) a package the caller holds: its thread links itself, is name
     const w = founderHolds(on)
     expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
     expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a' })
-    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: 'local_a', miss: 0 } })
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: 'local_a', miss: 0, made: expect.any(Number) } })
     expect(w.threads.get('local_a')).toMatchObject({ title: '🟡 21h left · Acme Roofing · your draft', pinned: true })
     expect((w.stored['mm.pins'] as Record<string, unknown>).local_a).toEqual(ourPin(ACME, 'Acme Roofing'))
     // nothing was sent or started by it
@@ -3250,17 +3336,18 @@ describe('(m)(n)(o) a package the caller holds: its thread links itself, is name
     expect(w.threads.get('local_a')).toMatchObject({ title: '✓ Acme Roofing · clear 11 AM', pinned: false })
   })
 
-  test('only what we pinned is unpinned: a thread the person had pinned keeps their pin when its client is clear', async ($, on) => {
+  // R14 (Rob, 2026-10-13: "Even if I manually pinned something, it should still unpin when it's cleared")
+  test('R14: a thread the person had pinned is unpinned too once its client is clear', async ($, on) => {
     const w = founderHolds(on, {}, { threads: [thread('local_a', 'Roof quote', 30, { pinned: true }), thread('local_x', 'Unrelated notes', 5)] })
     await mm($, '')
     expect((w.stored['mm.pins'] as Record<string, { byUs: boolean }>).local_a?.byUs).toBe(false)
     w.setFeed(nothingLeft)
     await mm($, '')
-    expect(w.threads.get('local_a')).toMatchObject({ title: '✓ Acme Roofing · clear 11 AM', pinned: true })
-    expect(w.writes().filter(c => c.startsWith('set_pinned'))).toEqual([])
+    expect(w.threads.get('local_a')).toMatchObject({ title: '✓ Acme Roofing · clear 11 AM', pinned: false })
+    expect(w.writes().filter(c => c.startsWith('set_pinned'))).toEqual(['set_pinned | local_a | false'])
   })
 
-  test('the same cap: with eight threads pinned already, a ninth client\'s thread is named and not pinned', async ($, on) => {
+  test('R1, no cap: nine held packages due within 24 business hours, nine threads pinned', async ($, on) => {
     const ids = Array.from({ length: 9 }, (_, i) => `${String(i + 1).repeat(8)}-0000-4000-8000-000000000000`)
     const w = world(on, {
       feed: {
@@ -3271,8 +3358,8 @@ describe('(m)(n)(o) a package the caller holds: its thread links itself, is name
       threads: ids.map((_, i) => thread(`local_${i + 1}`, `Thread ${i + 1}`, 30)),
       store: { 'mm.threads': Object.fromEntries(ids.map((_, i) => [`cli-${i + 1}`, { app: `local_${i + 1}`, at: NOW }])) },
     })
-    expect(await mm($, '')).toBe('9 clients need you; 8 threads pinned. The list is in the side pane.')
-    expect([...w.threads.values()].filter(t => t.pinned).length).toBe(8)
+    expect(await mm($, '')).toBe('9 clients need you; 9 threads pinned. The list is in the side pane.')
+    expect([...w.threads.values()].filter(t => t.pinned).length).toBe(9)
   })
 })
 
@@ -3283,7 +3370,8 @@ describe('(p) a reply draft is sent or discarded in a thread: one sync follows, 
   /** Another thread polls: this one's timer never syncs. */
   const notThePoller = { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR } }
 
-  test('ten seconds after the call, one sync, in the thread it was made in; the command and its answer pass through untouched', async ($, on) => {
+  // R6 (0.5.2, Rob 2026-10-13): the feed is read again at once after a route call that can close something
+  test('a second after the call, one sync, in the thread it was made in; the command and its answer pass through untouched', async ($, on) => {
     const w = world(on, { store: notThePoller })
     await tickOnce($, w)
     expect(closeouts(w)).toBe(0)
@@ -3294,30 +3382,30 @@ describe('(p) a reply draft is sent or discarded in a thread: one sync follows, 
     // not yet: the request is in the store, for the thread that polls
     expect(closeouts(w)).toBe(0)
     expect(w.stored['mm.ask']).toBe(NOW + 4_000)
-    await w.clock.advance(9_000)
+    await w.clock.advance(999)
     expect(closeouts(w)).toBe(0)
-    await w.clock.advance(1_000)
+    await w.clock.advance(1)
     expect(closeouts(w)).toBe(1)
-    expect((w.stored['mm.last'] as { at: number }).at).toBe(NOW + 14_000)
+    expect((w.stored['mm.last'] as { at: number }).at).toBe(NOW + 5_000)
     // and no more than that one
     for (let i = 0; i < 4; i++) await w.clock.advance(60_000)
     expect(closeouts(w)).toBe(1)
     // it sent nothing and started nothing
-    expect(w.acted()).toEqual([])
+    expect(sends(w)).toEqual([])
     expect(w.prompts).toEqual([])
   })
 
-  test('three drafts sent and discarded in a row: one sync, ten seconds after the last', async ($, on) => {
+  test('three drafts sent and discarded within the same second: one sync, a second after the last', async ($, on) => {
     const w = world(on, { store: notThePoller })
     await tickOnce($, w)
     await bash($, SENT)
-    await w.clock.advance(6_000)
+    await w.clock.advance(600)
     await bash($, DISCARD)
-    await w.clock.advance(6_000)
+    await w.clock.advance(600)
     await bash($, SENT)
-    await w.clock.advance(9_000)
+    await w.clock.advance(999)
     expect(closeouts(w)).toBe(0)
-    await w.clock.advance(1_000)
+    await w.clock.advance(1)
     expect(closeouts(w)).toBe(1)
     expect(w.shell.length).toBe(3)
   })
@@ -3377,9 +3465,8 @@ describe('(p) a reply draft is sent or discarded in a thread: one sync follows, 
     const w = world(on, { store: notThePoller })
     await tickOnce($, w)
     await bash($, SENT)
-    await w.clock.advance(5_000)
-    // the poller's own sync, in another thread
-    w.stored['mm.last'] = { at: NOW + 9_000, member: ME, items: [], pinned: 0, recs: {} }
+    // the poller's own sync, in another thread, before this one's second is up
+    w.stored['mm.last'] = { at: NOW + 4_500, member: ME, items: [], pinned: 0, recs: {} }
     await w.clock.advance(20_000)
     expect(closeouts(w)).toBe(0)
   })
@@ -3435,7 +3522,7 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     expect(await lines(ui)).toEqual([
       'Needs you now (1)',
       'New: no thread yet (1)',
-      '◆ 1. 🔴 1h late · Acme Roofing · needs your OK',
+      '◆ 1. 🔴 NO THREAD · Acme Roofing · due 8 AM',
       'needs your OK · Builder B sends, drafts ready · Start thread: no thread yet',
       `Updated 13:00 UTC for ${FOUNDER}. ${PANE_SENTENCE}`,
     ])
@@ -3555,7 +3642,7 @@ describe('(s) nothing drops off silently: Older', () => {
     expect(await lines(ui)).toEqual([
       'Needs you now (1)',
       'New: no thread yet (1)',
-      `◆ 1. 🟡 22h left · Bolt Staffing · reply`,
+      `◆ 1. ${BOLT_FRESH}`,
       '1 message waiting · Start thread: no thread yet',
       `Updated 15:00 UTC for ${ME}. ${PANE_SENTENCE}`,
     ])
@@ -3570,10 +3657,11 @@ describe('(s) nothing drops off silently: Older', () => {
     expect(await buttonsOf(ui, ACME)).toEqual([])
     expect(w.calls.length).toBe(calls)
     await ui.unmount()
-    // the band counts the one that needs the person now
+    // the band counts the one that needs the person now (R9: by name, with no thread, its chip here)
     await tickOnce($, w)
     const band = await bandOf($)
-    expect(await lines(band)).toEqual(['Needs you: 1 client · 1 with no thread yet'])
+    // (fix round 1, F6: and how many wait under Older)
+    expect(await lines(band)).toEqual(['Needs you: 0 pinned · 1 with no thread: Bolt Staffing · 1 older overdue. Open a thread for Bolt Staffing (due Tue 9 AM): a chip is waiting in this thread.'])
     await band.unmount()
   })
 
@@ -3816,7 +3904,7 @@ describe('(u) a client whose reply drafts a teammate holds: not pinned, not coun
     expect(w.stored['mm.unpinned']).toEqual({})
     expect(await mm($, '')).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
     const band = await bandOf($)
-    expect(await lines(band)).toEqual(['Needs you: 1 client · 1 with no thread yet'])
+    expect(await lines(band)).toEqual(['Needs you: 0 pinned · 1 with no thread: Cedar Dental. Open a thread for Cedar Dental (due 4 PM): a chip is waiting in this thread.'])
     await band.unmount()
     const ui = await pane($)
     expect((await lines(ui))[0]).toBe('Needs you now (1)')
@@ -3834,7 +3922,8 @@ describe('(u) a client whose reply drafts a teammate holds: not pinned, not coun
     expect(w.fetched.filter(u => u.includes('/reply-package')).length).toBe(reads)
     expect((await ui.find({ type: 'Markdown' }))?.text.split('\n').at(-1)).toBe(`_${ASK}_`)
     await ui.unmount()
-    expect(w.acted()).toEqual([])
+    // no message; the timer's own chip for Cedar (R4), and none for Bolt: a teammate has it
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP])
     expect(w.prompts).toEqual([])
   })
 
@@ -4186,7 +4275,8 @@ describe('B1: a pass writes only what it changed, over a fresh copy; what the pe
     expect(w.stored['mm.unlinked']).toEqual(store['mm.unlinked'])
     expect(w.stored['mm.pins']).toEqual(store['mm.pins'])
     expect(w.stored['mm.acted']).toEqual(store['mm.acted'])
-    expect(w.stored['mm.auto']).toEqual(store['mm.auto'])
+    // (0.5.2, R11) an older version's link record is dated the first time this version sees it
+    expect(w.stored['mm.auto']).toEqual({ [CEDAR]: { ...store['mm.auto'][CEDAR], made: NOW + 4_000 } })
     expect(w.stored['mm.titles']).toEqual(store['mm.titles'])
     expect(w.stored['mm.records']).toEqual(store['mm.records'])
     expect(w.stored['mm.threads']).toEqual({ ...store['mm.threads'], [SELF_CLI]: { app: SELF, at: NOW + 4_000 } })
@@ -4212,7 +4302,7 @@ describe('B3: a thread is linked by itself only to the one client its sessions d
     await mm($, '')
     // the feed could not tell: the session's only row named Acme
     expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_pipe' })
-    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: 'local_pipe', miss: 0 } })
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: 'local_pipe', miss: 0, made: expect.any(Number) } })
     expect(w.threads.get('local_pipe')).toMatchObject({ title: ACME_TITLE, pinned: true })
     // the feed now carries that session's internal-ops row as well
     w.setFeed(feed({ threads: [declared(ACME, 'cli-pipe', 2), declared(INTERNAL, 'cli-pipe', 1)] }))
@@ -4308,7 +4398,7 @@ describe('B3: a thread is linked by itself only to the one client its sessions d
       store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } },
     })
     await mm($, '')
-    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0 } })
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0, made: expect.any(Number) } })
     expect(await mm($, 'link Acme Roofing')).toBe('This thread is now Acme Roofing\'s. Showing Acme Roofing in the side pane.')
     w.setFeed(feed({ threads: [declared(ACME, SELF_CLI, 2), declared(INTERNAL, SELF_CLI, 1)] }))
     for (let i = 0; i < 4; i++) {
@@ -4388,12 +4478,725 @@ describe('B3: a thread is linked by itself only to the one client its sessions d
   test('[2] [3] the marker arrives after the thread linked itself to another client: let go on the next sync', async ($, on) => {
     const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } } })
     await mm($, '')
-    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0 } })
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0, made: expect.any(Number) } })
     // this thread is Acme's, so the Bolt marker links nothing; it still says which client the thread is for
     await $.prompt.submit({ text: BOLT_KICKOFF, wait: false, origin: { kind: 'sdk' } } as never)
     expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
     await mm($, '')
     expect(w.stored['mm.links']).toEqual({})
     expect(w.threads.get(SELF)).toMatchObject({ title: 'Morning hub', pinned: false })
+  })
+})
+
+// ======================================================================== 0.5.2 (Rob, 2026-10-13 evening)
+
+describe('R1: a pin means "needs you": pinned while something must be acted on within 24 business hours', () => {
+  test('a reply due in 30 business hours is on the list, its thread named and not pinned; it pins itself once within 24', async ($, on) => {
+    const due = new Date(NOW + 30 * HOUR).toISOString() // Tuesday 5 PM: 13 business hours today, 17 tomorrow
+    const w = world(on, {
+      feed: feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 1, { reply_due_at: due })], threads: [declared(BOLT, 'cli-bolt', 20)] }),
+      threads: [thread('local_b', 'Staffing plan', 20)],
+      store: { 'mm.threads': PAIRS },
+    })
+    expect(await mm($, '')).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 1d left · Bolt Staffing · reply', pinned: false })
+    // six hours on, it is 24 business hours away: pinned
+    await w.clock.advance(6 * HOUR)
+    expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
+    expect(w.threads.get('local_b')?.pinned).toBe(true)
+  })
+
+  test('comes back to me: with a teammate it is unpinned and off the list; mine again, it is pinned at the next sync', async ($, on) => {
+    const held = packageFor(BOLT, 'Bolt Staffing (Sam)', { ...heldBy('j.smith@example.com'), covers_through: ago(3) })
+    const mailNow = [mailFor(BOLT, 'Bolt Staffing (Sam)', 1)]
+    const w = world(on, {
+      feed: feed({ drafts: [held], mail: mailNow, tickets: {} }),
+      threads: [thread('local_b', 'Staffing plan', 20, { pinned: true })],
+      store: { 'mm.links': { [BOLT]: 'local_b' }, 'mm.pins': { local_b: ourPin(BOLT, 'Bolt Staffing') } },
+    })
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 with J Smith · Bolt Staffing · reply', pinned: false })
+    // the teammate let it go: the reply is mine again
+    w.setFeed(feed({ drafts: [], mail: mailNow, tickets: {} }))
+    expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 23h left · Bolt Staffing · reply', pinned: true })
+  })
+})
+
+describe('R4 and R5: a chip minted by itself for a client that needs a new thread, in every running thread', () => {
+  const DUNE = '44444444-4444-4444-4444-444444444444'
+  const task = (projectId: string, name: string, dueMs: number) => ({ ticket_id: `t-${projectId}`, project_id: projectId, project_name: name, title: 'Do it', due_at: new Date(dueMs).toISOString(), due_source: 'commitment', assignee_email: ME })
+
+  test('R4: no thread and due within 24 business hours: its own chip from the timer (no press), its row on top as NO THREAD, and the band names it; none further out', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: { due_today: [task(CEDAR, 'Cedar Dental', NOW + 5 * HOUR)], due_soon: [task(DUNE, 'Dune Freight', NOW + 53 * HOUR)] } }) })
+    // a command or a sync mints nothing
+    await mm($, '')
+    expect(w.acted()).toEqual([])
+    const ui = await pane($)
+    expect((await lines(ui)).slice(1, 6)).toEqual(['New: no thread yet (2)', `◆ 1. ${CEDAR_FRESH}`, '1 task due · Start thread: no thread yet', '◆ 2. 🟡 2d left · Dune Freight · task', '1 task due · Start thread: no thread yet'])
+    await ui.unmount()
+    // the timer does, for Cedar alone (Dune is further out than the pin's window)
+    await tickOnce($, w)
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP])
+    const band = await bandOf($)
+    expect(await lines(band)).toEqual(['Needs you: 0 pinned · 1 with no thread: Cedar Dental. Open a thread for Cedar Dental (due 4 PM): a chip is waiting in this thread.'])
+    await band.unmount()
+    // and once, however many ticks pass
+    for (let i = 0; i < 5; i++) await w.clock.advance(60_000)
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP])
+  })
+
+  test('R5: at most five chips in a thread, soonest due first', async ($, on) => {
+    const ids = Array.from({ length: 7 }, (_, i) => `5555555${i}-5555-4555-8555-555555555555`)
+    const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: { due_today: ids.map((id, i) => task(id, `Client ${i}`, NOW + (i + 1) * HOUR)) } }) })
+    await tickOnce($, w)
+    expect(chipTitles(w)).toEqual([0, 1, 2, 3, 4].map(i => `Client ${i}: reply to the client`))
+  })
+
+  test('R5: the thread withdraws its own chip once its client has a linked thread', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], mail: [] }) })
+    await tickOnce($, w)
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP])
+    w.stored['mm.links'] = { [CEDAR]: 'local_other' }
+    await w.clock.advance(60_000)
+    expect(w.dismissed()).toEqual([chipId(1)])
+    expect(w.stored['mm.chips']).toEqual([])
+  })
+
+  test('R3: a long thread\'s client gets its chip by itself; the old thread stays pinned until the new one starts, then hands over', async ($, on) => {
+    const prompt = `${ACME_KICKOFF}\n\n${HANDOVER('Roof quote', 'local_a', 'Acme Roofing Pat')}`
+    const w = world(on, {
+      feed: acmeFeed(),
+      threads: [thread('local_a', 'Roof quote', 30)],
+      store: { 'mm.threads': PAIRS, 'mm.ctx': { local_a: { tokensUsed: 700_000, contextWindow: 1_000_000, percentUsed: 70, at: NOW - HOUR } } },
+    })
+    await tickOnce($, w)
+    // the old thread is the client's, pinned, while the chip waits
+    expect(w.threads.get('local_a')).toMatchObject({ title: ACME_TITLE, pinned: true })
+    const chip = w.acted().find(c => c.args.title === 'Acme Roofing: review the reply drafts')
+    expect(chip?.args.prompt).toBe(prompt)
+    expect((w.stored['mm.chips'] as Array<{ projectId: string; had?: string; auto?: boolean }>).find(c => c.projectId === ACME)).toMatchObject({ had: 'local_a', auto: true })
+    // the person starts it: this thread takes the client, and a second later the old one is given back
+    await $.prompt.submit({ text: prompt, wait: false, origin: { kind: 'sdk' } } as never)
+    expect(w.stored['mm.links']).toMatchObject({ [ACME]: SELF })
+    await w.clock.advance(1_000)
+    expect(w.threads.get('local_a')).toMatchObject({ title: 'Roof quote', pinned: false })
+    expect(w.threads.get(SELF)).toMatchObject({ pinned: true })
+    expect(w.threads.get(SELF)?.title).toMatch(ACME_NAMED)
+  })
+})
+
+describe('R6 and R11: a route call that can close something re-pulls the feed, and makes an automatic link in its thread the person\'s; a send by any other path never does', () => {
+  const helper = 'node ~/.claude/skills/team-api-gateway/scripts/mm-api.mjs'
+  const NO_REPLY = `${helper} ext POST /reply-package/no-reply --body '{"project_id":"p","covers_through":"t","reason":"thanks"}'`
+  const bash = ($: Engine, command: string) => $.tool.call({ tool: 'Bash', command } as never)
+
+  test('R6: the no-reply route (any reply-package write) re-pulls the feed a second later', async ($, on) => {
+    const w = world(on, { store: { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR } } })
+    await tickOnce($, w)
+    expect(closeouts(w)).toBe(0)
+    await bash($, NO_REPLY)
+    await w.clock.advance(1_000)
+    expect(closeouts(w)).toBe(1)
+  })
+
+  const linkedByItself = (on: On) => world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } } })
+  const declaredMore = () => feed({ threads: [{ ...declared(ACME, SELF_CLI, 1), sole: false }] })
+
+  test('R11: a link the bridge made by itself, never used: let go when its session also declares another project (B3, as before)', async ($, on) => {
+    const w = linkedByItself(on)
+    await mm($, '')
+    expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { sid: SELF } })
+    w.setFeed(declaredMore())
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+  })
+
+  // ⛔ R11 (final round, 10-14): a send is never evidence. Only a closing route that worked in the thread, or the
+  // person's own act, makes a link the bridge made the person's.
+  const GMAIL_SCRIPT = `python3 - <<'EOF'\nservice.users().messages().send(userId="me", body=msg).execute()\nEOF`
+
+  test('R11, the F&I shape: linked by itself at T0, a Gmail-script send two hours later run in the thread, then the session declares another project: released', async ($, on) => {
+    const w = linkedByItself(on)
+    await mm($, '')
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0, made: NOW } })
+    await w.clock.advance(2 * HOUR)
+    // the send, two hours on, by a Gmail script run in this thread: the hook sees it and claims nothing
+    await bash($, GMAIL_SCRIPT)
+    expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { sid: SELF } })
+    // the feed shows the send, and this thread's own session at work on the client at that moment, with sole:false
+    const sent = new Date(NOW + 2 * HOUR - 60_000).toISOString()
+    const later = feed({ threads: [{ ...declared(ACME, SELF_CLI, 1), last_activity_at: sent, sole: false }] })
+    later.drafts = (later.drafts ?? []).map(d => ({ ...d, last_outbound_at: sent }))
+    w.setFeed(later)
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.stored['mm.auto']).toEqual({})
+    expect(w.threads.get(SELF)?.pinned).toBe(false)
+  })
+
+  test('R11, the F&I shape closed through a route: a reply-draft/sent call in the thread claims the link, and sole:false then leaves it', async ($, on) => {
+    const w = linkedByItself(on)
+    await mm($, '')
+    await w.clock.advance(2 * HOUR)
+    await bash($, `${helper} ext POST /reply-draft/sent --body-file sent.json`)
+    expect(w.stored['mm.auto']).toEqual({})
+    const sent = new Date(NOW + 2 * HOUR - 60_000).toISOString()
+    const later = feed({ threads: [{ ...declared(ACME, SELF_CLI, 1), last_activity_at: sent, sole: false }] })
+    later.drafts = (later.drafts ?? []).map(d => ({ ...d, last_outbound_at: sent }))
+    w.setFeed(later)
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+  })
+
+  // The reviewer's P6: a send from elsewhere proves nothing about the thread
+  const PIPE_CLI = 'cli-pipe'
+  const cedarOnly = (threads: NonNullable<Feed['threads']>, ticketOver: Record<string, unknown> = {}): Feed => ({
+    member: ME, role: 'builder', drafts: [], mail: [], threads,
+    tickets: { due_today: [{ ticket_id: 't1', project_id: CEDAR, project_name: 'Cedar Dental', title: 'Send the intake form', due_at: new Date(NOW + 5 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME, ...ticketOver }] },
+  })
+  const pipeline = (on: On) => world(on, { feed: cedarOnly([declared(CEDAR, PIPE_CLI, 1)]), threads: [thread('local_p', 'Pipeline speed', 1)], store: { 'mm.threads': { [PIPE_CLI]: { app: 'local_p', at: NOW } } } })
+  const elsewhere = { last_outbound_at: new Date(NOW + 30 * 60_000).toISOString() }
+
+  test('P6a: a send to the client from elsewhere (the thread\'s session was not at work on it), then sole:false: let go, and Update sends nothing into it', async ($, on) => {
+    const w = pipeline(on)
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [CEDAR]: 'local_p' })
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([declared(CEDAR, PIPE_CLI, 1)], elsewhere))
+    await mm($, '')
+    expect(w.stored['mm.auto']).toMatchObject({ [CEDAR]: { sid: 'local_p' } })
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([{ ...declared(CEDAR, PIPE_CLI, 1), sole: false }], elsewhere))
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.threads.get('local_p')).toMatchObject({ title: 'Pipeline speed', pinned: false })
+    await mm($, 'update Cedar')
+    expect(sends(w)).toEqual([])
+  })
+
+  test('P6b: sole:false and a newer send in the same sync: B3 wins, let go', async ($, on) => {
+    const w = pipeline(on)
+    await mm($, '')
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([{ ...declared(CEDAR, PIPE_CLI, 1), sole: false }], elsewhere))
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+  })
+
+  test('P6c: no send, sole:false: let go', async ($, on) => {
+    const w = pipeline(on)
+    await mm($, '')
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([{ ...declared(CEDAR, PIPE_CLI, 1), sole: false }]))
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+  })
+
+  test('a marker naming another client never claims: with a send and the session at work on the client, let go', async ($, on) => {
+    const sent = new Date(NOW + 2 * HOUR).toISOString()
+    const w = world(on, { feed: cedarOnly([declared(CEDAR, PIPE_CLI, 1)]), threads: [thread('local_p', 'Pipeline speed', 1)], store: { 'mm.threads': { [PIPE_CLI]: { app: 'local_p', at: NOW } } } })
+    await mm($, '')
+    w.stored['mm.marked'] = { local_p: BOLT }
+    await w.clock.advance(2 * HOUR)
+    w.setFeed(cedarOnly([{ ...declared(CEDAR, PIPE_CLI, 1), last_activity_at: sent }], { last_outbound_at: sent }))
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+  })
+
+  test('a Gmail send run in the thread itself does not make its link the person\'s: released on sole:false', async ($, on) => {
+    const w = linkedByItself(on)
+    await mm($, '')
+    await bash($, GMAIL_SCRIPT)
+    expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { sid: SELF } })
+    w.setFeed(declaredMore())
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+  })
+
+  test('a HighLevel send or the send script run in the thread claims nothing either', async ($, on) => {
+    const w = linkedByItself(on)
+    await mm($, '')
+    await bash($, 'curl -X POST https://services.leadconnectorhq.com/conversations/messages -d @sms.json')
+    await bash($, 'python3 scripts/send-client-email.py --to client@example.com')
+    expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { sid: SELF } })
+    w.setFeed(declaredMore())
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+  })
+
+  // The reviewer's round 2 (R2-F1a/b): a teammate's send, then the thread is used again on the client
+  const TEAMMATE_SEND = { last_outbound_at: new Date(NOW + 30 * 60_000).toISOString() }
+  const pipeRow = (lastActivity: number, over: Record<string, unknown> = {}) => ({ project_id: CEDAR, session_id: PIPE_CLI, last_activity_at: new Date(NOW + lastActivity).toISOString(), ...over })
+
+  test('R2-F1a: a teammate\'s send at +30m, the thread used again on the client at +90m, then it loads another skill: released, and Update sends nothing into it', async ($, on) => {
+    const w = pipeline(on)
+    await mm($, '')
+    expect(w.stored['mm.auto']).toMatchObject({ [CEDAR]: { sid: 'local_p', made: NOW } })
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([declared(CEDAR, PIPE_CLI, 1)], TEAMMATE_SEND))
+    await mm($, '')
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([pipeRow(90 * 60_000)], TEAMMATE_SEND))
+    await mm($, '')
+    expect(w.stored['mm.auto']).toMatchObject({ [CEDAR]: { sid: 'local_p' } })
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([pipeRow(150 * 60_000, { sole: false })], TEAMMATE_SEND))
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.threads.get('local_p')).toMatchObject({ title: 'Pipeline speed', pinned: false })
+    await mm($, 'update Cedar')
+    expect(sends(w)).toEqual([])
+  })
+
+  test('R2-F1b: the sync that first sees sole:false also sees the client\'s rows written after the teammate\'s send: released, and Update sends nothing into it', async ($, on) => {
+    const w = pipeline(on)
+    await mm($, '')
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([declared(CEDAR, PIPE_CLI, 1)], TEAMMATE_SEND))
+    await mm($, '')
+    await w.clock.advance(HOUR)
+    w.setFeed(cedarOnly([pipeRow(115 * 60_000, { sole: false })], TEAMMATE_SEND))
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.stored['mm.auto']).toEqual({})
+    await mm($, 'update Cedar')
+    expect(sends(w)).toEqual([])
+  })
+
+  test('R11: a link made by itself with no send since it was made (our last send is older) is let go, as before', async ($, on) => {
+    const w = linkedByItself(on)
+    await mm($, '')
+    await w.clock.advance(2 * HOUR)
+    const later = declaredMore()
+    later.drafts = (later.drafts ?? []).map(d => ({ ...d, last_outbound_at: new Date(NOW - HOUR).toISOString() }))
+    w.setFeed(later)
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+  })
+
+  test('R11: the same link used for a send in its thread is the person\'s, and keeps its link and its pin', async ($, on) => {
+    const w = linkedByItself(on)
+    await mm($, '')
+    await bash($, `${helper} ext POST /reply-draft/sent --body-file sent.json`)
+    expect(w.stored['mm.auto']).toEqual({})
+    w.setFeed(declaredMore())
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+    expect(w.threads.get(SELF)).toMatchObject({ title: ACME_TITLE, pinned: true })
+  })
+})
+
+describe('R7 and R14: every close path unpins the client\'s thread, whoever pinned it, and names it clear', () => {
+  const boltMail = (over: Record<string, unknown>) => [1, 2].map(n => mailFor(BOLT, 'Bolt Staffing (Sam)', n, over))
+  for (const [path, mail] of [
+    ['no reply owed (the prep ruled it)', boltMail({ reply_status: 'closed', closed_by: 'no_reply_owed' })],
+    ['a manual package (our own email answered it)', boltMail({ reply_status: 'closed', closed_by: 'answered_outside_drafts' })],
+    ['a reply sent later by hand (later_outbound)', boltMail({ reply_status: 'replied', replied_via: 'later_outbound' })],
+    ['the person said no reply is needed', boltMail({ reply_status: 'closed', closed_by: 'person_no_reply' })],
+  ] as Array<[string, unknown[]]>) {
+    test(`${path}: unpinned, the person's own pin too, and named clear`, async ($, on) => {
+      const w = world(on, {
+        threads: [thread('local_b', 'Staffing plan', 20, { pinned: true })],
+        store: { 'mm.links': { [BOLT]: 'local_b' } },
+      })
+      await mm($, '')
+      // the person had pinned it: it stays pinned while it needs them, and is remembered as theirs
+      expect(w.threads.get('local_b')).toMatchObject({ title: BOLT_TITLE, pinned: true })
+      expect((w.stored['mm.pins'] as Record<string, { byUs: boolean }>).local_b?.byUs).toBe(false)
+      w.setFeed(feed({ mail: mail as never }))
+      await mm($, '')
+      expect(w.threads.get('local_b')).toMatchObject({ title: '✓ Bolt Staffing · clear 11 AM', pinned: false })
+    })
+  }
+
+  test('a closed package: the client is clear, unpinned and named so', async ($, on) => {
+    const w = world(on, { threads: [thread('local_a', 'Roof quote', 30, { pinned: true })], store: { 'mm.links': { [ACME]: 'local_a' } } })
+    await mm($, '')
+    w.setFeed(feed({ drafts: [] }))
+    await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: '✓ Acme Roofing · clear 11 AM', pinned: false })
+  })
+
+  test('R14: a pin the person put on a thread no client is linked to is left alone', async ($, on) => {
+    const w = world(on, { threads: [thread('local_x', 'My notes', 5, { pinned: true })] })
+    await mm($, '')
+    w.setFeed(feed({ drafts: [], mail: [], tickets: {} }))
+    await mm($, '')
+    expect(w.threads.get('local_x')).toMatchObject({ title: 'My notes', pinned: true })
+    expect(w.writes().filter(c => c.includes('local_x'))).toEqual([])
+  })
+
+  test('R14: a thread the person unpinned while its client still needs them is not pinned again until something newer comes', async ($, on) => {
+    const w = world(on, { threads: [thread('local_b', 'Staffing plan', 20)], store: { 'mm.links': { [BOLT]: 'local_b' } } })
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(true)
+    ;(w.threads.get('local_b') as Thread).pinned = false
+    await mm($, '')
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(false)
+    // a newer message from the client: pinned again
+    w.setFeed(feed({ mail: [...(feed().mail ?? []), mailFor(BOLT, 'Bolt Staffing (Sam)', 0.5)] }))
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(true)
+  })
+})
+
+describe('R8: sent · checking, then clear or still open (Rob, 2026-10-13: "yes fast close")', () => {
+  const SENT_AT = ago(0.25) // 10:45 AM
+  const CHECKED = { last_outbound_at: SENT_AT, checked_send_at: SENT_AT, checked_at: ago(0.1), still_open: ['the logo file', 'the Q4 dates'], answered: ['pricing'] }
+  const STILL = '🟡 Acme Roofing · still open after your reply'
+  const CLAIM = 'Still open for Acme Roofing after our reply of 10:45 AM: the logo file; the Q4 dates. Load the client\'s project skill first, then follow client-reply-prep §9: show me what is still open and the drafts for it, and wait for me. Send nothing without my go.'
+
+  test('the whole cycle: pinned, sent · checking (unpinned at once), still open (pinned again, Claim in this thread), then clear', async ($, on) => {
+    const w = acmeWorld(on)
+    await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: ACME_TITLE, pinned: true })
+    // our send is in the feed, newer than any check: unpinned at once, and off the list
+    w.setFeed(acmeFeed({ last_outbound_at: SENT_AT }))
+    expect(await mm($, '')).toBe('2 clients need you; 0 threads pinned. The list is in the side pane.')
+    expect(w.threads.get('local_a')).toMatchObject({ title: '✓ Acme Roofing · sent 10:45 AM · checking', pinned: false })
+    // (Opus decision 2) its row is under a closed group of its own, named as its thread is, Drafts alone
+    let ui = await pane($)
+    expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([['mm-fold:checking', 'Checking your reply (1)']])
+    expect(await lines(ui)).not.toContain('3. ✓ Acme Roofing · sent 10:45 AM · checking')
+    await ui.press({ key: 'mm-fold:checking' })
+    expect(await lines(ui)).toContain('3. ✓ Acme Roofing · sent 10:45 AM · checking')
+    expect(await buttonsOf(ui, ACME)).toEqual(['Drafts'])
+    await ui.unmount()
+    // the check lands and leaves two items open: pinned again, named for it, the items under the row
+    w.setFeed(acmeFeed(CHECKED))
+    expect(await mm($, '')).toBe('3 clients need you; 1 thread pinned. The list is in the side pane.')
+    expect(w.threads.get('local_a')).toMatchObject({ title: STILL, pinned: true })
+    ui = await pane($)
+    expect(await lines(ui)).toEqual(expect.arrayContaining([`3. ${STILL}`, '- the logo file', '- the Q4 dates']))
+    expect(await buttonsOf(ui, ACME)).toEqual(['Claim in this thread', 'Drafts'])
+    // the band says it
+    const band = await bandOf($)
+    expect(await lines(band)).toEqual(['Needs you: 1 pinned · 2 with no thread: Cedar Dental, Bolt Staffing.'])
+    await band.unmount()
+    // Claim sends Rob's words into that same thread, once
+    await ui.press({ key: `claim:${ACME}` })
+    expect(w.acted()).toEqual([{ server: 'ccd_session_mgmt', tool: 'send_message', args: { session_id: 'local_a', message: CLAIM } }])
+    await ui.press({ key: `claim:${ACME}` })
+    expect(w.acted().length).toBe(1)
+    // (the thread's name is cleaned before it is shown in a sentence, as any)
+    expect(w.toasts.at(-1)).toBe('Acme Roofing\'s thread already has this. Open "Acme Roofing still open after your reply" under Pinned.')
+    await ui.unmount()
+    // the package is closed: clear, unpinned
+    w.setFeed(feed({ drafts: [], threads: [declared(ACME, 'cli-acme', 30)] }))
+    await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: '✓ Acme Roofing · clear 11 AM', pinned: false })
+  })
+
+  test('from 60% of its context: no Claim button, and a chip for a new thread minted by itself, titled with the percent', async ($, on) => {
+    const w = acmeWorld(on, { feed: acmeFeed(CHECKED), store: { 'mm.threads': PAIRS, 'mm.ctx': { local_a: { tokensUsed: 700_000, contextWindow: 1_000_000, percentUsed: 70, at: NOW - HOUR } } } })
+    await tickOnce($, w)
+    expect(w.threads.get('local_a')).toMatchObject({ title: STILL, pinned: true })
+    const ui = await pane($)
+    expect(await buttonsOf(ui, ACME)).toEqual(['Drafts'])
+    await ui.unmount()
+    const chip = w.acted().find(c => c.args.title === 'Acme Roofing: start a new thread (this one is at 70%)')
+    expect(chip?.args.prompt).toBe(`${ACME_KICKOFF}\n\n${HANDOVER('Roof quote', 'local_a', 'Acme Roofing Pat')}`)
+    expect((w.stored['mm.chips'] as Array<{ projectId: string; need?: string }>).find(c => c.projectId === ACME)?.need).toBe('long')
+  })
+
+  test('Claim reads the feed first: a client no longer open after our reply gets nothing', async ($, on) => {
+    const w = acmeWorld(on, { feed: acmeFeed(CHECKED) })
+    await mm($, '')
+    const ui = await pane($)
+    w.setFeed(acmeFeed({ ...CHECKED, still_open: [] }))
+    await ui.press({ key: `claim:${ACME}` })
+    expect(w.acted()).toEqual([])
+    expect(w.toasts.at(-1)).toBe('Acme Roofing has nothing waiting now. The list has been refreshed.')
+    await ui.unmount()
+  })
+})
+
+describe('R9: the band never reads all clear from a failed or stale read', () => {
+  const quiet = (on: On, last: Record<string, unknown>) =>
+    world(on, { feed: feed({ drafts: [], mail: [], tickets: {} }), store: { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR }, 'mm.last': last } })
+  const bandText = async ($: Engine) => {
+    const band = await bandOf($)
+    const out = await lines(band)
+    await band.unmount()
+    return out
+  }
+
+  test('a fresh sync with nothing: all clear; the same sync grown older than the sync interval allows: the refresh-failed line', async ($, on) => {
+    const w = quiet(on, { at: NOW, member: ME, items: [], pinned: 0, recs: {} })
+    await tickOnce($, w)
+    expect(await bandText($)).toEqual(['Nothing needs you in the next 24 hours.'])
+    await w.clock.advance(16 * 60_000)
+    expect(await bandText($)).toEqual(['Couldn\'t refresh the list. Showing what was last loaded.'])
+  })
+
+  test('a sync on record that failed: never all clear', async ($, on) => {
+    const w = quiet(on, { at: NOW, member: ME, items: [], pinned: 0, recs: {}, error: 'closeout HTTP 503: unavailable' })
+    await tickOnce($, w)
+    expect(await bandText($)).toEqual(['Couldn\'t refresh the list. Showing what was last loaded.'])
+  })
+})
+
+describe('R10: Start never says nothing', () => {
+  const MAKING = 'Making a chip for Cedar Dental…'
+  const NO_ANSWER = 'The app did not answer in 15 seconds, so no chip was made. Type /mm start Cedar Dental in any thread.'
+
+  test('the press says it is making the chip before any call; an app that has not answered in 15 seconds is said so; a chip that comes later is recorded', async ($, on) => {
+    const w = world(on, { spawnTakesMs: 20_000 })
+    await mm($, '')
+    const ui = await pane($)
+    void ui.press({ key: `start:${CEDAR}` })
+    await w.clock.advance(100)
+    expect(await lines(ui)).toContain(MAKING)
+    expect(w.stored['mm.chips']).toBeUndefined()
+    await w.clock.advance(15_000)
+    expect(await lines(ui)).toContain(NO_ANSWER)
+    expect(w.toasts).toContain(NO_ANSWER)
+    // the app answers after all: the chip is on record, so this thread can withdraw it like any other
+    await w.clock.advance(5_000)
+    expect((w.stored['mm.chips'] as Array<{ taskId: string; projectId: string }>).map(c => [c.taskId, c.projectId])).toEqual([[chipId(1), CEDAR]])
+    await ui.unmount()
+  })
+
+  test('the typed /mm start the same way', async ($, on) => {
+    const w = world(on, { spawnTakesMs: 20_000 })
+    const said = mm($, 'start cedar dental')
+    await w.clock.advance(15_000)
+    expect(await said).toBe(NO_ANSWER)
+    await w.clock.advance(5_000)
+  })
+
+  test('a chip the timer mints that the app does not answer: said where errors go, and no more mints by itself for ten minutes', async ($, on) => {
+    const w = world(on, { spawnTakesMs: 20_000, feed: feed({ drafts: [], mail: [] }) })
+    await tickOnce($, w)
+    await w.clock.advance(15_000)
+    expect(w.written.some(f => f.text.includes('auto chip: the app did not answer in 15 s'))).toBe(true)
+    await w.clock.advance(5_000)
+    expect(chipTitles(w)).toEqual(['Cedar Dental: reply to the client'])
+    // the late answer was recorded: no second chip for Cedar on the next ticks
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(chipTitles(w)).toEqual(['Cedar Dental: reply to the client'])
+  })
+})
+
+describe('R15: the thread list is grouped by date once on this machine (Rob, 2026-10-13: "sorting by date is also ideal")', () => {
+  const NOTICE = 'Your thread list is now grouped by date, newest activity first, with pinned threads on top. Change it any time from the sidebar\'s filter menu.'
+  const views = (w: { calls: Call[] }) => w.calls.filter(c => c.tool === 'set_view').map(c => c.args)
+
+  test('first run: set once, recorded, said once in the pane; it touches no pin, title or link', async ($, on) => {
+    const w = world(on, { firstRun: true, feed: feed({ drafts: [], mail: [], tickets: {} }) })
+    await tickOnce($, w)
+    expect(views(w)).toEqual([{ group_by: 'date', sort_by: 'recency' }])
+    expect(w.stored['mm.viewSet']).toEqual({ at: NOW + 4_000, version: '0.5.2' })
+    const ui = await pane($)
+    expect(await lines(ui)).toContain(NOTICE)
+    await ui.unmount()
+    expect(threadWrites(w).filter(c => !c.startsWith('set_view'))).toEqual([])
+    // a second run does nothing, in this session or the next
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(views(w).length).toBe(1)
+  })
+
+  test('a machine that has it on record: never again, whatever the person set since', async ($, on) => {
+    const w = world(on, { store: { 'mm.viewSet': { at: NOW - 24 * HOUR, version: '0.5.2' } } })
+    await tickOnce($, w)
+    expect(views(w)).toEqual([])
+  })
+
+  test('a refusal records nothing and says nothing; it is tried again at most once a day', async ($, on) => {
+    const w = world(on, { firstRun: true, setView: 'refused', feed: feed({ drafts: [], mail: [], tickets: {} }) })
+    await tickOnce($, w)
+    expect(views(w).length).toBe(1)
+    expect(w.stored['mm.viewSet']).toBeUndefined()
+    const ui = await pane($)
+    expect(await lines(ui)).not.toContain(NOTICE)
+    await ui.unmount()
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(views(w).length).toBe(1)
+  })
+})
+
+describe('R16: a row and its thread\'s name, from one pass, always agree', () => {
+  test('an item 1.5 business days late reads 1d late on its row and on its thread: one pass, one now', async ($, on) => {
+    // Bolt's message was due 1.5 business days ago: Thursday 11 PM (1 hour of Thursday, all of Friday, 11 of Monday)
+    const due = '2026-10-09T03:00:00.000Z'
+    const w = world(on, {
+      feed: feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 60, { reply_due_at: due })], threads: [declared(BOLT, 'cli-bolt', 20)] }),
+      threads: [thread('local_b', 'Staffing plan', 20)],
+      store: { 'mm.threads': PAIRS },
+    })
+    await mm($, '')
+    const name = w.threads.get('local_b')?.title
+    expect(name).toBe('🔴 1d late · Bolt Staffing · reply')
+    const ui = await pane($)
+    expect(await lines(ui)).toContain(`1. ${name}`)
+    await ui.unmount()
+  })
+})
+
+describe('R17: a client with nothing due', () => {
+  test('listed last with no clock; never pinned, no NO THREAD row, no chip by itself, and the band counts it nowhere', async ($, on) => {
+    const w = world(on, {
+      feed: feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 1, { reply_due_at: null })], threads: [declared(BOLT, 'cli-bolt', 20)] }),
+      threads: [thread('local_b', 'Staffing plan', 20)],
+      store: { 'mm.threads': PAIRS, 'mm.lease': { owner: 'x', until: 0 } },
+    })
+    await tickOnce($, w)
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 Bolt Staffing · reply', pinned: false })
+    expect(w.acted()).toEqual([])
+    const band = await bandOf($)
+    expect(await lines(band)).toEqual(['Nothing needs you in the next 24 hours.'])
+    await band.unmount()
+  })
+
+  test('with no thread at all: still no NO THREAD row, and no chip by itself', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], tickets: {}, mail: [mailFor(CEDAR, 'Cedar Dental', 1, { reply_due_at: null })] }) })
+    await tickOnce($, w)
+    const ui = await pane($)
+    await mm($, '')
+    expect(await lines(ui)).toContain('◆ 1. 🟡 Cedar Dental · reply')
+    await ui.unmount()
+    expect(w.acted()).toEqual([])
+  })
+})
+
+describe('R18: an internal project\'s thread is the person\'s to pin', () => {
+  const CORE = '3e439f40-a17f-48e2-bcfe-723af5b741fc'
+  const coreTask = { ticket_id: 'tc', project_id: CORE, project_name: 'Massmarket Core Snapshot', title: 'Tracker', due_at: null, due_source: null, assignee_email: ME }
+
+  test('pinned by hand, it stays pinned while its item has no clock, and when the item clears it keeps its pin and gets its own title back', async ($, on) => {
+    const w = world(on, {
+      feed: feed({ drafts: [], mail: [], tickets: { due_soon: [coreTask] } }),
+      threads: [thread('local_core', 'Massmarket · Tracker', 1, { pinned: true })],
+      store: { 'mm.links': { [CORE]: 'local_core' } },
+    })
+    await mm($, '')
+    expect(w.threads.get('local_core')).toMatchObject({ title: '🟡 Massmarket Core Snapshot · task', pinned: true })
+    expect((w.stored['mm.pins'] as Record<string, unknown>).local_core).toEqual({ projectId: CORE, client: 'Massmarket Core Snapshot', byUs: false, internal: true })
+    w.setFeed(feed({ drafts: [], mail: [], tickets: {} }))
+    await mm($, '')
+    expect(w.threads.get('local_core')).toMatchObject({ title: 'Massmarket · Tracker', pinned: true })
+    expect(w.writes().filter(c => c.startsWith('set_pinned'))).toEqual([])
+    // still linked: its next item names it again
+    expect(w.stored['mm.links']).toEqual({ [CORE]: 'local_core' })
+  })
+
+  test('a client thread pinned by hand still unpins when its client clears (R14)', async ($, on) => {
+    const w = world(on, { threads: [thread('local_b', 'Staffing plan', 20, { pinned: true })], store: { 'mm.links': { [BOLT]: 'local_b' } } })
+    await mm($, '')
+    w.setFeed(feed({ mail: [] }))
+    await mm($, '')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '✓ Bolt Staffing · clear 11 AM', pinned: false })
+  })
+})
+
+// ======================================================================== fix round 1 (review of e832775b)
+
+describe('fix round 1: the reviewer\'s findings', () => {
+  const INTERNAL_OPS = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
+  const iTicket = { ticket_id: 'ti', project_id: INTERNAL_OPS, project_name: 'Massmarket AI', title: 'Fix tracker', due_at: new Date(NOW + 3 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME }
+  const SENT_AT = ago(0.25)
+  const CHECKED = { last_outbound_at: SENT_AT, checked_send_at: SENT_AT, checked_at: ago(0.1), still_open: ['the logo file'], answered: [] }
+
+  test('F2 (P1a): Claim reads the feed first, and a thread the bridge linked by itself that B3 lets go there gets nothing', async ($, on) => {
+    const w = acmeWorld(on, { feed: acmeFeed(CHECKED) })
+    await mm($, '')
+    expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { sid: 'local_a' } })
+    const ui = await pane($)
+    expect(await buttonsOf(ui, ACME)).toEqual(['Claim in this thread', 'Drafts'])
+    w.setFeed(acmeFeed(CHECKED, [{ ...declared(ACME, 'cli-acme', 30), sole: false }]))
+    await ui.press({ key: `claim:${ACME}` })
+    expect(sends(w)).toEqual([])
+    expect(w.toasts.at(-1)).toBe(GONE)
+    await ui.unmount()
+  })
+
+  test('F5 (P8): a client listed only by a start_now task: its chip, started, links its thread; /mm link knows it', async ($, on) => {
+    const st = { ticket_id: 'ts', project_id: CEDAR, project_name: 'Cedar Dental', title: 'Build the intake flow', due_at: new Date(NOW + 72 * HOUR).toISOString(), start_by_at: new Date(NOW + 2 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME }
+    const w = world(on, { feed: { member: ME, role: 'builder', drafts: [], mail: [], tickets: { start_now: [st] }, threads: [] }, threads: [] })
+    await tickOnce($, w)
+    const chip = w.minted()[0]
+    expect(chip?.args.title).toBe('Cedar Dental: reply to the client')
+    expect((w.stored['mm.last'] as { projects: string[] }).projects).toContain(CEDAR)
+    await $.prompt.submit({ text: String(chip?.args.prompt), wait: false, origin: { kind: 'sdk' } } as never)
+    expect(w.stored['mm.links']).toEqual({ [CEDAR]: SELF })
+  })
+
+  test('F6 (P7a): with the person\'s own clients under Older, the band never reads all clear', async ($, on) => {
+    world(on, { feed: feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 24 * 8)] as never }), store: { 'mm.lease': { owner: 'x', until: NOW + 24 * HOUR } } })
+    await mm($, '')
+    const band = await bandOf($)
+    expect(await lines(band)).toEqual(['Nothing due in the next 24 hours · 1 older overdue.'])
+    await band.unmount()
+  })
+
+  test('L7 (P7b): a client linked since the last sync, due within the window: Needs you, not all clear', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], mail: [] }), threads: [], store: { 'mm.lease': { owner: 'x', until: NOW + 24 * HOUR } } })
+    await mm($, '')
+    w.stored['mm.links'] = { [CEDAR]: 'local_new' }
+    await mm($, 'status')
+    const band = await bandOf($)
+    expect(await lines(band)).toEqual(['Needs you: 0 pinned.'])
+    await band.unmount()
+  })
+
+  test('L8 (P3a): an internal project with a dated task gets no chip by itself', async ($, on) => {
+    const w = world(on, { feed: { member: ME, role: 'builder', drafts: [], mail: [], tickets: { due_today: [iTicket] }, threads: [] }, threads: [] })
+    await tickOnce($, w)
+    expect(w.minted()).toEqual([])
+  })
+
+  test('L8 (P3b): an internal thread the bridge pinned for a dated task is unpinned by it when the task clears, and gets its own title back', async ($, on) => {
+    const w = world(on, { feed: { member: ME, role: 'builder', drafts: [], mail: [], tickets: { due_today: [iTicket] }, threads: [] }, threads: [thread('local_i', 'Ops notes', 1)], store: { 'mm.links': { [INTERNAL_OPS]: 'local_i' } } })
+    await mm($, '')
+    expect(w.threads.get('local_i')).toMatchObject({ title: '🔴 3h left · Massmarket AI · task', pinned: true })
+    w.setFeed({ member: ME, role: 'builder', drafts: [], mail: [], tickets: {}, threads: [] })
+    await mm($, '')
+    expect(w.threads.get('local_i')).toMatchObject({ title: 'Ops notes', pinned: false })
+  })
+
+  test('L10: a second message to a client while the first is still going out is refused, with its line', async ($, on) => {
+    const w = acmeWorld(on, { sendTakesMs: 60_000 })
+    await mm($, '')
+    const ui = await pane($)
+    void ui.press({ key: `update:${ACME}` })
+    await w.clock.advance(1_000)
+    const typed = mm($, 'update acme roofing')
+    await w.clock.advance(1_000)
+    expect(await typed).toBe('A message to Acme Roofing\'s thread is still going out. Check that thread before pressing again.')
+    await w.clock.advance(60_000)
+    expect(sends(w).length).toBe(1)
+    await ui.unmount()
+  })
+
+  test('L11: a set_view answer that comes after the wait, and worked, is recorded then', async ($, on) => {
+    const w = world(on, { firstRun: true, setViewTakesMs: 20_000, feed: feed({ drafts: [], mail: [], tickets: {} }) })
+    await tickOnce($, w)
+    await w.clock.advance(15_000)
+    expect(w.stored['mm.viewSet']).toBeUndefined()
+    await w.clock.advance(5_000)
+    expect(w.stored['mm.viewSet']).toEqual({ at: NOW + 4_000, version: '0.5.2' })
+  })
+
+  test('L12: a sync that fails marks the sync on record failed, but not one another session wrote meanwhile', async ($, on) => {
+    const old = { at: NOW - 10 * 60_000, member: ME, items: [], pinned: 0, recs: {} }
+    const w = world(on, { store: { 'mm.last': old }, feedStatus: () => 503 })
+    await tickOnce($, w)
+    expect((w.stored['mm.last'] as { error?: string }).error).toContain('closeout HTTP 503')
+  })
+
+  test('L12: a newer sync written while this one failed is left with no error', async ($, on) => {
+    const old = { at: NOW - 10 * 60_000, member: ME, items: [], pinned: 0, recs: {} }
+    const newer = { at: NOW + 1, member: ME, items: [], pinned: 0, recs: {} }
+    const w: { stored: Record<string, unknown> } = world(on, {
+      store: { 'mm.last': old },
+      feedStatus: () => {
+        w.stored['mm.last'] = newer
+        return 503
+      },
+    })
+    await tickOnce($, w as never)
+    expect(w.stored['mm.last']).toEqual(newer)
   })
 })
