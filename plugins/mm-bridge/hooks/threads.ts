@@ -19,7 +19,7 @@
 import { businessMsBetween } from './business-time'
 import type { MmRow } from '../types'
 
-import { MAY_NEED_OK, NOBODY, cleanTitle, clockText, decidesText, holdSentence, titleFor, titleNames, withHolder, withTeammate } from './queue'
+import { MAY_NEED_OK, NOBODY, cleanTitle, clockText, decidesText, fastState, hasDue, holdSentence, noThreadTitle, pinsNow, stillOpenTitle, titleFor, titleNames, withHolder, withTeammate } from './queue'
 import type { FeedThread, QueueItem } from './queue'
 
 const HOUR = 3_600_000
@@ -394,7 +394,10 @@ export function waitingText(it: QueueItem): string {
 export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: Replaced | undefined } = {}): string {
   const id = it.projectId
   const who = `${it.projectName} (OW project ${id})`
-  const due = dueText(it.dueAt)
+  // (R17) nothing due: the kickoff says no due time (the clause is left out, never "due Invalid Date")
+  const due = hasDue(it) ? dueText(it.dueAt) : ''
+  const replyDue = due ? `, reply due ${due}` : ''
+  const tasksDue = due ? ` due ${due}` : ''
   const o = it.open ?? null
   const body =
     o?.state === 'held_by_me' && it.packageId
@@ -409,12 +412,12 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
           ? // (the founder) a stale package a teammate has, not held: Opus's words, 10-13
             `[mm-link ${id}] ${who}: ${o.by} has the reply drafts (package ${o.id.slice(0, 8)}), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`
           : o?.state === 'stale' && it.messages > 0
-            ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting, reply due ${due}. Load the client's project skill first, then follow client-reply-prep §9: package ${o.id.slice(0, 8)} exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.`
+            ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: package ${o.id.slice(0, 8)} exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.`
             : o?.state === 'prepared' && it.messages > 0
               ? `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${o.id.slice(0, 8)} and wait for me. Send nothing without my go.`
               : it.messages > 0
-                ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting, reply due ${due}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
-                : `[mm-link ${id}] ${who} has ${it.tasks} committed task(s) due ${due}. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`
+                ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
+                : `[mm-link ${id}] ${who} has ${it.tasks} committed task(s)${tasksDue}. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`
   if (opts.update) return `New since this thread last worked on this client: ${waitingText(it)}.\n${body}`
   const handover = opts.replaces ? handoverText(it, opts.replaces) : ''
   return handover ? `${body}\n\n${handover}` : body
@@ -432,6 +435,40 @@ function okKickoff(it: QueueItem, o: NonNullable<QueueItem['open']>): string {
 
 /** The thread a new one takes over from: the app's id for it and its own title. */
 export type Replaced = { sid: string; title: string }
+
+/**
+ * R8 (Rob, 2026-10-13): what Claim in this thread sends into the client's thread, in Rob's words: what the
+ * server's check of our reply found still open. `at` is the time of that reply. The items are the feed's,
+ * cleaned (queue.ts, checkOf).
+ */
+export function claimText(client: string, at: number, items: readonly string[], now: number): string {
+  return `Still open for ${client} after our reply of ${clockText(at, now)}: ${items.join('; ')}. Load the client's project skill first, then follow client-reply-prep §9: show me what is still open and the drafts for it, and wait for me. Send nothing without my go.`
+}
+
+/**
+ * R5 (Rob, 2026-10-13): the sentence a kickoff carries when the client already has a linked thread other than
+ * the one starting (a chip copy started after another copy, or another thread, took the client): that thread
+ * says which thread has the client, and stops.
+ */
+export function staleCopySentence(client: string): string {
+  return `If ${client} already has a thread other than this one, tell me its name and stop: do not run prep, do not link this thread.`
+}
+
+/**
+ * The kickoff of a new thread for a client (Start, a chip): 0.5.1's start kickoff, with the hand-over from the
+ * client's old thread. One case 0.5.1 never listed (R8): a stale package of the viewer's whose check left items
+ * open, with no client message and no task; its kickoff is the Claim message behind the client's marker.
+ */
+export function startKickoff(it: QueueItem, replaces: Replaced | undefined, now: number): string {
+  const fast = fastState(it, now)
+  const o = it.open ?? null
+  if (fast?.state === 'still_open' && !it.packageId && it.messages === 0 && it.tasks === 0 && !(o && withHolder(o))) {
+    const body = `[mm-link ${it.projectId}] ${claimText(it.client, fast.at, fast.items, now)}`
+    const handover = replaces ? handoverText(it, replaces) : ''
+    return handover ? `${body}\n\n${handover}` : body
+  }
+  return kickoffText(it, { replaces })
+}
 
 /** `local_<id>`: the app's id for a thread, which is what the session tools take. */
 export const THREAD_ID = /^local_[A-Za-z0-9_-]{1,100}$/
@@ -500,7 +537,7 @@ export function openCommand(thread: { sessionId: string; link?: unknown } | unde
 
 // ---------------------------------------------------------------- the pane
 
-export const LABEL = { update: 'Update thread', start: 'Start thread', open: 'Open thread', drafts: 'Drafts' } as const
+export const LABEL = { update: 'Update thread', start: 'Start thread', open: 'Open thread', drafts: 'Drafts', claim: 'Claim in this thread' } as const
 export type RowButton = keyof typeof LABEL
 
 /** R8: the sentence under the list. */
@@ -516,16 +553,29 @@ export const rowState = (row: Row): RowState => {
   return state === 'update' || state === 'current' ? state : 'start'
 }
 
-export function rowFor(it: QueueItem, rec: Recommendation, now: number): Row {
+/**
+ * How a row is drawn beyond its recommendation (0.5.2): `needsYou` for a row of the Needs-you list (R4 names a
+ * client there with no thread at all), and `percent`, the context reading of the client's thread when it has a
+ * fresh one (R8: at 60% or more, no Claim button; a chip for a new thread instead).
+ */
+export type RowOptions = { needsYou?: boolean; percent?: number | undefined }
+
+export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: RowOptions = {}): Row {
   // a client whose drafts a teammate holds, and that is not the viewer's to act on: who to ask, and no action
   const withMate = withTeammate(it)
+  // R8: the check of our reply left items open, and the client has a thread to claim them in
+  const fast = withMate ? null : fastState(it, now)
+  const still = fast?.state === 'still_open' && rec.target && !rec.target.suggested ? fast : null
+  // R4: on the Needs-you list, no thread of any kind, and due within the pin's window
+  const noThread = !withMate && opts.needsYou === true && rec.fresh === true && pinsNow(it, now)
+  const title = noThread ? noThreadTitle(it, now) : still ? stillOpenTitle(it.client) : titleFor(it, now)
   // (the founder) a package flagged for his OK that a teammate has, theirs to decide until its reply is due:
   // the row's sentence is followed by Opus's words, R2. A row with no sentence (a prepared package) gets no
   // line of them alone: its title and waiting text already say it (Opus, 10-13).
   const hold = withMate ? holdSentence(it) : ''
   const note = hold && it.theirs && it.kind === 'ok' ? `${hold} · ${MAY_NEED_OK}` : hold
   return {
-    projectId: it.projectId, client: it.client, title: titleFor(it, now), waiting: waitingText(it), state: rec.state, reason: rec.reason,
+    projectId: it.projectId, client: it.client, title, waiting: waitingText(it), state: rec.state, reason: rec.reason,
     // no thread of any kind: the row goes in the first group, marked
     fresh: rec.fresh === true,
     // the thread this row's button acts on: a press acts on this one or on none
@@ -533,8 +583,13 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number): Row {
     ...(note ? { note } : {}),
     // (the founder's alone, 0.5.1) a teammate's to see through: no action, with a sentence or without one
     ...(withMate && it.theirs ? { theirs: true } : {}),
+    // R8: what is still open, drawn under the row, and whether its one action is Claim in this thread
+    ...(still ? { stillOpen: [...still.items], claim: !(typeof opts.percent === 'number' && opts.percent >= LONG_CONTEXT_PERCENT) } : {}),
   }
 }
+
+/** R8: a row whose client's reply left items open (the server's check). */
+export const isStillOpenRow = (row: Row): boolean => Array.isArray(row.stillOpen) && row.stillOpen.length > 0
 
 /** A row under `With a teammate`: not the viewer's to act on. */
 const notMine = (row: Row): boolean => Boolean(row.note) || row.theirs === true
@@ -546,13 +601,15 @@ const notMine = (row: Row): boolean => Boolean(row.note) || row.theirs === true
  */
 export function rowButtons(row: Row): RowButton[] {
   if (notMine(row)) return ['drafts']
+  // R8: Claim in this thread while its context is under 60%; past that, a chip for a new thread is minted and the row has no action
+  if (isStillOpenRow(row)) return row.claim ? ['claim', 'drafts'] : ['drafts']
   const state = rowState(row)
   return [state === 'current' ? 'open' : state, 'drafts']
 }
 
 /** The second line of a row: what is waiting, then the action and its reason, or when the thread was updated. A row with no action: what is waiting. */
 export function rowDetail(row: Row): string {
-  if (notMine(row)) return row.waiting
+  if (notMine(row) || isStillOpenRow(row)) return row.waiting
   const state = rowState(row)
   return state === 'current' ? `${row.waiting} · ${row.reason}` : `${row.waiting} · ${LABEL[state]}: ${row.reason}`
 }
@@ -610,6 +667,7 @@ export function paneText(rows: readonly Row[], header: string, note: string, fol
   const draw = (row: Row, lead: string): void => {
     out.push('', `${lead} ${row.title}`, `   ${rowDetail(row)}`)
     if (row.note) out.push(`   ${row.note}`)
+    for (const item of isStillOpenRow(row) ? (row.stillOpen as string[]) : []) out.push(`   - ${item}`)
     out.push(`   ${rowButtons(row).map(b => `[ ${LABEL[b]} ]`).join(' ')}`)
   }
   for (const group of rowGroups(rows)) {
@@ -622,4 +680,55 @@ export function paneText(rows: readonly Row[], header: string, note: string, fol
   }
   out.push('', note)
   return out.join('\n')
+}
+
+// ---------------------------------------------------------------- the band (R9)
+
+/** The pane's one line when the refresh after a press failed (Opus, 10-13, L3): until the next sync that works. Also the band's, when the last read failed (R9). */
+export const REFRESH_FAILED = 'Couldn\'t refresh the list. Showing what was last loaded.'
+
+/** The band's words for what it carries, in the order R9 sets: its first line, then the alert that is most specific. */
+export type BandFacts = {
+  /** Threads the last sync pinned. */
+  pinned: number
+  /** Whether anything on the list pins now (past, or within the next 24 business hours). */
+  pinsNow: boolean
+  /** R4: clients on the list due within that window with no thread at all, soonest first, with their due times. */
+  noThread: Array<{ client: string; due: string }>
+  /** Whether this thread holds a chip for the one client with no thread (R9's first line). */
+  chipHere: boolean
+  /** R8: the first client still open after our reply, with a thread to claim it in. */
+  stillOpen?: string | undefined
+  /** R9: the first client whose pinned thread has an update ready to claim. */
+  update?: string | undefined
+  /** The last sync failed, or is older than STALE_SYNC_MS: never an all-clear from it. */
+  stale: boolean
+}
+
+/**
+ * R9 (Rob, 2026-10-13: "the band line is the alert"; and "yes band": the line always states the full truth, so an
+ * empty Pinned list can never read as all clear while someone still needs the person). Its words, verbatim:
+ *   something pinned, no client without a thread   `Needs you: <n> pinned.`
+ *   clients without a thread (R4)                  `Needs you: <n> pinned · <m> with no thread: <names>.`, and for
+ *                                                  one client, R9's open-a-thread line after it
+ *   a client still open after our reply (R8)       ` · <client> still open after your reply.` on the first line
+ *   an update ready on a pinned thread             R9's line after the first
+ *   nothing within 24 business hours, no client    `Nothing needs you in the next 24 hours.`
+ *   without a thread
+ *   the last read failed or is stale               0.5.1's refresh-failed line, and never the all-clear one
+ */
+export function bandText(f: BandFacts): string {
+  const out: string[] = []
+  let first = ''
+  if (f.noThread.length) first = `Needs you: ${f.pinned} pinned · ${f.noThread.length} with no thread: ${f.noThread.map(n => n.client).join(', ')}.`
+  else if (f.pinsNow || f.pinned > 0 || f.stillOpen) first = `Needs you: ${f.pinned} pinned.`
+  else if (!f.stale) first = 'Nothing needs you in the next 24 hours.'
+  // R8, when no client without a thread comes before it
+  if (first && !f.noThread.length && f.stillOpen) first = `${first.replace(/\.$/, '')} · ${f.stillOpen} still open after your reply.`
+  if (first) out.push(first)
+  const one = f.noThread.length === 1 ? f.noThread[0] : undefined
+  if (one) out.push(f.chipHere ? `Open a thread for ${one.client} (due ${one.due}): a chip is waiting in this thread.` : `Open a thread for ${one.client} (due ${one.due}): type /mm start ${one.client}.`)
+  else if (!f.noThread.length && !f.stillOpen && f.update) out.push(`An update is ready to claim in the ${f.update} thread.`)
+  if (f.stale) out.push(REFRESH_FAILED)
+  return out.join(' ')
 }

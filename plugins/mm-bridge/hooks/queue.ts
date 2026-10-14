@@ -31,8 +31,13 @@ export type FeedMail = {
   project_id: string | null
   project_name: string | null
   reply_status: string
-  reply_due_at?: string
+  /** (0.5.2, R17) `null`: no reply time (internal work, unless a person set one). Absent: 24 business hours after it arrived, as before. */
+  reply_due_at?: string | null
   project_owner_email?: string | null
+  /** (0.5.2, R18) The project is internal (Massmarket's own, a test or a template), when the feed says so. */
+  internal?: boolean
+  /** (0.5.2, R8) Our newest send to the client, when the feed gives it: what tells the bridge a reply went. */
+  last_outbound_at?: string | null
 }
 
 export type FeedDraft = {
@@ -50,6 +55,20 @@ export type FeedDraft = {
   picked_up_by?: string | null
   picked_up_at?: string | null
   project_owner_email?: string | null
+  /**
+   * (0.5.2, R8) What the server's check of our latest send to the client found, when the feed gives it: the
+   * items it left open (team-safe short strings), the ones it answered, when it checked, and the time of the
+   * send it checked. Absent on a server that does not send them yet: the package is read as in 0.5.1.
+   */
+  still_open?: unknown
+  answered?: unknown
+  /** (0.5.2, R17) `null`: the package has no reply time (internal work). Absent: 24 business hours after what it covers, as before. */
+  due_at?: string | null
+  /** (0.5.2, R18) The project is internal, when the feed says so. */
+  internal?: boolean
+  checked_at?: string | null
+  checked_send_at?: string | null
+  last_outbound_at?: string | null
 }
 
 export type FeedTicket = {
@@ -57,11 +76,21 @@ export type FeedTicket = {
   project_id: string
   project_name: string
   title: string
-  due_at: string
-  due_source?: string
+  /** (0.5.2, R17) `null`: no due time (internal work, unless a person set one). */
+  due_at: string | null
+  due_source?: string | null
   assignee_email?: string | null
   /** When the task was created, when the feed gives it. */
   created_at?: string | null
+  /**
+   * (0.5.2, R1) When the work has to start to finish by its due time: OW's `start_by_at`, the due time less
+   * the ticket's estimate (`est_hours`) at 1.5 hours of work a business day (OW src/lib/start-by.ts). Null or
+   * absent with no estimate: the task acts by its due time.
+   */
+  start_by_at?: string | null
+  last_outbound_at?: string | null
+  /** (0.5.2, R18) The project is internal, when the feed says so. */
+  internal?: boolean
 }
 
 /**
@@ -82,7 +111,8 @@ export type Feed = {
   role: string
   mail?: FeedMail[]
   drafts?: FeedDraft[]
-  tickets?: { overdue?: FeedTicket[]; due_today?: FeedTicket[]; due_soon?: FeedTicket[] }
+  /** `start_now` (0.5.2, R1): committed tickets due after the due-soon window whose start-by time has come or is within 24 business hours. */
+  tickets?: { overdue?: FeedTicket[]; due_today?: FeedTicket[]; due_soon?: FeedTicket[]; start_now?: FeedTicket[] }
   threads?: FeedThread[]
 }
 
@@ -148,7 +178,48 @@ export type QueueItem = {
    * under With a teammate. Absent otherwise, and on an item an older version stored.
    */
   theirs?: string
+  /**
+   * (0.5.2, R1) The soonest time something of the client's must be acted on: a reply's due time, a package's,
+   * a task's start-by time when the feed gives one, else its due time. Its thread is pinned while this is past
+   * or within the next 24 business hours. Every read is `it.actBy ?? it.dueAt`: an item an older version
+   * stored has none.
+   */
+  actBy?: number
+  /** (0.5.2, R8) Our newest send to the client in the feed, in ms (0: none given). */
+  lastOut?: number
+  /** (0.5.2, R8) The server's check of our latest send, on the client's own package: absent when the feed gives none. */
+  check?: PackageCheck | null
+  /**
+   * (0.5.2, R17) True when the client is listed for something with no due time (internal work, unless a person
+   * set one): its `dueAt` is then Infinity (stored as null), it is listed last, shows no clock, never pins and
+   * never gets a no-thread chip.
+   */
+  noDue?: true
+  /** (0.5.2, R18) An internal project (Massmarket's own, a test or a template): its thread is never unpinned by the bridge. */
+  internal?: true
 }
+
+/**
+ * (0.5.2, R18) The projects that are internal by id, while the feed carries no internal flag: Massmarket's
+ * internal-ops project and the Massmarket Core Snapshot. A feed row with `internal: true` makes any project so.
+ */
+export const INTERNAL_PROJECTS: ReadonlySet<string> = new Set(['e6deffc3-2713-4def-a11d-b75a1efba9c1', '3e439f40-a17f-48e2-bcfe-723af5b741fc'])
+
+/** (R17) Whether a client has a due time at all (an item stored by the bridge keeps Infinity as null). */
+export const hasDue = (it: Pick<QueueItem, 'dueAt'>): boolean => typeof it.dueAt === 'number' && Number.isFinite(it.dueAt)
+
+/** Soonest due first; a client with no due time last (R17). */
+export const byDue = (a: Pick<QueueItem, 'dueAt'>, b: Pick<QueueItem, 'dueAt'>): number => {
+  const x = hasDue(a) ? a.dueAt : Infinity
+  const y = hasDue(b) ? b.dueAt : Infinity
+  return x === y ? 0 : x < y ? -1 : 1
+}
+
+/**
+ * (0.5.2, R8) What the server's check found on the client's package: the time of the send it checked
+ * (`checked_send_at`, ms, 0 for none), what it left open, and what the package covers through (ms, 0 unknown).
+ */
+export type PackageCheck = { sendAt: number; stillOpen: string[]; covers: number }
 
 /**
  * What a row under With a teammate adds to its sentence when the package there is flagged for the founder's
@@ -161,9 +232,19 @@ export const decidesText = (who: string): string => `${MAY_NEED_OK} · ${who} de
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
-/** Both windows are business time: 3 business days back, 24 business hours ahead. */
+/**
+ * Both windows are business time: 3 business days back, 24 business hours ahead. (0.5.2, R1) The list holds
+ * everything the feed gives that is overdue by up to 3 business days or not due yet, however far ahead; the
+ * 24 business hours ahead are the pin's window (`pinsNow`): a client's thread pins while something of it must
+ * be acted on within them, or already should have been.
+ */
 export const WINDOW_BACK_MS = 3 * DAY
 export const WINDOW_AHEAD_MS = DAY
+/**
+ * (0.5.2, R8) How long a send waits for the server's check before the client is listed as it was: a check that
+ * never lands does not keep a client off the list. Real time (it is not a client's clock).
+ */
+export const CHECK_WAIT_MS = 2 * HOUR
 export const MAX_PINS = 8
 /**
  * How far back the feed is asked for client mail, in business hours: OW's `mail_hours`, which takes 1 to
@@ -247,7 +328,7 @@ function businessWithin(fromMs: number, toMs: number, limit: number): boolean {
  *             unanswered mail from ten and six days ago were not shown at all). Never pinned, never
  *             counted. The pane lists them last, under `Older (n)`, most overdue first.
  */
-export type Lists = { queue: QueueItem[]; teammate: QueueItem[]; older: QueueItem[] }
+export type Lists = { queue: QueueItem[]; teammate: QueueItem[]; older: QueueItem[]; checking: QueueItem[] }
 
 /**
  * A teammate holds this client's reply drafts and nothing else keeps it in the viewer's list: no committed
@@ -261,11 +342,116 @@ export function buildLists(feed: Feed, now: number): Lists {
   const current = build(feed, now, false)
   const inCurrent = new Set(current.map(i => i.projectId))
   const past = build(feed, now, true).filter(i => !inCurrent.has(i.projectId))
+  // (0.5.2, R8) a client whose package waits for the server's check of our newer send is in none of the
+  // three lists: off the Needs-you list, not pinned, not counted. Its thread is named for it (`checkingTitle`).
+  const checks = (i: QueueItem): boolean => fastState(i, now)?.state === 'checking'
   return {
-    queue: current.filter(i => !withTeammate(i)),
+    queue: current.filter(i => !withTeammate(i) && !checks(i)),
     teammate: [...current, ...past].filter(withTeammate),
-    older: past.filter(i => !withTeammate(i)),
+    older: past.filter(i => !withTeammate(i) && !checks(i)),
+    checking: [...current, ...past].filter(i => !withTeammate(i) && checks(i)),
   }
+}
+
+// ---------------------------------------------------------------- 0.5.2: what pins, and a send being checked
+
+/**
+ * R1 (Rob, 2026-10-13: "Pinned is something the server recognized needs to be done within the next 24 hours,
+ * whether it's a reply or work that must be started within 24 hours to finish by an ETA"): whether a client on
+ * the Needs-you list pins now. Its act-by time (a reply's due time, a task's start-by time, else its due
+ * time) is past, or within the next 24 BUSINESS hours (weekends do not count: Friday 3 PM to Monday 3 PM is 24).
+ */
+export function pinsNow(it: Pick<QueueItem, 'dueAt'> & { actBy?: number }, now: number): boolean {
+  const at = Number.isFinite(it.actBy) ? (it.actBy as number) : it.dueAt
+  if (!Number.isFinite(at)) return false
+  return at <= now || businessWithin(now, at, WINDOW_AHEAD_MS)
+}
+
+/** (R18) The internal projects: INTERNAL_PROJECTS, and every project a feed row marks `internal: true`. */
+export function internalProjects(feed: Feed): Set<string> {
+  const out = new Set(INTERNAL_PROJECTS)
+  const add = (row: { project_id?: string | null; internal?: boolean } | null | undefined): void => {
+    if (row && row.internal === true && isUuid(row.project_id)) out.add(row.project_id)
+  }
+  for (const m of feed.mail ?? []) add(m)
+  for (const d of feed.drafts ?? []) add(d)
+  const t = feed.tickets ?? {}
+  for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? [], t.start_now ?? []]) for (const tk of k) add(tk)
+  return out
+}
+
+/** Every client's newest `last_outbound_at`, from every row of it the feed gives one on, in ms. */
+function lastOutbound(feed: Feed): Map<string, number> {
+  const out = new Map<string, number>()
+  const add = (pid: unknown, at: unknown): void => {
+    const t = typeof at === 'string' ? ms(at) : NaN
+    if (!isUuid(pid) || !Number.isFinite(t)) return
+    out.set(pid, Math.max(out.get(pid) ?? 0, t))
+  }
+  for (const m of feed.mail ?? []) add(m?.project_id, m?.last_outbound_at)
+  for (const d of feed.drafts ?? []) add(d?.project_id, d?.last_outbound_at)
+  const t = feed.tickets ?? {}
+  for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? [], t.start_now ?? []]) for (const tk of k) add(tk?.project_id, tk?.last_outbound_at)
+  return out
+}
+
+/** At most this many items of what a check left open are kept, each cut to this length (team-safe short strings: OW keeps them under 120). */
+const STILL_OPEN_MAX = 8
+const STILL_OPEN_LEN = 120
+
+/** A package row's check, as the bridge keeps it: what is still open is server text, cleaned like any (it goes into a message Claude reads). */
+function checkOf(d: FeedDraft): PackageCheck {
+  const raw = Array.isArray(d.still_open) ? (d.still_open as unknown[]) : []
+  const stillOpen = raw.map(x => cleanText(x, STILL_OPEN_LEN)).filter(Boolean).slice(0, STILL_OPEN_MAX)
+  const sendAt = ms(d.checked_send_at)
+  const covers = ms(d.covers_through)
+  return { sendAt: Number.isFinite(sendAt) ? sendAt : 0, stillOpen, covers: Number.isFinite(covers) ? covers : 0 }
+}
+
+/** What R8 makes of a client: our newer send is being checked, or the check found something still open after it. */
+export type Fast = { state: 'checking'; at: number } | { state: 'still_open'; at: number; items: string[] }
+
+/**
+ * R8 (Rob, 2026-10-13, "yes fast close"), from the client's package and our newest send, both the feed's:
+ *   checking    our send is newer than the last check of the package (`last_outbound_at` > `checked_send_at`)
+ *               and newer than what the package covers, and no older than CHECK_WAIT_MS
+ *   still_open  the check of our send has landed (`checked_send_at` >= our newest send) and left items open
+ * null otherwise: no package, no check, nothing open, or a feed that gives none of these fields (0.5.1).
+ */
+export function fastOf(c: PackageCheck | null | undefined, lastOut: number, now: number): Fast | null {
+  if (!c) return null
+  const out = Number(lastOut) || 0
+  const checked = Number(c.sendAt) || 0
+  if (out > 0 && out > checked && out > (Number(c.covers) || 0)) return now - out <= CHECK_WAIT_MS ? { state: 'checking', at: out } : null
+  const items = Array.isArray(c.stillOpen) ? c.stillOpen : []
+  if (checked > 0 && items.length && !(out > checked)) return { state: 'still_open', at: checked, items }
+  return null
+}
+
+/** fastOf for a client as the lists hold it. (The founder's package that waits for his OK is somebody else's send: never.) */
+export function fastState(it: QueueItem, now: number): Fast | null {
+  if (it.kind === 'ok') return null
+  return fastOf(it.check ?? null, Number(it.lastOut) || 0, now)
+}
+
+/** R8: the thread's name while the server checks our send: `✓ Acme Legal · sent 3 PM · checking`. */
+export function checkingTitle(client: string, at: number, now: number): string {
+  return `✓ ${client} · sent ${clockText(at, now)} · checking`
+}
+
+/** R8: the thread's name once the check found something still open: `🟡 Acme Legal · still open after your reply`. */
+export function stillOpenTitle(client: string): string {
+  return `🟡 ${client} · still open after your reply`
+}
+
+/** R4: the row of a client on the Needs-you list with no thread at all: `🔴 NO THREAD · Acme Legal · due 3 PM`. */
+export function noThreadTitle(it: QueueItem, now: number): string {
+  return `🔴 NO THREAD · ${it.client} · due ${clockText(it.dueAt, now)}`
+}
+
+/** The name a client's linked thread is given: still open after our reply (R8), else what is due (titleFor). */
+export function threadTitle(it: QueueItem, now: number): string {
+  return fastState(it, now)?.state === 'still_open' && !withTeammate(it) ? stillOpenTitle(it.client) : titleFor(it, now)
 }
 
 /** The clients that need the viewer now: what pins. Soonest due first. */
@@ -303,8 +489,12 @@ export function feedClients(feed: Feed): KnownClient[] {
  */
 function build(feed: Feed, now: number, older: boolean): QueueItem[] {
   const tooOld = (due: number): boolean => due < now && !businessWithin(due, now, WINDOW_BACK_MS)
-  const inWindow = (due: number): boolean =>
-    Number.isFinite(due) && (older ? tooOld(due) : due < now ? businessWithin(due, now, WINDOW_BACK_MS) : businessWithin(now, due, WINDOW_AHEAD_MS))
+  // (0.5.2, R1) not due yet: listed however far ahead; whether it pins is `pinsNow`
+  const inWindow = (due: number): boolean => Number.isFinite(due) && (older ? tooOld(due) : due < now ? businessWithin(due, now, WINDOW_BACK_MS) : true)
+  /** (R8) Our newest send to each client, from every row of it the feed gives one on. */
+  const lastOut = lastOutbound(feed)
+  /** (R18) The internal projects: by the feed's own flag on any row, else by id. */
+  const internal = internalProjects(feed)
   const founder = feed.role === 'founder'
   const byProject = new Map<string, QueueItem>()
   // ⛔ A row whose project id is not a lower-case uuid, or whose name has nothing left once cleaned, is
@@ -316,7 +506,8 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
       it = {
         projectId, projectName: cleanName(projectName), client: shortName(projectName), dueAt: Infinity, kind: 'task',
         messages: 0, tasks: 0, packageId: null, coversThrough: null, packageUpdatedAt: null, flagged: false, mail: [], taskTitles: [], open: null,
-        ok: null, newest: { mail: 0, pkg: 0, task: 0 },
+        ok: null, newest: { mail: 0, pkg: 0, task: 0 }, actBy: Infinity, lastOut: lastOut.get(projectId) ?? 0, check: null,
+        ...(internal.has(projectId) ? { internal: true as const } : {}),
       }
       byProject.set(projectId, it)
     }
@@ -326,16 +517,29 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
   const seen = (it: QueueItem, kind: keyof Newest, at: number): void => {
     if (Number.isFinite(at) && at > it.newest[kind]) it.newest[kind] = at
   }
+  /** (R1) The soonest something of the client's must be acted on. */
+  const act = (it: QueueItem, at: number): void => {
+    if (Number.isFinite(at)) it.actBy = Math.min(it.actBy ?? Infinity, at)
+  }
 
   /** The mail rows counted for the viewer: a message is counted once. */
   const counted = new Set<FeedMail>()
-  /** The feed's reply time is trusted when it gives one; otherwise 24 business hours after the message arrived. */
-  const replyDue = (m: FeedMail): number => (Number.isFinite(ms(m.reply_due_at)) ? ms(m.reply_due_at) : businessDeadline(ms(m.received_at), DAY))
+  /**
+   * The feed's reply time is trusted when it gives one; otherwise 24 business hours after the message arrived.
+   * (R17, R18) None at all, Infinity, when the feed gives `null` or the project is internal: nobody set one.
+   */
+  const replyDue = (m: FeedMail): number =>
+    m.reply_due_at === null || internal.has(m.project_id ?? '') ? Infinity : Number.isFinite(ms(m.reply_due_at)) ? ms(m.reply_due_at as string) : businessDeadline(ms(m.received_at), DAY)
+  /** (R17) A row with no due time is listed in the current pass only (it is never overdue), and marks its client. */
+  const undated = (it: QueueItem): void => {
+    it.noDue = true
+  }
   /** A client message waiting on our reply, on the client's item. */
   const countMail = (it: QueueItem, m: FeedMail, due: number): void => {
     counted.add(m)
     it.messages += 1
     it.dueAt = Math.min(it.dueAt, due)
+    act(it, due)
     if (it.kind === 'task') it.kind = 'reply'
     it.mail.push({ at: m.received_at, sender: m.sender ?? '?', subject: m.subject ?? '', snippet: m.snippet ?? '' })
     seen(it, 'mail', ms(m.received_at))
@@ -345,6 +549,13 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     if (!usable(m.project_id, m.project_name)) continue
     if (!isMine(m.project_owner_email, feed)) continue
     const due = replyDue(m)
+    if (due === Infinity) {
+      if (older) continue
+      const it = item(m.project_id, m.project_name)
+      countMail(it, m, due)
+      undated(it)
+      continue
+    }
     if (!inWindow(due)) continue
     countMail(item(m.project_id, m.project_name), m, due)
   }
@@ -366,7 +577,10 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     const holder = (d.picked_up_by ?? '').toLowerCase()
     const held = d.status === 'picked_up'
     const ready = d.drafts_ready ?? 0
-    const unsent = d.drafts_unsent ?? ready
+    // R12 (0.5.2): the feed lists a picked-up package only while a draft of it is not sent (OW #455), whatever
+    // state that draft is in (`edited`, `sending`, `failed` are not `ready`): with no `drafts_unsent` given, a
+    // held package still has one. It is never read as "no drafts".
+    const unsent = typeof d.drafts_unsent === 'number' && Number.isFinite(d.drafts_unsent) ? d.drafts_unsent : held ? Math.max(1, ready) : ready
     // What counts: a held package with a draft not sent, or a prepared or stale one with a draft ready.
     if (held ? unsent < 1 || holder === '' : (d.status !== 'prepared' && d.status !== 'stale') || ready < 1) continue
     // (the founder) A teammate has this package to see through (Opus, 10-13): the teammate who holds it, whoever
@@ -382,9 +596,11 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     const forOk = founder && d.flagged_for_rob === true && !staleTheirsHere
     const heldByMe = held && holder === me
     const it = item(d.project_id, d.project_name)
-    const due = Number.isFinite(ms(d.covers_through)) ? businessDeadline(ms(d.covers_through), DAY) : now
+    // (R17, R18) no reply time for a package the feed gives none, or on an internal project: Infinity
+    const noDue = d.due_at === null || internal.has(d.project_id)
+    const due = noDue ? Infinity : typeof d.due_at === 'string' && Number.isFinite(ms(d.due_at)) ? ms(d.due_at) : Number.isFinite(ms(d.covers_through)) ? businessDeadline(ms(d.covers_through), DAY) : now
     // (this pass's side of the window: not yet 3 business days past its reply time, or only what is past that)
-    const inReach = older ? tooOld(due) : !tooOld(due)
+    const inReach = noDue ? !older : older ? tooOld(due) : !tooOld(due)
     // `by`: the teammate who holds it; for the founder, also the teammate a stale package is with (R1), so
     // that its pane names them instead of inviting him to pick it up
     const open = (state: OpenPackage['state']): OpenPackage => ({
@@ -402,8 +618,12 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
       it.packageUpdatedAt = typeof d.updated_at === 'string' ? d.updated_at : null
       it.flagged = Boolean(d.flagged_for_rob)
       it.ok = null
+      // (R8) what the server's check of our latest send found on this package
+      it.check = checkOf(d)
       if (inReach) {
         it.dueAt = Math.min(it.dueAt, due)
+        act(it, due)
+        if (noDue) undated(it)
         seen(it, 'pkg', ms(d.covers_through))
       }
       it.open = heldByMe ? open('held_by_me') : null
@@ -416,6 +636,19 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     // take its place on the row, in the pane or in the kickoff (B4, 2026-10-13).
     if (it.kind === 'ok' && !forOk) continue
     it.open = open(held ? 'held_by_other' : d.status === 'stale' ? 'stale' : 'prepared')
+    // (0.5.2, R8) A stale package of the viewer's own (nobody holds it, the client is theirs, no teammate sends
+    // it): while our latest send waits for the server's check, or the check left something open, the client is
+    // listed by it, so its thread is named for that and pins again on what is still open. Otherwise it changes
+    // nothing here, as before (M1: a stale package alone lists nothing).
+    if (d.status === 'stale' && !held && !staleTheirsHere && !forOk && isMine(d.project_owner_email, feed)) {
+      const c = checkOf(d)
+      it.check = c
+      if (fastOf(c, it.lastOut ?? 0, now) && inReach) {
+        it.dueAt = Math.min(it.dueAt, due)
+        act(it, due)
+        seen(it, 'pkg', ms(d.covers_through))
+      }
+    }
     // R1: with a client message waiting after its drafts were built, the client lists under With a teammate,
     // like any reply a teammate holds; with none, it is not listed. The messages are only noted here: they are
     // counted after the tasks, and only where they are all that lists the client (Opus, 10-13, B1).
@@ -446,22 +679,35 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
       else okTheirs.delete(d.project_id)
       if (inReach) {
         it.dueAt = Math.min(it.dueAt, due)
+        act(it, due)
         seen(it, 'pkg', ms(d.covers_through))
       }
     }
   }
 
   const t = feed.tickets ?? {}
-  for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? []]) {
+  // (0.5.2, R1) `start_now` too: committed tasks due further out whose work must start within 24 business hours
+  const counting = new Set<string>()
+  for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? [], t.start_now ?? []]) {
     for (const tk of k) {
-      if (tk.due_source !== 'commitment') continue
+      // (R17) a ticket with no due time (internal work nobody dated) has no due source either: it lists, undated
+      const undatedRow = tk.due_at === null
+      if (tk.due_source !== 'commitment' && !(undatedRow && (tk.due_source === null || tk.due_source === undefined))) continue
       if (!usable(tk.project_id, tk.project_name)) continue
       if ((tk.assignee_email ?? '').toLowerCase() !== feed.member.toLowerCase()) continue
-      const due = ms(tk.due_at)
-      if (!inWindow(due)) continue
+      // a ticket is in one of the feed's lists only; counted once whatever a feed sends
+      if (typeof tk.ticket_id === 'string' && counting.has(tk.ticket_id)) continue
+      const due = undatedRow ? Infinity : ms(tk.due_at)
+      if (undatedRow ? older : !inWindow(due)) continue
+      if (typeof tk.ticket_id === 'string') counting.add(tk.ticket_id)
       const it = item(tk.project_id, tk.project_name)
       it.tasks += 1
       it.dueAt = Math.min(it.dueAt, due)
+      // R1: a task acts by its start-by time when the feed gives one (OW's `start_by_at`, from the ticket's
+      // estimate), else by its due time
+      const startBy = ms(tk.start_by_at)
+      act(it, Number.isFinite(startBy) && startBy < due ? startBy : due)
+      if (undatedRow) undated(it)
       it.taskTitles.push(tk.title)
       seen(it, 'task', Number.isFinite(ms(tk.created_at)) ? ms(tk.created_at) : due)
     }
@@ -504,9 +750,10 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     }
   }
 
+  // (R17) a client with nothing dated is listed too, in the current pass, last
   return [...byProject.values()]
-    .filter(i => Number.isFinite(i.dueAt))
-    .sort((a, b) => a.dueAt - b.dueAt)
+    .filter(i => Number.isFinite(i.dueAt) || (!older && i.noDue === true))
+    .sort(byDue)
 }
 
 // ---------------------------------------------------------------- names
@@ -533,7 +780,8 @@ function etParts(t: number): { day: string; date: string; time: string } {
 export function whenText(due: number, now: number): string {
   if (due < now) {
     const late = businessMsBetween(due, now) // weekends do not count toward how late
-    return late < DAY ? `overdue ${Math.max(1, Math.round(late / HOUR))}h` : `overdue ${Math.round(late / DAY)}d`
+    // R16 (0.5.2): whole business days COMPLETED, so 1.5 days late is `1d` everywhere, never `2d` in one place
+    return late < DAY ? `overdue ${Math.max(1, Math.round(late / HOUR))}h` : `overdue ${Math.floor(late / DAY)}d`
   }
   const a = etParts(due)
   const today = etParts(now)
@@ -544,6 +792,8 @@ export function whenText(due: number, now: number): string {
 }
 
 export function isRed(it: QueueItem, now: number): boolean {
+  // (R17) nothing due: never red
+  if (!hasDue(it)) return false
   return it.dueAt < now || etParts(it.dueAt).date === etParts(now).date
 }
 
@@ -565,7 +815,8 @@ const whatOf = (it: QueueItem): string =>
 
 /** What is due for a client and when, in words: `reply ready due tomorrow 8 AM`. */
 export function dueLine(it: QueueItem, now: number): string {
-  return `${whatOf(it)} ${whenText(it.dueAt, now)}`
+  // (R17) nothing due: what it is, and no clock
+  return hasDue(it) ? `${whatOf(it)} ${whenText(it.dueAt, now)}` : whatOf(it)
 }
 
 /** A client and what is due, as a chip says it: `Acme Legal · reply ready due 7 PM · 3 new`, and who holds its drafts when a teammate does. */
@@ -585,7 +836,8 @@ export function clockLead(due: number, now: number): string {
   const late = due < now
   const span = late ? businessMsBetween(due, now) : businessMsBetween(now, due)
   // under a business day: 1 to 23 hours (59 minutes short of a day is 23h, not 24h); from there, whole days
-  const n = span < DAY ? `${Math.min(23, Math.max(1, Math.round(span / HOUR)))}h` : `${Math.round(span / DAY)}d`
+  // R16 (0.5.2): whole business days COMPLETED (Math.floor): 1.49 and 1.51 days both read `1d`, 2.0 reads `2d`
+  const n = span < DAY ? `${Math.min(23, Math.max(1, Math.round(span / HOUR)))}h` : `${Math.floor(span / DAY)}d`
   return `${n} ${late ? 'late' : 'left'}`
 }
 
@@ -599,7 +851,9 @@ export function titleFor(it: QueueItem, now: number): string {
   const theirs = withTeammate(it)
   // (`your draft` for a package the viewer holds, and `with <Name>` when a teammate holds it: 0.4.1; for the
   // founder, the teammate it is with when it is theirs to see through: 0.5.1)
-  const parts = [theirs ? `🟡 with ${it.theirs ?? it.open?.by ?? ''}` : `${isRed(it, now) ? '🔴' : '🟡'} ${clockLead(it.dueAt, now)}`, it.client, whatOf(it)]
+  // (R17) nothing due: `🟡 <client> · <what>`, no clock and never red
+  const lead = theirs ? `🟡 with ${it.theirs ?? it.open?.by ?? ''}` : hasDue(it) ? `${isRed(it, now) ? '🔴' : '🟡'} ${clockLead(it.dueAt, now)}` : ''
+  const parts = lead ? [lead, it.client, whatOf(it)] : [`🟡 ${it.client}`, whatOf(it)]
   if (it.messages > 1) parts.push(`${it.messages} new`)
   if (it.open?.state === 'held_by_other' && !theirs) parts.push(`with ${it.open.by}`)
   if (it.flagged) parts.push('flagged')
@@ -629,8 +883,9 @@ export function clientInTitle(title: string): string {
   const marked = /^[🔴🟡✓]\s/u.test(title.replace(/^\d{2}\s+/, ''))
   const parts = title.replace(/^\d{2}\s+/, '').replace(/^[🔴🟡✓]\s*/u, '').replace(/^client:\s*/i, '').split(' · ')
   const first = parts[0]?.trim() ?? ''
-  // what leads the name: the clock, or (in a name of the bridge's only) who holds the drafts
-  const lead = /^\d+[hd] (?:late|left)$/.test(first) || (marked && parts.length > 2 && /^with \S/.test(first))
+  // what leads the name: the clock, or (in a name of the bridge's only) who holds the drafts, or (0.5.2) that
+  // the client has no thread
+  const lead = /^\d+[hd] (?:late|left)$/.test(first) || (marked && parts.length > 2 && /^with \S/.test(first)) || (marked && first === 'NO THREAD')
   return lead ? (parts[1]?.trim() ?? '') : first
 }
 
@@ -707,24 +962,33 @@ export function clientMarkdown(it: QueueItem, now: number): string {
   return out.join('\n')
 }
 
-// ---------------------------------------------------------------- a reply draft was sent or discarded
+// ---------------------------------------------------------------- a route call that can close something
 
 /**
- * The team gateway's routes that end a reply draft: `sent` and `discard`, and `post-team`, which posts a
- * team draft and records it sent in the same call (client-reply-prep §9.5). Each changes what the feed
- * lists for the client.
+ * The team gateway's routes that can close something for a client (R6, Rob 2026-10-13: names and pins change
+ * only from the server's data, and the feed is read again at once after any of these): the reply-draft routes
+ * that end a draft (`sent`, `discard`, and `post-team`, which posts a team draft and records it sent in the same
+ * call, client-reply-prep §9.5), and ANY write to a reply package (`/reply-package`, `/reply-package/no-reply`,
+ * `/reply-package/<anything>`). Each can change what the feed lists for the client. Judged by the route and the
+ * method, never by a fixed list of commands.
  */
-const DRAFT_ROUTE = String.raw`\/reply-draft\/(?:sent|discard|post-team)(?![\w\/-])`
+const CLOSING_ROUTE = String.raw`\/(?:reply-draft\/(?:sent|discard|post-team)|reply-package(?:\/[\w-]+)*)(?![\w\/-])`
+/** A write: what a read (GET) never is. */
+const WRITE = String.raw`(?:POST|PATCH|PUT|DELETE)`
 /** As the gateway helper is called: `mm-api.mjs ext POST /reply-draft/sent ...`, the path quoted or not. */
-const VIA_HELPER = new RegExp(String.raw`\bmm-api\.mjs["']?\s+ext\s+POST\s+["']?${DRAFT_ROUTE}`)
-/** And as the route itself is called: a POST to `.../api/ext/reply-draft/sent`. */
-const VIA_URL = new RegExp(String.raw`\/api\/ext${DRAFT_ROUTE}`)
+const VIA_HELPER = new RegExp(String.raw`\bmm-api\.mjs["']?\s+ext\s+${WRITE}\s+["']?${CLOSING_ROUTE}`)
+/** And as the route itself is called: a write to `.../api/ext/reply-draft/sent`. */
+const VIA_URL = new RegExp(String.raw`\/api\/ext${CLOSING_ROUTE}`)
+const WRITE_WORD = new RegExp(String.raw`\b${WRITE}\b`)
 
 /**
  * Whether a shell command is a call to one of those routes. ⛔ This is all the bridge ever looks at of a
  * command: it answers yes or no, and nothing of the command is kept, logged or passed on.
  * The route is matched, never a loose word: `revise`, `claim-send`, `rob-ok`, `release` and a GET are not it.
  */
-export function isDraftDone(command: unknown): boolean {
-  return typeof command === 'string' && command.length <= 200_000 && (VIA_HELPER.test(command) || (VIA_URL.test(command) && /\bPOST\b/.test(command)))
+export function isClosingRoute(command: unknown): boolean {
+  return typeof command === 'string' && command.length <= 200_000 && (VIA_HELPER.test(command) || (VIA_URL.test(command) && WRITE_WORD.test(command)))
 }
+
+/** The name 0.5.1 gave it (a reply draft was sent or discarded); the same test now. */
+export const isDraftDone = isClosingRoute

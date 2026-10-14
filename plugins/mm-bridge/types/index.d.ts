@@ -38,6 +38,13 @@ export type MmRow = {
    * and sees through (0.5.1). Like a row with a `note`, it has the Drafts button and no action, sentence or not.
    */
   theirs?: boolean
+  /**
+   * (0.5.2, R8) What the server's check of our reply to the client found still open: drawn under the row. A
+   * row with these is named `🟡 <client> · still open after your reply`.
+   */
+  stillOpen?: string[]
+  /** (0.5.2, R8) With `stillOpen`: true when the row's one action is Claim in this thread (its thread is under 60% of its context). */
+  claim?: boolean
 }
 
 /**
