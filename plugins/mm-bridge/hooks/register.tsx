@@ -185,14 +185,46 @@ const PICKUPS_MAX = 20
 /** What the pane says while it has nothing to draw yet: the list, or a client's pickup view. */
 const CHECKING = 'Checking…'
 
-/** `[mm-link <project id>]`, counted only at the very start of a prompt. */
+/**
+ * `[mm-link <project id>]`, counted only at the very start of a prompt: the message itself, or (0.5.8) the task
+ * the app's wrapper carries (`promptOf`). Never anywhere else in the text.
+ */
 const MARKER = /^\[mm-link ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]/
+/**
+ * (0.5.8) How the app hands a thread its first message when another session started it (read from the app's own
+ * code, 10-14; the hook builder saw the first form in a real thread):
+ * - a fresh thread, from start_session or from a card the person started:
+ *   `Background (from the session that started this one):\n<background>\n\nTask:\n<prompt>`;
+ * - a fork: `Task (from the session that started this one):\n<prompt>`; an offer's brief has the fresh form inside that;
+ * - after the prompt, its notes line: `\n\nShared notes folder for this group of sessions (…): <path>`.
+ * Each wrapper counts only where the message begins.
+ */
+const WRAP_TASK = /^Task \([^)\n]{1,200}\):\n/
+const WRAP_BACKGROUND = /^Background \([^)\n]{1,200}\):\n[\s\S]*?\n\nTask:\n/
+const WRAP_NOTES = /\n\nShared notes folder for this group of sessions \([^\n]*$/
+/**
+ * (0.5.8) The prompt a message carries: the message itself, or, when it begins with the app's wrapper, the task
+ * after it, its notes line taken off. `task`: it began `Task (…):`, the form the app sends as `auto-continuation`.
+ */
+function promptOf(text: string): { prompt: string; task: boolean } {
+  const task = WRAP_TASK.exec(text)
+  let rest = task ? text.slice(task[0].length) : text
+  const background = WRAP_BACKGROUND.exec(rest)
+  if (background) rest = rest.slice(background[0].length)
+  if (!task && !background) return { prompt: text, task: false }
+  return { prompt: rest.replace(WRAP_NOTES, ''), task: task !== null }
+}
 /**
  * Where a prompt or a /mm command is the person's own: typed here (`composer`), sent from their phone or
  * the web (`bridge`), or the app's own turn for them, as when it starts a thread from a chip (`sdk`).
  * ⛔ Nothing else: not another Claude session's message (`peer`), a schedule, a channel or a plugin.
  */
 const PERSON_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge', 'sdk'])
+/**
+ * (0.5.8) The app's own delivery of a started thread's first task, for a fork or an offer's brief. It counts for
+ * the marker only in the app's `Task (…):` wrapper (`promptOf`), and for nothing else.
+ */
+const STARTED_TASK_ORIGIN = 'auto-continuation'
 
 const NO_THREAD_LIST = 'The app\'s thread list is not available here.'
 /** R10: what a press that makes a chip says before it asks the app for anything. */
@@ -3016,7 +3048,7 @@ async function chipsPass($: EngineInterface): Promise<void> {
  * ⛔ The person's own prompt only (PERSON_ORIGINS), never a marker kickoff, and only in a thread that knows its id.
  */
 async function claimInPlace($: EngineInterface, text: string, origin: string | undefined): Promise<void> {
-  if (!origin || !PERSON_ORIGINS.has(origin) || MARKER.test(text)) return
+  if (!origin || !PERSON_ORIGINS.has(origin) || MARKER.test(promptOf(text).prompt)) return
   const me = await knownSelf($)
   if (!me) return
   const projectId = ownerOf(me, await storeGet<Record<string, string>>($, 'mm.links', {}))
@@ -3990,8 +4022,12 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
 /**
  * A prompt that begins `[mm-link <project id>]` links this thread to that client: a chip the person
  * started opens its new thread with exactly that.
+ * (0.5.8) A thread start_session opened, or a card the person started, gets its first message in the app's wrapper
+ * (`Background (…):\n…\n\nTask:\n<prompt>`, or `Task (…):\n<prompt>` for a fork): the prompt is the task part, and
+ * the marker counts at its start as it does at the start of the message (`promptOf`).
  * ⛔ Only at the very start of the prompt, only for a project the person's last feed carried, and only
- * when the prompt is the person's own (`composer`, `bridge`, `sdk`). Another Claude session's message, a
+ * when the prompt is the person's own (`composer`, `bridge`, `sdk`), or the app's own delivery of a started
+ * thread's task in its `Task (…):` wrapper (`auto-continuation`). Another Claude session's message, a
  * channel, a scheduled task, a task notification or anything else is ignored, as is a marker anywhere
  * else in the text. (Update's kickoff needs no marker: the press that sent it wrote the link.)
  * ⛔ It never forgets an unlink record and never stamps: a thread the person unlinked stays unlinked, and a
@@ -4010,8 +4046,9 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
  * Answers that sentence, or undefined.
  */
 async function linkFromMarker($: EngineInterface, text: string, origin: string | undefined): Promise<string | undefined> {
-  const projectId = MARKER.exec(text)?.[1]
-  if (!projectId || !origin || !PERSON_ORIGINS.has(origin)) return undefined
+  const { prompt, task } = promptOf(text)
+  const projectId = MARKER.exec(prompt)?.[1]
+  if (!projectId || !origin || !(PERSON_ORIGINS.has(origin) || (origin === STARTED_TASK_ORIGIN && task))) return undefined
   const last = await storeGet<Last | null>($, 'mm.last', null)
   const inFeed = Array.isArray(last?.projects) ? last.projects : (last?.items ?? []).map(i => i.projectId)
   if (!inFeed.includes(projectId)) return undefined
@@ -4030,11 +4067,12 @@ async function linkFromMarker($: EngineInterface, text: string, origin: string |
   const now = await $.clock.now()
   const chips = await chipsOf($, now)
   // the chip this thread was started from: the one for this client whose prompt is this prompt, to the letter
-  const chip = [...chips].reverse().find(c => c.projectId === projectId && c.prompt.trim() === text.trim())
+  // ((0.5.8) the task part, when the app wrapped it)
+  const chip = [...chips].reverse().find(c => c.projectId === projectId && c.prompt.trim() === prompt.trim())
   // What this thread has: the kickoff it opened with. From the chip, what the chip carried; with no chip
   // on record, only when its prompt is exactly the kickoff that would be sent now.
   const it = listedIn(last).find(i => i.projectId === projectId)
-  const sig = chip ? chip.signature : it && kickoffText(it) === text.trim() ? signatureOf(it) : undefined
+  const sig = chip ? chip.signature : it && kickoffText(it) === prompt.trim() ? signatureOf(it) : undefined
   /** The thread the client had, when this one takes it by the chip rule. */
   let had: string | undefined
   /** Whether this thread is the client's once the link is written (it may have been already). */

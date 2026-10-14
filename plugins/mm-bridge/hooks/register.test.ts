@@ -5823,3 +5823,111 @@ describe('0.5.7: threads the bridge starts by itself (Rob, 10-14 ~13:35 ET: "we 
     expect(w.minted()).toEqual([])
   })
 })
+
+// ======================================================================== 0.5.8
+
+describe('0.5.8: the marker in the app\'s wrapper around a started thread\'s first message (the hook builder, 10-14)', () => {
+  /** What the app sends a fresh thread first, as its own code builds it: the background, the task, then its notes line. */
+  const BG = 'Opened by the Massmarket bridge (mm-bridge) for one client on the Needs-you list. The brief is the kickoff the bridge sends that client\'s thread; its [mm-link] marker links this thread to the client.'
+  const NOTES = '\n\nShared notes folder for this group of sessions (outside the repo; read siblings\' notes there, leave hand-over notes or large findings there instead of pasting them into messages): /Users/someone/notes/local_hub'
+  const fresh = (prompt: string, background = BG, notes = NOTES) => `Background (from the session that started this one):\n${background}\n\nTask:\n${prompt}${notes}`
+  /** A fork's first message (and an offer's brief, with the fresh form inside). */
+  const fork = (prompt: string) => `Task (from the session that started this one):\n${prompt}`
+
+  test('a fresh thread\'s wrapped first message links it from the start of its task, with or without the notes line; what it carries is recorded', async ($, on) => {
+    const w = world(on)
+    await mm($, '')
+    for (const text of [fresh(BOLT_KICKOFF), fresh(BOLT_KICKOFF, BG, '')]) {
+      w.stored['mm.links'] = {}
+      delete w.stored['mm.sent']
+      await $.prompt.submit({ text, wait: false, origin: { kind: 'sdk' } } as never)
+      expect(w.stored['mm.links']).toEqual({ [BOLT]: SELF })
+      // its task is the kickoff the bridge would send now (the notes line after it is the app's): on record as this thread's
+      expect((w.stored['mm.sent'] as Record<string, unknown> | undefined)?.[BOLT]).toMatchObject({ sid: SELF })
+    }
+    expect(w.stored['mm.acted']).toBeUndefined()
+  })
+
+  test('a fork\'s first message links it: `Task (…):` as the app sends it (auto-continuation), or as the person\'s turn; and an offer\'s brief, the fresh form inside it', async ($, on) => {
+    const w = world(on)
+    await mm($, '')
+    const cases = [
+      [fork(BOLT_KICKOFF), 'auto-continuation'],
+      [fork(BOLT_KICKOFF), 'sdk'],
+      [fork(fresh(BOLT_KICKOFF)), 'auto-continuation'],
+    ] as const
+    for (const [text, kind] of cases) {
+      w.stored['mm.links'] = {}
+      await $.prompt.submit({ text, wait: false, origin: { kind } } as never)
+      expect(w.stored['mm.links'], `${kind}: ${text.slice(0, 50)}`).toEqual({ [BOLT]: SELF })
+    }
+  })
+
+  test('a marker anywhere else does nothing: in the middle of normal text, in the background, after a wrapper that does not begin the message', async ($, on) => {
+    const w = world(on)
+    await mm($, '')
+    const before = snapshot(w)
+    const person = [
+      `please look at ${BOLT_KICKOFF}`,
+      `Some notes first.\n\n${BOLT_KICKOFF}`,
+      // a Task: line with no wrapper above it, or the wrapper somewhere other than where the message begins
+      `Notes.\n\nTask:\n${BOLT_KICKOFF}`,
+      `Task:\n${BOLT_KICKOFF}`,
+      `fyi\n${fresh(BOLT_KICKOFF)}`,
+      `fyi\n${fork(BOLT_KICKOFF)}`,
+      // the wrapper begins the message, but its task does not begin with the marker
+      fresh(`Look at this: ${BOLT_KICKOFF}`),
+      fork(`see ${BOLT_KICKOFF}`),
+      // the marker in the background, not the task
+      fresh('Do the thing.', `${BOLT_KICKOFF} ${BG}`),
+    ]
+    for (const text of person) await $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
+    // the app's own delivery counts only in its `Task (…):` wrapper; another session's message or a notification never
+    const others = [
+      [BOLT_KICKOFF, 'auto-continuation'],
+      [fresh(BOLT_KICKOFF), 'auto-continuation'],
+      [fresh(BOLT_KICKOFF), 'peer'],
+      [fork(BOLT_KICKOFF), 'peer'],
+      [fork(BOLT_KICKOFF), 'task-notification'],
+    ] as const
+    for (const [text, kind] of others) await $.prompt.submit({ text, wait: false, origin: { kind } } as never)
+    expect(snapshot(w)).toBe(before)
+    expect(w.stored['mm.links']).toEqual({})
+    // every prompt went on to the session untouched
+    expect(w.prompts.length).toBe(person.length + others.length)
+  })
+
+  test('a card (own_initiative) the person started: its wrapped thread is recognised as started from that card, takes the client, and every chip for the client is superseded', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: cedarAlone() })
+    await mm($, 'auto off')
+    await tickOnce($, w)
+    await w.clock.advance(3_000)
+    const card = proposals(w)[0]?.args as { prompt: string; background: string }
+    expect(card.prompt.startsWith(`[mm-link ${CEDAR}] `)).toBe(true)
+    // the card is in the hub, and another thread has its own copy of the client's chip
+    const chips = w.stored['mm.chips'] as Array<Record<string, unknown>>
+    const minted = chips.find(c => c.projectId === CEDAR) as Record<string, unknown>
+    minted.threadId = 'local_hub'
+    chips.push({ ...minted, taskId: 'task_p0000099', threadId: 'local_other' })
+    // the app opens the new thread with the card's prompt in its wrapper, as the person's own turn
+    await $.prompt.submit({ text: fresh(card.prompt, card.background), wait: false, origin: { kind: 'sdk' } } as never)
+    expect(w.stored['mm.links']).toMatchObject({ [CEDAR]: SELF })
+    expect((w.stored['mm.chips'] as Array<{ projectId: string; superseded?: boolean }>).filter(c => c.projectId === CEDAR).map(c => c.superseded)).toEqual([true, true])
+    // what it carries is the card's own
+    expect((w.stored['mm.sent'] as Record<string, unknown>)[CEDAR]).toMatchObject({ sid: SELF, sig: minted.signature })
+  })
+
+  test('Start where the app gave no session id: the started thread\'s wrapped first message links it by the marker, as started from that Start', async ($, on) => {
+    const w = world(on, { tools: 'start', startNoId: true })
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: `start:${CEDAR}` })
+    await ui.unmount()
+    expect(starts(w).length).toBe(1)
+    expect((w.stored['mm.links'] as Record<string, string> | undefined)?.[CEDAR]).toBeUndefined()
+    const args = starts(w)[0]?.args as { prompt: string; background: string }
+    await $.prompt.submit({ text: fresh(args.prompt, args.background), wait: false, origin: { kind: 'sdk' } } as never)
+    expect(w.stored['mm.links']).toMatchObject({ [CEDAR]: SELF })
+    expect((w.stored['mm.chips'] as Array<{ projectId: string; superseded?: boolean }>).filter(c => c.projectId === CEDAR).every(c => c.superseded)).toBe(true)
+  })
+})
