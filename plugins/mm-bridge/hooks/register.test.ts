@@ -85,6 +85,17 @@ type WorldOptions = {
   spawnTakesMs?: number
   /** The app takes this long to answer `set_view` (fix round 1, L11). */
   setViewTakesMs?: number
+  /**
+   * (0.5.7) Which of the app's session tools this session has, as `$.tool.list()` names them: `spawn_task` alone (the
+   * app before 10-14), `start_session` alone (since), or both. Left out, the listing names neither, as before 0.5.7.
+   */
+  tools?: 'spawn' | 'start' | 'both'
+  /** (0.5.7) start_session refuses a start with this text (its proposals still go). */
+  startFails?: string
+  /** (0.5.7) With `tools`: the engine's listing names none of them (the session has them all the same). */
+  toolsUnlisted?: boolean
+  /** (0.5.7) start_session's answer to a start gives no session id. */
+  startNoId?: boolean
 }
 
 function world(on: On, opts: WorldOptions = {}) {
@@ -108,6 +119,13 @@ function world(on: On, opts: WorldOptions = {}) {
   const registered: string[] = []
   let theFeed = opts.feed ?? feed()
   let chipsMinted = 0
+  let sessionsStarted = 0
+  // (0.5.7) the tools the model can call now, as the engine lists them
+  if (opts.tools) {
+    const names = [...(opts.tools !== 'start' ? ['mcp__ccd_session__spawn_task'] : []), ...(opts.tools !== 'spawn' ? ['mcp__ccd_session__start_session', 'mcp__ccd_session__list_start_targets'] : []), 'mcp__ccd_session__dismiss_task', 'Bash']
+    on('tool.list', () => ({ value: opts.toolsUnlisted ? [] : names.map(name => ({ name, description: name, mcp: name.startsWith('mcp__') })) }))
+  }
+  on('session.cwd', () => ({ value: '/work' }))
 
   const text = (value: unknown) => ({ value: { content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value) }], isError: false } })
   on('mcp.call', async (_$, e) => {
@@ -133,8 +151,21 @@ function world(on: On, opts: WorldOptions = {}) {
     // As the app answers a chip being minted, and one being withdrawn.
     if (e.tool === 'set_view' && opts.setViewTakesMs) await clock.sleep(opts.setViewTakesMs)
     if (e.tool === 'set_view') return opts.setView === 'refused' ? refused('set_view is not available here.') : text({ group_by: 'date', sort_by: 'recency' })
+    // (0.5.7) a tool this session does not have, as the engine answers for one
+    const missing = (opts.tools === 'start' && e.tool === 'spawn_task') || (opts.tools === 'spawn' && e.tool === 'start_session')
+    if (missing) return { deny: `mm-bridge: $.mcp.call: no connected MCP tool "${e.tool}" on a server named "ccd_session"` }
     if (e.tool === 'spawn_task' && opts.spawnTakesMs) await clock.sleep(opts.spawnTakesMs)
     if (e.tool === 'spawn_task') return text(`Noted (position ${++chipsMinted}, task_id: task_${String(chipsMinted).padStart(8, '0')}). A chip is showing for the user. If this suggestion becomes stale or superseded, call dismiss_task with this task_id.`)
+    // (0.5.7) as the app answers start_session (Claude.app, 10-14): a proposal card, or a session started now
+    if (e.tool === 'start_session' && e.args.initiation === 'own_initiative') {
+      return text(`Proposed "${String(e.args.title)}" (task_id: task_${String(++chipsMinted).padStart(8, '0')}). The user sees a card and nothing runs until they start it.`)
+    }
+    if (e.tool === 'start_session') {
+      if (opts.startFails) return refused(opts.startFails)
+      const sid = `local_started_${++sessionsStarted}`
+      threads.set(sid, { sessionId: sid, title: String(e.args.title), pinned: false, isArchived: false, lastActivityAt: new Date(clock.now()).toISOString() })
+      return text(`Started session "${String(e.args.title)}" (session_id: ${opts.startNoId ? '' : sid}, name: started-${sessionsStarted}). It runs on its own; you get a note here when its turn ends.`)
+    }
     if (e.tool === 'dismiss_task') return opts.dismissFails ? refused('Could not dismiss.') : text('Dismissed.')
     if (e.tool === 'send_message') {
       // delivering a message can take time: a test holds it here while it presses again
@@ -2937,22 +2968,35 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
     expect((w.stored['mm.chips'] as Array<{ taskId: string }>).map(c => c.taskId)).toEqual([chipId(2)])
   })
 
-  test('a withdrawal that fails is tried on five ticks, then the chip is forgotten', async ($, on) => {
-    const w = world(on, { dismissFails: true, store: { 'mm.chips': [chip(CEDAR, 31, SELF, { superseded: true })] } })
-    /** The old chip's record, if it is still on record. */
-    const old = () => (w.stored['mm.chips'] as Array<{ taskId: string; tries?: number }>).filter(c => c.taskId === chipId(31))
-    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
-    await w.clock.advance(4_000)
-    expect(w.dismissed()).toEqual([chipId(31)])
-    expect(old().map(c => c.tries)).toEqual([1])
+  test('a withdrawal that fails, of a chip this session minted, is tried on five ticks, then the chip is forgotten', async ($, on) => {
+    const w = world(on, { dismissFails: true, feed: feed({ drafts: [], mail: [] }) })
+    /** The chip's record, if it is still on record. */
+    const own = () => (w.stored['mm.chips'] as Array<{ taskId: string; tries?: number }>).filter(c => c.taskId === chipId(1))
+    const tried = () => w.dismissed().filter(id => id === chipId(1)).length
+    await tickOnce($, w)
+    expect(w.minted().length).toBe(1)
+    // its own chip, superseded: the 15-second pass tries it once, then the minute's ticks
+    w.stored['mm.chips'] = (w.stored['mm.chips'] as Array<Record<string, unknown>>).map(c => ({ ...c, superseded: true }))
+    await w.clock.advance(11_000)
+    expect(tried()).toBe(1)
+    expect(own().map(c => c.tries)).toEqual([1])
     for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
-    expect(w.dismissed().length).toBe(4)
-    expect(old().map(c => c.tries)).toEqual([4])
+    expect(tried()).toBe(4)
+    expect(own().map(c => c.tries)).toEqual([4])
     await w.clock.advance(60_000)
-    expect(w.dismissed().length).toBe(5)
-    expect(old()).toEqual([])
+    expect(tried()).toBe(5)
+    expect(own()).toEqual([])
     for (let i = 0; i < 5; i++) await w.clock.advance(60_000)
-    expect(w.dismissed().length).toBe(5)
+    expect(tried()).toBe(5)
+  })
+
+  test('(0.5.7) a withdrawal that fails, of a chip this session did not mint (one from before the app\'s update): one try, then forgotten', async ($, on) => {
+    const w = world(on, { dismissFails: true, store: { 'mm.chips': [chip(CEDAR, 31, SELF, { superseded: true })] } })
+    await tickOnce($, w)
+    expect(w.dismissed()).toEqual([chipId(31)])
+    expect((w.stored['mm.chips'] as Array<{ taskId: string }>).filter(c => c.taskId === chipId(31))).toEqual([])
+    for (let i = 0; i < 5; i++) await w.clock.advance(60_000)
+    expect(w.dismissed().filter(id => id === chipId(31))).toEqual([chipId(31)])
   })
 })
 
@@ -5426,13 +5470,16 @@ describe('0.5.3: a thread\'s chips pass runs every 15 seconds; minting and the f
   })
 
   test('a withdrawal that failed is left to the minute\'s tick: the pass does not try it again', async ($, on) => {
-    const w = world(on, { dismissFails: true, store: { 'mm.chips': [chip(CEDAR, 31, SELF, { superseded: true })] } })
+    const w = world(on, { dismissFails: true, feed: feed({ drafts: [], mail: [] }) })
     await tickOnce($, w)
-    expect(w.dismissed()).toEqual([chipId(31)])
-    await w.clock.advance(45_000)
-    expect(w.dismissed()).toEqual([chipId(31)])
+    // its own chip, superseded: the pass at 15 s tries it, the passes at 30 and 45 s do not, the tick at 60 s does
+    w.stored['mm.chips'] = (w.stored['mm.chips'] as Array<Record<string, unknown>>).map(c => ({ ...c, superseded: true }))
+    await w.clock.advance(11_000)
+    expect(w.dismissed()).toEqual([chipId(1)])
+    await w.clock.advance(30_000)
+    expect(w.dismissed()).toEqual([chipId(1)])
     await w.clock.advance(15_000)
-    expect(w.dismissed()).toEqual([chipId(31), chipId(31)])
+    expect(w.dismissed()).toEqual([chipId(1), chipId(1)])
   })
 })
 
@@ -5592,5 +5639,187 @@ describe('0.5.6 (Opus gate): a chip the person made holds back the auto chips on
     await tickOnce($, w)
     for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
     expect(w.minted().filter(c => String(c.args.title).includes('Cedar Dental'))).toEqual([])
+  })
+})
+
+// ======================================================================== 0.5.7
+
+/** (0.5.7) The threads started now (start_session user_asked), and the proposal cards (own_initiative). */
+const starts = (w: { calls: Call[] }) => w.calls.filter(c => c.tool === 'start_session' && c.args.initiation === 'user_asked')
+const proposals = (w: { calls: Call[] }) => w.calls.filter(c => c.tool === 'start_session' && c.args.initiation === 'own_initiative')
+/** The feed with Cedar alone: a committed task due at 4 PM today, and no thread. */
+const cedarAlone = () => feed({ drafts: [], mail: [] })
+
+describe('0.5.7: Start opens the client\'s thread with start_session where the app has it (Rob, 10-14: "can we just straight start sessions now?")', () => {
+  for (const tools of ['start', 'both'] as const) {
+    test(`Start (${tools === 'start' ? 'start_session alone' : 'both, start_session preferred'}): one start_session call, user_asked, the kickoff marker first; the link written and pinned; the answer`, async ($, on) => {
+      const w = world(on, { tools })
+      await mm($, '')
+      const ui = await pane($)
+      await ui.press({ key: `start:${CEDAR}` })
+      expect(starts(w).length).toBe(1)
+      expect(starts(w)[0]?.args).toMatchObject({ initiation: 'user_asked', title: 'Cedar Dental: reply to the client', context: 'fresh', use_worktree: false, wake_when_done: false, cwd: '/work' })
+      // the worklog hook counts a session whose first prompt starts with the marker as the bridge's
+      expect(String(starts(w)[0]?.args.prompt).startsWith(`[mm-link ${CEDAR}] `)).toBe(true)
+      expect(starts(w)[0]?.args.prompt).toBe(CEDAR_KICKOFF)
+      expect(String(starts(w)[0]?.args.background).length).toBeGreaterThanOrEqual(80)
+      expect(w.minted()).toEqual([])
+      expect(w.toasts.at(-1)).toBe('Started Cedar Dental\'s thread: "Cedar Dental: reply to the client". It is under Pinned.')
+      expect(w.stored['mm.links']).toMatchObject({ [CEDAR]: 'local_started_1' })
+      await ui.unmount()
+      // pinned and named by the sync a second on
+      await w.clock.advance(1_500)
+      expect(w.threads.get('local_started_1')).toMatchObject({ title: CEDAR_TITLE, pinned: true })
+    })
+  }
+
+  test('a typed /mm start the same way', async ($, on) => {
+    const w = world(on, { tools: 'start' })
+    expect(await mm($, 'start cedar dental')).toBe('Started Cedar Dental\'s thread: "Cedar Dental: reply to the client". It is under Pinned.')
+    expect(starts(w).length).toBe(1)
+  })
+
+  test('start_session refuses: the failure, verbatim, and nothing recorded', async ($, on) => {
+    const w = world(on, { tools: 'start', startFails: 'Starting sessions is not enabled here.' })
+    await mm($, '')
+    const links = JSON.stringify(w.stored['mm.links'])
+    const ui = await pane($)
+    await ui.press({ key: `start:${CEDAR}` })
+    expect(w.toasts.at(-1)).toBe('Could not start Cedar Dental\'s thread: Starting sessions is not enabled here. Type /mm start Cedar Dental to try again.')
+    expect(JSON.stringify(w.stored['mm.links'])).toBe(links)
+    expect(w.stored['mm.chips']).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('spawn_task alone (the app before 10-14): today\'s chip', async ($, on) => {
+    const w = world(on, { tools: 'spawn' })
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: `start:${CEDAR}` })
+    expect(w.calls.filter(c => c.tool === 'start_session')).toEqual([])
+    expect(w.minted().length).toBe(1)
+    expect(w.toasts.at(-1)).toBe('A chip for Cedar Dental is ready here: click Start on it.')
+    await ui.unmount()
+  })
+
+  test('a listing that names neither: spawn_task first, and its "no connected MCP tool" answer turns Start to start_session', async ($, on) => {
+    // as an app whose listing says nothing: the bridge learns from the engine's answer
+    const w = world(on, { tools: 'start', toolsUnlisted: true })
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: `start:${CEDAR}` })
+    expect(w.toasts.at(-1)).toBe('Started Cedar Dental\'s thread: "Cedar Dental: reply to the client". It is under Pinned.')
+    await ui.unmount()
+  })
+})
+
+describe('0.5.7: threads the bridge starts by itself (Rob, 10-14 ~13:35 ET: "we can automatically start the new thread")', () => {
+  const INTERNAL_OPS = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
+  const notices = (w: { written: Array<{ path: string; text: string }> }) => w.written.filter(f => f.path.endsWith('bridge-notices.log')).at(-1)?.text ?? ''
+  const bandLines = async ($: Engine) => {
+    const band = await bandOf($)
+    const out = await lines(band)
+    await band.unmount()
+    return out
+  }
+
+  test('a client with no thread: started once, user_asked, linked and pinned; the band says so; a second tick starts nothing; the log has its line', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: cedarAlone() })
+    await tickOnce($, w)
+    // the start comes once this session's claim has held, a second or three on
+    await w.clock.advance(3_000)
+    expect(starts(w).length).toBe(1)
+    expect(String(starts(w)[0]?.args.prompt).startsWith(`[mm-link ${CEDAR}] `)).toBe(true)
+    expect(w.stored['mm.links']).toMatchObject({ [CEDAR]: 'local_started_1' })
+    await w.clock.advance(1_500)
+    expect(w.threads.get('local_started_1')).toMatchObject({ pinned: true })
+    expect((await bandLines($)).join(' ')).toContain('Started Cedar Dental\'s thread: it is under Pinned.')
+    expect(notices(w)).toMatch(/started Cedar Dental \(33333333-3333-3333-3333-333333333333\) sig [0-9a-f]{8}: no thread/)
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(starts(w).length).toBe(1)
+    expect(proposals(w)).toEqual([])
+  })
+
+  test('a thread 60% full with something new: a fresh thread started; the old one unpinned and named " · moved"', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: acmeFeed(), store: { 'mm.links': { [ACME]: SELF }, 'mm.ctx': { [SELF]: { tokensUsed: 700_000, contextWindow: 1_000_000, percentUsed: 70, at: NOW - HOUR } } } })
+    await tickOnce($, w)
+    expect(w.threads.get(SELF)).toMatchObject({ title: ACME_TITLE, pinned: true })
+    await w.clock.advance(3_000)
+    const acme = starts(w).filter(c => String(c.args.prompt).startsWith(`[mm-link ${ACME}] `))
+    expect(acme.length).toBe(1)
+    expect(String(acme[0]?.args.prompt)).toContain(HANDOVER('Morning hub', SELF, 'Acme Roofing Pat'))
+    const sid = (w.stored['mm.links'] as Record<string, string>)[ACME]
+    expect(sid).toMatch(/^local_started_/)
+    expect(w.threads.get(SELF)).toMatchObject({ title: `${ACME_TITLE} · moved`, pinned: false })
+    // and the syncs after it leave the old thread as it is
+    await w.clock.advance(5 * 60_000)
+    expect(w.threads.get(SELF)).toMatchObject({ title: `${ACME_TITLE} · moved`, pinned: false })
+    expect(w.threads.get(sid as string)).toMatchObject({ pinned: true })
+  })
+
+  test('an internal project: never started by itself', async ($, on) => {
+    const iTicket = { ticket_id: 'ti', project_id: INTERNAL_OPS, project_name: 'Massmarket AI', title: 'Fix tracker', due_at: new Date(NOW + 3 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME }
+    const w = world(on, { tools: 'start', feed: { member: ME, role: 'builder', drafts: [], mail: [], tickets: { due_today: [iTicket] }, threads: [] }, threads: [] })
+    await tickOnce($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(starts(w)).toEqual([])
+  })
+
+  test('the hourly cap reached: a proposal card instead, and the band says so', async ($, on) => {
+    const earlier = Array.from({ length: 4 }, (_, i) => ({ at: NOW - (i + 1) * 600_000, pid: `9999999${i}-9999-4999-8999-999999999999`, client: `Client ${i}`, sig: '00000000', kind: 'nothread', by: 'local_x', ok: true, reason: 'no thread' }))
+    const w = world(on, { tools: 'start', feed: cedarAlone(), store: { 'mm.autostarts': earlier } })
+    await tickOnce($, w)
+    await w.clock.advance(3_000)
+    expect(starts(w)).toEqual([])
+    expect(proposals(w).map(c => c.args.title)).toEqual(['Cedar Dental: reply to the client'])
+    expect(proposals(w)[0]?.args).toMatchObject({ initiation: 'own_initiative', context: 'fresh' })
+    expect((proposals(w)[0]?.args as Record<string, unknown>).cwd).toBeUndefined()
+    expect((await bandLines($)).join(' ')).toContain('Cedar Dental: started threads paused for this hour; its card is ready to start.')
+  })
+
+  test('the app refuses the start: the card instead, at once, and the log says why', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: cedarAlone(), startFails: 'The app refuses a start on a turn it did not get from the user.' })
+    await tickOnce($, w)
+    await w.clock.advance(3_000)
+    expect(starts(w).length).toBe(1)
+    expect(proposals(w).length).toBe(1)
+    expect(notices(w)).toContain('not started Cedar Dental')
+    // and it is not asked again
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(starts(w).length).toBe(1)
+    expect(proposals(w).length).toBe(1)
+  })
+
+  test('/mm auto off: the card, as before (a proposal where the app has only start_session, withdrawn with dismiss_task); /mm status says it', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: cedarAlone() })
+    expect(await mm($, 'auto off')).toBe('Auto-start is off: a client\'s new thread waits as a card for you to start.')
+    expect(await mm($, 'status')).toContain('auto-start: off')
+    await tickOnce($, w)
+    await w.clock.advance(3_000)
+    expect(starts(w)).toEqual([])
+    expect(proposals(w).length).toBe(1)
+    const taskId = (w.stored['mm.chips'] as Array<{ taskId: string; projectId: string }>).find(c => c.projectId === CEDAR)?.taskId
+    expect(taskId).toBe(chipId(1))
+    // Cedar gets a thread: its card is withdrawn the way a chip is
+    w.stored['mm.links'] = { [CEDAR]: 'local_other' }
+    await w.clock.advance(15_000)
+    expect(w.dismissed()).toEqual([chipId(1)])
+    expect(await mm($, 'auto on')).toBe('Auto-start is on: a client\'s new thread starts by itself.')
+  })
+
+  test('/mm auto off where the app has only spawn_task: today\'s chip', async ($, on) => {
+    const w = world(on, { tools: 'spawn', feed: cedarAlone() })
+    await mm($, 'auto off')
+    await tickOnce($, w)
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP])
+    expect(w.calls.filter(c => c.tool === 'start_session')).toEqual([])
+  })
+
+  test('where the app has only start_session, a thread\'s own Do it here chip is not made: Update in the pane does it', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: acmeFeed(), store: { 'mm.links': { [ACME]: SELF } } })
+    await tickOnce($, w)
+    await w.clock.advance(3_000)
+    expect(w.calls.filter(c => c.tool === 'start_session' && String(c.args.prompt).includes(ACME))).toEqual([])
+    expect(w.minted()).toEqual([])
   })
 })

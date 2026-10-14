@@ -57,6 +57,8 @@ type WorldOptions = {
   seed: number
   /** More threads the app has, recently active (fix round 1, F4: a dozen of a test's own). */
   extra?: string[]
+  /** (0.5.7) The session has start_session and not spawn_task (the app since 10-14), and the engine lists them so. */
+  startOnly?: boolean
 }
 
 /**
@@ -98,6 +100,8 @@ function world(opts: WorldOptions) {
   /** The thread each chip was minted in, in order (the n-th has the id `task_<n>`), and the chips withdrawn. */
   const spawned: string[] = []
   const dismissed: string[] = []
+  /** (0.5.7) The prompts of the threads start_session started now, in order. */
+  const startedNow: string[] = []
 
   const session = (cli: string, self: string) => {
     const state = new Map<string, unknown>()
@@ -130,9 +134,20 @@ function world(opts: WorldOptions) {
           if (tool === 'set_session_title' && t) t.title = String(args.title)
           if (tool === 'set_pinned' && t) t.pinned = Boolean(args.pinned)
           if (tool === 'get_usage') return text({ context: { status: 'unavailable' } })
+          if (tool === 'spawn_task' && opts.startOnly) throw new Error('mm-bridge: $.mcp.call: no connected MCP tool "spawn_task" on a server named "ccd_session"')
           if (tool === 'spawn_task') {
             spawned.push(self)
             return text(`Noted (task_id: task_${String(spawned.length).padStart(8, '0')}).`)
+          }
+          // (0.5.7) as the app answers start_session: a proposal card, or a session started now
+          if (tool === 'start_session' && args.initiation === 'own_initiative') {
+            spawned.push(self)
+            return text(`Proposed "${String(args.title)}" (task_id: task_${String(spawned.length).padStart(8, '0')}).`)
+          }
+          if (tool === 'start_session') {
+            const sid = `local_started_${opts.seed}_${startedNow.push(String(args.prompt))}`
+            app.set(sid, thread(sid, String(args.title)))
+            return text(`Started session "${String(args.title)}" (session_id: ${sid}). It runs on its own.`)
           }
           if (tool === 'dismiss_task') {
             dismissed.push(String(args.task_id))
@@ -173,13 +188,18 @@ function world(opts: WorldOptions) {
       ui: { status: () => undefined, toast: () => undefined, open: async () => ({ isPlaced: true }), scroll: async () => undefined },
       process: { run: async () => ({ exitCode: 1, stdout: '', stderr: '' }) },
       command: { register: async () => ({ command: 'mm' }) },
-      tool: { register: async () => ({ tool: 'mcp__mm-bridge__mm' }) },
+      tool: {
+        register: async () => ({ tool: 'mcp__mm-bridge__mm' }),
+        // (0.5.7) the tools the model can call now
+        list: async () => (opts.startOnly ? ['mcp__ccd_session__start_session', 'mcp__ccd_session__dismiss_task'] : []).map(name => ({ name, description: name, mcp: true })),
+      },
     }
   }
 
   return {
     spawned,
     dismissed,
+    startedNow,
     session,
     stored: (key: string) => (stored[key] === undefined ? undefined : JSON.parse(stored[key] as string)),
     put: (key: string, value: unknown) => void (stored[key] = JSON.stringify(value)),
@@ -345,6 +365,40 @@ describe('F4: chip records when a dozen threads tick at once', () => {
       expect(w.spawned.length).toBe(spawned)
       expect(w.dismissed.length).toBe(dismissed)
       expect(live().length).toBe(5)
+    })
+  }
+})
+
+// (0.5.7, Rob 10-14 ~13:35 ET) Where the app has start_session, a client with no thread gets its thread started by
+// itself. A dozen threads that tick at once, none knowing which thread polls, may each take itself for the one to start
+// it: the claim per client and signature (`mm.starting`), checked again once it has held, lets one start it.
+describe('0.5.7: a dozen threads that tick at once never start one client\'s thread twice', () => {
+  const tickAll = async (w: ReturnType<typeof world>, threads: unknown[]) => {
+    await Promise.all(threads.map(t => hooks['session.start']?.(t, { cwd: '/work', surface: 'desktop', isInteractive: false }, next)))
+    await w.advance(4_000)
+    await w.advance(3_100)
+  }
+  for (const seed of [1, 7, 42, 99, 2026, 1013, 5, 11]) {
+    test(`twelve threads, no poller they know of: each client started once at most, within the hourly cap (seed ${seed})`, async () => {
+      const ids = Array.from({ length: N }, (_, i) => `local_as_${seed}_${i + 1}`)
+      const w = world({ seed, extra: ids, startOnly: true })
+      await before(w)
+      // the lease is held by a session none of them knows: nobody is the poller to them
+      w.put('mm.lease', { owner: 'cli-nobody', until: NOW + HOUR })
+      const threads = ids.map((id, i) => w.session(`cli-as-${seed}-${i + 1}`, id))
+      for (let i = 0; i < 2; i++) {
+        await tickAll(w, threads)
+        await w.advance(60_000)
+      }
+      const perClient = new Map<string, number>()
+      for (const p of w.startedNow) {
+        const pid = /^\[mm-link ([0-9a-f-]{36})\] /.exec(p)?.[1] ?? 'no marker'
+        perClient.set(pid, (perClient.get(pid) ?? 0) + 1)
+      }
+      expect(w.startedNow.length).toBeGreaterThan(0)
+      expect(w.startedNow.length).toBeLessThanOrEqual(4)
+      expect([...perClient.entries()].filter(([, n]) => n > 1)).toEqual([])
+      expect(perClient.has('no marker')).toBe(false)
     })
   }
 })

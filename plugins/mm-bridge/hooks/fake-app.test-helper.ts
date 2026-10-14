@@ -44,7 +44,12 @@ export const next = (e: unknown) => e
  * `every`: the clock's repeating timers run too (a session's minute tick and its 15-second chips pass); left
  * out, only its one-off timers do, as before.
  */
-export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessionId: string }>, unlisted: readonly string[] = [], opts: { every?: boolean } = {}) {
+export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessionId: string }>, unlisted: readonly string[] = [], opts: { every?: boolean; tools?: 'spawn' | 'start' | 'both' } = {}) {
+  /** (0.5.7) The session tools as the engine lists them; left out, the listing names neither, as before 0.5.7. */
+  const toolNames = opts.tools
+    ? [...(opts.tools !== 'start' ? ['mcp__ccd_session__spawn_task'] : []), ...(opts.tools !== 'spawn' ? ['mcp__ccd_session__start_session'] : []), 'mcp__ccd_session__dismiss_task']
+    : []
+  let started = 0
   const stored: Record<string, string> = {}
   /** Sets of `key` refused next: `skip` sets first go through, then `times` are refused. */
   const refusing = { key: '', times: 0, skip: 0 }
@@ -97,7 +102,18 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           if (tool === 'set_pinned' && failPins.has(id)) return { content: [{ type: 'text', text: 'set_pinned failed' }], isError: true }
           if (tool === 'set_pinned' && t) t.pinned = Boolean(args.pinned)
           if (tool === 'get_usage') return text({ context: { status: 'unavailable' } })
+          // (0.5.7) a tool this session does not have, as the engine answers for one
+          if ((opts.tools === 'start' && tool === 'spawn_task') || (opts.tools === 'spawn' && tool === 'start_session')) {
+            throw new Error(`mm-bridge: $.mcp.call: no connected MCP tool "${tool}" on a server named "ccd_session"`)
+          }
           if (tool === 'spawn_task') return text(`Noted (task_id: task_${String(calls.filter(c => c.tool === 'spawn_task').length).padStart(8, '0')}).`)
+          // (0.5.7) as the app answers start_session (Claude.app, 10-14)
+          if (tool === 'start_session' && args.initiation === 'own_initiative') return text(`Proposed "${String(args.title)}" (task_id: task_p${String(calls.length).padStart(7, '0')}). The user sees a card.`)
+          if (tool === 'start_session') {
+            const sid = `local_started_${++started}`
+            app.set(sid, { sessionId: sid, title: String(args.title), pinned: false, isArchived: false, lastActivityAt: new Date(time).toISOString() })
+            return text(`Started session "${String(args.title)}" (session_id: ${sid}, name: started-${started}). It runs on its own.`)
+          }
           if (tool === 'send_message') return text(`Message delivered to session ${id}.`)
           return text('ok')
         },
@@ -166,7 +182,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
       },
       process: { run: async () => ({ exitCode: 1, stdout: '', stderr: '' }) },
       command: { register: async () => ({ command: 'mm' }) },
-      tool: { register: async () => ({ tool: 'mcp__mm-bridge__mm' }) },
+      tool: { register: async () => ({ tool: 'mcp__mm-bridge__mm' }), list: async () => toolNames.map(name => ({ name, description: name, mcp: true })) },
       prompt: { submit: async () => ({}) },
     }
   }

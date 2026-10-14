@@ -959,6 +959,38 @@ describe('0.5.6: Start moves the chip to the thread it is pressed in (Rob, 10-14
   })
 })
 
+// ======================================================================== 0.5.7
+
+describe('0.5.7: a thread the bridge starts by itself is started once, whoever ticks', () => {
+  test('two sessions that both take themselves for the holder, at the same moment: one start, by the claim that held', async () => {
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(91, 'Client Nine One', 1)] }
+    const ids = ['local_race_a', 'local_race_b']
+    const w = fakeApp(feed, ids.map(sessionId => ({ sessionId })), [], { every: true, tools: 'start' })
+    // the thread that polls is none of theirs, and nobody has written in either: each may take itself for the holder
+    w.put('mm.lease', { owner: 'cli:local_nobody', until: NOW + 24 * 3_600_000 })
+    const [a, b] = ids.map(id => w.session(id))
+    await mm(a, '')
+    await startIn(a)
+    await startIn(b)
+    await w.advance(4_000)
+    await settleAll()
+    // the claims are checked 1 to 3 seconds on
+    await w.advance(3_100)
+    await settleAll()
+    const starts = w.calls.filter(c => c.tool === 'start_session' && c.args.initiation === 'user_asked')
+    expect(starts.length).toBe(1)
+    expect(String(starts[0]?.args.prompt).startsWith(`[mm-link ${pid(91)}] `)).toBe(true)
+    expect(linksOf(w)[pid(91)]).toBe('local_started_1')
+    // and the ticks after it start nothing more, in either thread
+    for (let i = 0; i < 3; i++) {
+      await w.advance(60_000)
+      await settleAll()
+    }
+    expect(w.calls.filter(c => c.tool === 'start_session' && c.args.initiation === 'user_asked').length).toBe(1)
+    expect(((w.stored('mm.autostarts') ?? []) as Array<{ ok: boolean | null }>).map(t => t.ok)).toEqual([true])
+  })
+})
+
 describe('R13: in a thread that does not sync, the refresh-failed line never goes while the pane shows the old list', () => {
   test('the line goes with the list drawn again from the newer sync', async () => {
     const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], drafts: [], mail: [mail(61, 'Client Six One')] }
