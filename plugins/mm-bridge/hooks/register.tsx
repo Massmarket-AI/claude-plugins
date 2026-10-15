@@ -9,7 +9,7 @@ import {
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
   CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
-  openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, signatureOf, staleCopySentence, startKickoff, threadLength, threadLink, threadRows, titleSuggestion,
+  newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, staleCopySentence, startKickoff, threadLength, threadLink, threadRows, titleSuggestion,
   REFRESH_FAILED, bandText, chipTitle,
 } from './threads'
 import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, Row, RowButton, RowState, Sent } from './threads'
@@ -88,7 +88,7 @@ import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, 
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.5.8'
+const VERSION = '0.5.9'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -203,15 +203,32 @@ const WRAP_TASK = /^Task \([^)\n]{1,200}\):\n/
 const WRAP_BACKGROUND = /^Background \([^)\n]{1,200}\):\n[\s\S]*?\n\nTask:\n/
 const WRAP_NOTES = /\n\nShared notes folder for this group of sessions \([^\n]*$/
 /**
+ * (0.5.9) The app's own notes, put in front of a message it sends: each `<system-reminder>\n…\n</system-reminder>`,
+ * one per line, then a blank line, then the message (read from the app's own code, 10-15). A thread started while
+ * the session that started it already has linked sessions opens with one, `Linked sessions now (status, not an
+ * instruction): …`. On 10-15 a dozen threads started together: the first opened without it and its marker counted;
+ * every later one opened with it, before the wrapper, and none of their markers did.
+ */
+const APP_NOTE = /^<system-reminder>\n[\s\S]*?\n<\/system-reminder>(?:\n\n|\n(?=<system-reminder>\n))/
+/** The most app notes taken off the front of one message. */
+const APP_NOTES_MAX = 10
+/**
  * (0.5.8) The prompt a message carries: the message itself, or, when it begins with the app's wrapper, the task
  * after it, its notes line taken off. `task`: it began `Task (…):`, the form the app sends as `auto-continuation`.
+ * (0.5.9) The app's own notes in front of it are taken off first: the message begins after them.
  */
 function promptOf(text: string): { prompt: string; task: boolean } {
-  const task = WRAP_TASK.exec(text)
-  let rest = task ? text.slice(task[0].length) : text
+  let body = text
+  for (let n = 0; n < APP_NOTES_MAX; n++) {
+    const note = APP_NOTE.exec(body)
+    if (!note) break
+    body = body.slice(note[0].length)
+  }
+  const task = WRAP_TASK.exec(body)
+  let rest = task ? body.slice(task[0].length) : body
   const background = WRAP_BACKGROUND.exec(rest)
   if (background) rest = rest.slice(background[0].length)
-  if (!task && !background) return { prompt: text, task: false }
+  if (!task && !background) return { prompt: body, task: false }
   return { prompt: rest.replace(WRAP_NOTES, ''), task: task !== null }
 }
 /**
@@ -227,6 +244,8 @@ const PERSON_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge', 'sdk'
 const STARTED_TASK_ORIGIN = 'auto-continuation'
 
 const NO_THREAD_LIST = 'The app\'s thread list is not available here.'
+/** What `link` from anything but the person says of a client the person linked to another thread (F4). */
+const alreadyHas = (client: string) => `${client} already has a thread. Only the person can move it: they type /mm link ${client} in the thread that should have it.`
 /** R10: what a press that makes a chip says before it asks the app for anything. */
 const MAKING_CHIP = (client: string) => `Making a chip for ${client}…`
 /** (0.5.7) The same, where Start opens the thread itself (start_session). */
@@ -813,7 +832,12 @@ async function recordSelf($: EngineInterface): Promise<void> {
   if (mine && mine.app === app && now - mine.at < DAY_MS) return
   const write = () =>
     patchStore<Pairs>($, 'mm.threads', {}, pairs => {
-      pairs[cli] = { app, at: now }
+      // (0.5.9) when the pair was first written for this thread is kept through the daily rewrite: it is the
+      // thread's start for R1b (`threadStart`), and a thread the person goes back to is not made newer by it.
+      // (A first write is `at` alone, as before: `since` is only written once it differs.)
+      const was = pairs[cli]
+      const first = was && was.app === app ? (typeof was.since === 'number' && Number.isFinite(was.since) ? was.since : was.at) : undefined
+      pairs[cli] = typeof first === 'number' && Number.isFinite(first) && first < now ? { app, at: now, since: first } : { app, at: now }
       for (const [k, v] of Object.entries(pairs)) if (!v || now - v.at > PAIR_KEEP_MS) delete pairs[k]
     })
   // gone a moment later (another session's write met this one, or this one was never made): written again.
@@ -1178,6 +1202,30 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
       }
       delete auto[pid]
       delete links[pid]
+      undone.push(a.sid)
+    }
+  }
+
+  // R1b (0.5.9, Rob 2026-10-15: "Can we have it update to attach to the most recent thread for each client?"). At
+  // 10:28 ET he switched profiles: this profile's sync dropped the other profile's links, R1 linked five clients to
+  // their newest thread HERE (last active 10-08 to 10-12) and pinned them, and the threads he started for them
+  // minutes later stayed unlinked. A link the bridge made by itself now follows the client's newest thread: one that
+  // opened with this client's marker, or whose sessions declared this client alone (`newerThreadFor`), started
+  // LATER than the linked one. The old thread is given back as an undone link is (its own name, our pin off, a pin
+  // the person put on left alone); the pin lands on the new one in the pass below.
+  // ⛔ Only a link in `auto`: one the person made, or that a closing route or their own act took out of `auto`,
+  //    never moves this way. ⛔ Once per feed, as the undo above (`known`), never on an empty list (not
+  //    `complete`), and never from or to a thread that cannot be seen. ⛔ A thread is one client's: a thread
+  //    linked to any client, this pass's moves included, is never taken.
+  if (!known && listed.complete) {
+    const shared = sharedThreads(feedThreads, pairs)
+    const left = Array.isArray(released) ? released : []
+    for (const [pid, a] of Object.entries(auto)) {
+      if (!a || typeof a.sid !== 'string' || links[pid] !== a.sid || unseen.has(a.sid) || !live.has(a.sid)) continue
+      const sid = newerThreadFor(pid, a.sid, links, feedThreads, pairs, live, { unlinked, released: left, marked, shared })
+      if (!sid || unseen.has(sid)) continue
+      links[pid] = sid
+      auto[pid] = { sid, miss: 0, made: now }
       undone.push(a.sid)
     }
   }
@@ -3960,6 +4008,13 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
   // anything is written, when this thread is one the person unlinked, when it is already another client's,
   // or when the client is already linked to another thread that is still there (review of 79cbc596, F4).
   // A thread that is nobody's may still be linked to a client that has no thread.
+  // (0.5.9, Rob 10-15: "You should be able to relink these when you're asked to") And a client the bridge linked
+  // by itself (`mm.auto`) may be moved here: that link is not the person's. The thread it had is given back on the
+  // next sync (`mm.released`: its own name, our pin off). ⛔ A client the person linked is still refused.
+  /** For anything but the person: the thread the client may be taken from (one gone, or one the bridge linked by itself). */
+  let allowed: string | undefined
+  /** (0.5.9) That thread, when it is the bridge's own link: given back once this thread has the client. */
+  let bridgeHeld: string | undefined
   if (verb === 'link' && by !== 'person') {
     const me = await selfId($)
     if (me && me in (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))) {
@@ -3976,8 +4031,10 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
     }
     // (a thread the app says is gone, or archived, holds nothing; one it cannot answer for is still there)
     const holder = links[named.projectId]
-    if (holder !== undefined && holder !== me && (await lookup($, holder)) !== 'gone') {
-      return `${named.client} already has a thread. Only the person can move it: they type /mm link ${named.client} in the thread that should have it.`
+    if (holder !== undefined && holder !== me) {
+      if ((await storeGet<Auto>($, 'mm.auto', {}))[named.projectId]?.sid === holder) bridgeHeld = holder
+      else if ((await lookup($, holder)) !== 'gone') return alreadyHas(named.client)
+      allowed = holder
     }
   }
   const pass = await reconcile($, feed)
@@ -3997,11 +4054,34 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
   const me = await selfId($)
   if (!me) return 'Linking a thread works in the desktop app\'s Code tab only.'
   await forgetUnlink($, me)
+  /** (0.5.9) For anything but the person: the bridge's own link for the client as the store has it now (the sync above may have moved it). */
+  const autoNow = by !== 'person' ? (await storeGet<Auto>($, 'mm.auto', {}))[pid]?.sid : undefined
+  /** The thread that had the client when this one took it. */
+  let had: string | undefined
+  let refused = false
   await patchStore<Record<string, string>>($, 'mm.links', {}, links => {
+    const holder = links[pid]
+    // ⛔ (0.5.9) for anything but the person, checked again on the fresh copy: a client the person linked to another
+    // thread meanwhile stays there
+    if (by !== 'person' && holder !== undefined && holder !== me && holder !== allowed && holder !== autoNow) {
+      refused = true
+      return false
+    }
     // ⛔ a thread is one client's: linked here by hand, it is no longer any other client's
     for (const k of Object.keys(links)) if (links[k] === me && k !== pid) delete links[k]
+    had = holder !== me ? holder : undefined
     links[pid] = me
   })
+  if (refused) return alreadyHas(named.client)
+  // (0.5.9) the thread the bridge had linked the client to by itself is given back on the next sync
+  const given = had
+  if (by !== 'person' && given !== undefined && (given === bridgeHeld || given === autoNow)) {
+    await patchStore<string[]>($, 'mm.released', [], released => {
+      if (released.includes(given)) return false
+      released.push(given)
+      released.splice(0, Math.max(0, released.length - REMEMBER_MAX))
+    })
+  }
   await claim($, pid, me)
   // ⛔ Only the person's own link stamps: one Claude or anything else made is not pinned ahead of the cap.
   if (it && by === 'person') await stamp($, pid, me)
@@ -4036,6 +4116,9 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
  * the prompt of a chip the bridge minted for that client (Start thread, /mm start) was started from that
  * chip, and it takes the client. The thread the client had is given back on the next sync: its own title,
  * our pin off. No other thread ever takes a client this way.
+ * (0.5.9) And one more: a client the bridge linked by itself (`mm.auto`) is taken by any thread that opens with its
+ * marker. The marker is the person's own act, so the link becomes theirs (out of `auto`), and the thread the bridge
+ * had linked is given back on the next sync, as above. A client the person linked keeps its thread exactly as before.
  * ⛔ Each map is changed over a fresh copy (patchStore), and the link is checked again a moment later
  * (settleLater): a dozen threads started together each keep their own (B1).
  * R5 (0.5.2): every running thread mints its own copy of a client's chip, and they share one prompt. A copy
@@ -4079,14 +4162,22 @@ async function linkFromMarker($: EngineInterface, text: string, origin: string |
   let ours = false
   /** (R5) Another linked thread has the client: this one is a stale copy, or a marker with no chip. */
   let taken = false
+  /**
+   * (0.5.9) The thread the bridge linked the client to by itself, as the store has it now: a marker takes the client
+   * from it (Rob, 10-15: the threads he started for five clients stayed unlinked while R1's links to their older
+   * threads held them).
+   */
+  const autoHolder = (await storeGet<Auto>($, 'mm.auto', {}))[projectId]?.sid
   const link = () =>
     patchStore<Record<string, string>>($, 'mm.links', {}, links => {
       // decided on the fresh copy: whose this thread is, and who holds the client, NOW
       const owner = ownerOf(me, links)
       if (owner !== undefined && owner !== projectId) return false
       const holder = links[projectId]
-      // a chip takes the client only from the thread it had when it was minted (none, or the old one R3 hands over from)
-      if (holder !== undefined && holder !== me && (!chip || holder !== chip.had)) {
+      // a chip takes the client only from the thread it had when it was minted (none, or the old one R3 hands over
+      // from); (0.5.9) any marker takes it from a thread the bridge linked by itself, which is given back on the next
+      // sync. ⛔ A thread the person linked keeps the client (R5: the stale copy's sentence).
+      if (holder !== undefined && holder !== me && (!chip || holder !== chip.had) && holder !== autoHolder) {
         taken = true
         return false
       }
@@ -4110,7 +4201,8 @@ async function linkFromMarker($: EngineInterface, text: string, origin: string |
       const holder = links[projectId]
       const owner = ownerOf(me, links)
       if (holder === me || (owner !== undefined && owner !== projectId)) return false
-      if (holder !== undefined && auto[projectId]?.sid !== holder) return false
+      // (0.5.9) the thread the bridge had linked by itself, that this marker took the client from, is no holder either
+      if (holder !== undefined && auto[projectId]?.sid !== holder && holder !== autoHolder) return false
       links[projectId] = me
       again = true
     })

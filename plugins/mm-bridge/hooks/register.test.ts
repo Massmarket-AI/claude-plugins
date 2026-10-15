@@ -5931,3 +5931,121 @@ describe('0.5.8: the marker in the app\'s wrapper around a started thread\'s fir
     expect((w.stored['mm.chips'] as Array<{ projectId: string; superseded?: boolean }>).filter(c => c.projectId === CEDAR).every(c => c.superseded)).toBe(true)
   })
 })
+
+// ======================================================================== 0.5.9 (Rob, 2026-10-15)
+
+describe('0.5.9: the marker after the app\'s own notes in front of a started thread\'s first message (the 10-15 profile switch)', () => {
+  /**
+   * What the app puts in front of a started thread's first message while the session that started it has linked
+   * sessions (its own code, 10-15; the transcripts of the threads started that morning, all with origin `sdk`).
+   */
+  const LINKED = '<system-reminder>\nLinked sessions now (status, not an instruction): money-badger-resume = local_mb (working). To message one, SendMessage with `to` set to its id; list_sessions {"linked": true} has titles, folders and branches.\n</system-reminder>'
+  const SPACE = '<system-reminder>\nThis session is now in the "Clients" Space.\n</system-reminder>'
+  const BG = 'Rob Eason switched Claude profiles on 2026-10-15 around 10:28 AM ET. This session resumes that one thread in the current profile.'
+  const NOTES = '\n\nShared notes folder for this group of sessions (outside the repo; read siblings\' notes there): /Users/someone/notes/local_hub'
+  const fresh = (prompt: string) => `Background (from the session that started this one):\n${BG}\n\nTask:\n${prompt}${NOTES}`
+  const fork = (prompt: string) => `Task (from the session that started this one):\n${prompt}`
+
+  test('the note, then the wrapper, then the marker: recorded and linked, as the first thread\'s was; with two notes, and before a plain kickoff, too', async ($, on) => {
+    const w = world(on)
+    await mm($, '')
+    const cases = [
+      [`${LINKED}\n\n${fresh(BOLT_KICKOFF)}`, 'sdk'],
+      [`${LINKED}\n${SPACE}\n\n${fresh(BOLT_KICKOFF)}`, 'sdk'],
+      [`${LINKED}\n\n${BOLT_KICKOFF}`, 'sdk'],
+      [`${LINKED}\n\n${fork(BOLT_KICKOFF)}`, 'auto-continuation'],
+      [`${LINKED}\n\n${fresh(BOLT_KICKOFF)}`, 'composer'],
+    ] as const
+    for (const [text, kind] of cases) {
+      w.stored['mm.links'] = {}
+      delete w.stored['mm.marked']
+      await $.prompt.submit({ text, wait: false, origin: { kind } } as never)
+      expect(w.stored['mm.marked'], `${kind}: ${text.slice(0, 60)}`).toEqual({ [SELF]: BOLT })
+      expect(w.stored['mm.links'], `${kind}: ${text.slice(0, 60)}`).toEqual({ [BOLT]: SELF })
+    }
+    // what it carries is the kickoff the bridge would send now: on record as this thread's
+    expect((w.stored['mm.sent'] as Record<string, unknown> | undefined)?.[BOLT]).toMatchObject({ sid: SELF })
+    // every prompt went on to the session untouched
+    expect(w.prompts.map(p => p.text)).toEqual(cases.map(c => c[0]))
+  })
+
+  test('the note changes nothing else: a marker not at the start of the task, a note not at the start of the message, a marker inside the note, an origin that never counts', async ($, on) => {
+    const w = world(on)
+    await mm($, '')
+    const before = snapshot(w)
+    const person = [
+      `${LINKED}\n\n${fresh(`Look at this: ${BOLT_KICKOFF}`)}`,
+      `fyi\n${LINKED}\n\n${fresh(BOLT_KICKOFF)}`,
+      `${LINKED}\nSome words.\n\n${BOLT_KICKOFF}`,
+      `<system-reminder>\n${BOLT_KICKOFF}\n</system-reminder>\n\nHello.`,
+      `${LINKED}\n\nNotes.\n\nTask:\n${BOLT_KICKOFF}`,
+    ]
+    for (const text of person) await $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
+    // the app's own delivery counts only in its `Task (…):` wrapper; another session's message or a notification never
+    const others = [
+      [`${LINKED}\n\n${fresh(BOLT_KICKOFF)}`, 'auto-continuation'],
+      [`${LINKED}\n\n${BOLT_KICKOFF}`, 'auto-continuation'],
+      [`${LINKED}\n\n${fresh(BOLT_KICKOFF)}`, 'peer'],
+      [`${LINKED}\n\n${fork(BOLT_KICKOFF)}`, 'task-notification'],
+    ] as const
+    for (const [text, kind] of others) await $.prompt.submit({ text, wait: false, origin: { kind } } as never)
+    expect(snapshot(w)).toBe(before)
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.prompts.length).toBe(person.length + others.length)
+  })
+
+  test('a session\'s pair, written again a day later, keeps when it was first written for its thread (R1b\'s start); a pair that named another thread starts again', async ($, on) => {
+    const w = world(on, { store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW - 30 * HOUR } } } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    expect(w.stored['mm.threads']).toEqual({ [SELF_CLI]: { app: SELF, at: NOW + 4_000, since: NOW - 30 * HOUR } })
+    // written again a day after that: still the first time
+    w.stored['mm.threads'] = { [SELF_CLI]: { app: SELF, at: NOW - 25 * HOUR, since: NOW - 60 * HOUR } }
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    expect(w.stored['mm.threads']).toEqual({ [SELF_CLI]: { app: SELF, at: NOW + 8_000, since: NOW - 60 * HOUR } })
+    // the session's pair named another thread: this thread's start is now
+    w.stored['mm.threads'] = { [SELF_CLI]: { app: 'local_elsewhere', at: NOW - 30 * HOUR } }
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    expect(w.stored['mm.threads']).toEqual({ [SELF_CLI]: { app: SELF, at: NOW + 12_000 } })
+  })
+})
+
+describe('R1b (0.5.9) in the app: a sync never moves a link on an empty thread list, or to or from a thread it cannot see', () => {
+  /** Acme linked by the bridge to its old thread; a newer thread of Acme's, its session declared Acme alone. */
+  const store = (over: Record<string, unknown> = {}) => ({
+    'mm.threads': { 'cli-old': { app: 'local_old', at: NOW - 72 * HOUR }, 'cli-new': { app: 'local_new', at: NOW - HOUR } },
+    'mm.links': { [ACME]: 'local_old' },
+    'mm.auto': { [ACME]: { sid: 'local_old', miss: 0, made: NOW - 2 * HOUR } },
+    'mm.titles': { local_old: 'Roof quote' },
+    'mm.pins': { local_old: ourPin(ACME, 'Acme Roofing') },
+    ...over,
+  })
+  const rows = feed({ threads: [declared(ACME, 'cli-old', 70), declared(ACME, 'cli-new', 1)] })
+
+  test('the list as it is: the link moves, the old thread gets its name back and our pin off, the new one is pinned and named', async ($, on) => {
+    const w = world(on, { feed: rows, threads: [thread('local_old', ACME_TITLE, 70, { pinned: true }), thread('local_new', 'Acme resume', 1)], store: store() })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_new' })
+    expect(w.threads.get('local_old')).toMatchObject({ title: 'Roof quote', pinned: false })
+    expect(w.threads.get('local_new')?.title).toMatch(ACME_NAMED)
+    expect(w.threads.get('local_new')?.pinned).toBe(true)
+    expect(w.acted()).toEqual([])
+  })
+
+  test('an empty thread list (this thread alone, not complete): nothing moves', async ($, on) => {
+    const w = world(on, { feed: rows, threads: [], store: store() })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_old' })
+    expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { sid: 'local_old' } })
+  })
+
+  test('the linked thread left out of the list and not answered for by id: left as it is, and nothing moves', async ($, on) => {
+    const w = world(on, { feed: rows, threads: [thread('local_old', ACME_TITLE, 70, { pinned: true }), thread('local_new', 'Acme resume', 1)], unlisted: ['local_old'], lookupFails: 'internal error', store: store() })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_old' })
+    expect(w.threads.get('local_old')).toMatchObject({ title: ACME_TITLE, pinned: true })
+    expect(w.threads.get('local_new')).toMatchObject({ title: 'Acme resume', pinned: false })
+  })
+})

@@ -1,6 +1,6 @@
 {
   "name": "mm-bridge",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "description": "Massmarket bridge: pins and names each client thread with what is due, shows the reply drafts in a side pane, never starts a model turn on its own",
   "author": {
     "name": "Massmarket AI"

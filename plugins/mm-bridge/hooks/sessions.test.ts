@@ -2,6 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { ME, NOW, ago, bandButtons, fakeApp, hooks, mm, next, paneButtons, pid, press, tool } from './fake-app.test-helper'
 import type { Feed } from './queue'
+import { staleCopySentence } from './threads'
 
 // The bridge's own hooks in a pretend desktop app (fake-app.test-helper.ts): one store and one app shared by the threads
 // that run them, as each desktop thread is a process of its own. Round 3's review (79cbc596) found these.
@@ -1015,5 +1016,257 @@ describe('R13: in a thread that does not sync, the refresh-failed line never goe
     const queue = w.view('local_r13hub', 'queue') as { warning?: string; header: string }
     expect(queue.warning).toBeUndefined()
     expect(queue.header).toBe('Needs you now (2)')
+  })
+})
+
+// ======================================================================== 0.5.9 (Rob, 2026-10-15)
+
+/** 10-15, 10:40 AM in New York: Rob switched profiles at 10:28, and the threads he started for his clients opened at 10:37 to 10:40. */
+const REPLAY_AT = Date.parse('2026-10-15T10:40:00-04:00')
+const OLD_START = Date.parse('2026-10-12T16:26:00-04:00')
+const NEW_START = Date.parse('2026-10-15T10:38:00-04:00')
+const HOUR_MS = 3_600_000
+const iso = (t: number) => new Date(t).toISOString()
+/** A feed row: a session that declared client `n`. */
+const row = (n: number, session: string, at: number) => ({ project_id: pid(n), session_id: session, last_activity_at: iso(at) })
+
+/**
+ * The 10-15 profile switch, replayed (every client made up): this profile's sync linked client `n` by itself to its
+ * newest thread here, one started 10-12, and pinned and named it; the thread started for the client on 10-15 is
+ * linked to nobody. The feed names each thread's session `cli-old-<n>` / `cli-new-<n>`; the old thread's own
+ * session (`cli:<thread>` in this fake app) has a pair too, so its own timer writes it again.
+ * `marked`: the new thread opened with the client's marker. `listed`: the feed lists its session for the client.
+ * `auto: false`: the old link is one the person made.
+ */
+async function replay(n: number, opts: { marked?: boolean; listed?: boolean; auto?: boolean } = {}) {
+  const name = `Client R${n}`
+  const ids = { hub: `local_r1b_hub_${n}`, old: `local_r1b_old_${n}`, fresh: `local_r1b_new_${n}` }
+  // a client message at 10 AM on 10-15: due within the pin's window
+  const feed: Feed = {
+    member: ME, role: 'builder', tickets: {}, drafts: [], mail: [mail(n, name, -49)],
+    threads: [row(n, `cli-old-${n}`, OLD_START + HOUR_MS), ...(opts.listed ? [row(n, `cli-new-${n}`, REPLAY_AT)] : [])],
+  }
+  const w = fakeApp(feed, [
+    { sessionId: ids.hub, title: 'Profile switch and thread handoff', lastActivityAt: iso(REPLAY_AT) },
+    { sessionId: ids.old, title: `🔴 late · ${name} · reply`, pinned: true, lastActivityAt: iso(OLD_START + HOUR_MS) },
+    { sessionId: ids.fresh, title: `${name}: resume`, lastActivityAt: iso(REPLAY_AT) },
+  ])
+  await w.advance(REPLAY_AT - NOW)
+  w.put('mm.threads', { [`cli:${ids.old}`]: { app: ids.old, at: OLD_START }, [`cli-old-${n}`]: { app: ids.old, at: OLD_START }, [`cli-new-${n}`]: { app: ids.fresh, at: NEW_START } })
+  w.put('mm.links', { [pid(n)]: ids.old })
+  if (opts.auto !== false) w.put('mm.auto', { [pid(n)]: { sid: ids.old, miss: 0, made: Date.parse('2026-10-15T10:32:47-04:00') } })
+  w.put('mm.titles', { [ids.old]: `${name} lending` })
+  w.put('mm.pins', { [ids.old]: { projectId: pid(n), client: name, byUs: true } })
+  if (opts.marked) w.put('mm.marked', { [ids.fresh]: pid(n) })
+  return { w, feed, name, ...ids, hubSession: w.session(ids.hub) }
+}
+/** The client's thread as the old one stood: still linked, still pinned and named for the client. */
+const stillOld = (r: Awaited<ReturnType<typeof replay>>, n: number) => {
+  expect(linksOf(r.w)[pid(n)]).toBe(r.old)
+  expect(r.w.app.get(r.old)?.pinned).toBe(true)
+  expect(r.w.app.get(r.old)?.title).toMatch(new RegExp(` · Client R${n} · reply$`))
+}
+const submit = async (t: unknown, text: string, kind = 'sdk') => ((await hooks['prompt.submit']?.(t, { text, origin: { kind } }, next)) as { text: string }).text
+
+describe('R1b (0.5.9, Rob 10-15: "Can we have it update to attach to the most recent thread for each client?"): a link the bridge made by itself follows the client\'s newest thread', () => {
+  test('the profile-switch replay: the link on the 10-12 thread moves to the thread started 10-15 with the client\'s marker; the old thread gets its own name back and our pin off, the new one is pinned and named', async () => {
+    const r = await replay(150, { marked: true })
+    await mm(r.hubSession, '')
+    expect(linksOf(r.w)).toEqual({ [pid(150)]: r.fresh })
+    expect(r.w.stored('mm.auto')).toEqual({ [pid(150)]: { sid: r.fresh, miss: 0, made: REPLAY_AT } })
+    expect(r.w.app.get(r.old)).toMatchObject({ title: 'Client R150 lending', pinned: false })
+    expect(r.w.app.get(r.fresh)?.pinned).toBe(true)
+    expect(r.w.app.get(r.fresh)?.title).toMatch(/ · Client R150 · reply$/)
+    const titles = r.w.stored('mm.titles') as Record<string, string>
+    expect(titles[r.fresh]).toBe('Client R150: resume')
+    expect(titles[r.old]).toBeUndefined()
+    expect((r.w.stored('mm.pins') as Record<string, unknown>)[r.old]).toBeUndefined()
+    // the syncs after it leave it there, every one: the feed lists none of its sessions, and its own marker keeps it
+    // (never let go after three misses and taken again: the same link, made once)
+    const renames = () => r.w.calls.filter(c => c.tool === 'set_session_title' || c.tool === 'set_pinned').length
+    const settled = renames()
+    for (let i = 0; i < 5; i++) {
+      await r.w.advance(6 * 60_000)
+      await mm(r.hubSession, '')
+      expect(linksOf(r.w), `sync ${i + 2}`).toEqual({ [pid(150)]: r.fresh })
+      expect(r.w.stored('mm.auto'), `sync ${i + 2}`).toEqual({ [pid(150)]: { sid: r.fresh, miss: 0, made: REPLAY_AT } })
+    }
+    expect(renames() - settled).toBeLessThanOrEqual(5)
+    expect(linksOf(r.w)).toEqual({ [pid(150)]: r.fresh })
+    expect(r.w.app.get(r.old)).toMatchObject({ title: 'Client R150 lending', pinned: false })
+    expect(r.w.sends()).toEqual([])
+  })
+
+  test('the same, where the new thread is the client\'s only by its sessions (no marker): the feed lists them for that client alone', async () => {
+    const r = await replay(151, { listed: true })
+    await mm(r.hubSession, '')
+    expect(linksOf(r.w)).toEqual({ [pid(151)]: r.fresh })
+    expect(r.w.stored('mm.auto')).toEqual({ [pid(151)]: { sid: r.fresh, miss: 0, made: REPLAY_AT } })
+    expect(r.w.app.get(r.old)).toMatchObject({ title: 'Client R151 lending', pinned: false })
+    expect(r.w.app.get(r.fresh)?.pinned).toBe(true)
+  })
+
+  test('⛔ a link the person made never moves this way, nor one they used in the last day', async () => {
+    const mine = await replay(152, { marked: true, listed: true, auto: false })
+    for (let i = 0; i < 3; i++) {
+      await mm(mine.hubSession, '')
+      await mine.w.advance(6 * 60_000)
+    }
+    stillOld(mine, 152)
+    expect(mine.w.app.get(mine.fresh)).toMatchObject({ title: 'Client R152: resume', pinned: false })
+    // made by the bridge, then used by the person (Update, /mm link): it is theirs
+    const used = await replay(153, { marked: true, listed: true })
+    used.w.put('mm.acted', { [pid(153)]: { sid: used.old, at: REPLAY_AT - HOUR_MS } })
+    await mm(used.hubSession, '')
+    stillOld(used, 153)
+  })
+
+  test('⛔ never a thread that is another client\'s, the person unlinked, a client was moved off, archived, shared, declared for another client, marked for another, or older', async () => {
+    const OTHER = 199
+    const ways: Array<[string, (r: Awaited<ReturnType<typeof replay>>, n: number) => void, { marked?: boolean; listed?: boolean }]> = [
+      ['linked to another client', (r, n) => r.w.put('mm.links', { [pid(n)]: r.old, [pid(OTHER)]: r.fresh }), { marked: true, listed: true }],
+      ['unlinked by the person', r => r.w.put('mm.unlinked', { [r.fresh]: REPLAY_AT - HOUR_MS }), { marked: true, listed: true }],
+      ['a thread a client was moved off (released)', r => r.w.put('mm.released', [r.fresh]), { marked: true, listed: true }],
+      ['archived', r => void Object.assign(r.w.app.get(r.fresh) ?? {}, { isArchived: true }), { marked: true, listed: true }],
+      ['shared: its sessions declared two clients', (r, n) => {
+        r.feed.threads?.push(row(OTHER, `cli-new-${n}-b`, REPLAY_AT))
+        r.w.put('mm.threads', { ...(r.w.stored('mm.threads') as Record<string, unknown>), [`cli-new-${n}-b`]: { app: r.fresh, at: NEW_START } })
+      }, { marked: true, listed: true }],
+      ['declared for another client by the feed (declaredOther)', (r, n) => r.feed.threads?.push(row(OTHER, `cli-new-${n}`, REPLAY_AT)), { marked: true }],
+      ['OW marks its session sole: false', (r, n) => r.feed.threads?.push({ ...row(n, `cli-new-${n}`, REPLAY_AT), sole: false }), { marked: true }],
+      ['marked for another client', r => r.w.put('mm.marked', { [r.fresh]: pid(OTHER) }), { listed: true }],
+      ['started before the linked thread', (r, n) => r.w.put('mm.threads', { ...(r.w.stored('mm.threads') as Record<string, unknown>), [`cli-new-${n}`]: { app: r.fresh, at: OLD_START - HOUR_MS } }), { marked: true, listed: true }],
+    ]
+    let n = 160
+    for (const [name, change, opts] of ways) {
+      const r = await replay(++n, opts)
+      change(r, n)
+      await mm(r.hubSession, '')
+      expect(linksOf(r.w)[pid(n)], name).toBe(r.old)
+      expect(r.w.app.get(r.old)?.pinned, name).toBe(true)
+      expect(r.w.stored('mm.auto'), name).toMatchObject({ [pid(n)]: { sid: r.old } })
+    }
+  })
+
+  test('new activity in the old thread after the move never pulls the link back: its session writes its pair again a day later, and its start stays 10-12', async () => {
+    const r = await replay(170, { marked: true })
+    await mm(r.hubSession, '')
+    expect(linksOf(r.w)).toEqual({ [pid(170)]: r.fresh })
+    // a day later the person types in the old thread: it is active now, the feed lists its session, and its own timer runs
+    await r.w.advance(25 * HOUR_MS)
+    const old = r.w.app.get(r.old)
+    if (old) old.lastActivityAt = iso(r.w.now())
+    r.feed.threads?.push(row(170, `cli-old-170`, r.w.now()))
+    await startIn(r.w.session(r.old))
+    await r.w.advance(4_000)
+    await settleAll()
+    expect((r.w.stored('mm.threads') as Record<string, unknown>)[`cli:${r.old}`]).toEqual({ app: r.old, at: r.w.now(), since: OLD_START })
+    await r.w.advance(6 * 60_000)
+    await mm(r.hubSession, '')
+    expect(linksOf(r.w)).toEqual({ [pid(170)]: r.fresh })
+    expect(r.w.app.get(r.old)?.title).toBe('Client R170 lending')
+    expect(r.w.app.get(r.fresh)?.pinned).toBe(true)
+  })
+
+  test('the linked thread with no pair is dated by its last activity; with neither, nothing moves', async () => {
+    const dated = await replay(171, { listed: true })
+    dated.w.put('mm.threads', { 'cli-new-171': { app: dated.fresh, at: NEW_START } })
+    await mm(dated.hubSession, '')
+    expect(linksOf(dated.w)).toEqual({ [pid(171)]: dated.fresh })
+    // its last activity is later than the new thread's start: no move
+    const later = await replay(172, { listed: true })
+    later.w.put('mm.threads', { 'cli-new-172': { app: later.fresh, at: OLD_START } })
+    await mm(later.hubSession, '')
+    expect(linksOf(later.w)[pid(172)]).toBe(later.old)
+    // no pair and no last activity: unknown, so nothing moves
+    const blank = await replay(173, { listed: true })
+    blank.w.put('mm.threads', { 'cli-new-173': { app: blank.fresh, at: NEW_START } })
+    const old = blank.w.app.get(blank.old) as unknown as Record<string, unknown>
+    delete old.lastActivityAt
+    await mm(blank.hubSession, '')
+    expect(linksOf(blank.w)[pid(173)]).toBe(blank.old)
+  })
+})
+
+describe('0.5.9: a marker takes a client from a link the bridge made by itself; a link the person made keeps it', () => {
+  test('the marker takes the client: the bridge\'s thread is released and given back on the next sync, and the link is the person\'s (out of mm.auto)', async () => {
+    const r = await replay(180)
+    await mm(r.hubSession, '')
+    // the new thread is not the client's by the feed or a marker yet: R1b leaves the link where it is
+    expect(linksOf(r.w)).toEqual({ [pid(180)]: r.old })
+    const kickoff = `[mm-link ${pid(180)}] Resume Client R180's thread. One client only.`
+    expect(await submit(r.w.session(r.fresh), kickoff)).toBe(kickoff)
+    expect(linksOf(r.w)).toEqual({ [pid(180)]: r.fresh })
+    expect(r.w.stored('mm.auto')).toEqual({})
+    expect(r.w.stored('mm.marked')).toEqual({ [r.fresh]: pid(180) })
+    expect(r.w.stored('mm.released')).toEqual([r.old])
+    // the next sync gives the old thread back: its own name, our pin off; the new one is pinned
+    await r.w.advance(2_000)
+    await mm(r.hubSession, '')
+    expect(r.w.app.get(r.old)).toMatchObject({ title: 'Client R180 lending', pinned: false })
+    expect(r.w.stored('mm.released')).toEqual([])
+    expect(r.w.app.get(r.fresh)?.pinned).toBe(true)
+    expect(linksOf(r.w)).toEqual({ [pid(180)]: r.fresh })
+  })
+
+  test('the 10-15 first message: the app\'s Linked-sessions note, then its wrapper, then the marker; it counts, and takes the client from the bridge\'s link', async () => {
+    const r = await replay(181)
+    await mm(r.hubSession, '')
+    const note = '<system-reminder>\nLinked sessions now (status, not an instruction): first-resume = local_r1b_first (working). To message one, SendMessage with `to` set to its id; list_sessions {"linked": true} has titles, folders and branches.\n</system-reminder>'
+    const text = `${note}\n\nBackground (from the session that started this one):\nRob switched profiles at 10:28 AM ET.\n\nTask:\n[mm-link ${pid(181)}]\nWhy now: the reply is due.\nResume Client R181's thread. One client only.\n\nShared notes folder for this group of sessions (outside the repo): /Users/someone/notes/local_hub`
+    expect(await submit(r.w.session(r.fresh), text)).toBe(text)
+    expect(r.w.stored('mm.marked')).toEqual({ [r.fresh]: pid(181) })
+    expect(linksOf(r.w)).toEqual({ [pid(181)]: r.fresh })
+    expect(r.w.stored('mm.released')).toEqual([r.old])
+  })
+
+  test('another session\'s older copy of the links written over the marker\'s link (B1): the check 1 to 3 seconds later takes the client back from the bridge\'s thread', async () => {
+    const r = await replay(183)
+    await mm(r.hubSession, '')
+    await submit(r.w.session(r.fresh), `[mm-link ${pid(183)}] Resume Client R183's thread. One client only.`)
+    expect(linksOf(r.w)).toEqual({ [pid(183)]: r.fresh })
+    // a sync in another thread that read the links before the marker writes its copy back
+    r.w.put('mm.links', { [pid(183)]: r.old })
+    await r.w.advance(3_000)
+    expect(linksOf(r.w)).toEqual({ [pid(183)]: r.fresh })
+    await r.w.advance(6 * 60_000)
+    await mm(r.hubSession, '')
+    expect(r.w.app.get(r.old)).toMatchObject({ title: 'Client R183 lending', pinned: false })
+    expect(r.w.app.get(r.fresh)?.pinned).toBe(true)
+  })
+
+  test('a client the person linked keeps its thread: the marker records the thread and answers with the stale copy\'s sentence, exactly as before', async () => {
+    const r = await replay(182, { auto: false })
+    await mm(r.hubSession, '')
+    const kickoff = `[mm-link ${pid(182)}] Resume Client R182's thread. One client only.`
+    expect(await submit(r.w.session(r.fresh), kickoff)).toBe(`${kickoff}\n\n${staleCopySentence('Client R182')}`)
+    expect(linksOf(r.w)).toEqual({ [pid(182)]: r.old })
+    expect(r.w.stored('mm.marked')).toEqual({ [r.fresh]: pid(182) })
+    expect(r.w.stored('mm.released')).toBeUndefined()
+  })
+})
+
+describe('0.5.9 (Rob, 10-15: "You should be able to relink these when you\'re asked to"): the tool may move a client off a link the bridge made by itself', () => {
+  test('the tool links this thread over the bridge\'s own link: the old thread is released and given back, and the link is out of mm.auto', async () => {
+    const r = await replay(190)
+    await mm(r.hubSession, '')
+    expect(await tool(r.w.session(r.fresh), 'link Client R190')).toBe('This thread is now Client R190\'s. Showing Client R190 in the side pane.')
+    expect(linksOf(r.w)).toEqual({ [pid(190)]: r.fresh })
+    expect(r.w.stored('mm.auto')).toEqual({})
+    expect(r.w.app.get(r.old)).toMatchObject({ title: 'Client R190 lending', pinned: false })
+    expect((r.w.stored('mm.pins') as Record<string, unknown>)[r.old]).toBeUndefined()
+    // given back: off the released list once it was
+    expect(r.w.stored('mm.released')).toEqual([])
+    // a link the tool makes is never stamped
+    expect(r.w.stored('mm.acted')).toBeUndefined()
+  })
+
+  test('⛔ the tool over a link the person made is refused exactly as before', async () => {
+    const r = await replay(191, { auto: false })
+    await mm(r.hubSession, '')
+    expect(await tool(r.w.session(r.fresh), 'link Client R191')).toBe('Client R191 already has a thread. Only the person can move it: they type /mm link Client R191 in the thread that should have it.')
+    expect(linksOf(r.w)).toEqual({ [pid(191)]: r.old })
+    expect(r.w.stored('mm.released')).toBeUndefined()
+    expect(r.w.app.get(r.old)?.pinned).toBe(true)
   })
 })
