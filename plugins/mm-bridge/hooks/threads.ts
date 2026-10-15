@@ -630,6 +630,45 @@ export function startKickoff(it: QueueItem, replaces: Replaced | undefined, now:
   return kickoffText(it, { replaces })
 }
 
+// ---------------------------------------------------------------- (0.5.12) Start all
+
+/**
+ * (0.5.12, Rob 10-15: no clicks at all; the app starts a thread only on the person's own words or press, so a new
+ * client's thread needs one person action) The most threads one Start all opens: the rest wait for a second press.
+ */
+export const START_ALL_MAX = 8
+
+/** (0.5.12) The Start all button, with how many clients need a new thread now. */
+export const startAllLabel = (n: number): string => `Start all (${n})`
+
+/**
+ * (0.5.12) The first message of a thread Start all opens: the new-thread kickoff (`startKickoff`) in the words that never
+ * take the package (kickoffText's `auto`, with no Update line, so the client's marker is first: cases 2, 4, 5 and 6
+ * show the drafts and make no pickup call until the person answers), with the hand-over from the client's old thread
+ * as a single Start has it. A client still open after our reply, with nothing else, opens with its Claim words, as
+ * Start has them. A single Start's own kickoff is unchanged.
+ */
+export function startAllKickoff(it: QueueItem, replaces: Replaced | undefined, now: number): string {
+  const fast = fastState(it, now)
+  const o = it.open ?? null
+  if (fast?.state === 'still_open' && !it.packageId && it.messages === 0 && it.tasks === 0 && !(o && withHolder(o))) return startKickoff(it, replaces, now)
+  return kickoffText(it, { replaces, auto: true })
+}
+
+/**
+ * (0.5.12) The one line a Start all leaves, in the band of every thread and above the list: the threads it started,
+ * the ones the app did not start and why, the ones it skipped (a thread or another start got there first), and how
+ * many still need a thread after the cap (START_ALL_MAX) for a second press.
+ */
+export function startAllSummary(started: readonly string[], failed: ReadonlyArray<{ client: string; why: string }>, skipped: ReadonlyArray<{ client: string; why: string }>, left: number): string {
+  const out: string[] = []
+  if (started.length) out.push(`Started ${started.length} thread${started.length === 1 ? '' : 's'}: ${started.join(', ')}.`)
+  if (failed.length) out.push(`Not started: ${failed.map(f => `${f.client} (${f.why})`).join('; ')}.`)
+  if (skipped.length) out.push(`Skipped: ${skipped.map(f => `${f.client} (${f.why})`).join('; ')}.`)
+  if (left > 0) out.push(`${left} more need${left === 1 ? 's' : ''} a thread: press Start all again.`)
+  return out.join(' ') || 'No client needs a new thread now.'
+}
+
 /** `local_<id>`: the app's id for a thread, which is what the session tools take. */
 export const THREAD_ID = /^local_[A-Za-z0-9_-]{1,100}$/
 

@@ -96,6 +96,10 @@ type WorldOptions = {
   toolsUnlisted?: boolean
   /** (0.5.7) start_session's answer to a start gives no session id. */
   startNoId?: boolean
+  /** (0.5.12) The app takes this long to answer start_session: how a test sees whether two starts are ever in flight at once. */
+  startTakesMs?: number
+  /** (0.5.12) start_session refuses this one start (by its arguments) with this text; undefined: it starts. */
+  startRefuses?: (args: Record<string, unknown>) => string | undefined
   /** (0.5.11, review of PR #15) The feed takes this long to answer its n-th read (the closeout feed only). */
   fetchTakesMs?: (n: number) => number
   /**
@@ -133,6 +137,8 @@ function world(on: On, opts: WorldOptions = {}) {
   let theFeed = opts.feed ?? feed()
   let chipsMinted = 0
   let sessionsStarted = 0
+  let startsNow = 0
+  let mostStartsAtOnce = 0
   // (0.5.7) the tools the model can call now, as the engine lists them
   if (opts.tools) {
     const names = [...(opts.tools !== 'start' ? ['mcp__ccd_session__spawn_task'] : []), ...(opts.tools !== 'spawn' ? ['mcp__ccd_session__start_session', 'mcp__ccd_session__list_start_targets'] : []), 'mcp__ccd_session__dismiss_task', 'Bash']
@@ -175,6 +181,13 @@ function world(on: On, opts: WorldOptions = {}) {
     }
     if (e.tool === 'start_session') {
       if (opts.startFails) return refused(opts.startFails)
+      // (0.5.12) how many starts the app has in hand at once, at most
+      startsNow++
+      mostStartsAtOnce = Math.max(mostStartsAtOnce, startsNow)
+      if (opts.startTakesMs) await clock.sleep(opts.startTakesMs)
+      startsNow--
+      const no = opts.startRefuses?.(e.args)
+      if (no) return refused(no)
       const sid = `local_started_${++sessionsStarted}`
       threads.set(sid, { sessionId: sid, title: String(e.args.title), pinned: false, isArchived: false, lastActivityAt: new Date(clock.now()).toISOString() })
       return text(`Started session "${String(e.args.title)}" (session_id: ${opts.startNoId ? '' : sid}, name: started-${sessionsStarted}). It runs on its own; you get a note here when its turn ends.`)
@@ -304,6 +317,8 @@ function world(on: On, opts: WorldOptions = {}) {
     setFeed: (f: Feed) => {
       theFeed = f
     },
+    /** (0.5.12) The most start_session calls the app had in hand at the same time. */
+    mostStartsAtOnce: () => mostStartsAtOnce,
   }
 }
 
@@ -6855,5 +6870,250 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     const started = w.calls.filter(c => c.tool === 'start_session' && c.args.initiation === 'user_asked')
     expect(started.map(c => String(c.args.prompt).slice(0, 47))).toEqual([`[mm-link ${CEDAR}] `])
     expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
+  })
+})
+
+// ======================================================================== 0.5.12
+
+describe('0.5.12: Start all (Rob, 10-15: no clicks at all; the app starts a thread only on the person\'s own press)', () => {
+  /** Every line written to the notice log (this world's disk keeps what is written, but does not read it back). */
+  const notices = (w: { written: Array<{ path: string; text: string }> }) => w.written.filter(f => f.path.endsWith('bridge-notices.log')).map(f => f.text).join('')
+  const bandButtons = async ($: Engine) => {
+    const band = await bandOf($)
+    const out = await buttons(band)
+    await band.unmount()
+    return out
+  }
+  const bandTexts = async ($: Engine) => {
+    const band = await bandOf($)
+    const out = (await lines(band)).join(' ')
+    await band.unmount()
+    return out
+  }
+  const startAllOn = async (ui: Drawing) => (await buttons(ui)).filter(b => b[0] === 'mm-start-all').map(b => b[1])
+  /** Each start's prompt, in the order the app was asked. */
+  const prompts = (w: { calls: Call[] }) => starts(w).map(c => String(c.args.prompt))
+  /** The Start all words of each of the three clients (0.5.11's `auto`, with no Update line): Acme's drafts shown, never taken. */
+  const ACME_ALL = NOT_TAKEN(ACME, 'Acme Roofing Pat')
+  const SUMMARY_3 = 'Started 3 threads: Cedar Dental, Acme Roofing, Bolt Staffing.'
+  const pidOf = (i: number) => `44444444-4444-4444-8444-${String(i).padStart(12, '0')}`
+  /** `n` clients, each with a message an hour or more old and no thread: all need a new thread. */
+  const many = (n: number): Feed => feed({ drafts: [], tickets: {}, mail: Array.from({ length: n }, (_, i) => mailFor(pidOf(i), `Client ${i}`, 1 + i)) })
+
+  test('N = 0: no Start all button anywhere; /mm start all says so and starts nothing', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: feed({ drafts: [], mail: [], tickets: {} }) })
+    await mm($, '')
+    const ui = await pane($)
+    expect(await startAllOn(ui)).toEqual([])
+    await ui.unmount()
+    expect((await bandButtons($)).filter(b => b[0] === 'mm-start-all')).toEqual([])
+    expect(await mm($, 'start all')).toBe('No client needs a new thread now.')
+    expect(starts(w)).toEqual([])
+  })
+
+  test('N = 1: no Start all button; the row\'s own Start stays (and /mm start all, typed, starts that one)', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: feed({ drafts: [], mail: [] }) })
+    await mm($, '')
+    const ui = await pane($)
+    expect(await startAllOn(ui)).toEqual([])
+    expect(await buttonsOf(ui, CEDAR)).toEqual(['Start thread', 'Drafts'])
+    await ui.unmount()
+    expect((await bandButtons($)).filter(b => b[0] === 'mm-start-all')).toEqual([])
+    expect(await mm($, 'start all')).toBe('Started 1 thread: Cedar Dental.')
+    expect(prompts(w)).toEqual([CEDAR_KICKOFF])
+  })
+
+  test('N = 2: Start all (2) in the pane and the band; one press starts both, one after another, soonest due first, in the words that never take the package', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: feed({ drafts: [] }), startTakesMs: 500 })
+    await mm($, '')
+    const ui = await pane($)
+    expect(await startAllOn(ui)).toEqual(['Start all (2)'])
+    expect(await bandButtons($)).toEqual([['mm-open-list', 'Open list'], ['mm-start-all', 'Start all (2)']])
+    const pressed = ui.press({ key: 'mm-start-all' })
+    await w.clock.advance(2_000)
+    await pressed
+    // ⛔ never two at once
+    expect(w.mostStartsAtOnce()).toBe(1)
+    expect(starts(w).map(c => c.args)).toMatchObject([
+      { initiation: 'user_asked', title: 'Cedar Dental: reply to the client', context: 'fresh', use_worktree: false, wake_when_done: false },
+      { initiation: 'user_asked', title: 'Bolt Staffing: reply to the client', context: 'fresh', use_worktree: false, wake_when_done: false },
+    ])
+    expect(prompts(w)).toEqual([CEDAR_KICKOFF, BOLT_AUTO_KICKOFF])
+    // each recorded and linked as a single Start does it
+    expect(w.stored['mm.links']).toMatchObject({ [CEDAR]: 'local_started_1', [BOLT]: 'local_started_2' })
+    expect(Object.keys(w.stored['mm.sent'] as object).sort()).toEqual([BOLT, CEDAR].sort())
+    expect(w.stored['mm.starting']).toEqual({})
+    const line = 'Started 2 threads: Cedar Dental, Bolt Staffing.'
+    expect(w.toasts.at(-1)).toBe(line)
+    expect(await lines(ui)).toContain(line)
+    expect(await bandTexts($)).toContain(line)
+    expect(notices(w)).toContain(`started Cedar Dental (${CEDAR}) sig`)
+    expect(notices(w)).toContain('Start all, pressed')
+    // pinned and named by the sync after; nothing left to start, so no button
+    await w.clock.advance(1_500)
+    expect(w.threads.get('local_started_1')).toMatchObject({ title: CEDAR_TITLE, pinned: true })
+    expect(w.threads.get('local_started_2')).toMatchObject({ title: BOLT_TITLE, pinned: true })
+    expect(await startAllOn(ui)).toEqual([])
+    expect((await bandButtons($)).filter(b => b[0] === 'mm-start-all')).toEqual([])
+    await ui.unmount()
+  })
+
+  test('the band\'s button does the same; Acme\'s thread opens with its drafts shown and not taken, the marker first', async ($, on) => {
+    const w = world(on, { tools: 'start' })
+    await mm($, '')
+    const band = await bandOf($)
+    expect((await buttons(band)).filter(b => b[0] === 'mm-start-all')).toEqual([['mm-start-all', 'Start all (3)']])
+    await band.press({ key: 'mm-start-all' })
+    await band.unmount()
+    expect(prompts(w)).toEqual([CEDAR_KICKOFF, ACME_ALL, BOLT_AUTO_KICKOFF])
+    for (const [p, pid] of prompts(w).map((p, i) => [p, [CEDAR, ACME, BOLT][i]] as const)) expect(p.startsWith(`[mm-link ${pid}] `)).toBe(true)
+    for (const p of prompts(w)) expect(p).not.toContain('Pick up the reply drafts')
+    expect(w.toasts.at(-1)).toBe(SUMMARY_3)
+  })
+
+  test('/mm start all, typed by the person, does the same; Claude through the tool cannot', async ($, on) => {
+    const w = world(on, { tools: 'start' })
+    expect(await tool($, 'start all')).toBe('Only the person can do this: press Start thread in the pane or type /mm start <client>.')
+    expect(starts(w)).toEqual([])
+    expect(await mm($, 'start all')).toBe(SUMMARY_3)
+    expect(prompts(w)).toEqual([CEDAR_KICKOFF, ACME_ALL, BOLT_AUTO_KICKOFF])
+  })
+
+  test('N = 9: one press starts 8 and says 1 is left; the button stays for the second press, which starts the last', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: many(9) })
+    await mm($, '')
+    const ui = await pane($)
+    expect(await startAllOn(ui)).toEqual(['Start all (9)'])
+    await ui.press({ key: 'mm-start-all' })
+    expect(starts(w).length).toBe(8)
+    const first = String(w.toasts.at(-1))
+    expect(first.startsWith('Started 8 threads: ')).toBe(true)
+    expect(first.endsWith(' 1 more needs a thread: press Start all again.')).toBe(true)
+    expect(await bandTexts($)).toContain('1 more needs a thread: press Start all again.')
+    // the one left: the button stays, in the pane and the band
+    await w.clock.advance(1_500)
+    expect(await startAllOn(ui)).toEqual(['Start all (1)'])
+    expect((await bandButtons($)).filter(b => b[0] === 'mm-start-all')).toEqual([['mm-start-all', 'Start all (1)']])
+    await ui.press({ key: 'mm-start-all' })
+    expect(starts(w).length).toBe(9)
+    expect(String(w.toasts.at(-1))).toMatch(/^Started 1 thread: Client \d\.$/)
+    // every client once, each in its own thread
+    expect(new Set(starts(w).map(c => String(c.args.prompt).slice(9, 45))).size).toBe(9)
+    expect(Object.keys(w.stored['mm.links'] as object).length).toBe(9)
+    await w.clock.advance(1_500)
+    expect(await startAllOn(ui)).toEqual([])
+    await ui.unmount()
+  })
+
+  test('⛔ a client linked to a thread by someone else between the press and its start is skipped; the rest start', async ($, on) => {
+    let done = false
+    const w = world(on, {
+      tools: 'start',
+      during: (call, stored) => {
+        if (done || call.tool !== 'start_session') return
+        done = true
+        // while Cedar's thread is being started, Bolt is linked to a thread that is there
+        stored['mm.links'] = { ...((stored['mm.links'] as Record<string, string>) ?? {}), [BOLT]: 'local_other' }
+      },
+    })
+    await mm($, '')
+    expect(await mm($, 'start all')).toBe('Started 2 threads: Cedar Dental, Acme Roofing. Skipped: Bolt Staffing (it has a thread now).')
+    expect(prompts(w)).toEqual([CEDAR_KICKOFF, ACME_ALL])
+    expect((w.stored['mm.links'] as Record<string, string>)[BOLT]).toBe('local_other')
+  })
+
+  test('⛔ a client another thread is starting (its claim in mm.starting) is skipped', async ($, on) => {
+    const w = world(on, { tools: 'start', store: { 'mm.starting': { [`${BOLT}\n0badc0de`]: { owner: 'local_elsewhere', until: NOW + 60_000 } } } })
+    await mm($, '')
+    expect(await mm($, 'start all')).toBe('Started 2 threads: Cedar Dental, Acme Roofing. Skipped: Bolt Staffing (another thread is starting it).')
+    expect(prompts(w)).toEqual([CEDAR_KICKOFF, ACME_ALL])
+    // the other thread's claim is its own
+    expect(w.stored['mm.starting']).toEqual({ [`${BOLT}\n0badc0de`]: { owner: 'local_elsewhere', until: NOW + 60_000 } })
+  })
+
+  test('⛔ two presses at once (the pane\'s twice, and the band\'s): one Start all, each client once, never two starts in flight', async ($, on) => {
+    const w = world(on, { tools: 'start', startTakesMs: 1_000 })
+    await mm($, '')
+    const ui = await pane($)
+    const band = await bandOf($)
+    const a = ui.press({ key: 'mm-start-all' })
+    const b = ui.press({ key: 'mm-start-all' })
+    const c = band.press({ key: 'mm-start-all' })
+    await w.clock.advance(200)
+    expect(await mm($, 'start all')).toBe('Start all is already running.')
+    await w.clock.advance(5_000)
+    await Promise.all([a, b, c])
+    expect(prompts(w)).toEqual([CEDAR_KICKOFF, ACME_ALL, BOLT_AUTO_KICKOFF])
+    expect(w.mostStartsAtOnce()).toBe(1)
+    expect(w.toasts.filter(t => t === SUMMARY_3).length).toBe(1)
+    await band.unmount()
+    await ui.unmount()
+  })
+
+  test('the app refuses one client: the rest still start, and the line says which and why', async ($, on) => {
+    const w = world(on, { tools: 'start', startRefuses: args => (String(args.prompt).includes(BOLT) ? 'Starting sessions is turned off for this one.' : undefined) })
+    await mm($, '')
+    expect(await mm($, 'start all')).toBe('Started 2 threads: Cedar Dental, Acme Roofing. Not started: Bolt Staffing (Starting sessions is turned off for this one).')
+    expect(starts(w).length).toBe(3)
+    expect((w.stored['mm.links'] as Record<string, string>)[BOLT]).toBeUndefined()
+    expect(notices(w)).toContain(`not started Bolt Staffing (${BOLT}) sig`)
+    expect(w.stored['mm.starting']).toEqual({})
+  })
+
+  test('⛔ the person presses a row\'s own Start while Start all runs: that client is started once, by the row; a row whose start is in flight does nothing', async ($, on) => {
+    const w = world(on, { tools: 'start', startTakesMs: 1_000 })
+    await mm($, '')
+    const ui = await pane($)
+    const all = ui.press({ key: 'mm-start-all' })
+    await w.clock.advance(200)
+    // Cedar's start is in flight in Start all: its row's Start does nothing
+    await ui.press({ key: `start:${CEDAR}` })
+    // Bolt's is not reached yet: its row's Start starts it, with a single Start's own words
+    const row = ui.press({ key: `start:${BOLT}` })
+    await w.clock.advance(5_000)
+    await Promise.all([all, row])
+    expect(prompts(w)).toEqual([CEDAR_KICKOFF, BOLT_KICKOFF, ACME_ALL])
+    expect(w.toasts).toContain('Started 2 threads: Cedar Dental, Acme Roofing. Skipped: Bolt Staffing (it has a thread now).')
+    expect(w.toasts).toContain('Started Bolt Staffing\'s thread: "Bolt Staffing: reply to the client". It is under Pinned.')
+    expect(Object.values(w.stored['mm.links'] as Record<string, string>).length).toBe(3)
+    await ui.unmount()
+  })
+
+  test('a single Start still opens with 0.5.11\'s words, byte for byte (Acme: pick up the drafts; Bolt: run prep; Cedar: what is due)', async ($, on) => {
+    const w = world(on, { tools: 'start' })
+    await mm($, '')
+    const ui = await pane($)
+    for (const pid of [ACME, BOLT, CEDAR]) await ui.press({ key: `start:${pid}` })
+    await ui.unmount()
+    expect(prompts(w)).toEqual([ACME_KICKOFF, BOLT_KICKOFF, CEDAR_KICKOFF])
+  })
+
+  test('⛔ (0.5.12) a single Start for a client another thread is starting does not start it twice', async ($, on) => {
+    const w = world(on, { tools: 'start', store: { 'mm.starting': { [`${CEDAR}\n0badc0de`]: { owner: 'local_elsewhere', until: NOW + 60_000 } } } })
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: `start:${CEDAR}` })
+    await ui.unmount()
+    expect(starts(w)).toEqual([])
+    expect(w.toasts.at(-1)).toBe('Cedar Dental\'s thread is being started from another thread. It will be under Pinned in a moment.')
+  })
+
+  test('⛔ nothing starts by itself: with the button offered, half an hour of ticks and syncs (auto off) start nothing', async ($, on) => {
+    const w = world(on, { tools: 'start', store: { 'mm.autostart': { on: false } } })
+    await tickOnce($, w)
+    for (let i = 0; i < 30; i++) await w.clock.advance(60_000)
+    expect((await bandButtons($)).filter(b => b[0] === 'mm-start-all')).toEqual([['mm-start-all', 'Start all (3)']])
+    expect(starts(w)).toEqual([])
+  })
+
+  test('where the app gives no start_session, there is no Start all button, and /mm start all says to use each row', async ($, on) => {
+    const w = world(on, { tools: 'spawn' })
+    await mm($, '')
+    const ui = await pane($)
+    expect(await startAllOn(ui)).toEqual([])
+    await ui.unmount()
+    expect(await mm($, 'start all')).toBe('Start all needs the app\'s start_session, which this thread does not have: press Start thread on each row.')
+    expect(starts(w)).toEqual([])
+    expect(w.minted()).toEqual([])
   })
 })

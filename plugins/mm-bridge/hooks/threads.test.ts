@@ -9,6 +9,7 @@ import {
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLink, titleLooksLike, titleSuggestion, waitingText,
   newerThreadFor, threadStart,
   CHIP_TITLE_MAX, REFRESH_FAILED, bandText, chipTitle, claimText, isStillOpenRow, staleCopySentence, startKickoff,
+  START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary,
   LABEL_MAX, buttonLabel,
 } from './threads'
 import type { AppThread, ClientThread, Pairs, Platform } from './threads'
@@ -1512,6 +1513,36 @@ describe('(0.5.11, Opus 10-15) an update sent by itself never takes the package;
       // the marker alone moved: the rest is the body as the words for a send by itself have it
       expect(auto.slice(marker.length), c.name).toBe(`${auto.slice(marker.length).split('\n')[0]}\n${kickoffText(c.it, { auto: true }).slice(marker.length)}`)
     }
+  })
+
+  // (0.5.12, Rob 10-15: no clicks at all) Start all opens each thread in the words that never take the package; a
+  // single Start (and a chip) opens with 0.5.11's words, byte for byte
+  test('(0.5.12) a single Start\'s kickoff is ded42364\'s and 0.5.11\'s, byte for byte; Start all\'s is the no-take body, the marker first, no Update line', async () => {
+    const old = { sid: 'local_0f1e2d3c-aaaa-4bbb-8ccc-000000000001', title: 'Roof quote' }
+    for (const c of CASES) {
+      expect(startKickoff(c.it, undefined, NOW), c.name).toBe(c.plain)
+      const all = startAllKickoff(c.it, undefined, NOW)
+      expect(all, c.name).toBe(kickoffText(c.it, { auto: true }))
+      expect(all.startsWith(`[mm-link ${c.it.projectId}] `), c.name).toBe(true)
+      expect(all, c.name).not.toContain('New since this thread last worked on this client')
+      expect(all, c.name).not.toContain('Pick up the reply drafts')
+      expect(all, c.name).not.toContain('so pick it up')
+      // the hand-over from an old thread, as a single Start carries it
+      expect(startAllKickoff(c.it, old, NOW), c.name).toBe(`${all}\n\n${handoverText(c.it, old)}`)
+    }
+    // the words differ from a single Start's exactly where an update sent by itself's do
+    expect(CASES.filter(c => startAllKickoff(c.it, undefined, NOW) !== c.plain).map(c => c.name)).toEqual(['2 prepared for me', '4 stale, messages waiting', '5 prepared, messages waiting', '6 messages, no package'])
+  })
+
+  test('(0.5.12) Start all\'s one line: started, not started and why, skipped and why, and how many are left for a second press', async () => {
+    expect(START_ALL_MAX).toBe(8)
+    expect(startAllLabel(3)).toBe('Start all (3)')
+    expect(startAllSummary([], [], [], 0)).toBe('No client needs a new thread now.')
+    expect(startAllSummary(['Acme Roofing'], [], [], 0)).toBe('Started 1 thread: Acme Roofing.')
+    expect(startAllSummary(['Acme Roofing', 'Cedar Dental'], [{ client: 'Bolt Staffing', why: 'the app did not answer in 15 seconds' }], [{ client: 'Dune Co', why: 'it has a thread now' }], 1)).toBe(
+      'Started 2 threads: Acme Roofing, Cedar Dental. Not started: Bolt Staffing (the app did not answer in 15 seconds). Skipped: Dune Co (it has a thread now). 1 more needs a thread: press Start all again.',
+    )
+    expect(startAllSummary(['A'], [], [], 3)).toBe('Started 1 thread: A. 3 more need a thread: press Start all again.')
   })
 })
 
