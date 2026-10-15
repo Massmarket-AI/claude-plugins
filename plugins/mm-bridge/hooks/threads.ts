@@ -64,11 +64,12 @@ export type Recommendation = {
   fresh?: true
 }
 
-/** What Update last put into a client's thread: which thread, the signature of what it carried, and when. */
-export type Sent = { sid: string; sig: string; at: number }
-
-/** A session's reading of its own context window: four numbers, nothing else. */
-export type ContextReading = { tokensUsed: number; contextWindow: number; percentUsed: number; at: number }
+/**
+ * What Update last put into a client's thread: which thread, the signature of what it carried, and when.
+ * (0.5.11, review of PR #15, F3) `prep`: it went by itself and asked the thread to build the client's package
+ * (kickoff case 6, `asksForPrep`): the package that then appears is the thread's own work, not something new for it.
+ */
+export type Sent = { sid: string; sig: string; at: number; prep?: true }
 
 /** The client a thread is linked to: the first project whose link is that thread. */
 export function ownerOf(sid: string, links: Readonly<Record<string, string>>): string | undefined {
@@ -383,10 +384,39 @@ export function hasWaiting(had: string, it: QueueItem): boolean {
 
 // ---------------------------------------------------------------- (0.5.11) Update by itself
 
-/** (0.5.11) Something new for a client goes into its thread by itself only once nothing newer has come for this long. */
+/**
+ * (0.5.11) Something new for a client goes into its thread by itself only once this bridge has seen it, unchanged,
+ * for this long (review of PR #15, F3: measured from when the bridge first saw it, `FirstSeen`, never from the feed's
+ * times: the live feed gives no time for a package's drafts, and a message's time says nothing of them).
+ */
 export const AUTO_QUIET_MS = 10 * 60_000
-/** (0.5.11) With client mail waiting and no reply drafts ready, it goes once the newest message is this old. */
-export const AUTO_NO_DRAFTS_MS = 60 * 60_000
+/**
+ * (0.5.11, review of PR #15, F3) With client mail waiting and no reply drafts ready, it goes once this bridge first
+ * saw the oldest waiting message this long ago, unless drafts are ready sooner. OW holds its own notice 120 minutes,
+ * and Lane-2 aims to have the drafts ready in 60: the thread is not asked to build them while Lane-2 still may.
+ */
+export const AUTO_NO_DRAFTS_MS = 120 * 60_000
+
+/**
+ * (0.5.11, review of PR #15, F3) What this bridge has seen of a client on the person's own list, as the syncs had it
+ * (`mm.firstSeen`): what it has now (`sig`, a short hash of its signature), since when this bridge has seen exactly that
+ * (`at`), and since when client mail has been waiting without a break (`mail`; 0: none waits).
+ */
+export type FirstSeen = { sig: string; at: number; mail: number }
+
+/** (0.5.11, review of PR #15, F3) `FirstSeen` for a client as a sync at `at` has it, from what was seen before. */
+export function seenNow(prev: FirstSeen | undefined, it: QueueItem, sig: string, at: number): FirstSeen {
+  const kept = (t: unknown): number => (typeof t === 'number' && Number.isFinite(t) && t > 0 && t <= at ? t : 0)
+  const since = prev && prev.sig === sig ? kept(prev.at) : 0
+  const mail = it.messages > 0 ? kept(prev?.mail) || at : 0
+  return { sig, at: since || at, mail }
+}
+
+/**
+ * (0.5.11, review of PR #15, F3) Kickoff case 6: client mail waiting and no package at all, so the thread is asked
+ * to build one (prep). Sent by itself, the package that then appears is the thread's own work (`Sent.prep`).
+ */
+export const asksForPrep = (it: QueueItem): boolean => it.messages > 0 && !it.packageId && !(it.open ?? null) && it.kind !== 'ok'
 
 /**
  * (0.5.11, Rob 10-15: "I think we should start updating threads automatically") Whether a client on the person's
@@ -403,24 +433,29 @@ export function autoUpdatable(it: QueueItem, now: number): boolean {
 /**
  * (0.5.11, Rob 10-15: "Joe's call from Second Peak Training ended a little while back... I don't understand why it
  * hasn't already handed the new context there so the draft is ready when I open the thread up") Whether it is time
- * to update a client's thread by itself: nothing newer has come for the client for AUTO_QUIET_MS (a message
- * received, the mail a package covers, the package's own update, a task created), and then reply drafts are ready
- * (a package prepared for the person, or one they hold), or the newest client message is AUTO_NO_DRAFTS_MS old, or
- * no client message waits at all (tasks only). A time more than AUTO_QUIET_MS ahead is a task's due time standing
- * in for when it was created, not something that arrived; one less far ahead is read as now.
+ * to update a client's thread by itself, from what this bridge has seen of the client (`seen`, for what it has
+ * NOW: the caller gives the record of this signature only). (Review of PR #15, F3) The bridge has seen it, unchanged,
+ * for AUTO_QUIET_MS; and then no client message waits (tasks only), or reply drafts are ready (a package prepared for
+ * the person, or one they hold), or the bridge first saw the oldest waiting message AUTO_NO_DRAFTS_MS ago. Never
+ * the feed's own times.
  */
-export function autoUpdateDue(it: QueueItem, now: number): boolean {
-  const n = it.newest ?? { mail: 0, pkg: 0, task: 0 }
-  const arrived = (t: unknown): number => {
-    const v = Number(t)
-    return Number.isFinite(v) && v > 0 && v <= now + AUTO_QUIET_MS ? Math.min(v, now) : 0
-  }
-  const newest = Math.max(arrived(n.mail), arrived(n.pkg), arrived(n.task), arrived(ms(it.packageUpdatedAt)))
-  if (now - newest < AUTO_QUIET_MS) return false
+export function autoUpdateDue(it: QueueItem, now: number, seen: FirstSeen | undefined): boolean {
+  if (!seen || !(now - seen.at >= AUTO_QUIET_MS)) return false
   if (it.messages === 0) return true
   const o = it.open ?? null
   const ready = it.kind === 'ready' || o?.state === 'prepared' || o?.state === 'held_by_me'
-  return ready || now - arrived(n.mail) >= AUTO_NO_DRAFTS_MS
+  return ready || (seen.mail > 0 && now - seen.mail >= AUTO_NO_DRAFTS_MS)
+}
+
+/**
+ * (0.5.11, review of PR #15, F3) After an update that went by itself and asked the thread to build the client's
+ * package (`Sent.prep`), the package that appears is that thread's own work: not something new to send it. So it is
+ * while the client has a package now, in that thread, with no client message received since the send.
+ */
+export function ownPackage(given: Sent | undefined, sid: string, it: QueueItem): boolean {
+  if (!given?.prep || given.sid !== sid || asksForPrep(it)) return false
+  if (!it.packageId && !(it.open ?? null)) return false
+  return !((Number(it.newest?.mail) || 0) > given.at)
 }
 
 /**
@@ -484,7 +519,8 @@ export function waitingText(it: QueueItem): string {
  *   6. client messages with no package yet
  *   7. committed tasks only (a package that is out of date, or another owner's, changes nothing here:
  *      the client is in the list for the task)
- * ⛔ (0.5.11) `auto`: the message an update sent by itself carries (`autoUpdate`), which no person pressed for. It
+ * ⛔ (0.5.11) `auto`: the message an update sent by itself carries (`autoUpdate`), which no person pressed for (with
+ *    `update`, the marker comes first: F4 below). It
  *    never takes the package (client-reply-prep §9.1's pickup call): taken by a send nobody pressed for, OW would
  *    show it held by the person, teammates would be refused it (409 held_by_another), and the 24-hour "nobody
  *    picked this up" warning would stop counting it. Cases 2, 4, 5 and 6 then have words of their own (Opus's,
@@ -530,7 +566,14 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
                     `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep: no package exists yet, so run prep (§2) to build one, then show the five-part pickup view without taking the package: no pickup call until I answer here. Then wait for me. Send nothing without my go.`
                   : `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
                 : `[mm-link ${id}] ${who} has ${it.tasks} committed task(s)${tasksDue}. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`
-  if (opts.update) return `New since this thread last worked on this client: ${waitingText(it)}.\n${body}`
+  const news = `New since this thread last worked on this client: ${waitingText(it)}.`
+  // ⛔ (0.5.11, review of PR #15, F4) sent by itself: the marker first, at the very start of the text, as every hook
+  // that tells the person's time from the bridge's reads it (a time-tracking hook too old to read the app's own
+  // `peer` stamp counts a turn that opens with the marker as automatic). Then the first line, then the body
+  // without its own marker. A pressed Update's text is as it was.
+  const marker = `[mm-link ${id}] `
+  if (opts.update && opts.auto) return `${marker}${news}\n${body.startsWith(marker) ? body.slice(marker.length) : body}`
+  if (opts.update) return `${news}\n${body}`
   const handover = opts.replaces ? handoverText(it, opts.replaces) : ''
   return handover ? `${body}\n\n${handover}` : body
 }

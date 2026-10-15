@@ -10,9 +10,9 @@ import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
   LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, staleCopySentence, startKickoff, threadLink, titleSuggestion,
-  REFRESH_FAILED, autoUpdatable, autoUpdateDue, bandText, chipTitle, waitingText,
+  REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, bandText, chipTitle, ownPackage, seenNow, waitingText,
 } from './threads'
-import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, Row, RowButton, RowState, Sent } from './threads'
+import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
 
 // The Massmarket bridge.
 // Pinned threads are each person's to-do list: a client's thread pins itself and its name says what is
@@ -38,10 +38,12 @@ import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, 
 // ⛔ (0.5.11, Rob 10-15: "I think we should start updating threads automatically") ONE exception, and only while
 //    auto is on (/mm auto, the switch auto-start has had since 0.5.7): after each sync, a client on the person's own
 //    list whose linked thread lacks what is waiting gets Update's message (in words that never take the package:
-//    kickoffText's `auto`), through Update's own send and guards, once the client has been quiet AUTO_QUIET_MS and
-//    its drafts are ready (or an hour has passed), within AUTO_UPDATES_PER_HOUR and AUTO_UPDATES_PER_DAY on this
-//    computer, and never from a thread into itself (`autoUpdates`). It stamps nothing and claims nothing: an
-//    automatic send is nobody's act (R11).
+//    kickoffText's `auto`, the marker first), through Update's own send and guards, once this bridge has seen the
+//    client unchanged for AUTO_QUIET_MS and its drafts are ready (or AUTO_NO_DRAFTS_MS have passed since it first saw
+//    the mail waiting), within AUTO_UPDATES_PER_SYNC from one sync and AUTO_UPDATES_PER_HOUR and AUTO_UPDATES_PER_DAY
+//    on this computer, never into a thread the person used in the last AUTO_IDLE_MS, never from a thread into itself,
+//    and only where the time-tracking hook counts it as automatic (`autoUpdates`). It stamps nothing and claims
+//    nothing: an automatic send is nobody's act (R11).
 // ⛔ CLAUDE CANNOT DO EITHER. The model can call the `mm` tool, and the tool runs the same `runCommand`:
 //    there, and for a /mm command that did not come from the person's own prompt (a message from another
 //    session, a scheduled task, a channel, another plugin), `update` and `start` are refused before
@@ -132,8 +134,6 @@ const AUTO_MISSES = 3
 const MISS_GAP_MS = 5 * 60_000
 /** The most threads asked for by id in one sync: linked or pinned threads the app's list (its 60 most recent) left out. */
 const LOOKUPS_PER_SYNC = 10
-/** A session asks the app for its own context reading no more often than this. */
-const CONTEXT_EVERY_MS = 5 * 60_000
 /** A chip the bridge minted is remembered this long: a thread started from it later than that is a thread like any other. */
 const CHIP_KEEP_MS = 30 * DAY_MS
 /** The most chips remembered at once. */
@@ -161,6 +161,12 @@ const AUTO_UPDATES_PER_HOUR = 6
 const AUTO_UPDATES_PER_DAY = 40
 /** (0.5.11) An update a session is about to send by itself is that session's alone this long (`mm.updating`). */
 const UPDATING_MS = 2 * 60_000
+/** (0.5.11, review of PR #15, F1) The most updates sent by itself from one sync: the rest wait for the next sync. */
+const AUTO_UPDATES_PER_SYNC = 3
+/** (0.5.11, review of PR #15, F5) A thread the person used this recently is not updated by itself: the next sync tries again. */
+const AUTO_IDLE_MS = 10 * 60_000
+/** (0.5.11, review of PR #15, F4) A session reads what the time-tracking hook is no more often than this. */
+const HOOK_CHECK_MS = 10 * 60_000
 /** (0.5.7) A band note (a thread started by itself, the hourly cap) shows in every thread this long. */
 const NOTE_SHOW_MS = 15 * 60_000
 /**
@@ -186,8 +192,6 @@ const OPEN_WAIT_MS = 10_000
  * such call: at once (Rob, 2026-10-13), and calls made within the same second still make one sync.
  */
 const ASK_WAIT_MS = 1_000
-/** The first line of the message Update sends: how a session knows an Update just arrived in its thread. */
-const UPDATE_OPENS_WITH = 'New since this thread last worked on this client: '
 /** A feed this session read may be taken for a press's refresh while it is younger than this (S2). */
 const FEED_REUSE_MS = 60_000
 /** A pickup view this session read is drawn at once, while it is read again, when it is younger than this. */
@@ -427,8 +431,6 @@ type By = 'person' | 'other'
  * one store in a test (concurrency.test.ts) each know their own thread.
  */
 const selves = new Map<string, string>()
-/** When this session last asked the app for its own context reading (0: never). */
-let contextAskedAt = 0
 /**
  * The presses in flight in this session, by client: when each began. A second press for a client whose
  * first has not returned does nothing (Rob pressed Update, saw nothing happen, pressed again, and the
@@ -899,40 +901,6 @@ async function recordSelf($: EngineInterface): Promise<void> {
   await write()
 }
 
-/**
- * This session's reading of ITS OWN context window, kept under its thread's id: how a row knows a thread
- * is long (Rob, 2026-10-12: "if the context is too long, you should also recommend starting a new thread").
- *
- * ⛔ Asked for `self` only, never for another thread, and never from a button press. At most once in
- *    CONTEXT_EVERY_MS for this session, whatever the answer was.
- * ⛔ Four numbers are kept: tokens used, the window, the percent, and when. Nothing of the answer's `plan`
- *    is read. Any error, or a status that is not `ok`, changes nothing.
- */
-async function recordContext($: EngineInterface): Promise<void> {
-  const now = await $.clock.now()
-  if (contextAskedAt && now - contextAskedAt < CONTEXT_EVERY_MS) return
-  // The session's own thread, as the timer already learnt it: no call is made here to find it out.
-  const me = await knownSelf($)
-  if (!me) return
-  contextAskedAt = now
-  try {
-    const answer = (await mcpJson($, 'ccd_session_mgmt', 'get_usage', { session_id: 'self' })) as { context?: Partial<ContextReading> & { status?: unknown } } | null
-    const c = answer && typeof answer === 'object' ? answer.context : undefined
-    if (!c || c.status !== 'ok') return
-    const numbers = [c.tokensUsed, c.contextWindow, c.percentUsed]
-    if (!numbers.every(n => typeof n === 'number' && Number.isFinite(n) && n >= 0)) return
-    const reading = { tokensUsed: c.tokensUsed as number, contextWindow: c.contextWindow as number, percentUsed: c.percentUsed as number, at: now }
-    await patchStore<Record<string, ContextReading>>($, 'mm.ctx', {}, all => {
-      // written last, so the cap keeps the readings most recently taken
-      delete all[me]
-      all[me] = reading
-      capped(all)
-    })
-  } catch {
-    // no reading this time: the row count decides until there is one
-  }
-}
-
 /** A thread linked by the person (a command, a button, a chip's first message) may link itself again later. */
 async function forgetUnlink($: EngineInterface, sid: string): Promise<void> {
   await patchStore<Record<string, number>>($, 'mm.unlinked', {}, unlinked => {
@@ -1175,7 +1143,6 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   const acted = await storeGet<Acted>($, 'mm.acted', {})
   const auto = await storeGet<Auto>($, 'mm.auto', {})
   const sent = await storeGet<Record<string, Sent>>($, 'mm.sent', {})
-  const readings = await storeGet<Record<string, ContextReading>>($, 'mm.ctx', {})
   const released = await storeGet<string[]>($, 'mm.released', [])
   const unpinned = await storeGet<Record<string, Unpinned>>($, 'mm.unpinned', {})
   /** (0.5.3) The linked threads whose client's clear this bridge has already acted on, with when: unpinned once per clear. */
@@ -1190,8 +1157,6 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
    * and a thread started meanwhile writes its own link into the same map (B1).
    */
   const was = { links: copyOf(links), pins: copyOf(pins), titles: copyOf(titles), auto: copyOf(auto), unpinned: copyOf(unpinned), cleared: copyOf(cleared), released: Array.isArray(released) ? [...released] : [] }
-  /** The threads linked as this pass began: one that is linked no more at its end loses its context reading. */
-  const linkedBefore = new Set(Object.values(links))
 
   // ⛔ A thread missing from the app's list is not a thread that is gone: the list holds the 60 most
   // recent. Each linked or pinned thread the list left out is asked for by id. One the app shows open is a
@@ -1399,10 +1364,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // this list). It is given back like an undone link. One that cannot be seen now waits for a later sync;
   // one that is linked again since is a client's thread, not one to give back.
   const waiting: string[] = []
-  const dropped = new Set<string>()
   for (const sid of released) {
     if (ownerOf(sid, links) !== undefined) continue
-    dropped.add(sid)
     if (gone.has(sid)) {
       delete titles[sid]
       delete pins[sid]
@@ -1656,16 +1619,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
       else delete auto[pid]
     }
   }
-  // A thread whose link was dropped in this pass loses its context reading with it. (Written over a fresh
-  // copy: each session writes its own reading there, and may have since this pass began.)
-  // (0.5.11, review of 0.5.10, L1) Only once both checks above are made: a link they kept for the person keeps
-  // its thread's reading.
-  for (const sid of linkedBefore) if (ownerOf(sid, links) === undefined) dropped.add(sid)
-  if ([...dropped].some(sid => sid in readings)) {
-    await patchStore<Record<string, ContextReading>>($, 'mm.ctx', {}, fresh => {
-      for (const sid of dropped) delete fresh[sid]
-    })
-  }
+  // (0.5.11, review of PR #15, F6) No context reading is kept or taken any more: Claude Code compacts a long thread,
+  // and nothing reads one. (`mm.ctx`, which an older version wrote, is left as it is.)
   await patchStore<Auto>($, 'mm.auto', {}, (fresh, stored) => applyChanges(fresh, was.auto, auto, 'set') || !stored)
   await patchStore<Record<string, string>>($, 'mm.titles', {}, fresh => applyChanges(fresh, was.titles, titles, 'set'))
   await patchStore<Record<string, string>>($, 'mm.links', {}, (fresh, stored) => applyLinkChanges(fresh, was.links, links) || !stored)
@@ -2182,8 +2137,6 @@ async function tick($: EngineInterface): Promise<void> {
     await noteSeen($, false).catch(() => {})
     // (0.5.5) a later mod installed on this machine than the one this thread runs
     await checkVersions($).catch(() => {})
-    // this session's own context reading, at most once in five minutes
-    await recordContext($)
     const now = await $.clock.now()
     const id = await instanceId($)
     const lease = await storeGet<{ owner: string; until: number } | null>($, 'mm.lease', null)
@@ -2766,11 +2719,15 @@ async function logAuto($: EngineInterface, line: string): Promise<void> {
 /**
  * (0.5.11, Rob 10-15: "I think we should start updating threads automatically") An update sent by itself, on record
  * (`mm.autoupdates`, every session's, the last day's): for which client and what it carried (`sig`, a short hash of
- * the signature, as `mm.autostarts` names it), into which thread (`sid`), by which thread, and whether it went (`ok`:
- * null while it is being sent). ⛔ One on record for a client, a signature and a thread is never sent again, whatever
- * became of it: a send the thread did not take waits for something new for the client.
+ * the signature, as `mm.autostarts` names it), into which thread (`sid`), by which thread, from which sync (`from`,
+ * that sync's time), and whether it went (`ok`: null while it is being sent). ⛔ One on record for a client, a
+ * signature and a thread is never sent again, whatever became of it: a send the thread did not take waits for
+ * something new for the client.
  */
-type AutoUpdate = { at: number; pid: string; client: string; sig: string; sid: string; by: string; ok: boolean | null; reason: string }
+type AutoUpdate = { at: number; pid: string; client: string; sig: string; sid: string; by: string; ok: boolean | null; reason: string; from?: number }
+
+/** (0.5.11) A session's claim on an update it is about to send (`mm.updating`): whose, until when, and (F1) from which sync. */
+type UpdateClaim = { owner?: string; until?: number; from?: number }
 
 /** (0.5.11) The updates this session has claimed and not finished: a second sync does not claim one again. */
 const autoUpdating = new Set<string>()
@@ -2783,10 +2740,33 @@ async function autoUpdatesOf($: EngineInterface): Promise<AutoUpdate[]> {
   return Array.isArray(list) ? list.filter(t => t && typeof t === 'object') : []
 }
 
-/** (0.5.11) This machine has updated AUTO_UPDATES_PER_HOUR threads by itself in the last hour, or AUTO_UPDATES_PER_DAY in the last day. */
-function updatesCapped(list: readonly AutoUpdate[], now: number): boolean {
-  const went = list.filter(t => t.ok !== false)
-  return went.filter(t => now - t.at < 3_600_000).length >= AUTO_UPDATES_PER_HOUR || went.filter(t => now - t.at < DAY_MS).length >= AUTO_UPDATES_PER_DAY
+/**
+ * (0.5.11, review of PR #15, F1) The updates that count toward the caps: each one on record that went or is being sent,
+ * and each unexpired claim (`mm.updating`) not on record yet, counted from when it was claimed (its lease's start) and
+ * from the sync it was chosen from. `except`: the caller's own claim. A burst of claims made before any is on record
+ * counts in full, so ten clients due at once are never ten sends.
+ */
+function countedUpdates(tries: readonly AutoUpdate[], claims: Readonly<Record<string, UpdateClaim>>, now: number, except?: string): Array<{ at: number; from: number | undefined }> {
+  const out = tries.filter(t => t.ok !== false).map(t => ({ at: Number(t.at), from: t.from }))
+  for (const [k, c] of Object.entries(claims)) {
+    if (k === except || !c || typeof c !== 'object' || !(Number(c.until) > now)) continue
+    const since = Number(c.until) - UPDATING_MS
+    // a claim whose send is on record already is counted there
+    if (tries.some(t => `${t.pid}\n${t.sig}` === k && t.by === c.owner && Number(t.at) >= since)) continue
+    out.push({ at: since, from: c.from })
+  }
+  return out
+}
+
+/**
+ * (0.5.11) The cap one more update would pass, or null: AUTO_UPDATES_PER_HOUR in the last hour, AUTO_UPDATES_PER_DAY in
+ * the last day, or (review of PR #15, F1) AUTO_UPDATES_PER_SYNC from the sync it was chosen from (`from`).
+ */
+function capOf(counted: ReadonlyArray<{ at: number; from: number | undefined }>, now: number, from: number): 'hour' | 'day' | 'sync' | null {
+  if (counted.filter(t => now - t.at < 3_600_000).length >= AUTO_UPDATES_PER_HOUR) return 'hour'
+  if (counted.filter(t => now - t.at < DAY_MS).length >= AUTO_UPDATES_PER_DAY) return 'day'
+  if (counted.filter(t => t.from === from).length >= AUTO_UPDATES_PER_SYNC) return 'sync'
+  return null
 }
 
 /** (0.5.11) Whether one is on record for this client, signature and thread. */
@@ -2796,17 +2776,103 @@ const triedHere = (list: readonly AutoUpdate[], pid: string, sig: string, sid: s
 const autoChosen = new Map<string, number>()
 
 /**
+ * (0.5.11, review of PR #15, F1) The writes to `mm.autoupdates` this session makes, one after another: a record pushed
+ * while another is being settled is never lost to it within the session.
+ */
+let autoRecords: Promise<unknown> = Promise.resolve()
+function oneAtATime<T>(work: () => Promise<T>): Promise<T> {
+  const run = autoRecords.then(work, work)
+  autoRecords = run.catch(() => {})
+  return run
+}
+
+/**
+ * (0.5.11, review of PR #15, F3) What this bridge has seen of each client on the person's own list, brought up to the
+ * sync on record (`seenNow`): since when it has had exactly what it has now, and since when its mail has waited. A
+ * client off the list is forgotten. Written only when something changed.
+ */
+async function recordSeen($: EngineInterface, last: Last): Promise<Record<string, FirstSeen>> {
+  return patchStore<Record<string, FirstSeen>>($, 'mm.firstSeen', {}, all => {
+    const before = JSON.stringify(all)
+    const on = new Set<string>()
+    for (const it of last.items) {
+      if (!isUuid(it.projectId)) continue
+      on.add(it.projectId)
+      const prev = all[it.projectId]
+      all[it.projectId] = seenNow(prev && typeof prev === 'object' ? prev : undefined, it, sigHash(signatureOf(it)), last.at)
+    }
+    for (const pid of Object.keys(all)) if (!on.has(pid)) delete all[pid]
+    return JSON.stringify(all) !== before
+  })
+}
+
+/** (0.5.11, review of PR #15, F3) What this bridge has seen of a client, when it is what the client has now (`signature`). */
+const seenOf = (seen: Readonly<Record<string, FirstSeen>>, pid: string, signature: string): FirstSeen | undefined => {
+  const s = seen[pid]
+  return s && typeof s === 'object' && s.sig === sigHash(signature) ? s : undefined
+}
+
+/**
+ * (0.5.11, review of PR #15, F4) Whether the time tracking on this computer counts a turn the bridge starts in another
+ * thread as automatic, never as the person's: the Massmarket hook (`~/.claude/mm-hooks/worklog-hook.js`) from 0.11.5
+ * on does, by the app's `peer` stamp and by the marker at the very start of the text (`TURN_ORIGIN_MARKER_RE`); 0.11.4
+ * and before count every turn as the person's. Read from the hook's own text, the only place it says what it is (it
+ * writes its version nowhere else on the computer). ⛔ A hook that cannot be read, or one without that rule: no update
+ * is sent by itself on this computer. Read again at most every HOOK_CHECK_MS.
+ */
+let hookChecked: { at: number; ok: boolean; why: string } | null = null
+async function hookCountsAuto($: EngineInterface, now: number): Promise<{ ok: boolean; why: string }> {
+  if (hookChecked && now - hookChecked.at < HOOK_CHECK_MS) return hookChecked
+  let ok = false
+  let why: string
+  try {
+    const text = await $.fs.read(`${await home($)}/.claude/mm-hooks/worklog-hook.js`)
+    ok = text.includes('TURN_ORIGIN_MARKER_RE')
+    why = ok ? 'the time-tracking hook counts it as automatic' : 'the time-tracking hook on this computer is older than 0.11.5 and would count it as the person\'s time'
+  } catch {
+    why = 'the time-tracking hook on this computer could not be read'
+  }
+  hookChecked = { at: now, ok, why }
+  return hookChecked
+}
+
+/**
+ * (0.5.11, review of PR #15, F3) The package a thread was asked to build by itself (kickoff case 6, `Sent.prep`) is
+ * there now: it is that thread's own work, recorded as what the thread has, and nothing is sent. Written over the
+ * store's fresh copy, only while it still says what this pass read (once, whichever thread gets there first).
+ */
+async function ownWork($: EngineInterface, it: QueueItem, sid: string, signature: string, given: Sent, now: number): Promise<void> {
+  const pid = it.projectId
+  let mine = false
+  await patchStore<Record<string, Sent>>($, 'mm.sent', {}, all => {
+    const had = all[pid]
+    if (!had?.prep || had.sid !== sid || had.sig !== given.sig) return false
+    delete all[pid]
+    all[pid] = { sid, sig: signature, at: now }
+    capped(all)
+    mine = true
+  })
+  if (!mine) return
+  sentHere.set(`${pid}\n${sid}`, signature)
+  await logAuto($, `not updated ${cleanName(it.client)} (${pid}) sig ${sigHash(signature)} in ${sid}: its package is the thread's own work (it was asked to build it)`)
+}
+
+/**
  * (0.5.11, Rob 10-15) Once for each sync on record, in every running thread, while auto is on (`/mm auto`, the switch
  * auto-start has): each client on the person's OWN list (the Needs-you list: never a client under With a teammate,
  * Older or Checking your reply) whose row says Update, on its linked thread (never a thread its row only suggests),
- * once it is time (`autoUpdateDue`), and never one a teammate has, whose package someone else holds, or that is
- * still open after our reply (`autoUpdatable`). From what is stored only: no feed call and no app call here.
+ * once it is time (`autoUpdateDue`, from what this bridge has seen, `mm.firstSeen`), and never one a teammate has, whose
+ * package someone else holds, or that is still open after our reply (`autoUpdatable`). From what is stored only: no
+ * feed call and no app call here.
  * ⛔ Never into the thread choosing (the app's send refuses it, and here the message would be a prompt the person
  * did not write): the thread that synced leaves its own client to the other running threads, which choose from the
  * same sync on their next tick. Never into a thread linked to another client, and never what the thread already
  * has (`mm.sent`, `sentHere`); a thread the sync could not see has no row to update (its row carries no thread).
+ * (F3) The package a thread was asked to build by itself is its own work (`ownWork`): nothing is sent for it.
  * Each one is claimed (`mm.updating`, a lease per client and signature, as `mm.starting` is) and sent once the claim
- * has held (`autoUpdate`): two threads never both send it. At the cap, nothing more from this sync.
+ * has held (`autoUpdate`): two threads never both send it. At a cap (the hour's, the day's, or AUTO_UPDATES_PER_SYNC
+ * from this sync), nothing more from this sync. (F4) Nothing at all where the time-tracking hook would count it as
+ * the person's time (`hookCountsAuto`).
  */
 async function autoUpdates($: EngineInterface): Promise<void> {
   if ((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) !== 'claude-desktop') return
@@ -2820,6 +2886,7 @@ async function autoUpdates($: EngineInterface): Promise<void> {
   const id = await instanceId($)
   if ((autoChosen.get(id) ?? -Infinity) >= last.at) return
   autoChosen.set(id, last.at)
+  const seen = await recordSeen($, last)
   const links = await storeGet<Record<string, string>>($, 'mm.links', {})
   const sent = await storeGet<Record<string, Sent>>($, 'mm.sent', {})
   for (const it of last.items.slice().sort(byDue)) {
@@ -2830,11 +2897,27 @@ async function autoUpdates($: EngineInterface): Promise<void> {
     const sid = target.sid
     // ⛔ its linked thread, no other client's, and not this one
     if (links[pid] !== sid || ownerOf(sid, links) !== pid || sid === me) continue
-    if (!autoUpdatable(it, now) || !autoUpdateDue(it, now)) continue
+    if (!autoUpdatable(it, now)) continue
     const signature = signatureOf(it)
     const given = sent[pid]
     if ((given && given.sid === sid && hasWaiting(given.sig, it)) || sentHere.get(`${pid}\n${sid}`) === signature) continue
-    if ((await autoUpdateClaim($, it, sid, signature, me, now)) !== 'capped') continue
+    if (given && ownPackage(given, sid, it)) {
+      await ownWork($, it, sid, signature, given, now)
+      continue
+    }
+    if (!autoUpdateDue(it, now, seenOf(seen, pid, signature))) continue
+    const hook = await hookCountsAuto($, now)
+    if (!hook.ok) {
+      if (!capLogged.has(`hook\n${hook.why}`)) {
+        capLogged.add(`hook\n${hook.why}`)
+        await logAuto($, `not updated ${cleanName(it.client)} (${pid}) sig ${sigHash(signature)}: no thread is updated by itself on this computer: ${hook.why}`)
+      }
+      return
+    }
+    const r = await autoUpdateClaim($, it, sid, signature, me, now, last.at)
+    // the rest of this sync's clients wait for the next sync
+    if (r === 'sync') return
+    if (r !== 'capped') continue
     const key = `${pid}\n${sigHash(signature)}`
     if (!capLogged.has(key)) {
       capLogged.add(key)
@@ -2849,31 +2932,44 @@ async function autoUpdates($: EngineInterface): Promise<void> {
  *   skip     it is on record for this thread already, or being sent (here, or by another session: its claim in
  *            `mm.updating`)
  *   capped   this machine updated AUTO_UPDATES_PER_HOUR threads by itself in the last hour, or AUTO_UPDATES_PER_DAY
- *            in the last day
+ *            in the last day, counting the claims not on record yet (F1)
+ *   sync     (F1) AUTO_UPDATES_PER_SYNC are claimed or sent from this sync already: the rest wait for the next sync
  *   claimed  claimed here, and sent once the claim has held (`autoUpdate`)
+ * ⛔ (Review of PR #15, F1) The caps are asked of the claims and the records as read, and again inside the write that
+ * claims, over the store's fresh claims: a burst of due clients is never claimed past a cap.
  */
-async function autoUpdateClaim($: EngineInterface, it: QueueItem, sid: string, signature: string, me: string, now: number): Promise<'skip' | 'capped' | 'claimed'> {
+async function autoUpdateClaim($: EngineInterface, it: QueueItem, sid: string, signature: string, me: string, now: number, from: number): Promise<'skip' | 'capped' | 'sync' | 'claimed'> {
   const pid = it.projectId
   const sig = sigHash(signature)
   const key = `${pid}\n${sig}`
   if (autoUpdating.has(key)) return 'skip'
   const tries = await autoUpdatesOf($)
   if (triedHere(tries, pid, sig, sid)) return 'skip'
-  const held = (await storeGet<Record<string, { owner?: string; until?: number }>>($, 'mm.updating', {}))[key]
+  const claims = await storeGet<Record<string, UpdateClaim>>($, 'mm.updating', {})
+  const held = claims[key]
   if (held && held.owner !== me && Number(held.until) > now) return 'skip'
-  if (updatesCapped(tries, now)) return 'capped'
+  const cap = (c: Readonly<Record<string, UpdateClaim>>): 'capped' | 'sync' | null => {
+    const at = capOf(countedUpdates(tries, c, now, key), now, from)
+    return at === null ? null : at === 'sync' ? 'sync' : 'capped'
+  }
+  const before = cap(claims)
+  if (before) return before
   let mine = false
-  await patchStore<Record<string, { owner?: string; until?: number }>>($, 'mm.updating', {}, fresh => {
+  let full: 'capped' | 'sync' | null = null
+  await patchStore<Record<string, UpdateClaim>>($, 'mm.updating', {}, fresh => {
     for (const [k, v] of Object.entries(fresh)) if (!v || !(Number(v.until) > now)) delete fresh[k]
     const other = fresh[key]
     if (other && other.owner !== me) return false
-    fresh[key] = { owner: me, until: now + UPDATING_MS }
+    full = cap(fresh)
+    if (full) return false
+    fresh[key] = { owner: me, until: now + UPDATING_MS, from }
     mine = true
   })
+  if (full) return full
   if (!mine) return 'skip'
   autoUpdating.add(key)
   try {
-    $.clock.after(settleMs(`${me}#update#${key}`), () => void autoUpdate($, it, sid, signature, me, key).finally(() => autoUpdating.delete(key)))
+    $.clock.after(settleMs(`${me}#update#${key}`), () => void autoUpdate($, it, sid, signature, me, key, from).finally(() => autoUpdating.delete(key)))
   } catch {
     // no timer here: the claim runs out, and a later sync claims it again
     autoUpdating.delete(key)
@@ -2886,47 +2982,61 @@ async function autoUpdateClaim($: EngineInterface, it: QueueItem, sid: string, s
  * (0.5.11, Rob 10-15: "so the draft is ready when I open the thread up") Sends the client's update by itself, once this
  * session's claim has held (another session's write since means that session sends it): what Update sends, in the
  * words for a send no person pressed for (`kickoffText(cur, { update: true, auto: true })`: ⛔ the package is never
- * taken), through Update's own send (`sendInto`), after Update's guards, all of them,
+ * taken, and the marker comes first), through Update's own send (`sendInto`), after Update's guards, all of them,
  * asked again now: the client's link is still this thread and the thread is no other client's; the app answers for
- * the thread by id, open; the feed is read once before the send (with no feed, nothing goes), and as it has the client
- * NOW, the client is still on the person's own list, still one to update by itself, still due, and still carries what
- * the sync saw (anything newer waits for the next sync); B3 and a newer thread of the client's (`stillTheClients`);
- * and the thread does not already have it. Recorded before the app is asked (`mm.autoupdates`), and logged either way
- * (`logAuto`). Sent: what the thread now has, as Update writes it, checked again 1 to 3 seconds later; the band says
- * so once; the list is brought up to date.
+ * the thread by id, open, and (F5) the person has not used it in the last AUTO_IDLE_MS (else the next sync tries
+ * again); the feed is read once before the send (with no feed, nothing goes), and as it has the client NOW, the
+ * client is still on the person's own list, still one to update by itself, still due, and still carries what the
+ * sync saw (anything newer waits for the next sync); B3 and a newer thread of the client's (`stillTheClients`); and
+ * the thread does not already have it. Recorded before the app is asked (`mm.autoupdates`), (F1) with the caps asked
+ * again inside that write, over the store's fresh list (a full list: nothing goes), and logged either way
+ * (`logAuto`). ⛔ (F2) Right before the send, once the record is written: the client's link, the thread's client
+ * and this session's claim are read again, and the record itself must still be there; any of them moved, nothing
+ * goes. Sent: what the thread now has, as Update writes it (F3: and, for a thread asked to build the package, that
+ * the package is its own work), checked again 1 to 3 seconds later; the band says so once; the list is brought up
+ * to date.
  * ⛔ Nothing else Update writes. No stamp and no acted: nobody acted. No claim: a send is never evidence (R11), so a
  * link the bridge made stays one it can let go. No link and no unlink record: the thread was the client's linked
  * thread before the send, and a move or an unlink made meanwhile is the person's and stands. No thread is opened.
  */
-async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signature: string, me: string, key: string): Promise<void> {
+async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signature: string, me: string, key: string, from: number): Promise<void> {
   const pid = it.projectId
   const sig = sigHash(signature)
   const client = cleanName(it.client)
   let entry: AutoUpdate | null = null
+  /** The record as this send wrote it, in a list. */
+  const isMine = (t: AutoUpdate, mine: AutoUpdate): boolean => t && t.pid === pid && t.sig === sig && t.sid === sid && t.at === mine.at && t.by === me
   /** The record's outcome, written over a fresh copy. */
   const settle = async (ok: boolean, why: string): Promise<void> => {
     const mine = entry
     if (!mine) return
     mine.ok = ok
-    await patchStore<AutoUpdate[]>($, 'mm.autoupdates', [], list => {
-      const e = list.find(t => t && t.pid === pid && t.sig === sig && t.sid === sid && t.at === mine.at && t.by === me)
-      if (!e) return false
-      e.ok = ok
-      if (!ok) e.reason = `${e.reason}; not sent: ${short(why, 160)}`
-    }).catch(() => {})
+    await oneAtATime(() =>
+      patchStore<AutoUpdate[]>($, 'mm.autoupdates', [], list => {
+        const e = list.find(t => isMine(t, mine))
+        if (!e) return false
+        e.ok = ok
+        if (!ok) e.reason = `${e.reason}; not sent: ${short(why, 160)}`
+      }),
+    ).catch(() => {})
   }
+  const claimOf = async (): Promise<string | undefined> => (await storeGet<Record<string, UpdateClaim>>($, 'mm.updating', {}))[key]?.owner
   try {
-    if ((await storeGet<Record<string, { owner?: string }>>($, 'mm.updating', {}))[key]?.owner !== me) return
+    if ((await claimOf()) !== me) return
     if (!(await autoStartOn($)) || (await $.store.get('mm.paused'))) return
     if (sid === (await knownSelf($))) return
     const now = await $.clock.now()
     // checked again, now that the claim has held
     const tries = await autoUpdatesOf($)
-    if (triedHere(tries, pid, sig, sid) || updatesCapped(tries, now)) return
+    if (triedHere(tries, pid, sig, sid) || capOf(countedUpdates(tries, await storeGet<Record<string, UpdateClaim>>($, 'mm.updating', {}), now, key), now, from)) return
     const links = await storeGet<Record<string, string>>($, 'mm.links', {})
     if (links[pid] !== sid || ownerOf(sid, links) !== pid) return
     const found = await lookup($, sid)
     if (found === 'gone' || found === 'unknown' || found.isArchived) return
+    // ⛔ (review of PR #15, F5) the person used the thread in the last AUTO_IDLE_MS: not now. Nothing is on record, so
+    // the next sync tries again.
+    const active = found.lastActivityAt ? Date.parse(found.lastActivityAt) : NaN
+    if (Number.isFinite(active) && now - active < AUTO_IDLE_MS) return
     let read: Feed
     try {
       read = await fetchFeed($)
@@ -2934,18 +3044,50 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
       return
     }
     const cur = buildLists(read, now).queue.find(i => i.projectId === pid)
-    if (!cur || !autoUpdatable(cur, now) || !autoUpdateDue(cur, now) || signatureOf(cur) !== signature) return
+    if (!cur || !autoUpdatable(cur, now) || signatureOf(cur) !== signature) return
+    if (!autoUpdateDue(cur, now, seenOf(await storeGet<Record<string, FirstSeen>>($, 'mm.firstSeen', {}), pid, signature))) return
     if (!(await stillTheClients($, pid, { sid, title: found.title ?? '', suggested: false }, sid, links, read, { live: new Map([[sid, found]]) }))) return
     const given = (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]
     if ((given && given.sid === sid && hasWaiting(given.sig, cur)) || sentHere.get(`${pid}\n${sid}`) === signature) return
     // one message to a client at a time: a press sending to it now has it
     if (sending.has(pid)) return
-    const made: AutoUpdate = { at: now, pid, client, sig, sid, by: me, ok: null, reason: `something new for the client: ${short(waitingText(cur), 120)}` }
-    await patchStore<AutoUpdate[]>($, 'mm.autoupdates', [], list => {
-      list.push({ ...made })
-      list.splice(0, list.length, ...list.filter(t => t && now - Number(t.at) <= DAY_MS).slice(-200))
-    })
+    const made: AutoUpdate = { at: now, pid, client, sig, sid, by: me, ok: null, reason: `something new for the client: ${short(waitingText(cur), 120)}`, from }
+    // ⛔ (F1) recorded over the store's fresh list, the caps asked again there: a list that is full refuses it
+    let full: string | null = null
+    await oneAtATime(() =>
+      patchStore<AutoUpdate[]>($, 'mm.autoupdates', [], list => {
+        if (triedHere(list, pid, sig, sid)) {
+          full = 'it is on record already'
+          return false
+        }
+        const at = capOf(countedUpdates(list, {}, now), now, from)
+        if (at) {
+          full = at === 'sync' ? `${AUTO_UPDATES_PER_SYNC} updated from this sync already` : `this computer updated ${AUTO_UPDATES_PER_HOUR} threads in the last hour or ${AUTO_UPDATES_PER_DAY} in the last day`
+          return false
+        }
+        list.push({ ...made })
+        list.splice(0, list.length, ...list.filter(t => t && now - Number(t.at) <= DAY_MS).slice(-200))
+      }),
+    )
+    if (full) {
+      if (full !== 'it is on record already') await logAuto($, `not updated ${client} (${pid}) sig ${sig} in ${sid}: ${full}`)
+      return
+    }
     entry = made
+    // ⛔ (F2) read again right before the send: the record is still there (no other write took it), the client's
+    // link is still this thread and the thread no other client's, and the claim is still this session's
+    const moved = !(await autoUpdatesOf($)).some(t => isMine(t, made))
+      ? 'its record was not kept'
+      : await (async () => {
+          const now2 = await storeGet<Record<string, string>>($, 'mm.links', {})
+          if (now2[pid] !== sid || ownerOf(sid, now2) !== pid) return 'the thread\'s link changed meanwhile'
+          return (await claimOf()) !== me ? 'another thread has it' : null
+        })()
+    if (moved) {
+      await settle(false, moved)
+      await logAuto($, `not updated ${client} (${pid}) sig ${sig} in ${sid}: ${moved}`)
+      return
+    }
     let why: string | null
     try {
       // ⛔ (0.5.11, Opus 10-15) the words for a send no person pressed for: the package is never taken (`auto`)
@@ -2959,13 +3101,15 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
     if (why !== null) return
     const at = await $.clock.now()
     sentHere.set(`${pid}\n${sid}`, signature)
+    // (F3) a thread asked to build the client's package: the package that then appears is its own work
+    const has: Sent = { sid, sig: signature, at, ...(asksForPrep(cur) ? { prep: true as const } : {}) }
     try {
-      await putSent($, pid, { sid, sig: signature, at })
+      await putSent($, pid, has)
     } catch (err) {
       await noteFailure($, 'auto update: what the thread now has', err)
     }
     settleLater($, `${sid}#auto`, async () => {
-      if (!(await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]) await putSent($, pid, { sid, sig: signature, at })
+      if (!(await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]) await putSent($, pid, has)
     })
     await bandNote($, `Updated ${client}'s thread.`, `updated\n${key}`)
     await refreshList($).catch(err => noteFailure($, 'auto update: the sync after it', err))
@@ -2973,7 +3117,7 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
     await noteFailure($, 'auto update', err)
     if (entry?.ok === null) await settle(false, errorText(err))
   } finally {
-    await patchStore<Record<string, { owner?: string }>>($, 'mm.updating', {}, fresh => {
+    await patchStore<Record<string, UpdateClaim>>($, 'mm.updating', {}, fresh => {
       if (fresh[key]?.owner !== me) return false
       delete fresh[key]
     }).catch(() => {})
@@ -3744,6 +3888,15 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
 
   const failed = (why: string): Answer => ({ said: `Could not send to ${it.client}'s thread: ${why}` })
   const text = kickoffText(cur, { update: true })
+  // ⛔ (0.5.11, review of PR #15, F2) The links read again right before the send: the press read them before the feed,
+  // and the person may have moved one since. The thread is another client's now, or the client's link is not what the
+  // press read (other than linked now to this very thread): nothing is sent.
+  const linksNow = await storeGet<Record<string, string>>($, 'mm.links', {})
+  const ownerNow = ownerOf(target.sid, linksNow)
+  if ((ownerNow !== undefined && ownerNow !== it.projectId) || (linksNow[it.projectId] !== linked && !(linked === undefined && linksNow[it.projectId] === target.sid))) {
+    const seen = guard
+    return { said: THREAD_GONE, after: seen ? async () => void (await reconcile($, seen)) : undefined }
+  }
   try {
     // (here: the client's thread is this one, and the app's send does not take the sending thread, so the
     // kickoff goes in here as the person's own prompt; only a press reaches this)
@@ -3884,8 +4037,8 @@ async function sendInto($: EngineInterface, client: string, projectId: string, h
 }
 
 /**
- * R8, Claim in this thread (Rob, 2026-10-13): the server's check of our reply left items open, and the client's
- * thread is under 60% of its context. The Claim message (claimText, Rob's words) goes into THAT thread, the one
+ * R8, Claim in this thread (Rob, 2026-10-13): the server's check of our reply left items open. (0.5.11, Opus 10-15:
+ * whatever the length of the client's thread: Claude Code compacts a long one.) The Claim message (claimText, Rob's words) goes into THAT thread, the one
  * the row showed, and starts a model turn there: show what is still open and its drafts, and wait. Update's
  * guards, all of them: a press acts on the thread its row showed or on none; never into a thread linked to
  * another client; the feed is read once before the send, and the client must still be open after our reply as
@@ -4269,12 +4422,7 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
           delete titles[me]
         })
       }
-      // The link is dropped, and the thread's context reading with it.
-      await patchStore<Record<string, ContextReading>>($, 'mm.ctx', {}, readings => {
-        if (!(me in readings)) return false
-        delete readings[me]
-      })
-      // So is the note that the person took our pin off it: it is no client's thread now.
+      // The link is dropped, and so is the note that the person took our pin off it: it is no client's thread now.
       await pinAgain($, me)
     }
     return 'This thread is no longer linked to a client.'
@@ -4614,9 +4762,6 @@ export const register: Register = on => {
       // (before the marker is read: a kickoff never claims, and the link is as it was)
       await claimInPlace($, text, origin).catch(() => {})
       sentence = await linkFromMarker($, text, origin)
-      // An Update just arrived in this thread from another one: this session takes its own context
-      // reading (its own, and no more often than its timer would).
-      if (origin === 'peer' && text.includes(UPDATE_OPENS_WITH)) await recordContext($)
     } catch {
       // a marker that cannot be acted on never holds a prompt back
     }

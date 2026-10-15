@@ -874,11 +874,18 @@ describe('0.5.3 claim in place, as 0.5.4 has it: the long thread\'s own fresh-th
       await w.advance(60_000)
       await settle()
     }
+    // (0.5.11, review of PR #15, F3) mail and no drafts: nothing yet, until 120 minutes after the mail was first seen
+    expect(w.sends()).toEqual([])
+    for (let i = 0; i < 120; i++) {
+      await w.advance(60_000)
+      await settle()
+    }
     expect(spawned(w).filter(c => String(c.args.title).startsWith('Start a fresh thread'))).toEqual([])
     expect(w.calls.filter(c => c.tool === 'start_session')).toEqual([])
     expect(w.stored('mm.claimedHere')).toBeUndefined()
     expect(w.sends().map(c => c.args.session_id)).toEqual([LINKED])
-    expect(String(w.sends()[0]?.args.message)).toMatch(new RegExp(`^New since this thread last worked on this client: 1 message waiting\\.\\n\\[mm-link ${pid(71)}\\] `))
+    // (review of PR #15, F4) the marker first
+    expect(String(w.sends()[0]?.args.message)).toMatch(new RegExp(`^\\[mm-link ${pid(71)}\\] New since this thread last worked on this client: 1 message waiting\\.\\n`))
     const done = (w.stored('mm.autoupdates') ?? []) as Array<{ pid: string; sid: string; ok: boolean | null; by: string }>
     expect(done.map(t => [t.pid, t.sid, t.ok])).toEqual([[pid(71), LINKED, true]])
     expect(done[0]?.by).not.toBe(LINKED)
@@ -1475,8 +1482,10 @@ describe('0.5.10 (review of 0.5.9, finding 1): a bridge link the sync lets go is
   })
 })
 
-describe('0.5.11 (review of 0.5.10, L1): a bridge link kept for the person keeps its thread\'s context reading', () => {
-  test('[probe C] the pass lets X\'s link go while the person acts on it in that thread: the link stays, and so does the thread\'s reading in mm.ctx', async () => {
+// (0.5.11, review of PR #15, F6) Nothing reads `mm.ctx` any more, so nothing deletes from it either (0.5.10's L1, which
+// kept a reading for a link kept for the person, has nothing left to keep): the links themselves are as 0.5.10 has them.
+describe('0.5.11 (review of PR #15, F6): a bridge link let go or kept for the person; `mm.ctx` is left as it was either way', () => {
+  test('[probe C] the pass lets X\'s link go while the person acts on it in that thread: the link stays; `mm.ctx` is untouched', async () => {
     const r = await replay(520, { extraMail: [mail(521, 'Client Y521', -49)] })
     r.feed.threads?.push(row(521, 'cli-old-520', REPLAY_AT))
     const reading = { tokensUsed: 1, contextWindow: 10, percentUsed: 10, at: r.w.now() }
@@ -1494,9 +1503,10 @@ describe('0.5.11 (review of 0.5.10, L1): a bridge link kept for the person keeps
     expect(r.w.stored('mm.ctx')).toEqual({ [r.old]: reading })
   })
 
-  test('with nobody acting, a link let go takes its thread\'s reading with it, as before (the third miss)', async () => {
+  test('with nobody acting, the link is let go on the third miss, as before; `mm.ctx` is untouched', async () => {
     const r = await replay(524)
-    r.w.put('mm.ctx', { [r.old]: { tokensUsed: 1, contextWindow: 10, percentUsed: 10, at: r.w.now() } })
+    const reading = { tokensUsed: 1, contextWindow: 10, percentUsed: 10, at: r.w.now() }
+    r.w.put('mm.ctx', { [r.old]: reading })
     // the feed stops listing the old thread's session: three syncs, five minutes apart
     r.feed.threads = [row(498, 'cli-elsewhere', REPLAY_AT)]
     for (let i = 0; i < 3; i++) {
@@ -1504,7 +1514,7 @@ describe('0.5.11 (review of 0.5.10, L1): a bridge link kept for the person keeps
       await r.w.advance(6 * 60_000)
     }
     expect(linksOf(r.w)[pid(524)]).toBeUndefined()
-    expect(r.w.stored('mm.ctx')).toEqual({})
+    expect(r.w.stored('mm.ctx')).toEqual({ [r.old]: reading })
   })
 })
 
@@ -1531,7 +1541,8 @@ describe('0.5.11: a client\'s thread updated by itself is sent once, whoever cho
     const ids = ['local_ua', 'local_ub', 'local_ut']
     const w = fakeApp(feed, ids.map(sessionId => ({ sessionId })), [], { every: true })
     w.put('mm.links', { [pid(93)]: 'local_ut' })
-    // the thread that polls is none of theirs: each chooses from the sync on record
+    // the thread that polls is none of theirs: each chooses from the sync on record (a /mm in one of them, every
+    // five minutes, stands in for the poller's syncs)
     w.put('mm.lease', { owner: 'cli:local_nobody', until: NOW + 24 * 3_600_000 })
     const [a, b, t] = ids.map(id => w.session(id))
     await mm(a, '')
@@ -1540,9 +1551,12 @@ describe('0.5.11: a client\'s thread updated by itself is sent once, whoever cho
     await settleAll()
     await w.advance(3_100)
     await settleAll()
-    for (let i = 0; i < 6; i++) {
+    // (0.5.11, review of PR #15, F3) mail and no drafts: it goes 120 minutes after this bridge first saw the mail
+    for (let i = 1; i <= 125; i++) {
       await w.advance(60_000)
       await settleAll()
+      if (i % 5 === 0) await mm(a, '')
+      if (i === 115) expect(w.sends()).toEqual([])
     }
     expect(w.sends().map(c => c.args.session_id)).toEqual(['local_ut'])
     const done = (w.stored('mm.autoupdates') ?? []) as Array<{ by: string; ok: boolean | null; sid: string }>
