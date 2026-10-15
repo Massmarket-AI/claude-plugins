@@ -98,7 +98,7 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.5.12'
+const VERSION = '0.5.13'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -157,9 +157,17 @@ const AUTO_STARTS_PER_HOUR = 4
 const AUTO_STARTS_PER_DAY = 20
 /** (0.5.7) A thread a session is about to start by itself is that session's alone this long (`mm.starting`). */
 const STARTING_MS = 2 * 60_000
-/** (0.5.11, Rob 10-15: update threads by itself) The most client threads this machine updates by itself in an hour, and in a day. */
-const AUTO_UPDATES_PER_HOUR = 6
+/**
+ * (0.5.11, Rob 10-15: update threads by itself) The most client threads this machine updates by itself in an hour, and in a day.
+ * (0.5.13, Rob 10-15: "12 updates an hour") The hour's was 6.
+ */
+const AUTO_UPDATES_PER_HOUR = 12
 const AUTO_UPDATES_PER_DAY = 40
+/**
+ * (0.5.13) The line saying a client was not updated because the hour's or the day's cap is reached is written to the
+ * notice log at most once per client in this long, across every running thread (`capNotice`, `mm.capLogged`).
+ */
+const CAP_LOG_EVERY_MS = 3_600_000
 /** (0.5.11) An update a session is about to send by itself is that session's alone this long (`mm.updating`). */
 const UPDATING_MS = 2 * 60_000
 /** (0.5.11, review of PR #15, F1) The most updates sent by itself from one sync: the rest wait for the next sync. */
@@ -2735,8 +2743,32 @@ type UpdateClaim = { owner?: string; until?: number; from?: number }
 
 /** (0.5.11) The updates this session has claimed and not finished: a second sync does not claim one again. */
 const autoUpdating = new Set<string>()
-/** (0.5.11) The caps this session has logged, by client and signature: once each, not on every sync. */
-const capLogged = new Set<string>()
+/**
+ * (0.5.11) The time-tracking hook's refusals this session has logged: once each, not on every sync. (0.5.13) The hour's
+ * and the day's caps are no longer here: they are logged once per client per hour across threads (`capNotice`).
+ */
+const hookLogged = new Set<string>()
+
+/**
+ * (0.5.13) The line saying a client was not updated because this computer reached the hour's or the day's cap, written
+ * to the notice log at most once per client in CAP_LOG_EVERY_MS across every running thread: each desktop thread is a
+ * process of its own, and each chose from the same sync (fifteen identical lines for one client within 40 seconds,
+ * one per running thread, on 10-15). When the client's line was last written is kept in the store (`mm.capLogged`,
+ * client → time), as the band's once-only notes are (`bandNote`); an entry older than CAP_LOG_EVERY_MS is dropped.
+ * It changes no decision: only whether the line is written.
+ */
+async function capNotice($: EngineInterface, pid: string, line: string): Promise<void> {
+  const now = await $.clock.now()
+  let mine = false
+  await patchStore<Record<string, number>>($, 'mm.capLogged', {}, fresh => {
+    const at = Number(fresh[pid])
+    if (Number.isFinite(at) && now - at < CAP_LOG_EVERY_MS) return false
+    for (const [k, v] of Object.entries(fresh)) if (!(now - Number(v) < CAP_LOG_EVERY_MS)) delete fresh[k]
+    fresh[pid] = now
+    mine = true
+  }).catch(() => {})
+  if (mine) await logAuto($, line)
+}
 
 /** (0.5.11) The updates on record (every session's). */
 async function autoUpdatesOf($: EngineInterface): Promise<AutoUpdate[]> {
@@ -2912,8 +2944,8 @@ async function autoUpdates($: EngineInterface): Promise<void> {
     if (!autoUpdateDue(it, now, seenOf(seen, pid, signature))) continue
     const hook = await hookCountsAuto($, now)
     if (!hook.ok) {
-      if (!capLogged.has(`hook\n${hook.why}`)) {
-        capLogged.add(`hook\n${hook.why}`)
+      if (!hookLogged.has(`hook\n${hook.why}`)) {
+        hookLogged.add(`hook\n${hook.why}`)
         await logAuto($, `not updated ${cleanName(it.client)} (${pid}) sig ${sigHash(signature)}: no thread is updated by itself on this computer: ${hook.why}`)
       }
       return
@@ -2922,11 +2954,8 @@ async function autoUpdates($: EngineInterface): Promise<void> {
     // the rest of this sync's clients wait for the next sync
     if (r === 'sync') return
     if (r !== 'capped') continue
-    const key = `${pid}\n${sigHash(signature)}`
-    if (!capLogged.has(key)) {
-      capLogged.add(key)
-      await logAuto($, `not updated ${cleanName(it.client)} (${pid}) sig ${sigHash(signature)}: this computer updated ${AUTO_UPDATES_PER_HOUR} threads in the last hour or ${AUTO_UPDATES_PER_DAY} in the last day`)
-    }
+    // (0.5.13) once per client per hour, across every running thread
+    await capNotice($, pid, `not updated ${cleanName(it.client)} (${pid}) sig ${sigHash(signature)}: this computer updated ${AUTO_UPDATES_PER_HOUR} threads in the last hour or ${AUTO_UPDATES_PER_DAY} in the last day`)
     return
   }
 }
@@ -3058,6 +3087,8 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
     const made: AutoUpdate = { at: now, pid, client, sig, sid, by: me, ok: null, reason: `something new for the client: ${short(waitingText(cur), 120)}`, from }
     // ⛔ (F1) recorded over the store's fresh list, the caps asked again there: a list that is full refuses it
     let full: string | null = null
+    /** (0.5.13) The hour's or the day's cap refused it: its line is written once per client per hour (`capNotice`). */
+    let atCap = false as boolean
     await oneAtATime(() =>
       patchStore<AutoUpdate[]>($, 'mm.autoupdates', [], list => {
         if (triedHere(list, pid, sig, sid)) {
@@ -3066,6 +3097,7 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
         }
         const at = capOf(countedUpdates(list, {}, now), now, from)
         if (at) {
+          atCap = at !== 'sync'
           full = at === 'sync' ? `${AUTO_UPDATES_PER_SYNC} updated from this sync already` : `this computer updated ${AUTO_UPDATES_PER_HOUR} threads in the last hour or ${AUTO_UPDATES_PER_DAY} in the last day`
           return false
         }
@@ -3074,7 +3106,8 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
       }),
     )
     if (full) {
-      if (full !== 'it is on record already') await logAuto($, `not updated ${client} (${pid}) sig ${sig} in ${sid}: ${full}`)
+      if (atCap) await capNotice($, pid, `not updated ${client} (${pid}) sig ${sig} in ${sid}: ${full}`)
+      else if (full !== 'it is on record already') await logAuto($, `not updated ${client} (${pid}) sig ${sig} in ${sid}: ${full}`)
       return
     }
     entry = made

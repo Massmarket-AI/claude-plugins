@@ -6259,6 +6259,12 @@ describe('0.5.9: the tool, re-checked on the store when it writes (review of 54a
 
 describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we should start updating threads automatically")', () => {
   const notices = (w: { written: Array<{ path: string; text: string }> }) => w.written.filter(f => f.path.endsWith('bridge-notices.log')).at(-1)?.text ?? ''
+  /**
+   * (0.5.13) Every line written to the notice log that matches, over all its writes: the pretend disk does not read back
+   * what was written, so each write holds the one line written then (`notices` is only the last).
+   */
+  const noticeLines = (w: { written: Array<{ path: string; text: string }> }, re: RegExp) =>
+    w.written.filter(f => f.path.endsWith('bridge-notices.log')).flatMap(f => f.text.split('\n')).filter(l => re.test(l))
   const bandLines = async ($: Engine) => {
     const band = await bandOf($)
     const out = await lines(band)
@@ -6624,7 +6630,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
 
   // ---- (review of PR #15, F1) the caps hold in a burst: the reviewer's P1, P2 and P2b
   const pidOf = (i: number) => `44444444-4444-4444-8444-${String(i).padStart(12, '0')}`
-  /** Ten clients, each with drafts ready and its own linked thread: all due at the same sync. */
+  /** `n` clients, each with drafts ready and its own linked thread: all due at the same sync. */
   const many = (n: number): WorldOptions => {
     const drafts = Array.from({ length: n }, (_, i) => packageFor(pidOf(i), `Client ${i}`, { package_id: `aaaaaaaa-bbbb-4ccc-8ddd-${String(i).padStart(12, '0')}` }))
     const threads = Array.from({ length: n }, (_, i) => thread(`local_t${i}`, `Topic ${i}`, 20))
@@ -6644,11 +6650,11 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     ['[P2b] the feed taking 0.4 s per read after the first', (n: number) => (n === 1 ? 0 : 400)],
     ['[P2] the feed taking 1.5 s per read after the first', (n: number) => (n === 1 ? 0 : 1_500)],
   ] as const) {
-    test(`⛔ (review of PR #15, F1) ${name}: ten clients due at the same sync are never more than 3 sends from one sync, nor 6 in the hour`, async ($, on) => {
+    test(`⛔ (review of PR #15, F1; 0.5.13, Rob 10-15: "12 updates an hour") ${name}: fifteen clients due at the same sync are never more than 3 sends from one sync, nor 12 in the hour; the rest go after the hour`, async ($, on) => {
       /** The most claims held at once for any one sync, as seen at every call to the app. */
       let claimed = 0
       const w = world(on, {
-        ...many(10),
+        ...many(15),
         ...(takes ? { fetchTakesMs: takes } : {}),
         during: (_call, stored) => {
           const bySync = new Map<number, number>()
@@ -6658,27 +6664,32 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
       })
       await tickOnce($, w)
       await after(w, 13)
-      // the sync at 11 minutes claimed three, the rest waited
+      // the sync at 11 minutes claimed three, the rest waited (the list read again after each send is a sync of its
+      // own, so the next three go from it, a minute on)
       expect(claimed).toBe(3)
-      expect(sends(w).length).toBeLessThanOrEqual(6)
+      expect(sends(w).length).toBeLessThanOrEqual(12)
       expect(most(records(w)).perSync).toBeLessThanOrEqual(3)
-      // the hour: never more than six, each sync three at most
+      // the hour: three from each sync, up to twelve, then nothing more in that hour
       await after(w, 50)
-      expect(sends(w).length).toBe(6)
-      expect(new Set(sends(w).map(c => c.args.session_id)).size).toBe(6)
+      expect(sends(w).length).toBe(12)
+      expect(new Set(sends(w).map(c => c.args.session_id)).size).toBe(12)
       const m = most(records(w))
-      expect(m.perHour).toBe(6)
+      expect(m.perHour).toBe(12)
       expect(m.perSync).toBeLessThanOrEqual(3)
-      expect(m.syncs).toBeGreaterThanOrEqual(2)
-      // and past the hour, the rest go
+      expect(m.syncs).toBeGreaterThanOrEqual(4)
+      // and past the hour (the first three are an hour old by the sync at 76 minutes), the rest go
       await after(w, 20)
-      expect(sends(w).length).toBe(10)
-      expect(new Set(sends(w).map(c => c.args.session_id)).size).toBe(10)
+      expect(sends(w).length).toBe(15)
+      expect(new Set(sends(w).map(c => c.args.session_id)).size).toBe(15)
+      const end = most(records(w))
+      expect(end.perHour).toBeLessThanOrEqual(12)
+      expect(end.perSync).toBeLessThanOrEqual(3)
+      expect(claimed).toBe(3)
     })
   }
 
-  test('⛔ (review of PR #15, F1) a full list at the moment of the record refuses the send: another session\'s six records written while this one read the feed', async ($, on) => {
-    const others: Rec[] = Array.from({ length: 6 }, (_, i) => ({ at: NOW + 9 * 60_000, pid: `99999999-9999-4999-8999-${String(i).padStart(12, '0')}`, client: `Client ${i}`, sig: '00000000', sid: `local_x${i}`, by: 'local_y', ok: true, reason: 'x' }))
+  test('⛔ (review of PR #15, F1) a full list at the moment of the record refuses the send: another session\'s twelve records written while this one read the feed', async ($, on) => {
+    const others: Rec[] = Array.from({ length: 12 }, (_, i) => ({ at: NOW + 9 * 60_000, pid: `99999999-9999-4999-8999-${String(i).padStart(12, '0')}`, client: `Client ${i}`, sig: '00000000', sid: `local_x${i}`, by: 'local_y', ok: true, reason: 'x' }))
     let wrote = false
     const w = linkedWorld(on, {
       during: (call, stored) => {
@@ -6695,16 +6706,18 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(notices(w)).toContain(`not updated Acme Roofing (${ACME}) sig`)
   })
 
-  test('the hour\'s cap: six in the last hour on this computer; past it nothing goes (logged once), and it goes once the hour has passed', async ($, on) => {
+  test('the hour\'s cap: twelve in the last hour on this computer; past it nothing goes (logged once), and it goes once the hour has passed', async ($, on) => {
     const earlier = (count: number, startMin: number, stepMin: number, ok: boolean | null = true): Rec[] =>
       Array.from({ length: count }, (_, i) => ({ at: NOW - (startMin + i * stepMin) * 60_000, pid: `99999999-9999-4999-8999-${String(i).padStart(12, '0')}`, client: `Client ${i}`, sig: '00000000', sid: `local_x${i}`, by: 'local_y', ok, reason: 'x' }))
-    // the hour: six in the last hour
-    const hour = linkedWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autoupdates': earlier(6, 10, 1) } })
+    // (0.5.13, Rob 10-15: "12 updates an hour") the hour: twelve in the last hour, 4 to 15 minutes ago
+    const hour = linkedWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autoupdates': earlier(12, 4, 1) } })
     await tickOnce($, hour)
     await after(hour, 30)
     expect(sends(hour)).toEqual([])
     expect(notices(hour)).toContain(`not updated Acme Roofing (${ACME}) sig`)
-    expect(notices(hour).match(/not updated Acme Roofing/g)?.length).toBe(1)
+    expect(notices(hour)).toContain('this computer updated 12 threads in the last hour or 40 in the last day')
+    // (0.5.13) once over every write, not only in the last one
+    expect(noticeLines(hour, /not updated Acme Roofing/).length).toBe(1)
     // the oldest of them is an hour old by the sync at 45 minutes
     await after(hour, 21)
     expect(sends(hour).map(c => c.args.session_id)).toEqual(['local_a'])
@@ -6720,8 +6733,47 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(notices(day)).toContain('or 40 in the last day')
   })
 
+  // (0.5.13) 10-15: fifteen identical "not updated … this computer updated 6 threads in the last hour" lines for one
+  // client within 40 seconds, one per running thread. Each desktop thread is a process of its own, so the line is
+  // kept to one per client per hour by the store (`mm.capLogged`), never by a thread's own memory.
+  test('(0.5.13) the cap\'s line is written once per client per hour across every running thread: another thread wrote it 10 minutes ago, so this one does not; once that is an hour old it is written once, and again only after another hour; nothing else changes', async ($, on) => {
+    // the day's cap holds for hours: forty in the last day, none of them in the last hour
+    const dayFull: Rec[] = Array.from({ length: 40 }, (_, i) => ({ at: NOW - (2 * 60 + i * 10) * 60_000, pid: `99999999-9999-4999-8999-${String(i).padStart(12, '0')}`, client: `Client ${i}`, sig: '00000000', sid: `local_x${i}`, by: 'local_y', ok: true, reason: 'x' }))
+    // another running thread (a process of its own: nothing of this one's memory) wrote Acme's line 10 minutes ago;
+    // Bolt's is two hours old
+    const w = linkedWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autoupdates': dayFull, 'mm.capLogged': { [ACME]: NOW - 10 * 60_000, [BOLT]: NOW - 2 * HOUR } } })
+    const acme = () => noticeLines(w, /not updated Acme Roofing/)
+    await tickOnce($, w)
+    // Acme is due from the sync at 11 minutes and capped at every sync after it: not written while the other thread's
+    // line is under an hour old (to 50 minutes on)
+    await after(w, 45)
+    expect(acme()).toEqual([])
+    expect(sends(w)).toEqual([])
+    // the sync at 51 minutes: written, once
+    await after(w, 10)
+    expect(acme().length).toBe(1)
+    expect(acme()[0]).toContain(`not updated Acme Roofing (${ACME}) sig`)
+    expect(acme()[0]).toContain('this computer updated 12 threads in the last hour or 40 in the last day')
+    // what the store keeps: Acme's, now; Bolt's, older than the hour, is dropped
+    const logged = w.stored['mm.capLogged'] as Record<string, number>
+    expect(Object.keys(logged)).toEqual([ACME])
+    expect(logged[ACME]).toBeGreaterThanOrEqual(NOW + 50 * 60_000)
+    expect(logged[ACME]).toBeLessThan(NOW + 56 * 60_000)
+    // ten more capped syncs within that hour: not again
+    await after(w, 50)
+    expect(acme().length).toBe(1)
+    // the hour has passed: written once more
+    await after(w, 15)
+    expect(acme().length).toBe(2)
+    // ⛔ no decision changed: nothing sent, nothing recorded for Acme, nothing claimed
+    expect(sends(w)).toEqual([])
+    expect(records(w).filter(r => r.pid === ACME)).toEqual([])
+    expect(w.stored['mm.updating'] ?? {}).toEqual({})
+  })
+
   test('sends the threads did not take do not count toward the caps', async ($, on) => {
-    const failed: Rec[] = Array.from({ length: 6 }, (_, i) => ({ at: NOW - (10 + i) * 60_000, pid: `99999999-9999-4999-8999-${String(i).padStart(12, '0')}`, client: `Client ${i}`, sig: '00000000', sid: `local_x${i}`, by: 'local_y', ok: false, reason: 'x' }))
+    // (0.5.13) twelve: the hour's cap, were they counted
+    const failed: Rec[] = Array.from({ length: 12 }, (_, i) => ({ at: NOW - (10 + i) * 60_000, pid: `99999999-9999-4999-8999-${String(i).padStart(12, '0')}`, client: `Client ${i}`, sig: '00000000', sid: `local_x${i}`, by: 'local_y', ok: false, reason: 'x' }))
     const w = linkedWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autoupdates': failed } })
     await tickOnce($, w)
     await seenTen(w)
