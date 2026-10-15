@@ -3,9 +3,10 @@ import { describe, expect, test } from 'claude-code/testing'
 import { buildLists, buildQueue, threadTitleShort } from './queue'
 import type { Feed, FeedThread, QueueItem } from './queue'
 import {
-  CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, LONG_CONTEXT_TOKENS, LONG_THREAD_ROWS, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
+  AUTO_NO_DRAFTS_MS, AUTO_QUIET_MS, LABEL, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
+  asksForPrep, autoUpdatable, autoUpdateDue, ownPackage, seenNow,
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
-  rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLength, threadLink, threadRows, titleLooksLike, titleSuggestion, waitingText,
+  rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLink, titleLooksLike, titleSuggestion, waitingText,
   newerThreadFor, threadStart,
   CHIP_TITLE_MAX, REFRESH_FAILED, bandText, chipTitle, claimText, isStillOpenRow, staleCopySentence, startKickoff,
   LABEL_MAX, buttonLabel,
@@ -524,9 +525,9 @@ describe('R3 and R8: the rows of the Needs-you pane', () => {
     )
   })
 
-  test('the clients with no thread yet come first and are marked; a client whose thread is old or long is in a thread; an empty group is not drawn', async () => {
-    const long = rowFor(item(ACME), recommend([known('local_a', 'Roof quote', '2026-10-09 15:00')], undefined, NOW, { length: () => ({ by: 'rows' }) }), NOW)
-    // as they come, soonest due first: an old thread, no thread, a long thread, a thread up to date, no thread
+  test('the clients with no thread yet come first and are marked; a client whose thread is old, or whose thread lacks what waits, is in a thread; an empty group is not drawn', async () => {
+    const long = rowFor(item(ACME), recommend([known('local_a', 'Roof quote', '2026-10-09 15:00')], undefined, NOW), NOW)
+    // as they come, soonest due first: an old thread, no thread, a thread to update, a thread up to date, no thread
     const groups = rowGroups([stale, start, long, current, { ...start, projectId: BOLT, client: 'Bolt Staffing' }])
     expect(groups.map(g => [g.heading, g.rows.map(r => `${r.mark}${r.n}. ${r.row.client}`)])).toEqual([
       ['New: no thread yet (2)', ['◆ 1. Cedar Dental', '◆ 2. Bolt Staffing']],
@@ -601,80 +602,117 @@ describe('the three states: start, update, current', () => {
   })
 })
 
-describe('a long thread: Start thread is the recommendation', () => {
-  const DAY = 24 * 3_600_000
-  const reading = (percentUsed: number, tokensUsed: number, ageMs = 0, contextWindow = 1_000_000) => ({ percentUsed, tokensUsed, contextWindow, at: NOW - ageMs })
-
-  test('the limits', async () => {
-    expect([LONG_CONTEXT_PERCENT, LONG_CONTEXT_TOKENS, LONG_THREAD_ROWS, CONTEXT_READING_MAX_AGE_MS]).toEqual([60, 300_000, 1500, 7 * DAY])
-  })
-
-  test('59% and 299,999 tokens: not long, even with 5,000 rows', async () => {
-    expect(threadLength(reading(59, 299_999), 5000, NOW)).toBeNull()
-    expect(threadLength(reading(0, 0), 5000, NOW)).toBeNull()
-  })
-
-  test('60%: long, by the context, with the percent', async () => {
-    expect(threadLength(reading(60, 120_000, 0, 200_000), 3, NOW)).toEqual({ by: 'context', percent: 60 })
-    expect(threadLength(reading(87.4, 174_800, 0, 200_000), undefined, NOW)).toEqual({ by: 'context', percent: 87 })
-  })
-
-  test('300,000 tokens at 30% of a 1M window: long', async () => {
-    expect(threadLength(reading(30, 300_000), undefined, NOW)).toEqual({ by: 'context', percent: 30 })
-  })
-
-  test('a reading 8 days old is ignored and the rows decide; one 7 days old still counts', async () => {
-    expect(threadLength(reading(95, 950_000, 8 * DAY), 100, NOW)).toBeNull()
-    expect(threadLength(reading(95, 950_000, 8 * DAY), 1500, NOW)).toEqual({ by: 'rows' })
-    expect(threadLength(reading(10, 10_000, 8 * DAY), 5000, NOW)).toEqual({ by: 'rows' })
-    expect(threadLength(reading(95, 950_000, 7 * DAY), 3, NOW)).toEqual({ by: 'context', percent: 95 })
-  })
-
-  test('with no reading: 1,499 rows is not long, 1,500 is, and a feed with no rows never makes a thread long', async () => {
-    expect(threadLength(undefined, 1499, NOW)).toBeNull()
-    expect(threadLength(undefined, 1500, NOW)).toEqual({ by: 'rows' })
-    expect(threadLength(undefined, undefined, NOW)).toBeNull()
-  })
-
-  test('a thread\'s rows are those of the client\'s newest session in it; a feed without `rows` gives none', async () => {
-    const pairs = pairsOf({ 'cli-new': 'local_a', 'cli-old': 'local_a', 'cli-b': 'local_b' })
-    const withRows = (t: FeedThread, rows: number): FeedThread => ({ ...t, rows })
-    const feed = [withRows(declared(ACME, 'cli-new', '2026-10-12 10:00'), 40), withRows(declared(ACME, 'cli-old', '2026-10-05 10:00'), 2000), withRows(declared(BOLT, 'cli-b', '2026-10-08 10:00'), 1700)]
-    expect(threadRows('local_a', ACME, feed, pairs)).toBe(40)
-    expect(threadRows('local_b', BOLT, feed, pairs)).toBe(1700)
-    expect(threadRows('local_b', ACME, feed, pairs)).toBeUndefined()
-    expect(threadRows('local_a', ACME, [declared(ACME, 'cli-new', '2026-10-12 10:00')], pairs)).toBeUndefined()
-  })
-
+describe('(0.5.11) a long thread is not replaced: Claude Code compacts it', () => {
   const thread = known('local_a', 'Roof quote', '2026-10-09 15:00')
   const sig = signatureOf(item(ACME))
   const sent = { sid: 'local_a', sig, at: et('2026-10-12 09:30') }
 
-  test('a long thread is Start thread, whether it would have been Update or current, and says why', async () => {
-    for (const known of [{}, { sent, signature: sig }]) {
-      expect(recommend([thread], undefined, NOW, { ...known, length: () => ({ by: 'context', percent: 61 }) })).toEqual({
-        state: 'start', reason: 'the existing thread has used 61% of its context, a new one is cheaper and cleaner', target: { sid: 'local_a', title: 'Roof quote', suggested: false },
-      })
-      expect(recommend([thread], undefined, NOW, { ...known, length: () => ({ by: 'rows' }) })).toMatchObject({ state: 'start', reason: 'the existing thread is long, a new one keeps the context clean' })
-    }
-    expect(rowDetail(rowFor(item(ACME), recommend([thread], undefined, NOW, { length: () => ({ by: 'context', percent: 61 }) }), NOW))).toBe(
-      'drafts ready · Start thread: the existing thread has used 61% of its context, a new one is cheaper and cleaner',
-    )
-    expect(rowDetail(rowFor(item(ACME), recommend([thread], undefined, NOW, { length: () => ({ by: 'rows' }) }), NOW))).toBe('drafts ready · Start thread: the existing thread is long, a new one keeps the context clean')
+  test('a thread is Update thread when it lacks what waits, and Open thread when it has it, whatever its length: there is no length to ask', async () => {
+    expect(recommend([thread], undefined, NOW)).toEqual({ state: 'update', reason: 'thread from Fri, Oct 9 exists', target: { sid: 'local_a', title: 'Roof quote', suggested: false } })
+    expect(recommend([thread], undefined, NOW, { sent, signature: sig }).state).toBe('current')
+    const row = rowFor(item(ACME), recommend([thread], undefined, NOW), NOW)
+    expect(rowButtons(row)).toEqual(['update', 'drafts'])
+    expect(rowDetail(row)).toBe('drafts ready · Update thread: thread from Fri, Oct 9 exists')
+    // an old thread is still Start, for being old
+    expect(recommend([known('local_old', 'Intake', '2026-09-22 10:00')], undefined, NOW)).toMatchObject({ state: 'start', reason: 'last thread is from Sep 22' })
+  })
+})
+
+describe('(0.5.11) a client\'s thread updated by itself: which clients, and when', () => {
+  const MIN = 60_000
+  // the fixtures, at NOW (11 AM): Acme has drafts ready (they cover 8 AM mail); Bolt has two messages (9 and 10 AM)
+  // and no package; Cedar has a task alone (the feed gives no creation time: its newest is its due time, 4 PM)
+  const pkg = (state: 'held_by_me' | 'held_by_other' | 'stale' | 'prepared', by = '') => ({ id: PKG, state, by, at: null, unsent: 1, newer: 0 })
+
+  /** What this bridge has seen of a client: unchanged for `quiet` minutes, its mail waiting for `mail` minutes (0: none). */
+  const seen = (quiet: number, mail = 0) => ({ sig: 'x', at: NOW - quiet * MIN, mail: mail ? NOW - mail * MIN : 0 })
+
+  test('(review of PR #15, F3) the waits: 10 minutes since the bridge first saw it unchanged, then drafts ready or 120 minutes since it first saw the oldest waiting message', async () => {
+    expect([AUTO_QUIET_MS, AUTO_NO_DRAFTS_MS]).toEqual([10 * MIN, 120 * MIN])
+    // nothing seen yet is never due
+    for (const pid of [ACME, BOLT, CEDAR]) expect(autoUpdateDue(item(pid), NOW, undefined)).toBe(false)
   })
 
-  test('a thread that is not long is judged as before, and the length is asked of the thread that would be used', async () => {
-    const asked: string[] = []
-    const length = (sid: string) => {
-      asked.push(sid)
-      return null
-    }
-    expect(recommend([thread], undefined, NOW, { length }).state).toBe('update')
-    expect(recommend([thread], undefined, NOW, { sent, signature: sig, length }).state).toBe('current')
-    expect(asked).toEqual(['local_a', 'local_a'])
-    // an old thread is Start for being old: its length is not asked
-    expect(recommend([known('local_old', 'Intake', '2026-09-22 10:00')], undefined, NOW, { length }).reason).toBe('last thread is from Sep 22')
-    expect(asked.length).toBe(2)
+  test('(review of PR #15, F3) drafts ready: it goes once the bridge has seen them unchanged for 10 minutes, whatever the feed\'s own times say', async () => {
+    expect(autoUpdateDue(item(ACME), NOW, seen(9))).toBe(false)
+    expect(autoUpdateDue(item(ACME), NOW, seen(10))).toBe(true)
+    // the feed's times are not asked: a package the feed dates an hour back, seen 5 minutes ago, waits; one it dates
+    // a minute back (or not at all, as the live feed gives none), seen 10 minutes ago, goes
+    expect(autoUpdateDue({ ...item(ACME), packageUpdatedAt: new Date(NOW - 60 * MIN).toISOString() }, NOW, seen(5))).toBe(false)
+    expect(autoUpdateDue({ ...item(ACME), packageUpdatedAt: new Date(NOW - MIN).toISOString(), newest: { mail: NOW - MIN, pkg: NOW - MIN, task: 0 } }, NOW, seen(10))).toBe(true)
+    expect(autoUpdateDue({ ...item(ACME), packageUpdatedAt: null }, NOW, seen(10))).toBe(true)
+  })
+
+  test('(review of PR #15, F3) messages and no drafts: it goes 120 minutes after the bridge first saw the oldest waiting message, or once drafts are ready, whichever comes first', async () => {
+    // Bolt: two messages, no package
+    expect(autoUpdateDue(item(BOLT), NOW, seen(10, 119))).toBe(false)
+    expect(autoUpdateDue(item(BOLT), NOW, seen(10, 120))).toBe(true)
+    // still the 10 quiet minutes first: a second message seen 5 minutes ago holds it back, mail waiting or not
+    expect(autoUpdateDue(item(BOLT), NOW, seen(5, 180))).toBe(false)
+    // the feed's own mail times are not asked: mail the feed dates three hours back, first seen 15 minutes ago, waits
+    expect(autoUpdateDue({ ...item(BOLT), newest: { mail: NOW - 180 * MIN, pkg: 0, task: 0 } }, NOW, seen(15, 15))).toBe(false)
+    // drafts ready (prepared, or held by the person) do not wait the 120 minutes; drafts out of date do
+    expect(autoUpdateDue({ ...item(BOLT), open: pkg('prepared') }, NOW, seen(10, 15))).toBe(true)
+    expect(autoUpdateDue({ ...item(BOLT), open: pkg('held_by_me') }, NOW, seen(10, 15))).toBe(true)
+    expect(autoUpdateDue({ ...item(BOLT), kind: 'ready', packageId: PKG }, NOW, seen(10, 15))).toBe(true)
+    expect(autoUpdateDue({ ...item(BOLT), open: pkg('stale') }, NOW, seen(10, 15))).toBe(false)
+    expect(autoUpdateDue({ ...item(BOLT), open: pkg('stale') }, NOW, seen(10, 120))).toBe(true)
+    // no record of the mail's wait (it cannot be: a record with mail waiting has it) is never due on mail alone
+    expect(autoUpdateDue(item(BOLT), NOW, seen(300, 0))).toBe(false)
+  })
+
+  test('a task alone: it goes once the bridge has seen it for 10 minutes; its due time is not asked', async () => {
+    expect(item(CEDAR).messages).toBe(0)
+    expect(autoUpdateDue(item(CEDAR), NOW, seen(9))).toBe(false)
+    expect(autoUpdateDue(item(CEDAR), NOW, seen(10))).toBe(true)
+  })
+
+  test('(review of PR #15, F3) what the bridge has seen of a client: kept while it is unchanged; its mail\'s wait kept while mail waits, without a break', async () => {
+    const T = NOW - 30 * MIN
+    // first seen: now, and its mail from now
+    expect(seenNow(undefined, item(BOLT), 'a', T)).toEqual({ sig: 'a', at: T, mail: T })
+    expect(seenNow(undefined, item(CEDAR), 'c', T)).toEqual({ sig: 'c', at: T, mail: 0 })
+    // the same thing later: both kept
+    expect(seenNow({ sig: 'a', at: T, mail: T }, item(BOLT), 'a', NOW)).toEqual({ sig: 'a', at: T, mail: T })
+    // something new (another message, a package): seen from now; the mail has waited since it was first seen
+    expect(seenNow({ sig: 'a', at: T, mail: T }, item(BOLT), 'b', NOW)).toEqual({ sig: 'b', at: NOW, mail: T })
+    expect(seenNow({ sig: 'a', at: T, mail: T }, { ...item(BOLT), open: pkg('prepared') }, 'p', NOW)).toEqual({ sig: 'p', at: NOW, mail: T })
+    // no mail waiting any more: the wait ends, and a message after that waits from then
+    const answered = seenNow({ sig: 'a', at: T, mail: T }, item(CEDAR), 'c', NOW - 10 * MIN)
+    expect(answered.mail).toBe(0)
+    expect(seenNow(answered, item(BOLT), 'd', NOW).mail).toBe(NOW)
+    // a time on record that is not a time, or later than the sync, is not kept
+    expect(seenNow({ sig: 'a', at: Number.NaN, mail: NOW + MIN }, item(BOLT), 'a', NOW)).toEqual({ sig: 'a', at: NOW, mail: NOW })
+  })
+
+  test('(review of PR #15, F3) kickoff case 6 asks the thread to build the package; the package that then appears is its own work, until the client writes again', async () => {
+    expect([ACME, BOLT, CEDAR].map(pid => asksForPrep(item(pid)))).toEqual([false, true, false])
+    expect(asksForPrep({ ...item(BOLT), open: pkg('stale') })).toBe(false)
+    const sent = { sid: 'local_b', sig: signatureOf(item(BOLT)), at: NOW - 20 * MIN, prep: true as const }
+    const built = { ...item(BOLT), open: pkg('held_by_me'), packageId: PKG, kind: 'ready' as const, newest: { mail: NOW - 60 * MIN, pkg: NOW - 60 * MIN, task: 0 } }
+    expect(ownPackage(sent, 'local_b', built)).toBe(true)
+    expect(ownPackage(sent, 'local_b', { ...built, open: pkg('prepared'), packageId: null })).toBe(true)
+    // not: no package yet, another thread, an update that did not ask for prep, or a client message since the send
+    expect(ownPackage(sent, 'local_b', item(BOLT))).toBe(false)
+    expect(ownPackage(sent, 'local_other', built)).toBe(false)
+    expect(ownPackage({ ...sent, prep: undefined }, 'local_b', built)).toBe(false)
+    expect(ownPackage(undefined, 'local_b', built)).toBe(false)
+    expect(ownPackage(sent, 'local_b', { ...built, newest: { mail: NOW - 5 * MIN, pkg: NOW - 60 * MIN, task: 0 } })).toBe(false)
+  })
+
+  test('which clients: never one a teammate has, a package someone else holds, an internal project, or one being checked or still open', async () => {
+    expect([ACME, BOLT, CEDAR].map(pid => autoUpdatable(item(pid), NOW))).toEqual([true, true, true])
+    expect(autoUpdatable({ ...item(ACME), theirs: 'Dana' }, NOW)).toBe(false)
+    // a package a teammate holds, on a client listed for a task of the person's own
+    expect(autoUpdatable({ ...item(CEDAR), open: pkg('held_by_other', 'Dana') }, NOW)).toBe(false)
+    // (the founder) a stale package a teammate has
+    expect(autoUpdatable({ ...item(BOLT), open: pkg('stale', 'Dana') }, NOW)).toBe(false)
+    expect(autoUpdatable({ ...item(BOLT), open: pkg('stale') }, NOW)).toBe(true)
+    expect(autoUpdatable({ ...item(CEDAR), internal: true }, NOW)).toBe(false)
+    // R8: our reply is being checked, or the check found something still open
+    const HOUR = 60 * MIN
+    expect(autoUpdatable({ ...item(ACME), lastOut: NOW - 5 * MIN, check: { sendAt: NOW - HOUR, stillOpen: [], covers: 0 } }, NOW)).toBe(false)
+    expect(autoUpdatable({ ...item(ACME), lastOut: NOW - HOUR, check: { sendAt: NOW - HOUR, stillOpen: ['the quote'], covers: 0 } }, NOW)).toBe(false)
   })
 })
 
@@ -1187,20 +1225,19 @@ describe('R4 and R8: the rows', () => {
     const [far] = buildQueue(later, NOW)
     expect(rowFor(far as QueueItem, fresh, NOW, { needsYou: true }).title).toBe('🟡 2d left · Cedar Dental · task')
   })
-  test('R8: still open after our reply, with a thread: its name, its items under it, and Claim in this thread under 60% (none from 60%)', async () => {
+  test('R8: still open after our reply, with a thread: its name, its items under it, and Claim in this thread ((0.5.11) whatever the thread\'s length)', async () => {
     const f: Feed = { ...FEED, drafts: [{ ...(FEED.drafts?.[0] as object), last_outbound_at: at('2026-10-12 10:00'), checked_send_at: at('2026-10-12 10:00'), still_open: ['the logo file'] } as never] }
     const it = buildQueue(f, NOW).find(i => i.projectId === ACME) as QueueItem
     const withThread = { state: 'update' as const, reason: 'thread from Sun, Oct 11 exists', target: { sid: 'local_a', title: 'Roof quote', suggested: false } }
-    const row = rowFor(it, withThread, NOW, { needsYou: true, percent: 55 })
+    const row = rowFor(it, withThread, NOW, { needsYou: true })
     expect(row).toMatchObject({ title: '🟡 Acme Roofing · still open after your reply', stillOpen: ['the logo file'], claim: true })
     expect(isStillOpenRow(row)).toBe(true)
     expect(rowButtons(row)).toEqual(['claim', 'drafts'])
     expect(LABEL.claim).toBe('Claim in this thread')
     expect(rowDetail(row)).toBe('drafts ready')
     expect(paneText([row], 'H', 'N')).toContain('   - the logo file')
-    const long = rowFor(it, withThread, NOW, { needsYou: true, percent: 61 })
-    expect(long.claim).toBe(false)
-    expect(rowButtons(long)).toEqual(['drafts'])
+    // (0.5.11, Opus 10-15) no length takes Claim off any more; a row an older version drew with no Claim keeps none
+    expect(rowButtons({ ...row, claim: false })).toEqual(['drafts'])
     // no thread to claim it in: the row is an ordinary one
     expect(rowFor(it, fresh, NOW, { needsYou: true }).stillOpen).toBeUndefined()
   })
@@ -1416,3 +1453,65 @@ describe('0.5.10: R1b counts only evidence dated at or after the candidate\'s ow
     expect(newerThreadFor(ACME, 'local_new', { [ACME]: 'local_new' }, [oldRow, declared(ACME, 'cli-new', '2026-10-15 10:40')], reopened, busy)).toBeUndefined()
   })
 })
+
+// ---------------------------------------------------------------- (0.5.11) the words of an update sent by itself
+
+describe('(0.5.11, Opus 10-15) an update sent by itself never takes the package; a pressed Update says what it said before', () => {
+  const pkg = (state: 'held_by_me' | 'held_by_other' | 'stale' | 'prepared', by = '') => ({ id: PKG, state, by, at: null, unsent: 1, newer: 0 })
+  /**
+   * For each case, the pressed text exactly as ded42364 (0.5.10, main) wrote it, captured from that commit's own
+   * kickoffText on these fixtures; and the text an update sent by itself carries (Opus's words for 2, 4, 5 and 6).
+   */
+  const CASES: Array<{ name: string; it: QueueItem; pressed: string; plain: string; auto: string }> = [
+    { name: "1 held by me", it: { ...item(ACME), open: pkg('held_by_me') }, pressed: "New since this thread last worked on this client: 1 draft not sent.\n[mm-link 11111111-1111-1111-1111-111111111111] Carry on with the reply drafts for Acme Roofing Pat (OW project 11111111-1111-1111-1111-111111111111). I already picked up package aaaaaaaa: 1 draft(s) not sent yet. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the five-part pickup view and wait for me. Send nothing without my go.", plain: "[mm-link 11111111-1111-1111-1111-111111111111] Carry on with the reply drafts for Acme Roofing Pat (OW project 11111111-1111-1111-1111-111111111111). I already picked up package aaaaaaaa: 1 draft(s) not sent yet. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the five-part pickup view and wait for me. Send nothing without my go.", auto: "[mm-link 11111111-1111-1111-1111-111111111111] New since this thread last worked on this client: 1 draft not sent.\nCarry on with the reply drafts for Acme Roofing Pat (OW project 11111111-1111-1111-1111-111111111111). I already picked up package aaaaaaaa: 1 draft(s) not sent yet. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the five-part pickup view and wait for me. Send nothing without my go." },
+    { name: "2 prepared for me", it: item(ACME), pressed: "New since this thread last worked on this client: drafts ready.\n[mm-link 11111111-1111-1111-1111-111111111111] Pick up the reply drafts for Acme Roofing Pat (OW project 11111111-1111-1111-1111-111111111111). Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package aaaaaaaa and wait for me. Send nothing without my go.", plain: "[mm-link 11111111-1111-1111-1111-111111111111] Pick up the reply drafts for Acme Roofing Pat (OW project 11111111-1111-1111-1111-111111111111). Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package aaaaaaaa and wait for me. Send nothing without my go.", auto: "[mm-link 11111111-1111-1111-1111-111111111111] New since this thread last worked on this client: drafts ready.\nThe reply drafts for Acme Roofing Pat (OW project 11111111-1111-1111-1111-111111111111) are ready in package aaaaaaaa. Load the client's project skill first, then follow client-reply-prep §9 to show the five-part pickup view for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. Send nothing without my go." },
+    { name: "3 held by a teammate", it: { ...item(BOLT), open: pkg('held_by_other', 'Dana') }, pressed: "New since this thread last worked on this client: 2 messages waiting, drafts with Dana.\n[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): Dana picked up the reply drafts (package aaaaaaaa) and has 1 not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.", plain: "[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): Dana picked up the reply drafts (package aaaaaaaa) and has 1 not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.", auto: "[mm-link 22222222-2222-2222-2222-222222222222] New since this thread last worked on this client: 2 messages waiting, drafts with Dana.\nBolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): Dana picked up the reply drafts (package aaaaaaaa) and has 1 not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go." },
+    { name: "3 stale, a teammate has it", it: { ...item(BOLT), open: pkg('stale', 'Dana') }, pressed: "New since this thread last worked on this client: 2 messages waiting, drafts out of date.\n[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): Dana has the reply drafts (package aaaaaaaa), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.", plain: "[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): Dana has the reply drafts (package aaaaaaaa), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.", auto: "[mm-link 22222222-2222-2222-2222-222222222222] New since this thread last worked on this client: 2 messages waiting, drafts out of date.\nBolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): Dana has the reply drafts (package aaaaaaaa), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go." },
+    { name: "4 stale, messages waiting", it: { ...item(BOLT), open: pkg('stale') }, pressed: "New since this thread last worked on this client: 2 messages waiting, drafts out of date.\n[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9 AM ET. Load the client's project skill first, then follow client-reply-prep §9: package aaaaaaaa exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.", plain: "[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9 AM ET. Load the client's project skill first, then follow client-reply-prep §9: package aaaaaaaa exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.", auto: "[mm-link 22222222-2222-2222-2222-222222222222] New since this thread last worked on this client: 2 messages waiting, drafts out of date.\nBolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9 AM ET. Package aaaaaaaa is marked out of date. Load the client's project skill first, then show me what the client sent, the current drafts and what is due, and wait for me. Do not take the package or rebuild the drafts until I answer here. Send nothing without my go." },
+    { name: "5 prepared, messages waiting", it: { ...item(BOLT), open: pkg('prepared') }, pressed: "New since this thread last worked on this client: 2 messages waiting, drafts ready.\n[mm-link 22222222-2222-2222-2222-222222222222] Pick up the reply drafts for Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222). Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package aaaaaaaa and wait for me. Send nothing without my go.", plain: "[mm-link 22222222-2222-2222-2222-222222222222] Pick up the reply drafts for Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222). Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package aaaaaaaa and wait for me. Send nothing without my go.", auto: "[mm-link 22222222-2222-2222-2222-222222222222] New since this thread last worked on this client: 2 messages waiting, drafts ready.\nThe reply drafts for Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222) are ready in package aaaaaaaa. Load the client's project skill first, then follow client-reply-prep §9 to show the five-part pickup view for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. Send nothing without my go." },
+    { name: "6 messages, no package", it: item(BOLT), pressed: "New since this thread last worked on this client: 2 messages waiting.\n[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9 AM ET. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.", plain: "[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9 AM ET. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.", auto: "[mm-link 22222222-2222-2222-2222-222222222222] New since this thread last worked on this client: 2 messages waiting.\nBolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9 AM ET. Load the client's project skill first, then follow client-reply-prep: no package exists yet, so run prep (§2) to build one, then show the five-part pickup view without taking the package: no pickup call until I answer here. Then wait for me. Send nothing without my go." },
+    { name: "7 tasks only", it: item(CEDAR), pressed: "New since this thread last worked on this client: 1 task due.\n[mm-link 33333333-3333-3333-3333-333333333333] Cedar Dental (OW project 33333333-3333-3333-3333-333333333333) has 1 committed task(s) due Mon, Oct 12 4 PM ET. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.", plain: "[mm-link 33333333-3333-3333-3333-333333333333] Cedar Dental (OW project 33333333-3333-3333-3333-333333333333) has 1 committed task(s) due Mon, Oct 12 4 PM ET. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.", auto: "[mm-link 33333333-3333-3333-3333-333333333333] New since this thread last worked on this client: 1 task due.\nCedar Dental (OW project 33333333-3333-3333-3333-333333333333) has 1 committed task(s) due Mon, Oct 12 4 PM ET. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go." },
+    { name: "ok", it: { ...item(BOLT), kind: 'ok' as const, ok: { sends: 'Dana' }, open: pkg('prepared') }, pressed: "New since this thread last worked on this client: needs your OK · Dana sends, 2 messages waiting, drafts ready.\n[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): reply package aaaaaaaa is flagged for my OK, and Dana sends it. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go.", plain: "[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): reply package aaaaaaaa is flagged for my OK, and Dana sends it. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go.", auto: "[mm-link 22222222-2222-2222-2222-222222222222] New since this thread last worked on this client: needs your OK · Dana sends, 2 messages waiting, drafts ready.\nBolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): reply package aaaaaaaa is flagged for my OK, and Dana sends it. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go." },
+  ]
+
+  for (const c of CASES) {
+    test(`case ${c.name}: pressed and chip texts as ded42364's, byte for byte; sent by itself, ${c.auto === c.pressed ? 'the same' : 'its own words'}`, async () => {
+      expect(kickoffText(c.it, { update: true })).toBe(c.pressed)
+      expect(kickoffText(c.it)).toBe(c.plain)
+      expect(kickoffText(c.it, { update: true, auto: true })).toBe(c.auto)
+    })
+  }
+
+  /** (Review of PR #15, F4) A text sent by itself, its marker put back where a pressed one has it: the second line's start. */
+  const markerBack = (text: string): string => text.replace(/^(\[mm-link [0-9a-f-]{36}\] )([^\n]*)\n/, '$2\n$1')
+
+  test('cases 2, 4, 5 and 6 have words of their own when sent by itself; 1, 3, 7 and the founder\'s OK say what a pressed Update says', async () => {
+    expect(CASES.filter(c => markerBack(c.auto) !== c.pressed).map(c => c.name)).toEqual(['2 prepared for me', '4 stale, messages waiting', '5 prepared, messages waiting', '6 messages, no package'])
+  })
+
+  test('⛔ no text sent by itself asks to take the package', async () => {
+    for (const c of CASES) {
+      const text = kickoffText(c.it, { update: true, auto: true })
+      expect(text, c.name).not.toContain('Pick up the reply drafts')
+      expect(text, c.name).not.toContain('so pick it up')
+      // the first line is Update's, as pressed, after the marker
+      expect(text.split('\n')[0], c.name).toBe(`[mm-link ${c.it.projectId}] ${c.pressed.split('\n')[0]}`)
+    }
+  })
+
+  // (Review of PR #15, F4) A hook too old to read the app's `peer` stamp tells the bridge's turns from the person's by the
+  // marker at the very start of the text: a text sent by itself opens with it, and has it once; a pressed one is as before.
+  test('⛔ (review of PR #15, F4) every text sent by itself starts with the client\'s marker, once; the pressed text opens with "New since", as ded42364\'s', async () => {
+    for (const c of CASES) {
+      const auto = kickoffText(c.it, { update: true, auto: true })
+      const marker = `[mm-link ${c.it.projectId}] `
+      expect(auto.startsWith(`${marker}New since this thread last worked on this client: `), c.name).toBe(true)
+      expect(auto.split('[mm-link ').length - 1, c.name).toBe(1)
+      expect(/^\[mm-link ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]/.exec(auto)?.[1], c.name).toBe(c.it.projectId)
+      expect(kickoffText(c.it, { update: true }).startsWith('New since this thread last worked on this client: '), c.name).toBe(true)
+      // the marker alone moved: the rest is the body as the words for a send by itself have it
+      expect(auto.slice(marker.length), c.name).toBe(`${auto.slice(marker.length).split('\n')[0]}\n${kickoffText(c.it, { auto: true }).slice(marker.length)}`)
+    }
+  })
+})
+

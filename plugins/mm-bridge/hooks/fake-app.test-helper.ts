@@ -122,6 +122,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
       fs: {
         read: async (path: string) => {
           if (path.endsWith('/.claude/mm-hooks/token')) return 'fixture-token-not-a-real-one'
+          // (0.5.11, review of PR #15, F4) a time-tracking hook that counts the bridge's turns as automatic (0.11.7's rule)
+          if (path.endsWith('/.claude/mm-hooks/worklog-hook.js')) return 'const HOOK_VERSION = "0.11.7";\nconst TURN_ORIGIN_MARKER_RE = /^\\[mm-link [0-9a-f-]{36}\\]/;\n'
           throw new Error(`ENOENT: no such file or directory, open '${path}'`)
         },
         list: async (path: string) => {

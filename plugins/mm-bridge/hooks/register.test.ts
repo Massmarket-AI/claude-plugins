@@ -96,6 +96,19 @@ type WorldOptions = {
   toolsUnlisted?: boolean
   /** (0.5.7) start_session's answer to a start gives no session id. */
   startNoId?: boolean
+  /** (0.5.11, review of PR #15) The feed takes this long to answer its n-th read (the closeout feed only). */
+  fetchTakesMs?: (n: number) => number
+  /**
+   * (0.5.11, review of PR #15, F4) The time-tracking hook on this computer: one that counts the bridge's turns as
+   * automatic (left out: 0.11.7's rule), one older than 0.11.5 (`old`), or none that can be read (`missing`).
+   */
+  hook?: 'old' | 'missing'
+}
+
+/** (0.5.11, review of PR #15, F4) The parts of the time-tracking hook's text the bridge reads: 0.11.7's, and 0.11.4's. */
+const HOOK_TEXT = {
+  current: 'const HOOK_VERSION = "0.11.7";\nconst TURN_ORIGIN_MARKER_RE =\n  /^\\[mm-link [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\]/;\n',
+  old: '// worklog hook (0.11.4)\nfunction postWorklog(entry) {}\n',
 }
 
 function world(on: On, opts: WorldOptions = {}) {
@@ -177,8 +190,13 @@ function world(on: On, opts: WorldOptions = {}) {
     }
     return text('ok')
   })
-  on('http.fetch', (_$, e) => {
+  let feedReads = 0
+  on('http.fetch', async (_$, e) => {
     fetched.push(e.url)
+    if (e.url.includes('/closeout') && opts.fetchTakesMs) {
+      const ms = opts.fetchTakesMs(++feedReads)
+      if (ms > 0) await clock.sleep(ms)
+    }
     const body = e.url.includes('/reply-package') ? { markdown: '## Acme Roofing\n\n1. What the client sent' } : theFeed
     const status = !e.url.includes('/reply-package') && opts.feedStatus ? opts.feedStatus() : 200
     return { value: { status, ok: status === 200, headers: {}, text: JSON.stringify(status === 200 ? body : { error: 'boom' }) } }
@@ -186,6 +204,7 @@ function world(on: On, opts: WorldOptions = {}) {
   // A pretend disk: the tracker token, and whatever record files a test puts under the app's data folder.
   const files = opts.files ?? {}
   const reads: string[] = []
+  const hookReads: string[] = []
   const lists: string[] = []
   const written: Array<{ path: string; text: string }> = []
   // These tests run on a POSIX host, where the engine reads `C:\\Users\\...` as a relative path and puts the
@@ -193,6 +212,11 @@ function world(on: On, opts: WorldOptions = {}) {
   const asGiven = (path: string) => path.replace(/^.*\/(?=[A-Za-z]:\\)/, '')
   on('fs.read', (_$, e) => {
     if (e.path.endsWith('/.claude/mm-hooks/token')) return opts.noToken ? { deny: `ENOENT: no such file or directory, open '${e.path}'` } : { value: 'fixture-token-not-a-real-one' }
+    // (0.5.11, review of PR #15, F4) the time-tracking hook, as the bridge reads it to know what it counts
+    if (e.path.endsWith('/.claude/mm-hooks/worklog-hook.js')) {
+      hookReads.push(e.path)
+      return opts.hook === 'missing' ? { deny: `ENOENT: no such file or directory, open '${e.path}'` } : { value: HOOK_TEXT[opts.hook ?? 'current'] }
+    }
     const path = asGiven(e.path)
     reads.push(path)
     const file = files[path]
@@ -268,7 +292,7 @@ function world(on: On, opts: WorldOptions = {}) {
   /** The chips this session asked the app for. */
   const minted = () => calls.filter(c => c.tool === 'spawn_task')
   return {
-    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, lists, written, appended, ran, shell,
+    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, ran, shell,
     /** The app calls that change a thread: a rename, a pin, a message, a chip. (Reading this session's own usage, and withdrawing a chip, change none.) */
     writes: () => calls.filter(c => !['get_session', 'list_sessions', 'get_usage', 'dismiss_task'].includes(c.tool)).map(c => [c.tool, c.args.session_id ?? '', c.args.title ?? c.args.pinned ?? ''].join(' | ')),
     /** The chips this session asked the app to withdraw, by their ids. */
@@ -353,6 +377,26 @@ const ACME_HERE_CHIP = {
   args: { title: 'Do it here: Acme Roofing: review the reply drafts', tldr: 'Acme Roofing needs you: Acme Roofing · reply ready due tomorrow 8 AM. Recommended: Do it here.', prompt: ACME_KICKOFF },
 }
 
+/** (0.5.11, Opus 10-15, verbatim) A kickoff sent by itself for drafts that are ready: shown, never taken. */
+const NOT_TAKEN = (pid: string, name: string) =>
+  `[mm-link ${pid}] The reply drafts for ${name} (OW project ${pid}) are ready in package aaaaaaaa. Load the client's project skill first, then follow client-reply-prep §9 to show the five-part pickup view for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. Send nothing without my go.`
+/** (0.5.11, Opus 10-15, verbatim) Bolt's kickoff sent by itself: no package yet, so prep builds one, and it is not taken. */
+const BOLT_AUTO_KICKOFF = `[mm-link ${BOLT}] Bolt Staffing (Sam) (OW project ${BOLT}) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9 AM ET. Load the client's project skill first, then follow client-reply-prep: no package exists yet, so run prep (§2) to build one, then show the five-part pickup view without taking the package: no pickup call until I answer here. Then wait for me. Send nothing without my go.`
+/**
+ * (0.5.11, Rob 10-15: "I think we should start updating threads automatically") What a sync sends by itself into
+ * Bolt's linked thread when it is another thread: (review of PR #15, F4) the marker first, then Update's first line,
+ * then the words that never take a package.
+ */
+const BOLT_AUTO_UPDATE = (sid: string) => ({
+  server: 'ccd_session_mgmt',
+  tool: 'send_message',
+  args: { session_id: sid, message: markerFirst(`New since this thread last worked on this client: 2 messages waiting.\n${BOLT_AUTO_KICKOFF}`) },
+})
+/** (0.5.11, review of PR #15, F4) An update sent by itself: its body's marker moved to the very start of the text. */
+function markerFirst(text: string): string {
+  return text.replace(/^([^\n]*)\n(\[mm-link [0-9a-f-]{36}\] )/, '$2$1\n')
+}
+
 /** (0.5.4, C3, verbatim) The band's sentence, in every thread, for a client with no thread whose one chip is in `place` (this world's own thread, by default). */
 const chipIn = (client: string, due: string, place = 'Morning hub') => `🔴 ${client} has no thread (due ${due}): its chip is in ${place}.`
 
@@ -408,7 +452,7 @@ describe('R1: existing threads link themselves', () => {
     expect(w.stored['mm.threads']).toEqual({ [SELF_CLI]: { app: SELF, at: NOW + 4_000, since: NOW + 4_000 } })
   })
 
-  test('the timer links this thread to the client its own session declared, and calls no message or chip tool', async ($, on) => {
+  test('the timer links this thread to the client its own session declared; its one message is (0.5.11) the update of Bolt\'s own thread', async ($, on) => {
     const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1), declared(BOLT, 'cli-bolt', 20)] }), threads: [thread('local_b', 'Staffing plan', 20)], store: { 'mm.threads': PAIRS } })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
@@ -417,9 +461,14 @@ describe('R1: existing threads link themselves', () => {
     expect(w.threads.get(SELF)?.title).toBe(ACME_TITLE)
     expect(w.threads.get('local_b')?.pinned).toBe(true)
     expect(w.fetched.filter(u => u.includes('/closeout')).length).toBeGreaterThan(0)
-    // no message; and the chips the timer mints by itself: (0.5.2, R4) Cedar's, the client with no thread, and
-    // (0.5.4, C1) Acme's, in Acme's own thread; Bolt's thread is another one, which mints Bolt's
+    // the chips the timer mints by itself: (0.5.2, R4) Cedar's, the client with no thread, and (0.5.4, C1) Acme's,
+    // in Acme's own thread; Bolt's thread is another one, which mints Bolt's. (0.5.11, review of PR #15, F3) Bolt's
+    // thread, linked and lacking what waits (mail, no drafts), gets Update's message by itself only 120 minutes after
+    // this bridge first saw the mail; Acme's thread is this one, which gets none.
     expect(w.acted()).toEqual([CEDAR_AUTO_CHIP, ACME_HERE_CHIP])
+    for (let i = 0; i < 116; i++) await w.clock.advance(60_000)
+    await w.clock.advance(3_000)
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP, ACME_HERE_CHIP, BOLT_AUTO_UPDATE('local_b')])
     expect(w.prompts).toEqual([])
   })
 
@@ -2394,8 +2443,9 @@ describe('starts a program: the system\'s opener takes the person to the thread'
     await band.unmount()
     await ui.unmount()
     expect(w.ran).toEqual([])
-    // the timer's own chips for Cedar and Bolt (R4); Start on Cedar found its chip already here
-    expect(w.acted().map(c => c.tool)).toEqual(['spawn_task', 'spawn_task'])
+    // the timer's own chips for Cedar and Bolt (R4); Start on Cedar found its chip already here. (0.5.11) And the
+    // update a sync sent by itself into Acme's thread, once: it opened nothing.
+    expect(w.acted().map(c => c.tool)).toEqual(['spawn_task', 'spawn_task', 'send_message'])
   })
 
   test('Update pressed inside the client\'s own thread: the person is already there, and nothing is opened', async ($, on) => {
@@ -2517,56 +2567,50 @@ describe('a press shows that it worked, and cannot fire twice', () => {
   })
 })
 
-describe('a long thread: Start thread is the recommendation', () => {
+// (0.5.11, Rob 10-15: "Can you just automatically compress context at 60% instead of 100% to save tokens?") A long
+// thread is no reason for a new one any more: Claude Code compacts it (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE).
+describe('(0.5.11) a long thread is not replaced: its row is Update or Open as for any thread', () => {
   const rows = (n: number | undefined): NonNullable<Feed['threads']> => [{ ...declared(ACME, 'cli-acme', 30), ...(n === undefined ? {} : { rows: n }) }]
-  const long = 'drafts ready · Start thread: the existing thread is long, a new one keeps the context clean'
+  const plain = 'drafts ready · Update thread: thread from Sun, Oct 11 exists'
 
-  test('by the feed\'s row count: 1,499 rows is Update, 1,500 is Start, and a feed with no rows never makes a thread long', async ($, on) => {
-    const w = acmeWorld(on, { feed: acmeFeed({}, rows(1499)) })
+  test('by the feed\'s row count: 1,500 rows and 5,000 rows are Update thread, and the thread stays linked, pinned and named', async ($, on) => {
+    const w = acmeWorld(on, { feed: acmeFeed({}, rows(1500)) })
     await mm($, '')
     const ui = await pane($)
     expect(await buttonsOf(ui, ACME)).toEqual(['Update thread', 'Drafts'])
-    w.setFeed(acmeFeed({}, rows(1500)))
-    await mm($, '')
-    expect(await buttonsOf(ui, ACME)).toEqual(['Start thread', 'Drafts'])
-    expect(await lines(ui)).toContain(long)
-    // the long thread stays the client's: linked, pinned, named, and its row is among the ones in a thread
-    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a' })
-    expect(w.threads.get('local_a')).toMatchObject({ title: ACME_TITLE, pinned: true })
-    expect(await lines(ui)).toContain('In a thread (1)')
-    w.setFeed(acmeFeed({}, rows(undefined)))
+    expect(await lines(ui)).toContain(plain)
+    w.setFeed(acmeFeed({}, rows(5000)))
     await mm($, '')
     expect(await buttonsOf(ui, ACME)).toEqual(['Update thread', 'Drafts'])
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a' })
+    expect(w.threads.get('local_a')).toMatchObject({ title: ACME_TITLE, pinned: true })
     expect(w.acted()).toEqual([])
     await ui.unmount()
   })
 
-  test('a thread that already has what is waiting is still Start when it is long', async ($, on) => {
+  test('a long thread that already has what is waiting is Open thread', async ($, on) => {
     const w = acmeWorld(on)
     await mm($, 'update acme roofing')
     w.setFeed(acmeFeed({}, rows(1500)))
     await mm($, '')
     const ui = await pane($)
-    expect(await buttonsOf(ui, ACME)).toEqual(['Start thread', 'Drafts'])
-    expect(await lines(ui)).toContain(long)
+    expect(await buttonsOf(ui, ACME)).toEqual(['Open thread', 'Drafts'])
     await ui.unmount()
   })
 
   const reading = (percentUsed: number, tokensUsed: number, daysAgo = 0) => ({ local_a: { tokensUsed, contextWindow: 1_000_000, percentUsed, at: NOW - daysAgo * 24 * HOUR } })
-  const cases: Array<[string, ReturnType<typeof reading>, number | undefined, string[], string]> = [
-    ['59% and 299,999 tokens: not long, even with 5,000 rows', reading(59, 299_999), 5000, ['Update thread', 'Drafts'], 'drafts ready · Update thread: thread from Sun, Oct 11 exists'],
-    ['60%: long, with the percent in the line', reading(60, 120_000), 3, ['Start thread', 'Drafts'], 'drafts ready · Start thread: the existing thread has used 60% of its context, a new one is cheaper and cleaner'],
-    ['300,000 tokens at 30% of a 1M window: long', reading(30, 300_000), undefined, ['Start thread', 'Drafts'], 'drafts ready · Start thread: the existing thread has used 30% of its context, a new one is cheaper and cleaner'],
-    ['a reading 8 days old is ignored and the rows decide: 100 rows', reading(95, 950_000, 8), 100, ['Update thread', 'Drafts'], 'drafts ready · Update thread: thread from Sun, Oct 11 exists'],
-    ['a reading 8 days old is ignored and the rows decide: 5,000 rows', reading(10, 10_000, 8), 5000, ['Start thread', 'Drafts'], long],
+  const cases: Array<[string, ReturnType<typeof reading>, number | undefined]> = [
+    ['60%', reading(60, 120_000), 3],
+    ['95%, with 5,000 rows', reading(95, 950_000), 5000],
+    ['300,000 tokens at 30% of a 1M window', reading(30, 300_000), undefined],
   ]
-  for (const [name, ctx, n, want, line] of cases) {
-    test(`by the thread's own context reading: ${name}`, async ($, on) => {
+  for (const [name, ctx, n] of cases) {
+    test(`by the thread's own context reading: ${name} is Update thread, as any thread`, async ($, on) => {
       acmeWorld(on, { feed: acmeFeed({}, rows(n)), store: { 'mm.threads': PAIRS, 'mm.ctx': ctx } })
       await mm($, '')
       const ui = await pane($)
-      expect(await buttonsOf(ui, ACME)).toEqual(want)
-      expect(await lines(ui)).toContain(line)
+      expect(await buttonsOf(ui, ACME)).toEqual(['Update thread', 'Drafts'])
+      expect(await lines(ui)).toContain(plain)
       await ui.unmount()
     })
   }
@@ -2580,46 +2624,27 @@ describe('a long thread: Start thread is the recommendation', () => {
   })
 })
 
-describe('a session reads its own context window, and only its own', () => {
-  const usage = (context: Record<string, unknown>) => () => ({ plan: { status: 'ok', plan: PLAN_MARK, windows: [{ label: PLAN_MARK, percentUsed: 52 }] }, context: { session: 'self', autoCompactsAtPercent: 97, categories: [{ name: PLAN_MARK, tokens: 1 }], ...context } })
-  const ok = usage({ status: 'ok', tokensUsed: 123_456, contextWindow: 1_000_000, percentUsed: 12 })
+// (0.5.11, review of PR #15, F6) Nothing reads a thread's context reading since Claude Code compacts a long thread: no
+// session asks the app for one any more, and what an older version stored in `mm.ctx` is left as it was.
+describe('(0.5.11, review of PR #15, F6) no session asks for its context window any more', () => {
+  const usage = () => ({ plan: { status: 'ok', plan: PLAN_MARK }, context: { session: 'self', status: 'ok', tokensUsed: 123_456, contextWindow: 1_000_000, percentUsed: 12 } })
+  const kept = { tokensUsed: 1, contextWindow: 2, percentUsed: 50, at: NOW - HOUR }
 
-  test('the timer asks for `self` at most once in five minutes and keeps four numbers', async ($, on) => {
-    const w = world(on, { usage: ok })
+  test('not the timer, not an Update arriving from another thread: no get_usage call, and an older version\'s `mm.ctx` is left as it was', async ($, on) => {
+    const w = world(on, { usage, store: { 'mm.ctx': { [SELF]: kept, local_kept: kept } } })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
-    await w.clock.advance(4_000)
-    expect(w.usageAsked()).toEqual(['self'])
-    expect(w.stored['mm.ctx']).toEqual({ [SELF]: { tokensUsed: 123_456, contextWindow: 1_000_000, percentUsed: 12, at: NOW + 4_000 } })
-    // five more ticks: 296 seconds since the first reading at the last of them
-    for (let i = 0; i < 5; i++) await w.clock.advance(60_000)
-    expect(w.usageAsked()).toEqual(['self'])
+    for (let i = 0; i < 12; i++) await w.clock.advance(60_000)
+    const update = `New since this thread last worked on this client: drafts ready.\n${ACME_KICKOFF}`
+    await $.prompt.submit({ text: update, wait: false, origin: { kind: 'peer' } } as never)
+    await $.prompt.submit({ text: `[mm-link ${ACME}] ${update}`, wait: false, origin: { kind: 'peer' } } as never)
     await w.clock.advance(60_000)
-    expect(w.usageAsked()).toEqual(['self', 'self'])
-    for (let i = 0; i < 20; i++) await w.clock.advance(60_000)
-    expect(w.usageAsked().length).toBe(6)
-    expect(new Set(w.usageAsked())).toEqual(new Set(['self']))
-    // ⛔ nothing of the plan, and nothing of the context but the four numbers
+    expect(w.usageAsked()).toEqual([])
+    expect(w.stored['mm.ctx']).toEqual({ [SELF]: kept, local_kept: kept })
     expect(JSON.stringify([w.stored, w.written])).not.toContain(PLAN_MARK)
-    expect(Object.keys((w.stored['mm.ctx'] as Record<string, object>)[SELF] ?? {}).sort()).toEqual(['at', 'contextWindow', 'percentUsed', 'tokensUsed'])
   })
 
-  for (const [name, answer] of [
-    ['unavailable', usage({ status: 'unavailable' })],
-    ['ok with a number missing', usage({ status: 'ok', tokensUsed: 5, contextWindow: 10 })],
-    ['ok with text where a number belongs', usage({ status: 'ok', tokensUsed: '5', contextWindow: 10, percentUsed: 50 })],
-    ['not an object', () => 'Usage is not available.'],
-  ] as const) {
-    test(`a reading whose status is not ok, or that is not a reading (${name}), stores nothing`, async ($, on) => {
-      const w = world(on, { usage: answer, store: { 'mm.ctx': { local_kept: { tokensUsed: 1, contextWindow: 2, percentUsed: 50, at: NOW - HOUR } } } })
-      await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
-      await w.clock.advance(4_000)
-      expect(w.usageAsked()).toEqual(['self'])
-      expect(w.stored['mm.ctx']).toEqual({ local_kept: { tokensUsed: 1, contextWindow: 2, percentUsed: 50, at: NOW - HOUR } })
-    })
-  }
-
-  test('never on a press, a command or a sync, and never for another thread', async ($, on) => {
-    const w = acmeWorld(on, { usage: ok })
+  test('not a press, a command or a sync either', async ($, on) => {
+    const w = acmeWorld(on, { usage })
     await mm($, '')
     const ui = await pane($)
     for (const key of [`update:${ACME}`, `start:${CEDAR}`, `open:${ACME}`, `drafts:${ACME}`]) await ui.press({ key })
@@ -2630,52 +2655,27 @@ describe('a session reads its own context window, and only its own', () => {
     expect(w.stored['mm.ctx']).toBeUndefined()
   })
 
-  test('an Update arriving from another thread takes this session\'s reading, inside the same five minutes', async ($, on) => {
-    const w = world(on, { usage: ok })
-    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
-    await w.clock.advance(4_000)
-    const update = `New since this thread last worked on this client: drafts ready.\n${ACME_KICKOFF}`
-    // one minute after the timer's reading: not again
-    await w.clock.advance(60_000)
-    await $.prompt.submit({ text: update, wait: false, origin: { kind: 'peer' } } as never)
-    expect(w.usageAsked()).toEqual(['self'])
-    // 306 seconds after it, between two ticks: now
-    for (let i = 0; i < 4; i++) await w.clock.advance(60_000)
-    await w.clock.advance(6_000)
-    await $.prompt.submit({ text: update, wait: false, origin: { kind: 'peer' } } as never)
-    expect(w.usageAsked()).toEqual(['self', 'self'])
-    // the person's own prompts, and anything that is not an Update, never do
-    await w.clock.advance(6 * 60_000 - 10_000)
-    const asked = w.usageAsked().length
-    await $.prompt.submit({ text: update, wait: false, origin: { kind: 'composer' } })
-    await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'peer' } } as never)
-    expect(w.usageAsked().length).toBe(asked)
-  })
-
-  test('the reading is dropped with the link: on /mm unlink, and when a sync drops a link to a thread that is gone', async ($, on) => {
-    const kept = { tokensUsed: 1, contextWindow: 2, percentUsed: 50, at: NOW - HOUR }
+  test('/mm unlink, and a sync that drops a link to a thread that is gone, leave `mm.ctx` as it was', async ($, on) => {
     const w = world(on, {
       store: { 'mm.links': { [ACME]: SELF, [BOLT]: 'local_deleted' }, 'mm.ctx': { [SELF]: kept, local_deleted: kept, local_other: kept } },
     })
     await mm($, '')
-    // Bolt's thread no longer exists: its link is dropped, and its reading with it; the others stay
     expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
-    expect(w.stored['mm.ctx']).toEqual({ [SELF]: kept, local_other: kept })
     await mm($, 'unlink')
-    expect(w.stored['mm.ctx']).toEqual({ local_other: kept })
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.stored['mm.ctx']).toEqual({ [SELF]: kept, local_deleted: kept, local_other: kept })
   })
 })
 
 describe('a new thread takes over from an old one', () => {
-  test('Start on a long thread: the chip\'s prompt carries the handover paragraph, with the thread\'s own stored title and its id', async ($, on) => {
+  // (0.5.11) a long thread's row offers Update, not Start: the person types /mm start for a new one
+  test('/mm start for a client with a long thread: the chip\'s prompt carries the handover paragraph, with the thread\'s own stored title and its id', async ($, on) => {
     const w = acmeWorld(on, { feed: acmeFeed({}, [{ ...declared(ACME, 'cli-acme', 30), rows: 2000 }]) })
     await mm($, '')
     // the bridge renamed the thread; its own title was stored first
     expect(w.threads.get('local_a')?.title).toBe(ACME_TITLE)
     expect(w.stored['mm.titles']).toEqual({ local_a: 'Roof quote' })
-    const ui = await pane($)
-    await ui.press({ key: `start:${ACME}` })
-    await ui.unmount()
+    expect(await mm($, 'start acme roofing')).toBe('A chip for Acme Roofing is ready here: click Start on it.')
     const prompt = String(w.acted()[0]?.args.prompt)
     expect(prompt).toBe(`${ACME_KICKOFF}\n\n${HANDOVER('Roof quote', 'local_a', 'Acme Roofing Pat')}`)
     expect(prompt.startsWith(`[mm-link ${ACME}] `)).toBe(true)
@@ -2750,7 +2750,8 @@ describe('a new thread takes over from an old one', () => {
     expect(w.stored['mm.titles']).toEqual({ [SELF]: 'Morning hub' })
     expect(w.stored['mm.pins']).toEqual({ [SELF]: { projectId: ACME, client: 'Acme Roofing', byUs: true } })
     expect(w.stored['mm.released']).toEqual([])
-    expect(w.stored['mm.ctx']).toEqual({})
+    // (0.5.11, review of PR #15, F6) an older version's reading is left as it was: nothing reads it
+    expect(w.stored['mm.ctx']).toEqual({ local_a: kept })
     // no unlink record for the old thread: the person did not unlink it
     expect(w.stored['mm.unlinked']).toBeUndefined()
     const ui = await pane($)
@@ -2937,10 +2938,14 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
       [chipId(17), false],
       [chipId(18), false],
     ])
-    // and nothing more after that
+    // and nothing more after that: no chip (0.5.11: Bolt's own thread gets its update by itself, once, and (review of
+    // PR #15, F3) only 120 minutes after this bridge first saw its mail, no drafts being ready)
     for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
     expect(w.dismissed()).toEqual([chipId(11), chipId(12), chipId(13)])
-    expect(w.acted().length).toBe(0)
+    expect(w.acted()).toEqual([])
+    for (let i = 0; i < 116; i++) await w.clock.advance(60_000)
+    expect(w.dismissed()).toEqual([chipId(11), chipId(12), chipId(13)])
+    expect(w.acted()).toEqual([BOLT_AUTO_UPDATE('local_b')])
   })
 
   test('a chip whose client was linked to a thread when it was minted is withdrawn only once the client is linked to another', async ($, on) => {
@@ -3212,11 +3217,12 @@ describe('one pane: this thread\'s client on top, the list under it', () => {
     const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.links': { [BOLT]: 'local_other' } } })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
-    for (let i = 0; i < 30; i++) await w.clock.advance(60_000)
+    for (let i = 0; i < 125; i++) await w.clock.advance(60_000)
     expect(w.opened).toEqual([])
-    // no message; the timer's own chips: (0.5.2, R4) Cedar's, the one client with no thread, and (0.5.4, C1)
-    // Acme's, in Acme's own thread, this one
-    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP, ACME_HERE_CHIP])
+    // the timer's own chips: (0.5.2, R4) Cedar's, the one client with no thread, and (0.5.4, C1) Acme's, in
+    // Acme's own thread, this one; (0.5.11) and Bolt's thread updated by itself, once (review of PR #15, F3: two
+    // hours after its mail was first seen, no drafts being ready), which opens no pane
+    expect(w.acted()).toEqual([CEDAR_AUTO_CHIP, ACME_HERE_CHIP, BOLT_AUTO_UPDATE('local_other')])
     expect(w.prompts).toEqual([])
   })
 })
@@ -3816,7 +3822,9 @@ describe('(t) a pin the person took off by hand stays off', () => {
     world(on, {
       feed: feed({ drafts: [], tickets: {} }),
       threads: [thread('local_b', BOLT_TITLE, 20, { pinned: true }), thread('local_x', 'Unrelated notes', 5)],
-      store: { 'mm.links': { [BOLT]: 'local_b' }, 'mm.pins': { local_b: ourPin(BOLT, 'Bolt Staffing') }, 'mm.titles': { local_b: 'Staffing plan' } },
+      // (0.5.11) auto off: these are about the person's own unpin, timed by the syncs alone (with it on, the pass
+      // after Bolt's update sent by itself sees the unpin a few seconds in)
+      store: { 'mm.links': { [BOLT]: 'local_b' }, 'mm.pins': { local_b: ourPin(BOLT, 'Bolt Staffing') }, 'mm.titles': { local_b: 'Staffing plan' }, 'mm.autostart': { on: false } },
       ...more,
     })
   const takeOff = (w: { threads: Map<string, Thread> }) => {
@@ -4372,10 +4380,18 @@ describe('B1: a pass writes only what it changed, over a fresh copy; what the pe
     expect(w.stored['mm.titles']).toEqual(store['mm.titles'])
     expect(w.stored['mm.records']).toEqual(store['mm.records'])
     expect(w.stored['mm.threads']).toEqual({ ...store['mm.threads'], [SELF_CLI]: { app: SELF, at: NOW + 4_000, since: NOW + 4_000 } })
-    // the threads are as they were: each still its client's, pinned, and nothing was sent
+    // the threads are as they were: each still its client's, and pinned
     for (const sid of ['local_a', 'local_b', 'local_c']) expect(w.threads.get(sid)?.pinned).toBe(true)
     expect(w.threads.get('local_u')?.title).toBe('Unlinked notes')
+    // (0.5.11, review of PR #15, F3) nothing is sent by itself yet: this bridge has only just seen each client
     expect(w.acted()).toEqual([])
+    // (0.5.11) once it has seen them for 10 minutes: Acme's and Cedar's linked threads get their update by itself, once,
+    // which stamps nothing and claims nothing (`mm.acted` and Cedar's `mm.auto` record above are as they were); Bolt's,
+    // mail with no drafts ready, waits its 120 minutes
+    for (let i = 0; i < 11; i++) await w.clock.advance(60_000)
+    expect(w.acted().map(c => `${c.tool} ${String(c.args.session_id)}`).sort()).toEqual(['send_message local_a', 'send_message local_c'])
+    expect(w.stored['mm.acted']).toEqual(store['mm.acted'])
+    expect((w.stored['mm.auto'] as Record<string, unknown>)[CEDAR]).toEqual({ ...store['mm.auto'][CEDAR], made: NOW + 4_000 })
   })
 })
 
@@ -4655,16 +4671,17 @@ describe('R4, R3 and (0.5.4) C1-C3: a chip minted by itself, ONE per client, in 
     expect(w.stored['mm.chips']).toEqual([])
   })
 
-  test('R3 (0.5.4, C1): a long thread\'s client gets its chip from that thread itself, titled for a fresh thread and handing over from it; no other thread mints one', async ($, on) => {
-    const prompt = `${ACME_KICKOFF}\n\n${HANDOVER('Morning hub', SELF, 'Acme Roofing Pat')}`
+  // (0.5.11, Rob 10-15: "Can you just automatically compress context at 60% instead of 100% to save tokens?")
+  test('(0.5.11) a long thread produces no need for a fresh thread: its client gets Do it here from that thread, as any thread\'s does', async ($, on) => {
     const w = world(on, { feed: acmeFeed(), store: { 'mm.links': { [ACME]: SELF }, 'mm.ctx': { [SELF]: { tokensUsed: 700_000, contextWindow: 1_000_000, percentUsed: 70, at: NOW - HOUR } } } })
     await tickOnce($, w)
-    // the old thread is the client's, pinned, while the chip waits in it
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    // the thread is the client's, pinned, and stays so
     expect(w.threads.get(SELF)).toMatchObject({ title: ACME_TITLE, pinned: true })
-    const chip = w.minted().find(c => c.args.title === 'Start a fresh thread: Acme Roofing (this one is at 70%)')
-    expect(chip?.args.tldr).toBe('Acme Roofing needs you: Acme Roofing · reply ready due tomorrow 8 AM. Recommended: start a fresh thread.')
-    expect(chip?.args.prompt).toBe(prompt)
-    expect((w.stored['mm.chips'] as Array<{ projectId: string }>).find(c => c.projectId === ACME)).toMatchObject({ had: SELF, auto: true, gen: 4, place: 'Acme Roofing' })
+    expect(chipTitles(w).filter(t => t.startsWith('Start a fresh thread'))).toEqual([])
+    expect(w.minted().filter(c => c.args.title === ACME_HERE_CHIP.args.title).length).toBe(1)
+    expect((w.stored['mm.chips'] as Array<{ projectId: string; need?: string }>).filter(c => c.projectId === ACME).map(c => c.need)).toEqual(['here'])
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
   })
 
   test('C1: a thread linked to a client mints its one chip, Do it here; a thread the client is not linked to mints none for it', async ($, on) => {
@@ -4998,17 +5015,30 @@ describe('R8: sent · checking, then clear or still open (Rob, 2026-10-13: "yes 
     expect(w.threads.get('local_a')).toMatchObject({ title: '✓ Acme Roofing · clear 11 AM', pinned: false })
   })
 
-  test('from 60% of its context: no Claim button, and (0.5.4, C1) the thread itself mints the chip for a fresh thread, titled with the percent', async ($, on) => {
+  // (0.5.11, Opus 10-15: "drop the 60% check on Claim too")
+  test('from 60% of its context: (0.5.11) Claim in this thread still shows and still works; no chip for a fresh thread', async ($, on) => {
     const w = world(on, { feed: acmeFeed(CHECKED), store: { 'mm.links': { [ACME]: SELF }, 'mm.ctx': { [SELF]: { tokensUsed: 700_000, contextWindow: 1_000_000, percentUsed: 70, at: NOW - HOUR } } } })
     await tickOnce($, w)
     expect(w.threads.get(SELF)).toMatchObject({ title: STILL, pinned: true })
     const ui = await pane($)
-    expect(await buttonsOf(ui, ACME)).toEqual(['Drafts'])
+    expect(await buttonsOf(ui, ACME)).toEqual(['Claim in this thread', 'Drafts'])
+    await ui.press({ key: `claim:${ACME}` })
+    expect(await lines(ui)).toContain('Picking up Acme Roofing in this thread.')
     await ui.unmount()
-    const chip = w.minted().find(c => c.args.title === 'Start a fresh thread: Acme Roofing (this one is at 70%)')
-    expect(chip?.args.tldr).toMatch(/^Acme Roofing needs you: .*\. Recommended: start a fresh thread\.$/)
-    expect(chip?.args.prompt).toBe(`${ACME_KICKOFF}\n\n${HANDOVER('Morning hub', SELF, 'Acme Roofing Pat')}`)
-    expect((w.stored['mm.chips'] as Array<{ projectId: string; need?: string }>).find(c => c.projectId === ACME)?.need).toBe('long')
+    expect(w.prompts.map(p => p.text)).toEqual([expect.stringMatching(/^Still open for Acme Roofing after our reply of /)])
+    expect(w.minted().filter(c => String(c.args.title).includes('Acme'))).toEqual([])
+    expect(starts(w)).toEqual([])
+  })
+
+  test('(0.5.11) a client still open, its thread another one 90% full: Claim in <client>\'s thread shows and sends there', async ($, on) => {
+    const w = acmeWorld(on, { feed: acmeFeed(CHECKED), store: { 'mm.threads': PAIRS, 'mm.ctx': { local_a: { tokensUsed: 900_000, contextWindow: 1_000_000, percentUsed: 90, at: NOW - HOUR } } } })
+    await mm($, '')
+    const ui = await pane($)
+    expect(await buttonsOf(ui, ACME)).toEqual(['Claim in Acme Roofing\'s thread', 'Drafts'])
+    await ui.press({ key: `claim:${ACME}` })
+    await ui.unmount()
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
+    expect(String(sends(w)[0]?.args.message)).toMatch(/^Still open for Acme Roofing after our reply of /)
   })
 
   test('Claim reads the feed first: a client no longer open after our reply gets nothing', async ($, on) => {
@@ -5745,21 +5775,17 @@ describe('0.5.7: threads the bridge starts by itself (Rob, 10-14 ~13:35 ET: "we 
     expect(proposals(w)).toEqual([])
   })
 
-  test('a thread 60% full with something new: a fresh thread started; the old one unpinned and named " · moved"', async ($, on) => {
+  // (0.5.11, Rob 10-15: "Can you just automatically compress context at 60% instead of 100% to save tokens?")
+  test('(0.5.11) a thread 60% full with something new: no fresh thread is started, and the thread is neither unpinned nor renamed " · moved"', async ($, on) => {
     const w = world(on, { tools: 'start', feed: acmeFeed(), store: { 'mm.links': { [ACME]: SELF }, 'mm.ctx': { [SELF]: { tokensUsed: 700_000, contextWindow: 1_000_000, percentUsed: 70, at: NOW - HOUR } } } })
     await tickOnce($, w)
-    expect(w.threads.get(SELF)).toMatchObject({ title: ACME_TITLE, pinned: true })
     await w.clock.advance(3_000)
-    const acme = starts(w).filter(c => String(c.args.prompt).startsWith(`[mm-link ${ACME}] `))
-    expect(acme.length).toBe(1)
-    expect(String(acme[0]?.args.prompt)).toContain(HANDOVER('Morning hub', SELF, 'Acme Roofing Pat'))
-    const sid = (w.stored['mm.links'] as Record<string, string>)[ACME]
-    expect(sid).toMatch(/^local_started_/)
-    expect(w.threads.get(SELF)).toMatchObject({ title: `${ACME_TITLE} · moved`, pinned: false })
-    // and the syncs after it leave the old thread as it is
-    await w.clock.advance(5 * 60_000)
-    expect(w.threads.get(SELF)).toMatchObject({ title: `${ACME_TITLE} · moved`, pinned: false })
-    expect(w.threads.get(sid as string)).toMatchObject({ pinned: true })
+    for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
+    expect(starts(w).filter(c => String(c.args.prompt).startsWith(`[mm-link ${ACME}] `))).toEqual([])
+    expect(proposals(w).filter(c => String(c.args.prompt).startsWith(`[mm-link ${ACME}] `))).toEqual([])
+    expect((w.stored['mm.links'] as Record<string, string>)[ACME]).toBe(SELF)
+    expect(w.threads.get(SELF)).toMatchObject({ title: ACME_TITLE, pinned: true })
+    expect(((w.stored['mm.autostarts'] ?? []) as Array<{ pid: string }>).filter(t => t.pid === ACME)).toEqual([])
   })
 
   test('an internal project: never started by itself', async ($, on) => {
@@ -5797,8 +5823,8 @@ describe('0.5.7: threads the bridge starts by itself (Rob, 10-14 ~13:35 ET: "we 
 
   test('/mm auto off: the card, as before (a proposal where the app has only start_session, withdrawn with dismiss_task); /mm status says it', async ($, on) => {
     const w = world(on, { tools: 'start', feed: cedarAlone() })
-    expect(await mm($, 'auto off')).toBe('Auto-start is off: a client\'s new thread waits as a card for you to start.')
-    expect(await mm($, 'status')).toContain('auto-start: off')
+    expect(await mm($, 'auto off')).toBe('Auto-start and auto-update are off: a client\'s new thread waits as a card for you to start, and its thread waits for you to press Update.')
+    expect(await mm($, 'status')).toContain('auto-start and auto-update: off')
     await tickOnce($, w)
     await w.clock.advance(3_000)
     expect(starts(w)).toEqual([])
@@ -5809,7 +5835,7 @@ describe('0.5.7: threads the bridge starts by itself (Rob, 10-14 ~13:35 ET: "we 
     w.stored['mm.links'] = { [CEDAR]: 'local_other' }
     await w.clock.advance(15_000)
     expect(w.dismissed()).toEqual([chipId(1)])
-    expect(await mm($, 'auto on')).toBe('Auto-start is on: a client\'s new thread starts by itself.')
+    expect(await mm($, 'auto on')).toBe('Auto-start and auto-update are on: a client\'s new thread starts by itself, and its thread is updated by itself when something new arrives.')
   })
 
   test('/mm auto off where the app has only spawn_task: today\'s chip', async ($, on) => {
@@ -6211,5 +6237,623 @@ describe('0.5.9: the tool, re-checked on the store when it writes (review of 54a
     expect(await tool($, 'link Acme Roofing')).toBe('This thread is Bolt Staffing\'s. Only the person can move it: they type /mm link Acme Roofing.')
     expect(wrote).toBe(true)
     expect(w.stored['mm.links']).toEqual({ [BOLT]: SELF })
+  })
+})
+
+// ======================================================================== 0.5.11
+
+describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we should start updating threads automatically")', () => {
+  const notices = (w: { written: Array<{ path: string; text: string }> }) => w.written.filter(f => f.path.endsWith('bridge-notices.log')).at(-1)?.text ?? ''
+  const bandLines = async ($: Engine) => {
+    const band = await bandOf($)
+    const out = await lines(band)
+    await band.unmount()
+    return out
+  }
+  type Rec = { at: number; pid: string; client: string; sig: string; sid: string; by: string; ok: boolean | null; reason: string; from?: number }
+  const records = (w: { stored: Record<string, unknown> }) => (w.stored['mm.autoupdates'] ?? []) as Rec[]
+  const after = async (w: { clock: { advance: (ms: number) => Promise<void> } }, minutes: number) => {
+    for (let i = 0; i < minutes; i++) await w.clock.advance(60_000)
+  }
+  /** (0.5.11, Opus 10-15) Update's message for Acme, drafts ready, in the words that never take the package. */
+  const ACME_UPDATE = markerFirst(`New since this thread last worked on this client: drafts ready.\n${NOT_TAKEN(ACME, 'Acme Roofing Pat')}`)
+  /** Acme alone: drafts ready, covering mail three hours old; nothing else in the feed. */
+  const acmeOnly = (over: Record<string, unknown> = {}): Feed => {
+    const f = feed({ mail: [], tickets: {}, threads: [] })
+    f.drafts = (f.drafts ?? []).map(d => ({ ...d, ...over }))
+    return f
+  }
+  /** Acme's thread is another one, linked by the person. */
+  const linkedWorld = (on: On, more: WorldOptions = {}) => world(on, { feed: acmeOnly(), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.links': { [ACME]: 'local_a' } }, ...more })
+  const boltMail = (hoursAgo: number) => mailFor(BOLT, 'Bolt Staffing (Sam)', hoursAgo)
+
+  /**
+   * (Review of PR #15, F3) The first sync (at NOW + 4 s) is when this bridge first sees a client; the syncs come every
+   * five minutes on the minute ticks after it (6, 11, 16 minutes on): the one at 11 minutes is the first to find it
+   * seen for 10 minutes, and its update goes 1 to 3 seconds later.
+   */
+  const seenTen = async (w: { clock: { advance: (ms: number) => Promise<void> } }) => {
+    await after(w, 11)
+    await w.clock.advance(3_000)
+  }
+  /** (Review of PR #15) To the sync at 11 minutes: its claim made, its send not yet (1 to 3 seconds on). */
+  const toClaim = async (w: { clock: { advance: (ms: number) => Promise<void> } }) => {
+    await after(w, 10)
+    await w.clock.advance(56_000)
+  }
+
+  test('Update\'s own message goes once, by itself, into the client\'s linked thread, (review of PR #15, F3) 10 minutes after this bridge first saw it; never twice; something new goes once more, 10 minutes after it is first seen', async ($, on) => {
+    const w = linkedWorld(on)
+    await tickOnce($, w)
+    // the first sync is when this bridge first saw it: nothing yet, nor at the sync six minutes on
+    await w.clock.advance(3_000)
+    expect(sends(w)).toEqual([])
+    await after(w, 10)
+    expect(sends(w)).toEqual([])
+    // the sync at 11 minutes: sent once this session's claim has held, a second or three on
+    const read = closeouts(w)
+    await after(w, 1)
+    await w.clock.advance(3_000)
+    expect(sends(w).map(c => [c.args.session_id, c.args.message])).toEqual([['local_a', ACME_UPDATE]])
+    expect(records(w).map(r => [r.pid, r.sid, r.ok, r.by, r.client])).toEqual([[ACME, 'local_a', true, SELF, 'Acme Roofing']])
+    expect((w.stored['mm.sent'] as Record<string, { sid: string }>)[ACME]?.sid).toBe('local_a')
+    expect(w.stored['mm.updating']).toEqual({})
+    expect((await bandLines($)).join(' ')).toContain('Updated Acme Roofing\'s thread.')
+    expect(notices(w)).toMatch(new RegExp(`updated Acme Roofing \\(${ACME}\\) sig [0-9a-f]{8} in local_a: something new for the client: drafts ready`))
+    // nothing opened, nothing typed, nothing said in the pane
+    expect([w.ran, w.opened, w.toasts, w.prompts]).toEqual([[], [], [], []])
+    // the sync's read, the update's own read before the send, and once more for the list after it
+    expect(closeouts(w) - read).toBe(3)
+    // the list was brought up to date: the row reads that the thread has it
+    const ui = await pane($)
+    expect(await buttonsOf(ui, ACME)).toEqual(['Open thread', 'Drafts'])
+    await ui.unmount()
+    // never twice: half an hour of syncs
+    await after(w, 30)
+    expect(sends(w).length).toBe(1)
+    // something new: the package is rebuilt; it goes once this bridge has seen it for 10 minutes, and once only
+    w.setFeed(acmeOnly({ updated_at: new Date(w.clock.now()).toISOString() }))
+    await after(w, 6)
+    expect(sends(w).length).toBe(1)
+    await after(w, 14)
+    expect(sends(w).length).toBe(2)
+    await after(w, 20)
+    expect(sends(w).length).toBe(2)
+    expect(records(w).map(r => r.ok)).toEqual([true, true])
+  })
+
+  // (Review of PR #15, F3: the live feed gives no time for a package's drafts) the wait is measured from when this
+  // bridge first saw the client as it is now, never from the feed's own times
+  test('(review of PR #15, F3) a package the feed dates a day back, and one it gives no time at all, still wait 10 minutes from the first sync that saw them', async ($, on) => {
+    const w = linkedWorld(on, { feed: acmeOnly({ covers_through: ago(30), updated_at: ago(24) }) })
+    await tickOnce($, w)
+    await after(w, 10)
+    expect(sends(w)).toEqual([])
+    await after(w, 1)
+    await w.clock.advance(3_000)
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
+    // what this bridge has seen of the client is on record: since the first sync, with no mail waiting
+    const seen = w.stored['mm.firstSeen'] as Record<string, { sig: string; at: number; mail: number }>
+    expect(Object.keys(seen)).toEqual([ACME])
+    expect(seen[ACME]?.at).toBe(NOW + 4_000)
+    expect(seen[ACME]?.mail).toBe(0)
+  })
+
+  test('(review of PR #15, F3) a package rebuilt under the bridge\'s eyes waits 10 minutes from the first sync that saw it rebuilt', async ($, on) => {
+    const w = linkedWorld(on, { feed: acmeOnly({ updated_at: ago(5 / 60) }) })
+    await tickOnce($, w)
+    await seenTen(w)
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
+  })
+
+  test('(review of PR #15, F3) messages and no drafts ready: it goes 120 minutes after this bridge first saw the oldest waiting message, however old the mail itself', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], tickets: {}, mail: [boltMail(5)] }), threads: [thread('local_b', 'Staffing plan', 20)], store: { 'mm.links': { [BOLT]: 'local_b' } } })
+    await tickOnce($, w)
+    // the syncs up to 116 minutes after the first: nothing, though the mail is five hours old
+    await after(w, 119)
+    expect(sends(w)).toEqual([])
+    expect(records(w)).toEqual([])
+    // the sync at 121 minutes: 120 minutes and more since the mail was first seen
+    await after(w, 2)
+    await w.clock.advance(3_000)
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_b'])
+    // (review of PR #15, F4) the marker first, then Update's first line, then the words that build no package to take
+    expect(String(sends(w)[0]?.args.message).startsWith(`[mm-link ${BOLT}] New since this thread last worked on this client: 1 message waiting.\nBolt Staffing (Sam) (OW project ${BOLT}) needs a reply: `)).toBe(true)
+    expect(String(sends(w)[0]?.args.message)).toContain('no package exists yet, so run prep (§2) to build one, then show the five-part pickup view without taking the package: no pickup call until I answer here.')
+    // and it asked the thread to build the package: on record with what the thread has
+    expect((w.stored['mm.sent'] as Record<string, { prep?: boolean }>)[BOLT]?.prep).toBe(true)
+  })
+
+  test('(review of PR #15, F3) messages and no drafts, then drafts ready before the 120 minutes: it goes 10 minutes after the drafts were first seen, as drafts ready', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], tickets: {}, mail: [boltMail(1)] }), threads: [thread('local_b', 'Staffing plan', 20)], store: { 'mm.links': { [BOLT]: 'local_b' } } })
+    await tickOnce($, w)
+    await after(w, 30)
+    expect(sends(w)).toEqual([])
+    // Lane-2 has the drafts ready (no time on them, as the live feed has it)
+    w.setFeed(feed({ drafts: [packageFor(BOLT, 'Bolt Staffing (Sam)', { covers_through: ago(0.5) })], tickets: {}, mail: [boltMail(1)] }))
+    await after(w, 5)
+    expect(sends(w)).toEqual([])
+    await after(w, 11)
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_b'])
+    expect(String(sends(w)[0]?.args.message)).toBe(markerFirst(`New since this thread last worked on this client: 1 message waiting.\n${NOT_TAKEN(BOLT, 'Bolt Staffing (Sam)')}`))
+  })
+
+  test('drafts ready with a message 15 minutes old: it goes 10 minutes after this bridge first saw it, without waiting the 120', async ($, on) => {
+    const w = world(on, {
+      feed: feed({ drafts: [packageFor(BOLT, 'Bolt Staffing (Sam)', { covers_through: ago(0.25) })], tickets: {}, mail: [boltMail(0.25)] }),
+      threads: [thread('local_b', 'Staffing plan', 20)],
+      store: { 'mm.links': { [BOLT]: 'local_b' } },
+    })
+    await tickOnce($, w)
+    await seenTen(w)
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_b'])
+    expect(String(sends(w)[0]?.args.message)).toBe(markerFirst(`New since this thread last worked on this client: 1 message waiting.\n${NOT_TAKEN(BOLT, 'Bolt Staffing (Sam)')}`))
+  })
+
+  test('a task alone: it goes 10 minutes after this bridge first saw it (its due time is not asked)', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], mail: [] }), threads: [thread('local_c', 'Dental intake', 20)], store: { 'mm.links': { [CEDAR]: 'local_c' } } })
+    await tickOnce($, w)
+    await seenTen(w)
+    expect(sends(w).map(c => [c.args.session_id, c.args.message])).toEqual([['local_c', markerFirst(`New since this thread last worked on this client: 1 task due.\n${CEDAR_KICKOFF}`)]])
+  })
+
+  // ---- (review of PR #15, F3) the package the thread was asked to build is the thread's own work: P4 and P4b
+  /** Bolt's case 6 sent by itself, two hours after its mail was first seen: the world, and the time it went. */
+  const boltPrepSent = async ($: Engine, on: On) => {
+    const mail = boltMail(2)
+    const w = world(on, { feed: feed({ drafts: [], tickets: {}, mail: [mail] }), threads: [thread('local_b', 'Staffing plan', 20)], store: { 'mm.links': { [BOLT]: 'local_b' } } })
+    await tickOnce($, w)
+    await after(w, 121)
+    await w.clock.advance(3_000)
+    expect(sends(w).length).toBe(1)
+    return { w, mail }
+  }
+  for (const [name, over] of [
+    ['[P4b] no time on it, as the live feed has it', {}],
+    ['[P4] its own `updated_at`', { updated_at: 'now' }],
+  ] as const) {
+    test(`⛔ (review of PR #15, F3) ${name}: the package its prep built is recorded as what the thread has, and nothing more is sent`, async ($, on) => {
+      const { w, mail } = await boltPrepSent($, on)
+      const had = (w.stored['mm.sent'] as Record<string, { sig: string; prep?: boolean }>)[BOLT]
+      expect(had?.prep).toBe(true)
+      // the auto turn ran prep (client-reply-prep §2): a package now exists, prepared, covering the message
+      const extra = 'updated_at' in over ? { updated_at: new Date(w.clock.now()).toISOString() } : {}
+      w.setFeed(feed({ drafts: [packageFor(BOLT, 'Bolt Staffing (Sam)', { covers_through: ago(1.9), ...extra })], tickets: {}, mail: [mail] }))
+      await after(w, 30)
+      expect(sends(w).length).toBe(1)
+      const now = (w.stored['mm.sent'] as Record<string, { sig: string; prep?: boolean; sid: string }>)[BOLT]
+      expect(now?.sid).toBe('local_b')
+      expect(now?.sig).not.toBe(had?.sig)
+      expect(now?.prep).toBeUndefined()
+      expect(notices(w)).toContain(`not updated Bolt Staffing (${BOLT}) sig`)
+      expect(notices(w)).toContain('in local_b: its package is the thread\'s own work (it was asked to build it)')
+      expect(notices(w).match(/its package is the thread's own work/g)?.length).toBe(1)
+      // the row says the thread has it
+      const ui = await pane($)
+      expect(await buttonsOf(ui, BOLT)).toEqual(['Open thread', 'Drafts'])
+      await ui.unmount()
+    })
+  }
+
+  test('(review of PR #15, F3) a client message after the send: the package is not only the thread\'s own work; it goes, 10 minutes after it was first seen', async ($, on) => {
+    const { w, mail } = await boltPrepSent($, on)
+    const newer = mailFor(BOLT, 'Bolt Staffing (Sam)', 0, { message_id_key: 'bolt-newer', received_at: new Date(w.clock.now() + 60_000).toISOString() })
+    await after(w, 2)
+    w.setFeed(feed({ drafts: [packageFor(BOLT, 'Bolt Staffing (Sam)', { covers_through: ago(1.9) })], tickets: {}, mail: [mail, newer] }))
+    await after(w, 20)
+    expect(sends(w).length).toBe(2)
+    expect(String(sends(w)[1]?.args.message).startsWith(`[mm-link ${BOLT}] New since this thread last worked on this client: `)).toBe(true)
+    expect(notices(w)).not.toContain('its package is the thread\'s own work')
+  })
+
+  const SENT = ago(1)
+  const skipped: Array<[string, WorldOptions]> = [
+    ['a client a teammate has (With a teammate)', { feed: feed({ drafts: [packageFor(BOLT, 'Bolt Staffing (Sam)', heldBy(TEAMMATE_B))], tickets: {}, mail: [boltMail(2)] }), threads: [thread('local_b', 'Staffing plan', 20)], store: { 'mm.links': { [BOLT]: 'local_b' } } }],
+    ['a package someone else holds, on a client listed for a task of the person\'s own', { feed: feed({ drafts: [packageFor(CEDAR, 'Cedar Dental', heldBy(TEAMMATE_B))], mail: [] }), threads: [thread('local_c', 'Dental intake', 20)], store: { 'mm.links': { [CEDAR]: 'local_c' } } }],
+    ['a client whose reply the server is checking', { feed: acmeOnly({ last_outbound_at: ago(0.5), checked_send_at: ago(2) }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.links': { [ACME]: 'local_a' } } }],
+    ['a client still open after our reply (Claim is the person\'s)', { feed: acmeOnly({ last_outbound_at: SENT, checked_send_at: SENT, checked_at: ago(0.1), still_open: ['the logo file'], answered: [] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.links': { [ACME]: 'local_a' } } }],
+    ['a client under Older alone', { feed: feed({ drafts: [], tickets: {}, mail: [mailFor(ACME, 'Acme Roofing — Pat', 10 * 24)] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.links': { [ACME]: 'local_a' } } }],
+    ['a client whose linked thread is the one running the sync', { feed: acmeOnly(), store: { 'mm.links': { [ACME]: SELF } } }],
+    ['a client whose linked thread the sync could not see', { feed: acmeOnly(), threads: [thread('local_a', 'Roof quote', 30)], unlisted: ['local_a'], lookupFails: 'no answer', store: { 'mm.links': { [ACME]: 'local_a' } } }],
+    ['a client whose row only suggests a thread by its title', { feed: acmeOnly(), threads: [thread('local_t', 'Acme Roofing: roof quote', 30)] }],
+    ['a client with no thread (its thread is started, never updated)', { feed: acmeOnly() }],
+  ]
+  for (const [name, opts] of skipped) {
+    test(`⛔ never ${name}`, async ($, on) => {
+      const w = world(on, opts)
+      await tickOnce($, w)
+      await after(w, 30)
+      expect(sends(w)).toEqual([])
+      expect(records(w)).toEqual([])
+      expect(w.prompts).toEqual([])
+    })
+  }
+
+  const changed: Array<[string, Record<string, string>]> = [
+    ['a thread the person made another client\'s meanwhile', { [BOLT]: 'local_a' }],
+    ['a client the person unlinked meanwhile', {}],
+  ]
+  for (const [name, change] of changed) {
+    test(`⛔ re-checked once the claim has held: ${name} gets nothing, and nothing writes the link back`, async ($, on) => {
+      const w = linkedWorld(on)
+      await tickOnce($, w)
+      await toClaim(w)
+      // between the choice and the send (the claim is checked 1 to 3 seconds on)
+      expect(Object.keys(w.stored['mm.updating'] as object).length).toBe(1)
+      w.stored['mm.links'] = change
+      await w.clock.advance(3_000)
+      expect(sends(w)).toEqual([])
+      expect(records(w)).toEqual([])
+      expect(w.stored['mm.updating']).toEqual({})
+      expect(w.stored['mm.links']).toEqual(change)
+    })
+  }
+
+  // ⛔ (review of PR #15, F2, the reviewer's P3) the person relinks the thread while the update asks the app for it and
+  // reads the feed: the links are read again right before the send, and nothing goes into a thread that is no longer
+  // the client's
+  test('⛔ (review of PR #15, F2) [P3] the thread is made another client\'s while the update reads the app and the feed: nothing is sent into it, on record as not sent', async ($, on) => {
+    let armed = true
+    const w = linkedWorld(on, {
+      during: (call, stored) => {
+        const claims = stored['mm.updating'] as Record<string, unknown> | undefined
+        if (armed && call.tool === 'get_session' && call.args.session_id === 'local_a' && claims && Object.keys(claims).length) {
+          armed = false
+          stored['mm.links'] = { [BOLT]: 'local_a' }
+        }
+      },
+    })
+    await tickOnce($, w)
+    await seenTen(w)
+    expect(armed).toBe(false)
+    expect(sends(w)).toEqual([])
+    expect(records(w).map(r => [r.pid, r.sid, r.ok])).toEqual([[ACME, 'local_a', false]])
+    expect(records(w)[0]?.reason).toContain('not sent: the thread\'s link changed meanwhile')
+    expect(notices(w)).toContain(`not updated Acme Roofing (${ACME}) sig`)
+    expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_a' })
+    expect(w.stored['mm.updating']).toEqual({})
+    // and later syncs send Acme's update into no thread: it has none now
+    await after(w, 30)
+    expect(sends(w)).toEqual([])
+  })
+
+  test('⛔ (review of PR #15, F2) [P3, pressed] Update pressed, and the thread made another client\'s while the press reads the feed: nothing is sent, and the list is drawn again', async ($, on) => {
+    const w = linkedWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autostart': { on: false } }, fetchTakesMs: n => (n >= 2 ? 1_500 : 0) })
+    await mm($, '')
+    const ui = await pane($)
+    const press = ui.press({ key: `update:${ACME}` })
+    await w.clock.advance(500)
+    // the feed is being read for the press: the person links the thread to Bolt
+    w.stored['mm.links'] = { [BOLT]: 'local_a' }
+    await w.clock.advance(2_000)
+    await press
+    expect(sends(w)).toEqual([])
+    expect(w.toasts.join(' ')).toContain('That thread is no longer available. The list has been refreshed.')
+    expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_a' })
+    expect(w.stored['mm.sent']).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('⛔ (review of PR #15, F2) [P3, pressed] the client linked to another thread while the press reads the feed: nothing is sent into the old one', async ($, on) => {
+    const w = linkedWorld(on, {
+      threads: [thread('local_a', 'Roof quote', 30), thread('local_new', 'Acme follow-up', 1)],
+      store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autostart': { on: false } },
+      fetchTakesMs: n => (n >= 2 ? 1_500 : 0),
+    })
+    await mm($, '')
+    const ui = await pane($)
+    const press = ui.press({ key: `update:${ACME}` })
+    await w.clock.advance(500)
+    // the person links Acme to the other thread (/mm link there) while the feed is read for the press
+    w.stored['mm.links'] = { [ACME]: 'local_new' }
+    await w.clock.advance(2_000)
+    await press
+    expect(sends(w)).toEqual([])
+    expect(w.toasts.join(' ')).toContain('That thread is no longer available.')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_new' })
+    await ui.unmount()
+  })
+
+  test('a press with nothing moved meanwhile still sends, after the slow feed read (the final check refuses only a move)', async ($, on) => {
+    const w = linkedWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autostart': { on: false } }, fetchTakesMs: n => (n >= 2 ? 1_500 : 0) })
+    await mm($, '')
+    const ui = await pane($)
+    const press = ui.press({ key: `update:${ACME}` })
+    await w.clock.advance(2_000)
+    await press
+    expect(sends(w).map(c => [c.args.session_id, c.args.message])).toEqual([['local_a', `New since this thread last worked on this client: drafts ready.\n${ACME_KICKOFF}`]])
+    await ui.unmount()
+  })
+
+  test('⛔ the feed is read once before the send: with no feed, nothing goes and nothing is recorded', async ($, on) => {
+    let down = false
+    const w = linkedWorld(on, { feedStatus: () => (down ? 503 : 200) })
+    await tickOnce($, w)
+    await toClaim(w)
+    down = true
+    await w.clock.advance(3_000)
+    expect(sends(w)).toEqual([])
+    expect(records(w)).toEqual([])
+  })
+
+  test('⛔ a client answered between the sync and the send gets nothing', async ($, on) => {
+    const w = linkedWorld(on)
+    await tickOnce($, w)
+    await toClaim(w)
+    w.setFeed(acmeOnly({ status: 'sent' }))
+    await w.clock.advance(3_000)
+    expect(sends(w)).toEqual([])
+    expect(records(w)).toEqual([])
+  })
+
+  test('⛔ another session\'s claim since: that session sends it, this one does not; a claim that lapsed is taken again at the next sync, and it goes once', async ($, on) => {
+    const w = linkedWorld(on)
+    await tickOnce($, w)
+    await toClaim(w)
+    const claims = w.stored['mm.updating'] as Record<string, { owner: string; until: number; from: number }>
+    const key = Object.keys(claims)[0] as string
+    expect(key.startsWith(`${ACME}\n`)).toBe(true)
+    expect(claims[key]?.owner).toBe(SELF)
+    // (review of PR #15, F1) a claim says which sync it was chosen from
+    expect(claims[key]?.from).toBe((w.stored['mm.last'] as { at: number }).at)
+    // another session writes its own claim before this one's has held
+    w.stored['mm.updating'] = { [key]: { owner: 'local_elsewhere', until: (claims[key]?.until ?? 0) } }
+    await w.clock.advance(3_000)
+    expect(sends(w)).toEqual([])
+    // that session never sent it: its claim runs out, and the next sync's choice here takes it
+    await after(w, 6)
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
+    await after(w, 20)
+    expect(sends(w).length).toBe(1)
+  })
+
+  // ---- (review of PR #15, F1) the caps hold in a burst: the reviewer's P1, P2 and P2b
+  const pidOf = (i: number) => `44444444-4444-4444-8444-${String(i).padStart(12, '0')}`
+  /** Ten clients, each with drafts ready and its own linked thread: all due at the same sync. */
+  const many = (n: number): WorldOptions => {
+    const drafts = Array.from({ length: n }, (_, i) => packageFor(pidOf(i), `Client ${i}`, { package_id: `aaaaaaaa-bbbb-4ccc-8ddd-${String(i).padStart(12, '0')}` }))
+    const threads = Array.from({ length: n }, (_, i) => thread(`local_t${i}`, `Topic ${i}`, 20))
+    const links = Object.fromEntries(Array.from({ length: n }, (_, i) => [pidOf(i), `local_t${i}`]))
+    return { feed: feed({ drafts, mail: [], tickets: {}, threads: [] }), threads, store: { 'mm.links': links } }
+  }
+  /** The most updates on record that went in any one hour, and from any one sync. */
+  const most = (list: Rec[]) => {
+    const went = list.filter(r => r.ok !== false)
+    const perHour = Math.max(0, ...went.map(r => went.filter(o => o.at >= r.at && o.at - r.at < HOUR).length))
+    const bySync = new Map<number, number>()
+    for (const r of went) bySync.set(Number(r.from), (bySync.get(Number(r.from)) ?? 0) + 1)
+    return { perHour, perSync: Math.max(0, ...bySync.values()), syncs: bySync.size }
+  }
+  for (const [name, takes] of [
+    ['[P1] the feed answering at once', undefined],
+    ['[P2b] the feed taking 0.4 s per read after the first', (n: number) => (n === 1 ? 0 : 400)],
+    ['[P2] the feed taking 1.5 s per read after the first', (n: number) => (n === 1 ? 0 : 1_500)],
+  ] as const) {
+    test(`⛔ (review of PR #15, F1) ${name}: ten clients due at the same sync are never more than 3 sends from one sync, nor 6 in the hour`, async ($, on) => {
+      /** The most claims held at once for any one sync, as seen at every call to the app. */
+      let claimed = 0
+      const w = world(on, {
+        ...many(10),
+        ...(takes ? { fetchTakesMs: takes } : {}),
+        during: (_call, stored) => {
+          const bySync = new Map<number, number>()
+          for (const c of Object.values((stored['mm.updating'] ?? {}) as Record<string, { from?: number }>)) bySync.set(Number(c.from), (bySync.get(Number(c.from)) ?? 0) + 1)
+          claimed = Math.max(claimed, 0, ...bySync.values())
+        },
+      })
+      await tickOnce($, w)
+      await after(w, 13)
+      // the sync at 11 minutes claimed three, the rest waited
+      expect(claimed).toBe(3)
+      expect(sends(w).length).toBeLessThanOrEqual(6)
+      expect(most(records(w)).perSync).toBeLessThanOrEqual(3)
+      // the hour: never more than six, each sync three at most
+      await after(w, 50)
+      expect(sends(w).length).toBe(6)
+      expect(new Set(sends(w).map(c => c.args.session_id)).size).toBe(6)
+      const m = most(records(w))
+      expect(m.perHour).toBe(6)
+      expect(m.perSync).toBeLessThanOrEqual(3)
+      expect(m.syncs).toBeGreaterThanOrEqual(2)
+      // and past the hour, the rest go
+      await after(w, 20)
+      expect(sends(w).length).toBe(10)
+      expect(new Set(sends(w).map(c => c.args.session_id)).size).toBe(10)
+    })
+  }
+
+  test('⛔ (review of PR #15, F1) a full list at the moment of the record refuses the send: another session\'s six records written while this one read the feed', async ($, on) => {
+    const others: Rec[] = Array.from({ length: 6 }, (_, i) => ({ at: NOW + 9 * 60_000, pid: `99999999-9999-4999-8999-${String(i).padStart(12, '0')}`, client: `Client ${i}`, sig: '00000000', sid: `local_x${i}`, by: 'local_y', ok: true, reason: 'x' }))
+    let wrote = false
+    const w = linkedWorld(on, {
+      during: (call, stored) => {
+        if (wrote || call.tool !== 'get_session' || call.args.session_id !== 'local_a' || !Object.keys((stored['mm.updating'] as object) ?? {}).length) return
+        wrote = true
+        stored['mm.autoupdates'] = [...((stored['mm.autoupdates'] as Rec[]) ?? []), ...others]
+      },
+    })
+    await tickOnce($, w)
+    await seenTen(w)
+    expect(wrote).toBe(true)
+    expect(sends(w)).toEqual([])
+    expect(records(w).filter(r => r.pid === ACME)).toEqual([])
+    expect(notices(w)).toContain(`not updated Acme Roofing (${ACME}) sig`)
+  })
+
+  test('the hour\'s cap: six in the last hour on this computer; past it nothing goes (logged once), and it goes once the hour has passed', async ($, on) => {
+    const earlier = (count: number, startMin: number, stepMin: number, ok: boolean | null = true): Rec[] =>
+      Array.from({ length: count }, (_, i) => ({ at: NOW - (startMin + i * stepMin) * 60_000, pid: `99999999-9999-4999-8999-${String(i).padStart(12, '0')}`, client: `Client ${i}`, sig: '00000000', sid: `local_x${i}`, by: 'local_y', ok, reason: 'x' }))
+    // the hour: six in the last hour
+    const hour = linkedWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autoupdates': earlier(6, 10, 1) } })
+    await tickOnce($, hour)
+    await after(hour, 30)
+    expect(sends(hour)).toEqual([])
+    expect(notices(hour)).toContain(`not updated Acme Roofing (${ACME}) sig`)
+    expect(notices(hour).match(/not updated Acme Roofing/g)?.length).toBe(1)
+    // the oldest of them is an hour old by the sync at 45 minutes
+    await after(hour, 21)
+    expect(sends(hour).map(c => c.args.session_id)).toEqual(['local_a'])
+  })
+
+  test('the day\'s cap: forty in the last day, none of them in the last hour: nothing goes', async ($, on) => {
+    const earlier = (count: number, ok: boolean | null): Rec[] =>
+      Array.from({ length: count }, (_, i) => ({ at: NOW - (2 * 60 + i * 10) * 60_000, pid: `99999999-9999-4999-8999-${String(i).padStart(12, '0')}`, client: `Client ${i}`, sig: '00000000', sid: `local_x${i}`, by: 'local_y', ok, reason: 'x' }))
+    const day = linkedWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autoupdates': earlier(40, true) } })
+    await tickOnce($, day)
+    await after(day, 30)
+    expect(sends(day)).toEqual([])
+    expect(notices(day)).toContain('or 40 in the last day')
+  })
+
+  test('sends the threads did not take do not count toward the caps', async ($, on) => {
+    const failed: Rec[] = Array.from({ length: 6 }, (_, i) => ({ at: NOW - (10 + i) * 60_000, pid: `99999999-9999-4999-8999-${String(i).padStart(12, '0')}`, client: `Client ${i}`, sig: '00000000', sid: `local_x${i}`, by: 'local_y', ok: false, reason: 'x' }))
+    const w = linkedWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autoupdates': failed } })
+    await tickOnce($, w)
+    await seenTen(w)
+    expect(sends(w).length).toBe(1)
+  })
+
+  test('a send the thread does not take: recorded and logged with why, and not tried again for the same thing', async ($, on) => {
+    const w = linkedWorld(on, { sendFails: 'that session did not accept it (messages from other sessions can require approval there, or be turned off)' })
+    await tickOnce($, w)
+    await seenTen(w)
+    expect(sends(w).length).toBe(1)
+    expect(records(w).map(r => [r.ok, r.reason])).toEqual([[false, expect.stringContaining('; not sent: that session did not accept it')]])
+    expect(notices(w)).toContain(`not updated Acme Roofing (${ACME})`)
+    expect(w.stored['mm.sent']).toBeUndefined()
+    expect((await bandLines($)).join(' ')).not.toContain('Updated Acme Roofing')
+    await after(w, 30)
+    expect(sends(w).length).toBe(1)
+  })
+
+  test('⛔ no stamp, no acted, no claim: a link the bridge made stays one it can let go; the unlink records and the links are as they were', async ($, on) => {
+    const w = acmeWorld(on)
+    await tickOnce($, w)
+    expect((w.stored['mm.auto'] as Record<string, { sid: string }>)[ACME]?.sid).toBe('local_a')
+    await seenTen(w)
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
+    expect(w.stored['mm.acted']).toBeUndefined()
+    expect((w.stored['mm.auto'] as Record<string, { sid: string }>)[ACME]?.sid).toBe('local_a')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a' })
+    expect(w.stored['mm.unlinked']).toBeUndefined()
+  })
+
+  // ---- (review of PR #15, F5) never into a thread the person used in the last 10 minutes: the reviewer's P5
+  test('⛔ (review of PR #15, F5) [P5] the person is in the thread: not now, and nothing on record; it goes at a sync once the thread has been idle 10 minutes', async ($, on) => {
+    const w = linkedWorld(on)
+    await tickOnce($, w)
+    await after(w, 9)
+    // the person works in Acme's thread
+    const active = w.threads.get('local_a') as Thread
+    active.lastActivityAt = new Date(w.clock.now()).toISOString()
+    // the sync at 11 minutes: due, but the thread was used 2 minutes ago
+    await after(w, 2)
+    await w.clock.advance(3_000)
+    expect(sends(w)).toEqual([])
+    expect(records(w)).toEqual([])
+    expect(w.stored['mm.updating']).toEqual({})
+    // the sync at 16 minutes: idle 7 minutes, still not
+    await after(w, 5)
+    expect(sends(w)).toEqual([])
+    // the sync at 21 minutes: idle 12 minutes
+    await after(w, 5)
+    await w.clock.advance(3_000)
+    expect(sends(w).map(c => [c.args.session_id, c.args.message])).toEqual([['local_a', ACME_UPDATE]])
+  })
+
+  test('⛔ (review of PR #15, F5) case 1, a package the person holds, mid-reply in its thread: nothing goes while they are in it', async ($, on) => {
+    const held = feed({ drafts: [packageFor(ACME, 'Acme Roofing — Pat', heldBy(ME))], mail: [], tickets: {}, threads: [] })
+    const w = linkedWorld(on, { feed: held, threads: [thread('local_a', 'Roof quote', 0)] })
+    await tickOnce($, w)
+    // the person keeps working in the thread for twenty minutes
+    for (let i = 0; i < 20; i++) {
+      ;(w.threads.get('local_a') as Thread).lastActivityAt = new Date(w.clock.now()).toISOString()
+      await after(w, 1)
+    }
+    await w.clock.advance(3_000)
+    expect(sends(w)).toEqual([])
+    expect(records(w)).toEqual([])
+    // they stop: ten idle minutes on, it goes, the drafts carried on with
+    await after(w, 16)
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
+    expect(String(sends(w)[0]?.args.message).startsWith(`[mm-link ${ACME}] New since this thread last worked on this client: 1 draft not sent.\nCarry on with the reply drafts for Acme Roofing Pat`)).toBe(true)
+  })
+
+  // ---- (review of PR #15, F4) the time-tracking hook
+  for (const [hook, why] of [
+    ['old', 'the time-tracking hook on this computer is older than 0.11.5 and would count it as the person\'s time'],
+    ['missing', 'the time-tracking hook on this computer could not be read'],
+  ] as const) {
+    test(`⛔ (review of PR #15, F4) a time-tracking hook that ${hook === 'old' ? 'counts every turn as the person\'s (0.11.4 and before)' : 'cannot be read'}: nothing is sent by itself, logged once; read again at most every 10 minutes`, async ($, on) => {
+      const w = linkedWorld(on, { hook })
+      await tickOnce($, w)
+      await after(w, 40)
+      expect(sends(w)).toEqual([])
+      expect(records(w)).toEqual([])
+      expect(w.stored['mm.updating']).toBeUndefined()
+      expect(notices(w)).toContain(`no thread is updated by itself on this computer: ${why}`)
+      expect(notices(w).match(/no thread is updated by itself on this computer/g)?.length).toBe(1)
+      // the syncs at 10 to 40 minutes asked; the hook was read at 10, 20 and 30 (and 40) minutes at most
+      expect(w.hookReads.length).toBeGreaterThanOrEqual(1)
+      expect(w.hookReads.length).toBeLessThanOrEqual(4)
+      // a Start, a press and the person's own Update are the person's and are not held back by it
+      const ui = await pane($)
+      await ui.press({ key: `update:${ACME}` })
+      await ui.unmount()
+      expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
+    })
+  }
+
+  test('(review of PR #15, F4) the text sent by itself opens with the client\'s marker: typed by the person in a thread, it links that thread as any kickoff does; arriving from another thread, it links nothing and claims nothing', async ($, on) => {
+    const w = world(on, { feed: acmeOnly(), threads: [thread('local_other', 'Unrelated notes', 100)] })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+    // from another thread (the app's `peer`): nothing
+    await $.prompt.submit({ text: ACME_UPDATE, wait: false, origin: { kind: 'peer' } } as never)
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.stored['mm.marked']).toBeUndefined()
+    // the person's own prompt with that text: the marker at its very start links this thread to Acme
+    await $.prompt.submit({ text: ACME_UPDATE, wait: false, origin: { kind: 'composer' } })
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+    expect(w.stored['mm.marked']).toEqual({ [SELF]: ACME })
+  })
+
+  test('/mm auto off: nothing is sent; /mm auto on: sent 10 minutes after the first sync that sees it, once', async ($, on) => {
+    const w = linkedWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autostart': { on: false } } })
+    await tickOnce($, w)
+    await after(w, 30)
+    expect(sends(w)).toEqual([])
+    expect(w.stored['mm.updating']).toBeUndefined()
+    expect(await mm($, 'auto on')).toContain('its thread is updated by itself')
+    await after(w, 16)
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
+    await after(w, 20)
+    expect(sends(w).length).toBe(1)
+  })
+
+  test('while the bridge is paused: nothing is sent', async ($, on) => {
+    const w = linkedWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.paused': true } })
+    await tickOnce($, w)
+    await after(w, 30)
+    expect(sends(w)).toEqual([])
+  })
+
+  test('a long thread gets its update as any thread does: no fresh thread, nothing started, nothing moved', async ($, on) => {
+    const w = linkedWorld(on, { tools: 'start', store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.ctx': { local_a: { tokensUsed: 700_000, contextWindow: 1_000_000, percentUsed: 70, at: NOW - HOUR } } } })
+    await tickOnce($, w)
+    await seenTen(w)
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
+    expect(w.calls.filter(c => c.tool === 'start_session')).toEqual([])
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a' })
+    expect(w.threads.get('local_a')?.title).not.toContain('· moved')
+  })
+
+  test('C3 unchanged: a client with no thread still has its thread started by itself; a client with one gets its update', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: feed({ mail: [] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.links': { [ACME]: 'local_a' } } })
+    await tickOnce($, w)
+    await seenTen(w)
+    const started = w.calls.filter(c => c.tool === 'start_session' && c.args.initiation === 'user_asked')
+    expect(started.map(c => String(c.args.prompt).slice(0, 47))).toEqual([`[mm-link ${CEDAR}] `])
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
   })
 })

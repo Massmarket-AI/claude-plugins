@@ -31,14 +31,9 @@ export const RECENT_THREAD_MS = 7 * DAY
 /** Last activity further back than this is old, decided without counting business time (no calendar walk for a date years back). */
 export const OLD_THREAD_MS = 60 * DAY
 
-/** A thread's own reading of its context window at or past this percent makes it long. */
-export const LONG_CONTEXT_PERCENT = 60
-/** And so does this many tokens used, whatever the percent (a 1M window at 30% is still a costly thread). */
-export const LONG_CONTEXT_TOKENS = 300_000
-/** With no reading fresh enough, this many worklog rows in the feed's window make a thread long. */
-export const LONG_THREAD_ROWS = 1500
-/** A reading older than this says nothing: the row count decides. */
-export const CONTEXT_READING_MAX_AGE_MS = 7 * DAY
+// (0.5.11, Rob 10-15: "Can you just automatically compress context at 60% instead of 100% to save tokens?") A thread's
+// length decides nothing any more: Claude Code compacts a long thread (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE), so it is
+// never one to replace, and its row offers Claim whatever its length.
 
 /** A thread as the desktop app lists it. `link` is the app's own link to it, kept only when it is that thread's. */
 export type AppThread = { sessionId: string; title?: string; pinned?: boolean; isArchived?: boolean; lastActivityAt?: string; link?: string }
@@ -69,14 +64,12 @@ export type Recommendation = {
   fresh?: true
 }
 
-/** What Update last put into a client's thread: which thread, the signature of what it carried, and when. */
-export type Sent = { sid: string; sig: string; at: number }
-
-/** A session's reading of its own context window: four numbers, nothing else. */
-export type ContextReading = { tokensUsed: number; contextWindow: number; percentUsed: number; at: number }
-
-/** Why a thread is long: by its own context reading (with the percent used), or by the feed's row count. */
-export type Length = { by: 'context'; percent: number } | { by: 'rows' } | null
+/**
+ * What Update last put into a client's thread: which thread, the signature of what it carried, and when.
+ * (0.5.11, review of PR #15, F3) `prep`: it went by itself and asked the thread to build the client's package
+ * (kickoff case 6, `asksForPrep`): the package that then appears is the thread's own work, not something new for it.
+ */
+export type Sent = { sid: string; sig: string; at: number; prep?: true }
 
 /** The client a thread is linked to: the first project whose link is that thread. */
 export function ownerOf(sid: string, links: Readonly<Record<string, string>>): string | undefined {
@@ -361,30 +354,6 @@ export function titleSuggestion(client: string, links: Readonly<Record<string, s
 }
 
 /**
- * How a thread is judged long, and by what.
- *   context  the thread's own reading of its context window (what its session recorded about itself)
- *   rows     the feed's row count for it, used only when there is no reading fresh enough
- * A fresh reading under both limits is NOT long, whatever the row count.
- */
-export function threadLength(reading: ContextReading | undefined, rows: number | undefined, now: number): Length {
-  if (reading && Number.isFinite(reading.at) && now - reading.at <= CONTEXT_READING_MAX_AGE_MS) {
-    const long = reading.percentUsed >= LONG_CONTEXT_PERCENT || reading.tokensUsed >= LONG_CONTEXT_TOKENS
-    return long ? { by: 'context', percent: Math.round(reading.percentUsed) } : null
-  }
-  return typeof rows === 'number' && rows >= LONG_THREAD_ROWS ? { by: 'rows' } : null
-}
-
-/**
- * The feed's row count for a thread and a client: that of the newest of the client's sessions that ran in
- * the thread (the feed lists newest first). Undefined when the feed carries none: a server that does not
- * send `rows` yet never makes a thread long.
- */
-export function threadRows(sid: string, projectId: string, feedThreads: readonly FeedThread[], pairs: Pairs): number | undefined {
-  const entry = feedThreads.find(t => t.project_id === projectId && pairs[t.session_id]?.app === sid)
-  return entry && typeof entry.rows === 'number' && Number.isFinite(entry.rows) ? entry.rows : undefined
-}
-
-/**
  * What a thread must already hold to be up to date: the kickoff that would be sent now (without Update's
  * first line), and the package's `covers_through` and `updated_at` when the feed gives them. A new client
  * message, another package, a package that changed: each makes it a different text.
@@ -413,13 +382,87 @@ export function hasWaiting(had: string, it: QueueItem): boolean {
   return head(had) === head(want)
 }
 
+// ---------------------------------------------------------------- (0.5.11) Update by itself
+
+/**
+ * (0.5.11) Something new for a client goes into its thread by itself only once this bridge has seen it, unchanged,
+ * for this long (review of PR #15, F3: measured from when the bridge first saw it, `FirstSeen`, never from the feed's
+ * times: the live feed gives no time for a package's drafts, and a message's time says nothing of them).
+ */
+export const AUTO_QUIET_MS = 10 * 60_000
+/**
+ * (0.5.11, review of PR #15, F3) With client mail waiting and no reply drafts ready, it goes once this bridge first
+ * saw the oldest waiting message this long ago, unless drafts are ready sooner. OW holds its own notice 120 minutes,
+ * and Lane-2 aims to have the drafts ready in 60: the thread is not asked to build them while Lane-2 still may.
+ */
+export const AUTO_NO_DRAFTS_MS = 120 * 60_000
+
+/**
+ * (0.5.11, review of PR #15, F3) What this bridge has seen of a client on the person's own list, as the syncs had it
+ * (`mm.firstSeen`): what it has now (`sig`, a short hash of its signature), since when this bridge has seen exactly that
+ * (`at`), and since when client mail has been waiting without a break (`mail`; 0: none waits).
+ */
+export type FirstSeen = { sig: string; at: number; mail: number }
+
+/** (0.5.11, review of PR #15, F3) `FirstSeen` for a client as a sync at `at` has it, from what was seen before. */
+export function seenNow(prev: FirstSeen | undefined, it: QueueItem, sig: string, at: number): FirstSeen {
+  const kept = (t: unknown): number => (typeof t === 'number' && Number.isFinite(t) && t > 0 && t <= at ? t : 0)
+  const since = prev && prev.sig === sig ? kept(prev.at) : 0
+  const mail = it.messages > 0 ? kept(prev?.mail) || at : 0
+  return { sig, at: since || at, mail }
+}
+
+/**
+ * (0.5.11, review of PR #15, F3) Kickoff case 6: client mail waiting and no package at all, so the thread is asked
+ * to build one (prep). Sent by itself, the package that then appears is the thread's own work (`Sent.prep`).
+ */
+export const asksForPrep = (it: QueueItem): boolean => it.messages > 0 && !it.packageId && !(it.open ?? null) && it.kind !== 'ok'
+
+/**
+ * (0.5.11, Rob 10-15: "I think we should start updating threads automatically") Whether a client on the person's
+ * own list is one whose thread may be updated by itself: never one a teammate has (`withTeammate`; the founder's
+ * `theirs`), never one whose package someone else holds (`withHolder`), never one whose reply the server is
+ * checking or found still open (R8: Claim is the person's press), and never an internal project's (as no thread
+ * is started by itself for one).
+ */
+export function autoUpdatable(it: QueueItem, now: number): boolean {
+  const o = it.open ?? null
+  return it.internal !== true && !it.theirs && !withTeammate(it) && !(o && withHolder(o)) && fastState(it, now) === null
+}
+
+/**
+ * (0.5.11, Rob 10-15: "Joe's call from Second Peak Training ended a little while back... I don't understand why it
+ * hasn't already handed the new context there so the draft is ready when I open the thread up") Whether it is time
+ * to update a client's thread by itself, from what this bridge has seen of the client (`seen`, for what it has
+ * NOW: the caller gives the record of this signature only). (Review of PR #15, F3) The bridge has seen it, unchanged,
+ * for AUTO_QUIET_MS; and then no client message waits (tasks only), or reply drafts are ready (a package prepared for
+ * the person, or one they hold), or the bridge first saw the oldest waiting message AUTO_NO_DRAFTS_MS ago. Never
+ * the feed's own times.
+ */
+export function autoUpdateDue(it: QueueItem, now: number, seen: FirstSeen | undefined): boolean {
+  if (!seen || !(now - seen.at >= AUTO_QUIET_MS)) return false
+  if (it.messages === 0) return true
+  const o = it.open ?? null
+  const ready = it.kind === 'ready' || o?.state === 'prepared' || o?.state === 'held_by_me'
+  return ready || (seen.mail > 0 && now - seen.mail >= AUTO_NO_DRAFTS_MS)
+}
+
+/**
+ * (0.5.11, review of PR #15, F3) After an update that went by itself and asked the thread to build the client's
+ * package (`Sent.prep`), the package that appears is that thread's own work: not something new to send it. So it is
+ * while the client has a package now, in that thread, with no client message received since the send.
+ */
+export function ownPackage(given: Sent | undefined, sid: string, it: QueueItem): boolean {
+  if (!given?.prep || given.sid !== sid || asksForPrep(it)) return false
+  if (!it.packageId && !(it.open ?? null)) return false
+  return !((Number(it.newest?.mail) || 0) > given.at)
+}
+
 /**
  * What to do about a client's thread, and why. ONE action per client:
  *
  *   start    Start thread  · no thread yet
  *            Start thread  · last thread is from Oct 2                the thread is older than 7 business days
- *            Start thread  · the existing thread has used 61% of its context, a new one is cheaper and cleaner
- *            Start thread  · the existing thread is long, a new one keeps the context clean
  *   update   Update thread · thread from Mon, Oct 12 exists           a thread exists and has not been given this
  *            Update thread · new since this thread was updated        the bridge updated it before, with less
  *            Update thread · "<title>" looks like this client         no known thread, but a title matches
@@ -427,12 +470,13 @@ export function hasWaiting(had: string, it: QueueItem): boolean {
  *
  * The thread is the client's linked one when it has one, else the most recently active matched one.
  * `current` is decided by `sent`: the thread and the signature the bridge stored when Update last went.
+ * (0.5.11, Rob 10-15) A thread's length is no reason for a new one: Claude Code compacts it instead.
  */
 export function recommend(
   threads: readonly ClientThread[],
   suggestion: Target | undefined,
   now: number,
-  known: { sent?: Sent | undefined; signature?: string; length?: (sid: string) => Length } = {},
+  known: { sent?: Sent | undefined; signature?: string } = {},
 ): Recommendation {
   const own = threads.filter(t => t.source === 'linked')
   const thread = [...(own.length ? own : threads)].sort((a, b) => b.lastAt - a.lastAt)[0]
@@ -441,9 +485,6 @@ export function recommend(
     // More than 60 days back is old whatever the weekends were: business time is only counted inside that.
     const recent = now - thread.lastAt <= OLD_THREAD_MS && businessMsBetween(thread.lastAt, now) <= RECENT_THREAD_MS
     if (!recent) return { state: 'start', reason: `last thread is from ${monthDay(thread.lastAt)}`, target }
-    const length = known.length?.(thread.sid) ?? null
-    if (length?.by === 'context') return { state: 'start', reason: `the existing thread has used ${length.percent}% of its context, a new one is cheaper and cleaner`, target }
-    if (length?.by === 'rows') return { state: 'start', reason: 'the existing thread is long, a new one keeps the context clean', target }
     const sent = known.sent && known.sent.sid === thread.sid ? known.sent : undefined
     if (sent && known.signature !== undefined && sent.sig === known.signature) return { state: 'current', reason: `Thread updated ${clockText(sent.at, now)}`, target }
     return { state: 'update', reason: sent ? 'new since this thread was updated' : `thread from ${weekdayMonthDay(thread.lastAt)} exists`, target }
@@ -478,8 +519,14 @@ export function waitingText(it: QueueItem): string {
  *   6. client messages with no package yet
  *   7. committed tasks only (a package that is out of date, or another owner's, changes nothing here:
  *      the client is in the list for the task)
+ * ⛔ (0.5.11) `auto`: the message an update sent by itself carries (`autoUpdate`), which no person pressed for (with
+ *    `update`, the marker comes first: F4 below). It
+ *    never takes the package (client-reply-prep §9.1's pickup call): taken by a send nobody pressed for, OW would
+ *    show it held by the person, teammates would be refused it (409 held_by_another), and the 24-hour "nobody
+ *    picked this up" warning would stop counting it. Cases 2, 4, 5 and 6 then have words of their own (Opus's,
+ *    10-15, verbatim); 1, 3, 7 and the founder's OK are as pressed. A pressed Update's text is unchanged.
  */
-export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: Replaced | undefined } = {}): string {
+export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: Replaced | undefined; auto?: boolean } = {}): string {
   const id = it.projectId
   const who = `${it.projectName} (OW project ${id})`
   // (R17) nothing due: the kickoff says no due time (the clause is left out, never "due Invalid Date")
@@ -487,11 +534,16 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
   const replyDue = due ? `, reply due ${due}` : ''
   const tasksDue = due ? ` due ${due}` : ''
   const o = it.open ?? null
+  // (0.5.11, Opus 10-15, verbatim) cases 2 and 5 sent by itself: the pickup view, and no pickup call
+  const notTaken = (pkg: string): string =>
+    `[mm-link ${id}] The reply drafts for ${who} are ready in package ${pkg}. Load the client's project skill first, then follow client-reply-prep §9 to show the five-part pickup view for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. Send nothing without my go.`
   const body =
     o?.state === 'held_by_me' && it.packageId
       ? `[mm-link ${id}] Carry on with the reply drafts for ${who}. I already picked up package ${it.packageId.slice(0, 8)}: ${o.unsent} draft(s) not sent yet${o.newer > 0 ? `, and ${o.newer} client message(s) arrived since` : ''}. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the five-part pickup view and wait for me. Send nothing without my go.`
       : it.packageId
-        ? `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${it.packageId.slice(0, 8)} and wait for me. Send nothing without my go.`
+        ? opts.auto
+          ? notTaken(it.packageId.slice(0, 8))
+          : `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${it.packageId.slice(0, 8)} and wait for me. Send nothing without my go.`
         : it.kind === 'ok' && o
           ? okKickoff(it, o)
         : o?.state === 'held_by_other'
@@ -500,13 +552,28 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
           ? // (the founder) a stale package a teammate has, not held: Opus's words, 10-13
             `[mm-link ${id}] ${who}: ${o.by} has the reply drafts (package ${o.id.slice(0, 8)}), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`
           : o?.state === 'stale' && it.messages > 0
-            ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: package ${o.id.slice(0, 8)} exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.`
+            ? opts.auto
+              ? // (0.5.11, Opus 10-15, verbatim) case 4 sent by itself
+                `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Package ${o.id.slice(0, 8)} is marked out of date. Load the client's project skill first, then show me what the client sent, the current drafts and what is due, and wait for me. Do not take the package or rebuild the drafts until I answer here. Send nothing without my go.`
+              : `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: package ${o.id.slice(0, 8)} exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.`
             : o?.state === 'prepared' && it.messages > 0
-              ? `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${o.id.slice(0, 8)} and wait for me. Send nothing without my go.`
+              ? opts.auto
+                ? notTaken(o.id.slice(0, 8))
+                : `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${o.id.slice(0, 8)} and wait for me. Send nothing without my go.`
               : it.messages > 0
-                ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
+                ? opts.auto
+                  ? // (0.5.11, Opus 10-15, verbatim) case 6 sent by itself
+                    `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep: no package exists yet, so run prep (§2) to build one, then show the five-part pickup view without taking the package: no pickup call until I answer here. Then wait for me. Send nothing without my go.`
+                  : `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
                 : `[mm-link ${id}] ${who} has ${it.tasks} committed task(s)${tasksDue}. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`
-  if (opts.update) return `New since this thread last worked on this client: ${waitingText(it)}.\n${body}`
+  const news = `New since this thread last worked on this client: ${waitingText(it)}.`
+  // ⛔ (0.5.11, review of PR #15, F4) sent by itself: the marker first, at the very start of the text, as every hook
+  // that tells the person's time from the bridge's reads it (a time-tracking hook too old to read the app's own
+  // `peer` stamp counts a turn that opens with the marker as automatic). Then the first line, then the body
+  // without its own marker. A pressed Update's text is as it was.
+  const marker = `[mm-link ${id}] `
+  if (opts.update && opts.auto) return `${marker}${news}\n${body.startsWith(marker) ? body.slice(marker.length) : body}`
+  if (opts.update) return `${news}\n${body}`
   const handover = opts.replaces ? handoverText(it, opts.replaces) : ''
   return handover ? `${body}\n\n${handover}` : body
 }
@@ -648,10 +715,10 @@ export const rowState = (row: Row): RowState => {
 
 /**
  * How a row is drawn beyond its recommendation (0.5.2): `needsYou` for a row of the Needs-you list (R4 names a
- * client there with no thread at all), and `percent`, the context reading of the client's thread when it has a
- * fresh one (R8: at 60% or more, no Claim button; a chip for a new thread instead).
+ * client there with no thread at all). (0.5.11: no context reading any more; R8's Claim shows whatever the
+ * thread's length.)
  */
-export type RowOptions = { needsYou?: boolean; percent?: number | undefined }
+export type RowOptions = { needsYou?: boolean }
 
 export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: RowOptions = {}): Row {
   // a client whose drafts a teammate holds, and that is not the viewer's to act on: who to ask, and no action
@@ -678,8 +745,9 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: Ro
     ...(note ? { note } : {}),
     // (the founder's alone, 0.5.1) a teammate's to see through: no action, with a sentence or without one
     ...(withMate && it.theirs ? { theirs: true } : {}),
-    // R8: what is still open, drawn under the row, and whether its one action is Claim in this thread
-    ...(still ? { stillOpen: [...still.items], claim: !(typeof opts.percent === 'number' && opts.percent >= LONG_CONTEXT_PERCENT) } : {}),
+    // R8: what is still open, drawn under the row, and its one action, Claim in this thread ((0.5.11, Opus 10-15)
+    // whatever the thread's length: a long thread is compacted, not replaced)
+    ...(still ? { stillOpen: [...still.items], claim: true } : {}),
     ...(checking ? { checking: true as const } : {}),
   }
 }
@@ -697,7 +765,7 @@ const notMine = (row: Row): boolean => Boolean(row.note) || row.theirs === true 
  */
 export function rowButtons(row: Row): RowButton[] {
   if (notMine(row)) return ['drafts']
-  // R8: Claim in this thread while its context is under 60%; past that, a chip for a new thread is minted and the row has no action
+  // R8: Claim in this thread ((0.5.11) whatever the thread's length; a row an older version drew with no Claim keeps none)
   if (isStillOpenRow(row)) return row.claim ? ['claim', 'drafts'] : ['drafts']
   const state = rowState(row)
   return [state === 'current' ? 'open' : state, 'drafts']
