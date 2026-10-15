@@ -246,6 +246,11 @@ export function threadStart(sid: string, pairs: Pairs): number | undefined {
  * or its sessions declared this client alone (`onlyClients`). Its start (`threadStart`) must be known, and LATER
  * than both the linked thread's start and its last activity (M1: whichever of them is known and later; neither
  * known, nothing moves). The newest start wins. ⛔ A candidate whose start is unknown is never one.
+ * ⛔ (0.5.10) And only on evidence dated at or after its own start: the marker recorded then or later (`markedAt`;
+ * a marker with no time on record never counts here), or a feed row of its sessions for this client whose last
+ * activity is then or later. An old thread reopened (paired again, so it looks new) is not this client's newest
+ * thread on what its sessions did for the client before (review of 0.5.9, probe 240: X's link, pin and name landed
+ * on a thread the person was using for client Y until the feed caught up).
  * ⛔ The newest thread, never the most recently active: typing in the old thread later never pulls the link back.
  * ⛔ Only for a link the bridge made by itself: the caller never asks this for a link the person made.
  */
@@ -260,6 +265,8 @@ export function newerThreadFor(
     unlinked?: Readonly<Record<string, unknown>>
     released?: readonly string[]
     marked?: Readonly<Record<string, string>>
+    /** (0.5.10) When each thread's marker was recorded, where that is known. */
+    markedAt?: Readonly<Record<string, number>>
     shared?: ReadonlySet<string>
   } = {},
 ): string | undefined {
@@ -277,9 +284,15 @@ export function newerThreadFor(
     if (sid in unlinked || released.includes(sid) || shared.has(sid)) continue
     // ⛔ a thread whose marker names another client, or that the feed gives to another, never qualifies
     if (declaredOther(projectId, sid, feedThreads, pairs, marked)) continue
-    if (marked[sid] !== projectId && soleClient(sid, feedThreads, pairs) !== projectId) continue
     const start = threadStart(sid, pairs)
     if (start === undefined || start <= from) continue
+    // (0.5.10) this client's, on evidence dated at or after the thread's start
+    const markedAt = skip.markedAt?.[sid]
+    const byMarker = marked[sid] === projectId && typeof markedAt === 'number' && Number.isFinite(markedAt) && markedAt >= start
+    const byFeed =
+      soleClient(sid, feedThreads, pairs) === projectId &&
+      feedThreads.some(t => t.project_id === projectId && pairs[t.session_id]?.app === sid && ms(t.last_activity_at) >= start)
+    if (!byMarker && !byFeed) continue
     if (!best || start > best.start) best = { sid, start }
   }
   return best?.sid

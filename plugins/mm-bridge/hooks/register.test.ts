@@ -2777,11 +2777,16 @@ describe('a new thread takes over from an old one', () => {
     // the chip's very prompt, from another session or a schedule
     await $.prompt.submit({ text: prompt, wait: false, origin: { kind: 'peer' } } as never)
     await $.prompt.submit({ text: prompt, wait: false, origin: { kind: 'scheduled-trigger' } } as never)
-    // nothing changes but one record (B3): the person's own prompt here opened with Acme's marker, so this
-    // thread is never linked by itself to another client, though it did not take Acme's link
-    const after = JSON.parse(snapshot(w)) as Record<string, unknown>
+    // nothing changes but the marker's records (B3): the person's own prompt here opened with Acme's marker, so this
+    // thread is never linked by itself to another client, though it did not take Acme's link. (0.5.10) With it, when
+    // it was marked, and this session's own pair, written first so the thread's start is on record before its marker.
+    const after = JSON.parse(snapshot(w)) as Record<string, Record<string, unknown>>
     expect(after['mm.marked']).toEqual({ [SELF]: ACME })
+    expect(after['mm.markedAt']).toEqual({ [SELF]: NOW })
+    expect(after['mm.threads']?.[SELF_CLI]).toEqual({ app: SELF, at: NOW, since: NOW })
     delete after['mm.marked']
+    delete after['mm.markedAt']
+    delete after['mm.threads']?.[SELF_CLI]
     expect(JSON.stringify(after)).toBe(before)
     // and with no chip on record for the client at all
     w.stored['mm.chips'] = []
