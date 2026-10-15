@@ -43,8 +43,14 @@ export const CONTEXT_READING_MAX_AGE_MS = 7 * DAY
 /** A thread as the desktop app lists it. `link` is the app's own link to it, kept only when it is that thread's. */
 export type AppThread = { sessionId: string; title?: string; pinned?: boolean; isArchived?: boolean; lastActivityAt?: string; link?: string }
 
-/** Claude Code session id → the app thread it runs in, as each session records about itself. */
-export type Pairs = Record<string, { app: string; at: number }>
+/**
+ * Claude Code session id → the app thread it runs in, as each session records about itself. `at` is when the
+ * pair was last written (a session writes it again once a day, and a pair not written for 30 days is
+ * forgotten); `since` (0.5.9) is when it was first written for that thread, written with every first write and
+ * kept through those rewrites. A pair with no `since` (written before 0.5.9, or found late in the app's records
+ * and dated then) says nothing about when its thread started.
+ */
+export type Pairs = Record<string, { app: string; at: number; since?: number }>
 
 export type ClientThread = { sid: string; title: string; lastAt: number; source: 'linked' | 'matched' }
 
@@ -200,14 +206,83 @@ export function onlyClients(projectId: string, sid: string, feedThreads: readonl
 
 /**
  * What becomes of a link the bridge made by itself, by this sync's feed:
- *   stays     its thread's sessions declared this client alone (`onlyClients`)
+ *   stays     its thread's sessions declared this client alone (`onlyClients`), or (0.5.9) the feed lists
+ *             none of them and the thread opened with this client's own [mm-link] marker
  *   goes      something makes the thread another client's too (`declaredOther`: a row for another project,
  *             a row OW marks `sole: false`, a marker for another client): let go on this sync (B3)
  *   unlisted  the feed lists none of its sessions: the sync counts a miss
+ * (0.5.9) A thread that opened with this client's marker said so itself, and that does not age out of the
+ * feed's window: a link R1b moved to such a thread is not undone by misses and then taken again (a loop).
  */
 export function autoLinkFate(projectId: string, sid: string, feedThreads: readonly FeedThread[], pairs: Pairs, marked: Readonly<Record<string, string>> = {}): 'stays' | 'goes' | 'unlisted' {
   if (declaredOther(projectId, sid, feedThreads, pairs, marked)) return 'goes'
-  return feedThreads.some(t => pairs[t.session_id]?.app === sid) ? 'stays' : 'unlisted'
+  if (feedThreads.some(t => pairs[t.session_id]?.app === sid)) return 'stays'
+  return marked[sid] === projectId ? 'stays' : 'unlisted'
+}
+
+/**
+ * (0.5.9) When a thread started, as far as the bridge knows: the earliest any Claude Code session was first
+ * recorded running in it (each pair's `since`). Undefined, START-UNKNOWN, when no session of the thread has a pair,
+ * or when any of its pairs has no `since` (review of 54a0437d, M1: a pair written before 0.5.9 carries its last
+ * daily rewrite, and one the app's records gave late carries the day it was found; neither is when the thread
+ * started). ⛔ Never its last activity: typing in a thread later does not make it newer.
+ */
+export function threadStart(sid: string, pairs: Pairs): number | undefined {
+  let start: number | undefined
+  for (const p of Object.values(pairs)) {
+    if (!p || p.app !== sid) continue
+    if (typeof p.since !== 'number' || !Number.isFinite(p.since)) return undefined
+    if (start === undefined || p.since < start) start = p.since
+  }
+  return start
+}
+
+/**
+ * R1b (0.5.9, Rob 2026-10-15: "Can we have it update to attach to the most recent thread for each client?"): the
+ * thread a link the bridge made by itself moves to, when the client has a newer one. A candidate is open in the
+ * app's list, not archived, not the linked thread, linked to no client, not one the person unlinked, not one a
+ * client was moved off (`released`), not reached by sessions of more than one client (`shared`), not
+ * another client's by the feed or by its marker (`declaredOther`), and it opened with this client's own marker
+ * or its sessions declared this client alone (`onlyClients`). Its start (`threadStart`) must be known, and LATER
+ * than both the linked thread's start and its last activity (M1: whichever of them is known and later; neither
+ * known, nothing moves). The newest start wins. ⛔ A candidate whose start is unknown is never one.
+ * ⛔ The newest thread, never the most recently active: typing in the old thread later never pulls the link back.
+ * ⛔ Only for a link the bridge made by itself: the caller never asks this for a link the person made.
+ */
+export function newerThreadFor(
+  projectId: string,
+  linked: string,
+  links: Readonly<Record<string, string>>,
+  feedThreads: readonly FeedThread[],
+  pairs: Pairs,
+  live: ReadonlyMap<string, AppThread>,
+  skip: {
+    unlinked?: Readonly<Record<string, unknown>>
+    released?: readonly string[]
+    marked?: Readonly<Record<string, string>>
+    shared?: ReadonlySet<string>
+  } = {},
+): string | undefined {
+  const marked = skip.marked ?? {}
+  const unlinked = skip.unlinked ?? {}
+  const released = skip.released ?? []
+  const shared = skip.shared ?? sharedThreads(feedThreads, pairs)
+  const known = [threadStart(linked, pairs), ms(live.get(linked)?.lastActivityAt)].filter((t): t is number => typeof t === 'number' && Number.isFinite(t))
+  if (!known.length) return undefined
+  const from = Math.max(...known)
+  let best: { sid: string; start: number } | undefined
+  for (const s of live.values()) {
+    const sid = s.sessionId
+    if (s.isArchived || sid === linked || ownerOf(sid, links) !== undefined) continue
+    if (sid in unlinked || released.includes(sid) || shared.has(sid)) continue
+    // ⛔ a thread whose marker names another client, or that the feed gives to another, never qualifies
+    if (declaredOther(projectId, sid, feedThreads, pairs, marked)) continue
+    if (marked[sid] !== projectId && soleClient(sid, feedThreads, pairs) !== projectId) continue
+    const start = threadStart(sid, pairs)
+    if (start === undefined || start <= from) continue
+    if (!best || start > best.start) best = { sid, start }
+  }
+  return best?.sid
 }
 
 /**

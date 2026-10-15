@@ -6,6 +6,7 @@ import {
   CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, LONG_CONTEXT_TOKENS, LONG_THREAD_ROWS, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLength, threadLink, threadRows, titleLooksLike, titleSuggestion, waitingText,
+  newerThreadFor, threadStart,
   CHIP_TITLE_MAX, REFRESH_FAILED, bandText, chipTitle, claimText, isStillOpenRow, staleCopySentence, startKickoff,
   LABEL_MAX, buttonLabel,
 } from './threads'
@@ -1284,5 +1285,105 @@ describe('L13: a chip\'s title is at most 60 characters', () => {
     const long = chipTitle('Thirty Two Character Client Name: start a new thread (this one is at 70%)')
     expect(long.length).toBe(60)
     expect(long.endsWith('…')).toBe(true)
+  })
+})
+
+// ======================================================================== 0.5.9 (Rob, 2026-10-15)
+
+describe('R1b (0.5.9): a link the bridge made by itself follows the client\'s newest thread', () => {
+  const HOUR = 3_600_000
+  /** The 10-15 profile switch: the bridge linked Acme to its thread from 10-12; the thread started for Acme on 10-15 is linked to nobody. */
+  const OLD_START = et('2026-10-12 16:26')
+  const NEW_START = et('2026-10-15 10:38')
+  const live = liveOf(app('local_old', 'Roof quote', '2026-10-12 17:00'), app('local_new', 'Acme resume', '2026-10-15 10:40'))
+  /** Pairs written by 0.5.9: each with when it was first written. */
+  const pairs: Pairs = { 'cli-old': { app: 'local_old', at: OLD_START, since: OLD_START }, 'cli-new': { app: 'local_new', at: NEW_START, since: NEW_START } }
+  const listed = [declared(ACME, 'cli-old', '2026-10-12 17:00'), declared(ACME, 'cli-new', '2026-10-15 10:40')]
+  const links = { [ACME]: 'local_old' }
+
+  test('a thread\'s start is the first time any of its sessions was recorded in it (`since`); a pair without one leaves it unknown, and it is never the last activity', async () => {
+    expect(threadStart('local_old', pairs)).toBe(OLD_START)
+    expect(threadStart('local_none', pairs)).toBeUndefined()
+    // two sessions in one thread (a /clear): the earlier
+    expect(threadStart('local_old', { ...pairs, 'cli-old2': { app: 'local_old', at: NEW_START, since: NEW_START } })).toBe(OLD_START)
+    // a pair written again a day later keeps when it was first written
+    expect(threadStart('local_old', { 'cli-old': { app: 'local_old', at: NEW_START + HOUR, since: OLD_START } })).toBe(OLD_START)
+    // (M1) a pair written before 0.5.9, or one the app's records gave late: no `since`, so the start is unknown,
+    // even beside a pair that has one
+    expect(threadStart('local_old', { 'cli-old': { app: 'local_old', at: OLD_START } })).toBeUndefined()
+    expect(threadStart('local_old', { ...pairs, 'cli-old0': { app: 'local_old', at: NEW_START } })).toBeUndefined()
+  })
+
+  test('the newer thread is taken when it opened with this client\'s marker, or when its sessions declared this client alone', async () => {
+    // (a) the marker, with no feed row for it
+    expect(newerThreadFor(ACME, 'local_old', links, [listed[0] as FeedThread], pairs, live, { marked: { local_new: ACME } })).toBe('local_new')
+    // (b) its sessions declared Acme alone
+    expect(newerThreadFor(ACME, 'local_old', links, listed, pairs, live)).toBe('local_new')
+    // neither: not this client's thread
+    expect(newerThreadFor(ACME, 'local_old', links, [listed[0] as FeedThread], pairs, live)).toBeUndefined()
+    // the newest start wins among several
+    const three = new Map([...live, ['local_newer', app('local_newer', 'Acme again', '2026-10-15 09:00')]])
+    const p3: Pairs = { ...pairs, 'cli-newer': { app: 'local_newer', at: NEW_START + HOUR, since: NEW_START + HOUR } }
+    expect(newerThreadFor(ACME, 'local_old', links, [...listed, declared(ACME, 'cli-newer', '2026-10-15 09:00')], p3, three)).toBe('local_newer')
+  })
+
+  test('⛔ never a thread another client has, the person unlinked, a client was moved off, that is archived, shared, or another client\'s by the feed or its marker', async () => {
+    const ways: Record<string, Parameters<typeof newerThreadFor>> = {
+      'linked to another client': [ACME, 'local_old', { ...links, [BOLT]: 'local_new' }, listed, pairs, live],
+      'unlinked by the person': [ACME, 'local_old', links, listed, pairs, live, { unlinked: { local_new: NOW } }],
+      'released': [ACME, 'local_old', links, listed, pairs, live, { released: ['local_new'] }],
+      'archived': [ACME, 'local_old', links, listed, pairs, liveOf(app('local_old', 'Roof quote', '2026-10-12 17:00'), app('local_new', 'Acme resume', '2026-10-15 10:40', { isArchived: true }))],
+      'shared': [ACME, 'local_old', links, [...listed, declared(BOLT, 'cli-new2', '2026-10-15 10:41')], { ...pairs, 'cli-new2': { app: 'local_new', at: NEW_START, since: NEW_START } }, live],
+      'declaredOther, by a row for another project': [ACME, 'local_old', links, [listed[0] as FeedThread, declared(BOLT, 'cli-new', '2026-10-15 10:40')], pairs, live, { marked: { local_new: ACME } }],
+      'declaredOther, by sole false': [ACME, 'local_old', links, [listed[0] as FeedThread, { ...declared(ACME, 'cli-new', '2026-10-15 10:40'), sole: false }], pairs, live, { marked: { local_new: ACME } }],
+      'marked for another client': [ACME, 'local_old', links, listed, pairs, live, { marked: { local_new: BOLT } }],
+      'its start unknown (a pair from before 0.5.9)': [ACME, 'local_old', links, listed, { ...pairs, 'cli-new': { app: 'local_new', at: NEW_START } }, live],
+    }
+    for (const [name, args] of Object.entries(ways)) expect(newerThreadFor(...args), name).toBeUndefined()
+  })
+
+  test('the linked thread is dated by the later of its start and its last activity; a candidate must start after that, and with neither known nothing moves', async () => {
+    // started before the linked thread: no move, however recently it was active
+    const older: Pairs = { 'cli-old': { app: 'local_old', at: NEW_START, since: NEW_START }, 'cli-new': { app: 'local_new', at: OLD_START, since: OLD_START } }
+    expect(newerThreadFor(ACME, 'local_old', links, listed, older, live)).toBeUndefined()
+    // the same start: no move
+    expect(newerThreadFor(ACME, 'local_old', links, listed, { ...pairs, 'cli-new': { app: 'local_new', at: OLD_START, since: OLD_START } }, live)).toBeUndefined()
+    // (M1) the linked thread was active after the candidate started: no move, though it started long before
+    const busy = liveOf(app('local_old', 'Roof quote', '2026-10-15 11:00'), app('local_new', 'Acme resume', '2026-10-15 10:40'))
+    expect(newerThreadFor(ACME, 'local_old', links, listed, pairs, busy)).toBeUndefined()
+    // the old thread written again a day later (the person went back to it): its start stays, so the link stays on the new one
+    const after = { [ACME]: 'local_new' }
+    const rewritten: Pairs = { 'cli-old': { app: 'local_old', at: NEW_START + 24 * HOUR, since: OLD_START }, 'cli-new': { app: 'local_new', at: NEW_START, since: NEW_START } }
+    const busyOld = liveOf(app('local_old', 'Roof quote', '2026-10-16 11:00'), app('local_new', 'Acme resume', '2026-10-15 10:40'))
+    expect(newerThreadFor(ACME, 'local_new', after, listed, rewritten, busyOld)).toBeUndefined()
+    // no pair for the linked thread: its last activity (10-12 17:00) stands in
+    const noPair: Pairs = { 'cli-new': { app: 'local_new', at: NEW_START, since: NEW_START } }
+    expect(newerThreadFor(ACME, 'local_old', links, listed, noPair, live)).toBe('local_new')
+    expect(newerThreadFor(ACME, 'local_old', links, listed, { 'cli-new': { app: 'local_new', at: et('2026-10-12 12:00'), since: et('2026-10-12 12:00') } }, live)).toBeUndefined()
+    // a pair from before 0.5.9 for the linked thread: its last activity stands in the same way
+    expect(newerThreadFor(ACME, 'local_old', links, listed, { ...noPair, 'cli-old': { app: 'local_old', at: OLD_START } }, live)).toBe('local_new')
+    // neither known: nothing moves
+    const blank = liveOf(app('local_old', 'Roof quote', undefined), app('local_new', 'Acme resume', '2026-10-15 10:40'))
+    expect(newerThreadFor(ACME, 'local_old', links, listed, noPair, blank)).toBeUndefined()
+    // a candidate with no pair has no start: not taken
+    expect(newerThreadFor(ACME, 'local_old', links, [listed[0] as FeedThread], { 'cli-old': pairs['cli-old'] as Pairs[string] }, live, { marked: { local_new: ACME } })).toBeUndefined()
+  })
+
+  test('[M1 probe] a store from before 0.5.9: the client on B (started 10-10, active 10-15 09:00, pair rewritten 10-14 08:00), an older thread A (used 10-14 noon, its pair as old): no move', async () => {
+    const both = liveOf(app('local_b', 'Thread B', '2026-10-15 09:00'), app('local_a', 'Thread A', '2026-10-14 12:00'))
+    const old: Pairs = { 'cli-b': { app: 'local_b', at: et('2026-10-14 08:00') }, 'cli-a': { app: 'local_a', at: et('2026-10-14 12:00') } }
+    const rows = [declared(ACME, 'cli-b', '2026-10-15 09:00'), declared(ACME, 'cli-a', '2026-10-14 12:00')]
+    expect(newerThreadFor(ACME, 'local_b', { [ACME]: 'local_b' }, rows, old, both)).toBeUndefined()
+    expect(newerThreadFor(ACME, 'local_b', { [ACME]: 'local_b' }, rows, old, both, { marked: { local_a: ACME } })).toBeUndefined()
+  })
+
+  test('a link moved to a thread that opened with the client\'s own marker is not undone by misses; a marker for another client, a row for another client or `sole: false` still lets it go', async () => {
+    expect(autoLinkFate(ACME, 'local_new', [], pairs, { local_new: ACME })).toBe('stays')
+    expect(autoLinkFate(ACME, 'local_new', [declared(BOLT, 'cli-other', '2026-10-15 10:00')], pairs, { local_new: ACME })).toBe('stays')
+    expect(autoLinkFate(ACME, 'local_new', [declared(BOLT, 'cli-other', '2026-10-15 10:00')], pairs, {})).toBe('unlisted')
+    expect(autoLinkFate(ACME, 'local_new', [], pairs, { local_new: BOLT })).toBe('goes')
+    // (L6) marked for this client, then declared for another: a row of its session names another project, or OW marks it sole: false
+    expect(autoLinkFate(ACME, 'local_new', [declared(BOLT, 'cli-new', '2026-10-15 11:00')], pairs, { local_new: ACME })).toBe('goes')
+    expect(autoLinkFate(ACME, 'local_new', [{ ...declared(ACME, 'cli-new', '2026-10-15 11:00'), sole: false }], pairs, { local_new: ACME })).toBe('goes')
   })
 })
