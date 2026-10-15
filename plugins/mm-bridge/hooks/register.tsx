@@ -88,7 +88,7 @@ import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, 
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.5.9'
+const VERSION = '0.5.10'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -211,6 +211,8 @@ const WRAP_NOTES = /\n\nShared notes folder for this group of sessions \([^\n]*$
  */
 const NOTE_OPEN = '<system-reminder>\n'
 const NOTE_CLOSE = '</system-reminder>'
+/** (0.5.10) A note's close tag at the start of a line. */
+const LINE_CLOSE = /(?:^|\n)<\/system-reminder>/
 /** The most app notes taken off the front of one message. */
 const APP_NOTES_MAX = 10
 /**
@@ -219,6 +221,9 @@ const APP_NOTES_MAX = 10
  * line (then the message) or at once by the next note. Anything else (a close tag inside a line, a second open tag
  * inside the note, CRLF, no close tag, more than APP_NOTES_MAX notes) gives the message back as it is: it begins
  * with `<system-reminder>`, so neither the wrapper nor a marker is read in it.
+ * ⛔ (0.5.10, review of 0.5.9, finding 2) So does a message that, after its notes, still has a `</system-reminder>`
+ * at the start of a line: what looked like the message may be the rest of a note (probe D: a marker inside a
+ * note's body, after a line-start close tag and a blank line).
  */
 function afterAppNotes(text: string): string {
   let rest = text
@@ -227,7 +232,7 @@ function afterAppNotes(text: string): string {
     if (close < 0 || rest[close - 1] !== '\n') return text
     if (rest.slice(NOTE_OPEN.length, close).includes('<system-reminder>')) return text
     const after = rest.slice(close + NOTE_CLOSE.length)
-    if (after.startsWith('\n\n')) return after.slice(2)
+    if (after.startsWith('\n\n')) return LINE_CLOSE.test(after.slice(2)) ? text : after.slice(2)
     if (!after.startsWith(`\n${NOTE_OPEN}`)) return text
     rest = after.slice(1)
   }
@@ -1165,6 +1170,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   const cleared = await storeGet<Record<string, number>>($, 'mm.cleared', {})
   /** The client each thread's [mm-link] marker named: never a thread the bridge links to another by itself. */
   const marked = await storeGet<Record<string, string>>($, 'mm.marked', {})
+  /** (0.5.10) When each thread's marker was recorded, where it is known: R1b's dated evidence. */
+  const markedAt = await storeGet<Record<string, number>>($, 'mm.markedAt', {})
   /**
    * The shared maps as this pass read them. ⛔ The pass never writes one of them back whole: at its end each
    * gets only what the pass itself changed, over a fresh copy (`applyChanges`). Its app calls take seconds,
@@ -1214,6 +1221,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // counts only when the one before it is MISS_GAP_MS old (three /mm in a row are one sync). A thread that
   // cannot be seen is left as it is. A link the person made is not in `auto`, and is never undone here.
   const undone: string[] = []
+  /** (0.5.10) The bridge links this pass let go here: checked again on the store before the links are written. */
+  const drops: Array<{ pid: string; sid: string }> = []
   if (!known) {
     for (const [pid, a] of Object.entries(auto)) {
       if (unseen.has(a.sid)) continue
@@ -1238,6 +1247,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
       delete auto[pid]
       delete links[pid]
       undone.push(a.sid)
+      drops.push({ pid, sid: a.sid })
     }
   }
 
@@ -1260,7 +1270,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const left = Array.isArray(released) ? released : []
     for (const [pid, a] of Object.entries(auto)) {
       if (!a || typeof a.sid !== 'string' || links[pid] !== a.sid || unseen.has(a.sid) || !live.has(a.sid)) continue
-      const sid = newerThreadFor(pid, a.sid, links, feedThreads, pairs, live, { unlinked, released: left, marked, shared })
+      const sid = newerThreadFor(pid, a.sid, links, feedThreads, pairs, live, { unlinked, released: left, marked, markedAt, shared })
       if (!sid || unseen.has(sid)) continue
       links[pid] = sid
       auto[pid] = { sid, miss: 0, made: now }
@@ -1610,6 +1620,21 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // app: (L2) another client holds its thread now (one thread, one client); (M2) an R1b move whose client the person
   // acted on meanwhile (a /mm link, a press, a claim: the auto record no longer names the thread it had, or their
   // act names that thread). (The pins and names it touched are put right by the next sync.)
+  // ⛔ (0.5.10, review of 0.5.9, finding 1) The same for a bridge link this pass let go (B3's "goes", the third miss):
+  // one whose client the person acted on while this pass waited on the app (the auto record no longer names its
+  // thread, or their act names it) is not let go here; the store keeps what they wrote. Checked first, so a link R1
+  // made in its place this pass goes with it.
+  if (drops.length) {
+    const freshAuto = await storeGet<Auto>($, 'mm.auto', {})
+    const freshActed = await storeGet<Acted>($, 'mm.acted', {})
+    for (const d of drops) {
+      if (freshAuto[d.pid]?.sid === d.sid && freshActed[d.pid]?.sid !== d.sid) continue
+      links[d.pid] = d.sid
+      const before = was.auto[d.pid]
+      if (before) auto[d.pid] = copyOf(before)
+      else delete auto[d.pid]
+    }
+  }
   const made = Object.keys(links).filter(pid => links[pid] !== was.links[pid])
   if (made.length) {
     const freshLinks = await storeGet<Record<string, string>>($, 'mm.links', {})
@@ -4213,14 +4238,29 @@ async function linkFromMarker($: EngineInterface, text: string, origin: string |
   if (!inFeed.includes(projectId)) return undefined
   const me = await selfId($)
   if (!me) return undefined
+  // (0.5.10) this session's pair first: the thread's start is on record no later than its marker (a session's
+  // first message comes before its timer's first write)
+  await recordSelf($).catch(() => {})
   // ⛔ This thread declared this client: the bridge never links it by itself to another one (B3), whatever
   // becomes of the link this prompt makes. Kept whether or not it links (an unlinked thread, another
   // client's thread).
+  let markedNow = false
   await patchStore<Record<string, string>>($, 'mm.marked', {}, marked => {
     if (marked[me] === projectId) return false
     delete marked[me]
     marked[me] = projectId
     capped(marked)
+    markedNow = true
+  })
+  // (0.5.10) and when, in a map of its own (`mm.marked` keeps its form: a thread still running 0.5.9 reads it), the
+  // first time this thread was marked for this client. A marker with no time on record (one 0.5.9 made) is not
+  // evidence for R1b; it counts everywhere else as before.
+  const at = await $.clock.now()
+  await patchStore<Record<string, number>>($, 'mm.markedAt', {}, times => {
+    if (!markedNow && typeof times[me] === 'number') return false
+    delete times[me]
+    times[me] = at
+    capped(times)
   })
   if (me in (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))) return undefined
   const now = await $.clock.now()
