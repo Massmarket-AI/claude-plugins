@@ -8,9 +8,9 @@ import {
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
-  CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
-  newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, staleCopySentence, startKickoff, threadLength, threadLink, threadRows, titleSuggestion,
-  REFRESH_FAILED, bandText, chipTitle,
+  CONTEXT_READING_MAX_AGE_MS, LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
+  newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, staleCopySentence, startKickoff, threadLink, titleSuggestion,
+  REFRESH_FAILED, autoUpdatable, autoUpdateDue, bandText, chipTitle, waitingText,
 } from './threads'
 import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, Row, RowButton, RowState, Sent } from './threads'
 
@@ -35,6 +35,12 @@ import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, 
 // starts a model turn in the client's thread: the one paid moment the bridge causes, and the person asked
 // for it. (0.5.2, R4/R5, Rob 2026-10-13) A chip is minted by itself too, in every running thread, for a
 // client that needs a new thread (`autoChips`): a chip starts nothing until the person clicks it.
+// ⛔ (0.5.11, Rob 10-15: "I think we should start updating threads automatically") ONE exception, and only while
+//    auto is on (/mm auto, the switch auto-start has had since 0.5.7): after each sync, a client on the person's own
+//    list whose linked thread lacks what is waiting gets Update's own message, through Update's own send and
+//    guards, once the client has been quiet AUTO_QUIET_MS and its drafts are ready (or an hour has passed), within
+//    AUTO_UPDATES_PER_HOUR and AUTO_UPDATES_PER_DAY on this computer, and never from a thread into itself
+//    (`autoUpdates`). It stamps nothing and claims nothing: an automatic send is nobody's act (R11).
 // ⛔ CLAUDE CANNOT DO EITHER. The model can call the `mm` tool, and the tool runs the same `runCommand`:
 //    there, and for a /mm command that did not come from the person's own prompt (a message from another
 //    session, a scheduled task, a channel, another plugin), `update` and `start` are refused before
@@ -88,7 +94,7 @@ import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, 
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.5.10'
+const VERSION = '0.5.11'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -149,6 +155,11 @@ const AUTO_STARTS_PER_HOUR = 4
 const AUTO_STARTS_PER_DAY = 20
 /** (0.5.7) A thread a session is about to start by itself is that session's alone this long (`mm.starting`). */
 const STARTING_MS = 2 * 60_000
+/** (0.5.11, Rob 10-15: update threads by itself) The most client threads this machine updates by itself in an hour, and in a day. */
+const AUTO_UPDATES_PER_HOUR = 6
+const AUTO_UPDATES_PER_DAY = 40
+/** (0.5.11) An update a session is about to send by itself is that session's alone this long (`mm.updating`). */
+const UPDATING_MS = 2 * 60_000
 /** (0.5.7) A band note (a thread started by itself, the hourly cap) shows in every thread this long. */
 const NOTE_SHOW_MS = 15 * 60_000
 /**
@@ -1570,8 +1581,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const elsewhere = (sid: string) => declaredOther(it.projectId, sid, feedThreads, pairs, marked)
     const had = sent[it.projectId]
     // A client whose linked thread cannot be seen keeps the last recommendation's words, and no thread to act on.
-    // Otherwise ONE of three: Start (no thread, or the thread is old or long), Update (the thread has not
-    // been given what is waiting now), or current (it has: what Update last put there is what would go now).
+    // Otherwise ONE of three: Start (no thread, or the thread is old), Update (the thread has not been given
+    // what is waiting now), or current (it has: what Update last put there is what would go now). (0.5.11, Rob
+    // 10-15) A long thread is not one to replace: Claude Code compacts it.
     const rec =
       linked && unseen.has(linked)
         ? carried(it)
@@ -1579,8 +1591,6 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
             sent: had,
             // (a package the person holds, in the thread that was given it, is not new for that thread: hasWaiting)
             signature: had && hasWaiting(had.sig, it) ? had.sig : signatureOf(it),
-            // by the thread's own context reading when it has a fresh one, else by the feed's row count
-            length: sid => threadLength(readings[sid], threadRows(sid, it.projectId, feedThreads, pairs), now),
           })
     recs[it.projectId] = rec
     // (R8) the context reading of the thread the row acts on, when it has a fresh one: past 60%, no Claim button
@@ -1591,14 +1601,6 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // (R8, Opus decision 2) a client being checked is under `Checking your reply`, with a recommendation on record
   const folds = { teammate: lists.teammate.map(it => rowOf(it)), older: lists.older.map(it => rowOf(it)), checking: checking.map(it => rowOf(it)) }
 
-  // A thread whose link was dropped in this pass loses its context reading with it. (Written over a fresh
-  // copy: each session writes its own reading there, and may have since this pass began.)
-  for (const sid of linkedBefore) if (ownerOf(sid, links) === undefined) dropped.add(sid)
-  if ([...dropped].some(sid => sid in readings)) {
-    await patchStore<Record<string, ContextReading>>($, 'mm.ctx', {}, fresh => {
-      for (const sid of dropped) delete fresh[sid]
-    })
-  }
   await patchStore<string[]>($, 'mm.released', [], fresh => applyListChanges(fresh, was.released, waiting))
 
   const last: Last = { at: now, member, items, ...also, pinned: want.size, recs, projects }
@@ -1654,6 +1656,16 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
       if (before) auto[pid] = copyOf(before)
       else delete auto[pid]
     }
+  }
+  // A thread whose link was dropped in this pass loses its context reading with it. (Written over a fresh
+  // copy: each session writes its own reading there, and may have since this pass began.)
+  // (0.5.11, review of 0.5.10, L1) Only once both checks above are made: a link they kept for the person keeps
+  // its thread's reading.
+  for (const sid of linkedBefore) if (ownerOf(sid, links) === undefined) dropped.add(sid)
+  if ([...dropped].some(sid => sid in readings)) {
+    await patchStore<Record<string, ContextReading>>($, 'mm.ctx', {}, fresh => {
+      for (const sid of dropped) delete fresh[sid]
+    })
   }
   await patchStore<Auto>($, 'mm.auto', {}, (fresh, stored) => applyChanges(fresh, was.auto, auto, 'set') || !stored)
   await patchStore<Record<string, string>>($, 'mm.titles', {}, fresh => applyChanges(fresh, was.titles, titles, 'set'))
@@ -2198,6 +2210,9 @@ async function tick($: EngineInterface): Promise<void> {
       // R15: the thread list's view, once on this machine
       await setViewOnce($).catch(() => {})
     }
+    // (0.5.11, Rob 10-15) in every running thread, once for each sync on record: the clients' threads to update by
+    // themselves (the thread that synced, at once; every other, on its next tick)
+    await autoUpdates($).catch(err => noteFailure($, 'auto update', err))
     await refreshSelf($, false)
     // R5: this thread's own chips: the ones no longer wanted withdrawn, the missing ones minted
     await chipsTick($).catch(() => {})
@@ -2269,6 +2284,8 @@ async function syncAsked($: EngineInterface): Promise<void> {
     // (a sync made in the very millisecond of the request may have read the store before the change it is for)
     if (last && last.at > asked) return
     await sync($)
+    // (0.5.11) as a tick does, once the sync is on record
+    await autoUpdates($).catch(err => noteFailure($, 'auto update', err))
     await refreshSelf($, false)
     await refreshBand($)
   } catch {
@@ -2396,21 +2413,15 @@ function startTldr(it: QueueItem, now: number): string {
 
 /**
  * (0.5.4, C1: Rob, 10-14, "yes chips") The chip a client's own thread mints, titled with the action it recommends,
- * verbatim: `Do it here: <what>` (the client's kickoff, run in this thread with the app's Do it here), or, from 60%
- * of the thread's context (R3, R8), `Start a fresh thread: <client> (this one is at <n>%)`. Cut to 60 characters.
- * Its line ends with `Recommended: Do it here.` or `Recommended: start a fresh thread.`
+ * verbatim: `Do it here: <what>` (the client's kickoff, run in this thread with the app's Do it here). Cut to 60
+ * characters. Its line ends with `Recommended: Do it here.` (0.5.11: no `Start a fresh thread` chip from a thread's
+ * length any more: Claude Code compacts a long thread.)
  */
 function hereTitle(it: QueueItem): string {
   return chipTitle(`Do it here: ${startWhat(it)}`)
 }
-function freshTitle(it: QueueItem, percent: number): string {
-  return chipTitle(`Start a fresh thread: ${it.client} (this one is at ${Math.round(percent)}%)`)
-}
 function hereTldr(it: QueueItem, now: number): string {
   return `${it.client} needs you: ${needsLine(it, now)}. Recommended: Do it here.`
-}
-function freshTldr(it: QueueItem, now: number): string {
-  return `${it.client} needs you: ${needsLine(it, now)}. Recommended: start a fresh thread.`
 }
 
 /**
@@ -2569,6 +2580,10 @@ async function startNow($: EngineInterface, title: string, prompt: string): Prom
  * the new thread's id, it is linked, claimed and stamped at once (the person's act: pinned first), and a sync a second
  * on pins and names it. With no id, the kickoff's [mm-link] marker links it on its first turn, as a chip's does: a
  * record of what it was started with lets it take the client from the thread the client had (`linkFromMarker`).
+ * (0.5.11) With an id, what the thread opened with is recorded at once too (`mm.sent`): the client's kickoff, whatever
+ * hand-over it carried. Its own marker says so only once its first turn runs, and its kickoff with a hand-over never
+ * does (it is not the bare kickoff): until then its row would read Update, and a thread just started would be sent
+ * Update's message by itself (`autoUpdates`).
  */
 async function adoptStarted($: EngineInterface, it: QueueItem, sid: string | undefined, prompt: string, me: string, now: number): Promise<void> {
   const pid = it.projectId
@@ -2592,6 +2607,7 @@ async function adoptStarted($: EngineInterface, it: QueueItem, sid: string | und
       fresh[pid] = sid
     }),
   )
+  await step('what the thread now has', () => putSent($, pid, { sid, sig: signatureOf(it), at: now }))
   await step('the unlink record', () => forgetUnlink($, sid))
   await step('the claim', () => claim($, pid, sid))
   await step('the stamp', () => stamp($, pid, sid))
@@ -2631,8 +2647,8 @@ function sigHash(s: string): string {
 const autoInFlight = new Set<string>()
 
 /**
- * (0.5.7) What becomes of a need for a new thread (C3, or a thread 60% full) where the app gives start_session and
- * auto-start is on:
+ * (0.5.7) What becomes of a need for a new thread (C3; 0.5.11: no longer a thread 60% full) where the app gives
+ * start_session and auto-start is on:
  *   skip    it is started, or being started (here or by another session: its claim in `mm.starting`), or a thread
  *           already has what it would carry
  *   card    the app refused to start it: the card instead
@@ -2673,8 +2689,8 @@ async function autoVerdict($: EngineInterface, n: Need, me: string, now: number)
  * (0.5.7) Starts the client's thread by itself, once this session's claim has held (another session's write since
  * means that session starts it): `start_session` user_asked, with the kickoff a chip would carry. Recorded before the
  * app is asked, so no other session starts it meanwhile, and logged either way (`logAuto`). Started: linked and pinned
- * as a person's Start does it (`adoptStarted`), and for a thread 60% full, this old thread unpinned and named
- * `<its name> · moved` (`moveAway`); the band says so once. Refused: the card instead, at once.
+ * as a person's Start does it (`adoptStarted`); the band says so once. Refused: the card instead, at once.
+ * (0.5.11, Rob 10-15) Never for a thread's length: no thread is replaced, or unpinned and renamed ` · moved`, for it.
  */
 async function autoStart($: EngineInterface, n: Need, me: string, key: string): Promise<void> {
   const pid = n.it.projectId
@@ -2689,7 +2705,7 @@ async function autoStart($: EngineInterface, n: Need, me: string, key: string): 
     if (tries.some(t => t.pid === pid && t.sig === sig)) return
     const started = tries.filter(t => t.ok !== false)
     if (started.filter(t => now - t.at < 3_600_000).length >= AUTO_STARTS_PER_HOUR || started.filter(t => now - t.at < DAY_MS).length >= AUTO_STARTS_PER_DAY) return
-    const entry: AutoStart = { at: now, pid, client: cleanName(n.it.client), sig, kind: n.kind, by: me, ok: null, reason: n.kind === 'fresh' ? 'its thread is 60% full or more' : 'no thread' }
+    const entry: AutoStart = { at: now, pid, client: cleanName(n.it.client), sig, kind: n.kind, by: me, ok: null, reason: 'no thread' }
     await patchStore<AutoStart[]>($, 'mm.autostarts', [], list => {
       list.push(entry)
       list.splice(0, list.length, ...list.filter(t => t && now - Number(t.at) <= DAY_MS).slice(-200))
@@ -2708,7 +2724,6 @@ async function autoStart($: EngineInterface, n: Need, me: string, key: string): 
       if (answer.why !== 'no-tool') await mintChip($, { ...n, auto: true, me, now: await $.clock.now() })
       return
     }
-    if (n.kind === 'fresh') await moveAway($, me, pid)
     await adoptStarted($, n.it, answer.sid, n.prompt, me, now)
     await bandNote($, `Started ${entry.client}'s thread: it is under Pinned.`, `started\n${key}`)
   } catch (err) {
@@ -2719,27 +2734,6 @@ async function autoStart($: EngineInterface, n: Need, me: string, key: string): 
       delete fresh[key]
     }).catch(() => {})
   }
-}
-
-/**
- * (0.5.7) The thread a fresh one replaces, when it is this one: unpinned, named as it is with ` · moved`, and its pin
- * record and kept name dropped, so no later pass names or pins it again. ⛔ Only while it is still this client's thread:
- * a thread linked to another client is never touched.
- */
-async function moveAway($: EngineInterface, me: string, pid: string): Promise<void> {
-  if (ownerOf(me, await storeGet<Record<string, string>>($, 'mm.links', {})) !== pid) return
-  const self = asThread(await desktopOnly(() => mcpJsonWithin($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' }), null))
-  if (self?.pinned) await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: me, pinned: false })
-  const title = self?.title ?? ''
-  if (title && !title.endsWith(' · moved')) await mcpJson($, 'ccd_session_mgmt', 'set_session_title', { session_id: me, title: `${title} · moved` })
-  await patchStore<Record<string, Pin>>($, 'mm.pins', {}, pins => {
-    if (!(me in pins)) return false
-    delete pins[me]
-  })
-  await patchStore<Record<string, string>>($, 'mm.titles', {}, titles => {
-    if (!(me in titles)) return false
-    delete titles[me]
-  })
 }
 
 /** (0.5.7) A line for the band, in every thread, for NOTE_SHOW_MS, once for its `key`. */
@@ -2770,6 +2764,223 @@ async function logAuto($: EngineInterface, line: string): Promise<void> {
     await $.fs.write(path, `${lines.join('\n')}\n`)
   } catch {
     // the log is for audit: its failure stops nothing
+  }
+}
+
+// ---------------------------------------------------------------- (0.5.11) client threads the bridge updates by itself
+
+/**
+ * (0.5.11, Rob 10-15: "I think we should start updating threads automatically") An update sent by itself, on record
+ * (`mm.autoupdates`, every session's, the last day's): for which client and what it carried (`sig`, a short hash of
+ * the signature, as `mm.autostarts` names it), into which thread (`sid`), by which thread, and whether it went (`ok`:
+ * null while it is being sent). ⛔ One on record for a client, a signature and a thread is never sent again, whatever
+ * became of it: a send the thread did not take waits for something new for the client.
+ */
+type AutoUpdate = { at: number; pid: string; client: string; sig: string; sid: string; by: string; ok: boolean | null; reason: string }
+
+/** (0.5.11) The updates this session has claimed and not finished: a second sync does not claim one again. */
+const autoUpdating = new Set<string>()
+/** (0.5.11) The caps this session has logged, by client and signature: once each, not on every sync. */
+const capLogged = new Set<string>()
+
+/** (0.5.11) The updates on record (every session's). */
+async function autoUpdatesOf($: EngineInterface): Promise<AutoUpdate[]> {
+  const list = await storeGet<AutoUpdate[]>($, 'mm.autoupdates', [])
+  return Array.isArray(list) ? list.filter(t => t && typeof t === 'object') : []
+}
+
+/** (0.5.11) This machine has updated AUTO_UPDATES_PER_HOUR threads by itself in the last hour, or AUTO_UPDATES_PER_DAY in the last day. */
+function updatesCapped(list: readonly AutoUpdate[], now: number): boolean {
+  const went = list.filter(t => t.ok !== false)
+  return went.filter(t => now - t.at < 3_600_000).length >= AUTO_UPDATES_PER_HOUR || went.filter(t => now - t.at < DAY_MS).length >= AUTO_UPDATES_PER_DAY
+}
+
+/** (0.5.11) Whether one is on record for this client, signature and thread. */
+const triedHere = (list: readonly AutoUpdate[], pid: string, sig: string, sid: string): boolean => list.some(t => t.pid === pid && t.sig === sig && t.sid === sid)
+
+/** (0.5.11) The sync on record each session last chose updates from: each sync is chosen from once in each thread. */
+const autoChosen = new Map<string, number>()
+
+/**
+ * (0.5.11, Rob 10-15) Once for each sync on record, in every running thread, while auto is on (`/mm auto`, the switch
+ * auto-start has): each client on the person's OWN list (the Needs-you list: never a client under With a teammate,
+ * Older or Checking your reply) whose row says Update, on its linked thread (never a thread its row only suggests),
+ * once it is time (`autoUpdateDue`), and never one a teammate has, whose package someone else holds, or that is
+ * still open after our reply (`autoUpdatable`). From what is stored only: no feed call and no app call here.
+ * ⛔ Never into the thread choosing (the app's send refuses it, and here the message would be a prompt the person
+ * did not write): the thread that synced leaves its own client to the other running threads, which choose from the
+ * same sync on their next tick. Never into a thread linked to another client, and never what the thread already
+ * has (`mm.sent`, `sentHere`); a thread the sync could not see has no row to update (its row carries no thread).
+ * Each one is claimed (`mm.updating`, a lease per client and signature, as `mm.starting` is) and sent once the claim
+ * has held (`autoUpdate`): two threads never both send it. At the cap, nothing more from this sync.
+ */
+async function autoUpdates($: EngineInterface): Promise<void> {
+  if ((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) !== 'claude-desktop') return
+  if (!(await autoStartOn($)) || (await $.store.get('mm.paused'))) return
+  const me = await knownSelf($)
+  if (!me) return
+  const now = await $.clock.now()
+  const last = await storeGet<Last | null>($, 'mm.last', null)
+  // a sync that failed, or one too old to say anything, chooses nothing
+  if (!last || last.error || !Array.isArray(last.items) || !Number.isFinite(last.at) || now - last.at > STALE_SYNC_MS) return
+  const id = await instanceId($)
+  if ((autoChosen.get(id) ?? -Infinity) >= last.at) return
+  autoChosen.set(id, last.at)
+  const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+  const sent = await storeGet<Record<string, Sent>>($, 'mm.sent', {})
+  for (const it of last.items.slice().sort(byDue)) {
+    const pid = it.projectId
+    const rec = storedRec(last, pid)
+    const target = rec?.target
+    if (rec?.state !== 'update' || !target || target.suggested || !THREAD_ID.test(target.sid) || !isUuid(pid)) continue
+    const sid = target.sid
+    // ⛔ its linked thread, no other client's, and not this one
+    if (links[pid] !== sid || ownerOf(sid, links) !== pid || sid === me) continue
+    if (!autoUpdatable(it, now) || !autoUpdateDue(it, now)) continue
+    const signature = signatureOf(it)
+    const given = sent[pid]
+    if ((given && given.sid === sid && hasWaiting(given.sig, it)) || sentHere.get(`${pid}\n${sid}`) === signature) continue
+    if ((await autoUpdateClaim($, it, sid, signature, me, now)) !== 'capped') continue
+    const key = `${pid}\n${sigHash(signature)}`
+    if (!capLogged.has(key)) {
+      capLogged.add(key)
+      await logAuto($, `not updated ${cleanName(it.client)} (${pid}) sig ${sigHash(signature)}: this computer updated ${AUTO_UPDATES_PER_HOUR} threads in the last hour or ${AUTO_UPDATES_PER_DAY} in the last day`)
+    }
+    return
+  }
+}
+
+/**
+ * (0.5.11) What becomes of a client's update a thread chose:
+ *   skip     it is on record for this thread already, or being sent (here, or by another session: its claim in
+ *            `mm.updating`)
+ *   capped   this machine updated AUTO_UPDATES_PER_HOUR threads by itself in the last hour, or AUTO_UPDATES_PER_DAY
+ *            in the last day
+ *   claimed  claimed here, and sent once the claim has held (`autoUpdate`)
+ */
+async function autoUpdateClaim($: EngineInterface, it: QueueItem, sid: string, signature: string, me: string, now: number): Promise<'skip' | 'capped' | 'claimed'> {
+  const pid = it.projectId
+  const sig = sigHash(signature)
+  const key = `${pid}\n${sig}`
+  if (autoUpdating.has(key)) return 'skip'
+  const tries = await autoUpdatesOf($)
+  if (triedHere(tries, pid, sig, sid)) return 'skip'
+  const held = (await storeGet<Record<string, { owner?: string; until?: number }>>($, 'mm.updating', {}))[key]
+  if (held && held.owner !== me && Number(held.until) > now) return 'skip'
+  if (updatesCapped(tries, now)) return 'capped'
+  let mine = false
+  await patchStore<Record<string, { owner?: string; until?: number }>>($, 'mm.updating', {}, fresh => {
+    for (const [k, v] of Object.entries(fresh)) if (!v || !(Number(v.until) > now)) delete fresh[k]
+    const other = fresh[key]
+    if (other && other.owner !== me) return false
+    fresh[key] = { owner: me, until: now + UPDATING_MS }
+    mine = true
+  })
+  if (!mine) return 'skip'
+  autoUpdating.add(key)
+  try {
+    $.clock.after(settleMs(`${me}#update#${key}`), () => void autoUpdate($, it, sid, signature, me, key).finally(() => autoUpdating.delete(key)))
+  } catch {
+    // no timer here: the claim runs out, and a later sync claims it again
+    autoUpdating.delete(key)
+    return 'skip'
+  }
+  return 'claimed'
+}
+
+/**
+ * (0.5.11, Rob 10-15: "so the draft is ready when I open the thread up") Sends the client's update by itself, once this
+ * session's claim has held (another session's write since means that session sends it): exactly what Update sends
+ * (`kickoffText(cur, { update: true })`), through Update's own send (`sendInto`), after Update's guards, all of them,
+ * asked again now: the client's link is still this thread and the thread is no other client's; the app answers for
+ * the thread by id, open; the feed is read once before the send (with no feed, nothing goes), and as it has the client
+ * NOW, the client is still on the person's own list, still one to update by itself, still due, and still carries what
+ * the sync saw (anything newer waits for the next sync); B3 and a newer thread of the client's (`stillTheClients`);
+ * and the thread does not already have it. Recorded before the app is asked (`mm.autoupdates`), and logged either way
+ * (`logAuto`). Sent: what the thread now has, as Update writes it, checked again 1 to 3 seconds later; the band says
+ * so once; the list is brought up to date.
+ * ⛔ Nothing else Update writes. No stamp and no acted: nobody acted. No claim: a send is never evidence (R11), so a
+ * link the bridge made stays one it can let go. No link and no unlink record: the thread was the client's linked
+ * thread before the send, and a move or an unlink made meanwhile is the person's and stands. No thread is opened.
+ */
+async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signature: string, me: string, key: string): Promise<void> {
+  const pid = it.projectId
+  const sig = sigHash(signature)
+  const client = cleanName(it.client)
+  let entry: AutoUpdate | null = null
+  /** The record's outcome, written over a fresh copy. */
+  const settle = async (ok: boolean, why: string): Promise<void> => {
+    const mine = entry
+    if (!mine) return
+    mine.ok = ok
+    await patchStore<AutoUpdate[]>($, 'mm.autoupdates', [], list => {
+      const e = list.find(t => t && t.pid === pid && t.sig === sig && t.sid === sid && t.at === mine.at && t.by === me)
+      if (!e) return false
+      e.ok = ok
+      if (!ok) e.reason = `${e.reason}; not sent: ${short(why, 160)}`
+    }).catch(() => {})
+  }
+  try {
+    if ((await storeGet<Record<string, { owner?: string }>>($, 'mm.updating', {}))[key]?.owner !== me) return
+    if (!(await autoStartOn($)) || (await $.store.get('mm.paused'))) return
+    if (sid === (await knownSelf($))) return
+    const now = await $.clock.now()
+    // checked again, now that the claim has held
+    const tries = await autoUpdatesOf($)
+    if (triedHere(tries, pid, sig, sid) || updatesCapped(tries, now)) return
+    const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+    if (links[pid] !== sid || ownerOf(sid, links) !== pid) return
+    const found = await lookup($, sid)
+    if (found === 'gone' || found === 'unknown' || found.isArchived) return
+    let read: Feed
+    try {
+      read = await fetchFeed($)
+    } catch {
+      return
+    }
+    const cur = buildLists(read, now).queue.find(i => i.projectId === pid)
+    if (!cur || !autoUpdatable(cur, now) || !autoUpdateDue(cur, now) || signatureOf(cur) !== signature) return
+    if (!(await stillTheClients($, pid, { sid, title: found.title ?? '', suggested: false }, sid, links, read, { live: new Map([[sid, found]]) }))) return
+    const given = (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]
+    if ((given && given.sid === sid && hasWaiting(given.sig, cur)) || sentHere.get(`${pid}\n${sid}`) === signature) return
+    // one message to a client at a time: a press sending to it now has it
+    if (sending.has(pid)) return
+    const made: AutoUpdate = { at: now, pid, client, sig, sid, by: me, ok: null, reason: `something new for the client: ${short(waitingText(cur), 120)}` }
+    await patchStore<AutoUpdate[]>($, 'mm.autoupdates', [], list => {
+      list.push({ ...made })
+      list.splice(0, list.length, ...list.filter(t => t && now - Number(t.at) <= DAY_MS).slice(-200))
+    })
+    entry = made
+    let why: string | null
+    try {
+      const r = await sendInto($, cur.client, pid, false, sid, kickoffText(cur, { update: true }), true)
+      why = r === null ? null : typeof r === 'object' ? 'a message to this client was already going out' : r
+    } catch (err) {
+      why = errorText(err)
+    }
+    await settle(why === null, why ?? '')
+    await logAuto($, `${why === null ? 'updated' : 'not updated'} ${client} (${pid}) sig ${sig} in ${sid}: ${made.reason}${why === null ? '' : `; ${short(why, 160)}`}`)
+    if (why !== null) return
+    const at = await $.clock.now()
+    sentHere.set(`${pid}\n${sid}`, signature)
+    try {
+      await putSent($, pid, { sid, sig: signature, at })
+    } catch (err) {
+      await noteFailure($, 'auto update: what the thread now has', err)
+    }
+    settleLater($, `${sid}#auto`, async () => {
+      if (!(await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]) await putSent($, pid, { sid, sig: signature, at })
+    })
+    await bandNote($, `Updated ${client}'s thread.`, `updated\n${key}`)
+    await refreshList($).catch(err => noteFailure($, 'auto update: the sync after it', err))
+  } catch (err) {
+    await noteFailure($, 'auto update', err)
+    if (entry?.ok === null) await settle(false, errorText(err))
+  } finally {
+    await patchStore<Record<string, { owner?: string }>>($, 'mm.updating', {}, fresh => {
+      if (fresh[key]?.owner !== me) return false
+      delete fresh[key]
+    }).catch(() => {})
   }
 }
 
@@ -2945,13 +3156,13 @@ async function placeChip($: EngineInterface, me: string, projectId: string, at: 
 type Need = {
   it: QueueItem
   signature: string
-  need: 'start' | 'long' | 'here'
+  need: 'start' | 'here'
   title: string
   tldr: string
   prompt: string
   place?: string | undefined
-  /** (0.5.7) For whom: a client with no thread (C3), a new thread for one whose thread is 60% full (R3, R8), or its kickoff run in its own thread. */
-  kind: 'nothread' | 'fresh' | 'here'
+  /** (0.5.7) For whom: a client with no thread (C3), or its kickoff run in its own thread. (0.5.11: never a new thread for a thread's length.) */
+  kind: 'nothread' | 'here'
 }
 
 /** (0.5.4) What one thread knows, from the store, to decide which chips are its own to hold. */
@@ -2959,7 +3170,6 @@ type ChipWorld = {
   me: string
   links: Readonly<Record<string, string>>
   titles: Readonly<Record<string, string>>
-  readings: Readonly<Record<string, ContextReading>>
   claims: Readonly<Record<string, ClaimedHere>>
   sent: Readonly<Record<string, Sent>>
   chips: readonly Chip[]
@@ -2975,11 +3185,11 @@ type ChipWorld = {
  *   a client with a linked thread (C1)  that thread's, and no other's (C2: the band points to it):
  *     here   `Do it here: <what>`, the client's kickoff, to run in this thread (its recommendation is Update, or
  *            Start for a thread that is old)
- *     start  `Start a fresh thread: <client> (this one is at <n>%)`, from 60% of this thread's context (R3), the
- *     long   kickoff handing over from it; `long` when the client is still open after our reply (R8)
  *            None when the thread already has what is waiting, or when the client is still open after our reply
- *            and the thread is under 60% (Claim in the pane), or (0.5.3) while the person went on in this thread
- *            with a fresh-thread chip waiting (`claimHolds`).
+ *            (Claim in the pane), or (0.5.3) while the person went on in this thread with a fresh-thread chip
+ *            waiting (`claimHolds`). (0.5.11, Rob 10-15: "Can you just automatically compress context at 60%
+ *            instead of 100% to save tokens?") No `Start a fresh thread` chip from 60% of a thread's context any
+ *            more (R3's and R8's `start` and `long`): Claude Code compacts a long thread instead.
  *   a client with no linked thread (C3)  ONE chip, 0.5.1's start chip, in the thread the person is working in now
  *            (`noThreadHolder`).
  * Never for an internal project (fix round 1, L8), nor a client further out than the pin's window.
@@ -3011,14 +3221,8 @@ function needsFor(last: Last, w: ChipWorld, now: number): Need[] {
     if (linked !== w.me) continue
     if (claimHolds(w.claims[it.projectId], it.projectId, w.links, last)) continue
     const fast = fastState(it, now)
-    const percent = freshPercent(w.readings[w.me], now)
     const place = cleanName(it.client)
-    if (percent !== undefined && percent >= LONG_CONTEXT_PERCENT && (fast?.state === 'still_open' || rec.state === 'start' || rec.state === 'update')) {
-      const replaces = { sid: w.me, title: w.titles[w.me] || rec.target?.title || '' }
-      out.push({ it, signature, need: fast?.state === 'still_open' ? 'long' : 'start', title: freshTitle(it, percent), tldr: freshTldr(it, now), prompt: startKickoff(it, replaces, now), place, kind: 'fresh' })
-      continue
-    }
-    // still open after our reply, under 60%: Claim in this thread, in the pane
+    // still open after our reply: Claim in this thread, in the pane
     if (fast?.state === 'still_open') continue
     // the thread already has what is waiting
     if (rec.state === 'current') continue
@@ -3083,8 +3287,8 @@ async function chipsTick($: EngineInterface, atTurn = false): Promise<void> {
     // (0.5.7) where the app gives only start_session, a client's kickoff run in its own thread has no card: the pane's
     // Update does it there
     if (n.kind === 'here' && !tools.spawn) continue
-    // (0.5.7, Rob 10-14) a new thread, for a client with none or one whose thread is 60% full: started by itself,
-    // within the hourly and daily caps; past them, or where the app refused it, the card below
+    // (0.5.7, Rob 10-14) a new thread, for a client with none: started by itself, within the hourly and daily caps;
+    // past them, or where the app refused it, the card below
     if (n.kind !== 'here' && tools.start && auto) {
       const verdict = await autoVerdict($, n, me, now)
       if (verdict === 'start' || verdict === 'skip') continue
@@ -3122,7 +3326,6 @@ async function storedNeeds($: EngineInterface, now: number): Promise<Need[] | nu
       me,
       links: await storeGet<Record<string, string>>($, 'mm.links', {}),
       titles: await storeGet<Record<string, string>>($, 'mm.titles', {}),
-      readings: await storeGet<Record<string, ContextReading>>($, 'mm.ctx', {}),
       claims: await storeGet<Record<string, ClaimedHere>>($, 'mm.claimedHere', {}),
       sent: await storeGet<Record<string, Sent>>($, 'mm.sent', {}),
       chips,
@@ -3439,7 +3642,7 @@ async function stillTheClients(
   linked: string | undefined,
   links: Readonly<Record<string, string>>,
   read: Feed,
-  pass: Pass,
+  pass: Pick<Pass, 'live'>,
 ): Promise<boolean> {
   const auto = await storeGet<Auto>($, 'mm.auto', {})
   const own = auto[projectId]
@@ -3660,8 +3863,9 @@ async function showThread($: EngineInterface, it: QueueItem, pass: Pass, shown: 
  * send. Answers why it failed, or null when it went. R10 (Opus, 10-13, decision 1): no cutoff. When the app has
  * not answered in APP_WAIT_MS, the pane says so (NOT_CONFIRMED) and the send is still waited for; while it is in
  * flight the client's press stays held (`sending`), so a second press never sends it again.
+ * (0.5.11) `quiet`: an update sent by itself (`autoUpdate`), which nobody pressed: the pane says nothing of it.
  */
-async function sendInto($: EngineInterface, client: string, projectId: string, here: boolean, sid: string, text: string): Promise<string | null | { busy: string }> {
+async function sendInto($: EngineInterface, client: string, projectId: string, here: boolean, sid: string, text: string, quiet = false): Promise<string | null | { busy: string }> {
   // (fix round 1, L10) one message to a client at a time: a typed /mm update, or the other button, while one is going out
   if (sending.has(projectId)) return { busy: STILL_GOING(client) }
   sending.add(projectId)
@@ -3675,7 +3879,7 @@ async function sendInto($: EngineInterface, client: string, projectId: string, h
     }
     const call = $.mcp.call('ccd_session_mgmt', 'send_message', { session_id: sid, message: text }) as Promise<Mcp>
     const first = await within($, call)
-    if (!first.ok) await say($, NOT_CONFIRMED(client)).catch(() => {})
+    if (!first.ok && !quiet) await say($, NOT_CONFIRMED(client)).catch(() => {})
     const r = first.ok ? first.value : await call
     return r.isError ? short(textOf(r)) : null
   } finally {
@@ -3985,11 +4189,14 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
     await $.store.set('mm.paused', verb === 'pause')
     return verb === 'pause' ? 'Paused on this computer: no pins or renames until /mm resume.' : 'Resumed.'
   }
-  // (0.5.7) whether threads start by themselves on this computer (on unless turned off)
+  // (0.5.7) whether threads start by themselves on this computer (on unless turned off); (0.5.11) and whether a
+  // client's thread is updated by itself: the same switch
   if (verb === 'auto') {
-    if (arg !== 'on' && arg !== 'off') return `Auto-start is ${(await autoStartOn($)) ? 'on' : 'off'} on this computer. Type /mm auto off or /mm auto on.`
+    if (arg !== 'on' && arg !== 'off') return `Auto-start and auto-update are ${(await autoStartOn($)) ? 'on' : 'off'} on this computer. Type /mm auto off or /mm auto on.`
     await $.store.set('mm.autostart', { on: arg === 'on' })
-    return arg === 'on' ? 'Auto-start is on: a client\'s new thread starts by itself.' : 'Auto-start is off: a client\'s new thread waits as a card for you to start.'
+    return arg === 'on'
+      ? 'Auto-start and auto-update are on: a client\'s new thread starts by itself, and its thread is updated by itself when something new arrives.'
+      : 'Auto-start and auto-update are off: a client\'s new thread waits as a card for you to start, and its thread waits for you to press Update.'
   }
   if (verb === 'status') {
     const last = await storeGet<Last | null>($, 'mm.last', null)
@@ -4005,7 +4212,7 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       `pins you took off: ${off}`,
       `poller: ${lease?.owner === (await instanceId($)) ? 'this thread' : 'another thread'}`,
       `paused: ${Boolean(await $.store.get('mm.paused'))}`,
-      `auto-start: ${(await autoStartOn($)) ? 'on' : 'off'}`,
+      `auto-start and auto-update: ${(await autoStartOn($)) ? 'on' : 'off'}`,
       `last error: ${last?.error ?? 'none'}`,
     ].join('\n')
   }

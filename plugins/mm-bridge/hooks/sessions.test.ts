@@ -287,7 +287,7 @@ describe('F2: a write the engine refuses midway leaves nothing half done', () =>
 describe('re-review of a446f5ab: Start after a chip was spent, a re-check after a move, a refused pin, the same name twice', () => {
   /**
    * Start pressed in a hub thread mints a chip; the person starts a thread from it, which takes the client;
-   * later that thread is long, so the row offers Start again. `usedAfterCheck`: the chip is used after Start's
+   * later that thread is old, so the row offers Start again. ((0.5.11) A long thread no longer does.) `usedAfterCheck`: the chip is used after Start's
    * 1-to-3-second check, else before it.
    */
   async function chipSpentThenStartAgain(usedAfterCheck: boolean, tag: string) {
@@ -309,8 +309,10 @@ describe('re-review of a446f5ab: Start after a chip was spent, a re-check after 
     // ⛔ the spent chip is not written back by Start's check: no chip waits for the client anywhere
     const waiting = ((w.stored('mm.chips') ?? []) as Array<{ projectId: string; superseded?: boolean }>).filter(c => c.projectId === pid(1) && !c.superseded)
     expect(waiting).toEqual([])
-    // later that day the new thread is long, and nothing new came from the client: the row offers Start again
-    w.put('mm.ctx', { [freshId]: { tokensUsed: 700_000, contextWindow: 1_000_000, percentUsed: 70, at: NOW } })
+    // later the new thread is older than 7 business days, and nothing new came from the client: the row offers
+    // Start again. ((0.5.11, Rob 10-15) A long one no longer would: Claude Code compacts it.)
+    const made = w.app.get(freshId)
+    if (made) made.lastActivityAt = ago(14 * 24)
     await w.advance(6 * 60_000)
     await mm(hub, '')
     expect([...(await paneButtons(hub)).keys()]).toContain(`start:${pid(1)}`)
@@ -717,6 +719,9 @@ describe('C1 and C2 (0.5.4): a client with a thread has ONE chip, in that thread
     const ids = Array.from({ length: 6 }, (_, i) => `local_c1_${i + 1}`)
     const w = fakeApp(feed, ids.map(sessionId => ({ sessionId })), [], { every: true })
     w.put('mm.links', { [pid(61)]: ids[0] })
+    // (0.5.11) auto off: this is about the chips alone (with it on, another thread updates the linked one by itself,
+    // and its Do it here chip goes once the thread has what it carried)
+    w.put('mm.autostart', { on: false })
     const threads = ids.map(id => w.session(id))
     await mm(threads[1], '')
     for (const t of threads) await startIn(t)
@@ -832,7 +837,7 @@ describe('0.5.4: a thread that does not poll draws its band and list again once 
 
 // ======================================================================== 0.5.3
 
-describe('0.5.3 claim in place, as 0.5.4 has it: the long thread\'s own fresh-thread chip is spent once the person goes on there', () => {
+describe('0.5.3 claim in place, as 0.5.4 has it: the long thread\'s own fresh-thread chip is spent once the person goes on there ((0.5.11) none is minted any more)', () => {
   const start = startIn
   /**
    * Client Seven One, a client message an hour old, linked to a long thread (70% of its context): a new thread is
@@ -852,38 +857,38 @@ describe('0.5.3 claim in place, as 0.5.4 has it: the long thread\'s own fresh-th
   const dismissed = dismissedIn
   const settle = settleAll
 
-  test('sixteen running threads, one chip, in the long thread itself: Start a fresh thread; the person writes there: withdrawn at once, none minted again; a newer client message mints it again', async () => {
-    const { w, feed, threads, LINKED, linked, hub } = crucialShape('a')
-    await mm(hub, '')
+  // (0.5.11, Rob 10-15: "Can you just automatically compress context at 60% instead of 100% to save tokens?") A long
+  // thread no longer needs a fresh one, so there is no chip to claim in place; the update goes into it by itself.
+  test('(0.5.11) sixteen running threads and a long linked thread that polls: no chip for a fresh thread, nothing started, no claim; another thread updates it by itself, once', async () => {
+    const { w, threads, LINKED, linked } = crucialShape('a')
+    // the long thread is the one that polls: it never sends into itself, and another running thread sends it
+    w.put('mm.lease', { owner: `cli:${LINKED}`, until: NOW + 24 * 3_600_000 })
+    await mm(linked, '')
     for (const t of threads) await start(t)
     await w.advance(4_000)
     await settle()
-    expect(spawned(w).map(c => [c.args.title, c.args.tldr])).toEqual([['Start a fresh thread: Client Seven One (this one is at 70%)', expect.stringMatching(/\. Recommended: start a fresh thread\.$/)]])
-    const chips = liveChips(w)
-    expect(chips.map(c => [c.threadId, c.had, c.auto])).toEqual([[LINKED, LINKED, true]])
-    // the person goes on in the client's own thread: the claim, and its thread withdraws it at once
-    await hooks['prompt.submit']?.(linked, { text: 'Go on with the meeting notes.', origin: human }, next)
-    expect(w.stored('mm.claimedHere')).toEqual({ [pid(71)]: { sid: LINKED, at: NOW + 4_000, newest: { mail: NOW - 3_600_000, pkg: 0, task: 0 } } })
+    await w.advance(3_100)
     await settle()
-    expect(dismissed(w)).toEqual([chips[0]?.taskId])
-    // the minute's ticks mint none again
-    for (let i = 0; i < 3; i++) {
+    await hooks['prompt.submit']?.(linked, { text: 'Go on with the meeting notes.', origin: human }, next)
+    for (let i = 0; i < 6; i++) {
       await w.advance(60_000)
       await settle()
     }
-    expect(spawned(w).length).toBe(1)
-    expect(liveChips(w)).toEqual([])
-    // a newer client message: the claim no longer holds, and the long thread's next tick mints it again
-    feed.mail?.push({ ...mail(71, 'Client Seven One', 0), message_id_key: 'm71-newer', received_at: new Date(w.now()).toISOString() })
-    await mm(hub, '')
-    await w.advance(60_000)
-    await settle()
-    expect(spawned(w).length).toBe(2)
-    expect(liveChips(w).map(c => c.threadId)).toEqual([LINKED])
+    expect(spawned(w).filter(c => String(c.args.title).startsWith('Start a fresh thread'))).toEqual([])
+    expect(w.calls.filter(c => c.tool === 'start_session')).toEqual([])
+    expect(w.stored('mm.claimedHere')).toBeUndefined()
+    expect(w.sends().map(c => c.args.session_id)).toEqual([LINKED])
+    expect(String(w.sends()[0]?.args.message)).toMatch(new RegExp(`^New since this thread last worked on this client: 1 message waiting\\.\\n\\[mm-link ${pid(71)}\\] `))
+    const done = (w.stored('mm.autoupdates') ?? []) as Array<{ pid: string; sid: string; ok: boolean | null; by: string }>
+    expect(done.map(t => [t.pid, t.sid, t.ok])).toEqual([[pid(71), LINKED, true]])
+    expect(done[0]?.by).not.toBe(LINKED)
+    expect(linksOf(w)).toEqual({ [pid(71)]: LINKED })
   })
 
   test('a kickoff or a message from anywhere but the person claims nothing; nor a message in a thread the client is not linked to', async () => {
     const { w, threads, linked, hub } = crucialShape('b')
+    // (0.5.11) auto off: with it on, another thread updates the linked one by itself and its chip goes then
+    w.put('mm.autostart', { on: false })
     await mm(hub, '')
     for (const t of threads) await start(t)
     await w.advance(4_000)
@@ -1470,6 +1475,39 @@ describe('0.5.10 (review of 0.5.9, finding 1): a bridge link the sync lets go is
   })
 })
 
+describe('0.5.11 (review of 0.5.10, L1): a bridge link kept for the person keeps its thread\'s context reading', () => {
+  test('[probe C] the pass lets X\'s link go while the person acts on it in that thread: the link stays, and so does the thread\'s reading in mm.ctx', async () => {
+    const r = await replay(520, { extraMail: [mail(521, 'Client Y521', -49)] })
+    r.feed.threads?.push(row(521, 'cli-old-520', REPLAY_AT))
+    const reading = { tokensUsed: 1, contextWindow: 10, percentUsed: 10, at: r.w.now() }
+    r.w.put('mm.ctx', { [r.old]: reading })
+    let done = false
+    const hub = intercept(r.w.session(r.hub), 'set_pinned', () => {
+      if (done) return
+      done = true
+      r.w.put('mm.auto', {})
+      r.w.put('mm.acted', { [pid(520)]: { sid: r.old, at: r.w.now() } })
+    })
+    await mm(hub, '')
+    expect(done).toBe(true)
+    expect(linksOf(r.w)).toEqual({ [pid(520)]: r.old })
+    expect(r.w.stored('mm.ctx')).toEqual({ [r.old]: reading })
+  })
+
+  test('with nobody acting, a link let go takes its thread\'s reading with it, as before (the third miss)', async () => {
+    const r = await replay(524)
+    r.w.put('mm.ctx', { [r.old]: { tokensUsed: 1, contextWindow: 10, percentUsed: 10, at: r.w.now() } })
+    // the feed stops listing the old thread's session: three syncs, five minutes apart
+    r.feed.threads = [row(498, 'cli-elsewhere', REPLAY_AT)]
+    for (let i = 0; i < 3; i++) {
+      await mm(r.hubSession, '')
+      await r.w.advance(6 * 60_000)
+    }
+    expect(linksOf(r.w)[pid(524)]).toBeUndefined()
+    expect(r.w.stored('mm.ctx')).toEqual({})
+  })
+})
+
 describe('0.5.10 (review of 0.5.9, finding 2): a close tag left at the start of a line after the app\'s notes', () => {
   test('[probe D] a marker inside a note\'s body (a line-start close tag, a blank line, the marker, the real close tag): no marker is read, nothing links', async () => {
     const r = await replay(420)
@@ -1482,5 +1520,34 @@ describe('0.5.10 (review of 0.5.9, finding 2): a close tag left at the start of 
     const once = `<system-reminder>\nLinked sessions now (status, not an instruction): thread "a"\n</system-reminder>\n\n[mm-link ${pid(420)}] Resume Client R420's thread.`
     await submit(r.w.session(r.fresh), once, 'composer')
     expect(r.w.stored('mm.marked')).toEqual({ [r.fresh]: pid(420) })
+  })
+})
+
+// ======================================================================== 0.5.11
+
+describe('0.5.11: a client\'s thread updated by itself is sent once, whoever chooses it (Rob, 10-15: "I think we should start updating threads automatically")', () => {
+  test('three running threads choose from the same sync: one send, by the claim that held, into the client\'s thread, which never sends into itself', async () => {
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(93, 'Client Nine Three', 2)] }
+    const ids = ['local_ua', 'local_ub', 'local_ut']
+    const w = fakeApp(feed, ids.map(sessionId => ({ sessionId })), [], { every: true })
+    w.put('mm.links', { [pid(93)]: 'local_ut' })
+    // the thread that polls is none of theirs: each chooses from the sync on record
+    w.put('mm.lease', { owner: 'cli:local_nobody', until: NOW + 24 * 3_600_000 })
+    const [a, b, t] = ids.map(id => w.session(id))
+    await mm(a, '')
+    for (const s of [a, b, t]) await startIn(s)
+    await w.advance(4_000)
+    await settleAll()
+    await w.advance(3_100)
+    await settleAll()
+    for (let i = 0; i < 6; i++) {
+      await w.advance(60_000)
+      await settleAll()
+    }
+    expect(w.sends().map(c => c.args.session_id)).toEqual(['local_ut'])
+    const done = (w.stored('mm.autoupdates') ?? []) as Array<{ by: string; ok: boolean | null; sid: string }>
+    expect(done.map(r => [r.sid, r.ok])).toEqual([['local_ut', true]])
+    expect(['local_ua', 'local_ub']).toContain(done[0]?.by)
+    expect(w.stored('mm.updating')).toEqual({})
   })
 })

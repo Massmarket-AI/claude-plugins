@@ -31,13 +31,13 @@ export const RECENT_THREAD_MS = 7 * DAY
 /** Last activity further back than this is old, decided without counting business time (no calendar walk for a date years back). */
 export const OLD_THREAD_MS = 60 * DAY
 
-/** A thread's own reading of its context window at or past this percent makes it long. */
+/**
+ * (R8) A thread's own reading of its context window at or past this percent: its row offers no Claim. (0.5.11, Rob
+ * 10-15: "Can you just automatically compress context at 60% instead of 100% to save tokens?") It no longer makes a
+ * thread one to replace: Claude Code compacts a long thread instead (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE).
+ */
 export const LONG_CONTEXT_PERCENT = 60
-/** And so does this many tokens used, whatever the percent (a 1M window at 30% is still a costly thread). */
-export const LONG_CONTEXT_TOKENS = 300_000
-/** With no reading fresh enough, this many worklog rows in the feed's window make a thread long. */
-export const LONG_THREAD_ROWS = 1500
-/** A reading older than this says nothing: the row count decides. */
+/** A reading older than this says nothing. */
 export const CONTEXT_READING_MAX_AGE_MS = 7 * DAY
 
 /** A thread as the desktop app lists it. `link` is the app's own link to it, kept only when it is that thread's. */
@@ -74,9 +74,6 @@ export type Sent = { sid: string; sig: string; at: number }
 
 /** A session's reading of its own context window: four numbers, nothing else. */
 export type ContextReading = { tokensUsed: number; contextWindow: number; percentUsed: number; at: number }
-
-/** Why a thread is long: by its own context reading (with the percent used), or by the feed's row count. */
-export type Length = { by: 'context'; percent: number } | { by: 'rows' } | null
 
 /** The client a thread is linked to: the first project whose link is that thread. */
 export function ownerOf(sid: string, links: Readonly<Record<string, string>>): string | undefined {
@@ -361,30 +358,6 @@ export function titleSuggestion(client: string, links: Readonly<Record<string, s
 }
 
 /**
- * How a thread is judged long, and by what.
- *   context  the thread's own reading of its context window (what its session recorded about itself)
- *   rows     the feed's row count for it, used only when there is no reading fresh enough
- * A fresh reading under both limits is NOT long, whatever the row count.
- */
-export function threadLength(reading: ContextReading | undefined, rows: number | undefined, now: number): Length {
-  if (reading && Number.isFinite(reading.at) && now - reading.at <= CONTEXT_READING_MAX_AGE_MS) {
-    const long = reading.percentUsed >= LONG_CONTEXT_PERCENT || reading.tokensUsed >= LONG_CONTEXT_TOKENS
-    return long ? { by: 'context', percent: Math.round(reading.percentUsed) } : null
-  }
-  return typeof rows === 'number' && rows >= LONG_THREAD_ROWS ? { by: 'rows' } : null
-}
-
-/**
- * The feed's row count for a thread and a client: that of the newest of the client's sessions that ran in
- * the thread (the feed lists newest first). Undefined when the feed carries none: a server that does not
- * send `rows` yet never makes a thread long.
- */
-export function threadRows(sid: string, projectId: string, feedThreads: readonly FeedThread[], pairs: Pairs): number | undefined {
-  const entry = feedThreads.find(t => t.project_id === projectId && pairs[t.session_id]?.app === sid)
-  return entry && typeof entry.rows === 'number' && Number.isFinite(entry.rows) ? entry.rows : undefined
-}
-
-/**
  * What a thread must already hold to be up to date: the kickoff that would be sent now (without Update's
  * first line), and the package's `covers_through` and `updated_at` when the feed gives them. A new client
  * message, another package, a package that changed: each makes it a different text.
@@ -413,13 +386,53 @@ export function hasWaiting(had: string, it: QueueItem): boolean {
   return head(had) === head(want)
 }
 
+// ---------------------------------------------------------------- (0.5.11) Update by itself
+
+/** (0.5.11) Something new for a client goes into its thread by itself only once nothing newer has come for this long. */
+export const AUTO_QUIET_MS = 10 * 60_000
+/** (0.5.11) With client mail waiting and no reply drafts ready, it goes once the newest message is this old. */
+export const AUTO_NO_DRAFTS_MS = 60 * 60_000
+
+/**
+ * (0.5.11, Rob 10-15: "I think we should start updating threads automatically") Whether a client on the person's
+ * own list is one whose thread may be updated by itself: never one a teammate has (`withTeammate`; the founder's
+ * `theirs`), never one whose package someone else holds (`withHolder`), never one whose reply the server is
+ * checking or found still open (R8: Claim is the person's press), and never an internal project's (as no thread
+ * is started by itself for one).
+ */
+export function autoUpdatable(it: QueueItem, now: number): boolean {
+  const o = it.open ?? null
+  return it.internal !== true && !it.theirs && !withTeammate(it) && !(o && withHolder(o)) && fastState(it, now) === null
+}
+
+/**
+ * (0.5.11, Rob 10-15: "Joe's call from Second Peak Training ended a little while back... I don't understand why it
+ * hasn't already handed the new context there so the draft is ready when I open the thread up") Whether it is time
+ * to update a client's thread by itself: nothing newer has come for the client for AUTO_QUIET_MS (a message
+ * received, the mail a package covers, the package's own update, a task created), and then reply drafts are ready
+ * (a package prepared for the person, or one they hold), or the newest client message is AUTO_NO_DRAFTS_MS old, or
+ * no client message waits at all (tasks only). A time more than AUTO_QUIET_MS ahead is a task's due time standing
+ * in for when it was created, not something that arrived; one less far ahead is read as now.
+ */
+export function autoUpdateDue(it: QueueItem, now: number): boolean {
+  const n = it.newest ?? { mail: 0, pkg: 0, task: 0 }
+  const arrived = (t: unknown): number => {
+    const v = Number(t)
+    return Number.isFinite(v) && v > 0 && v <= now + AUTO_QUIET_MS ? Math.min(v, now) : 0
+  }
+  const newest = Math.max(arrived(n.mail), arrived(n.pkg), arrived(n.task), arrived(ms(it.packageUpdatedAt)))
+  if (now - newest < AUTO_QUIET_MS) return false
+  if (it.messages === 0) return true
+  const o = it.open ?? null
+  const ready = it.kind === 'ready' || o?.state === 'prepared' || o?.state === 'held_by_me'
+  return ready || now - arrived(n.mail) >= AUTO_NO_DRAFTS_MS
+}
+
 /**
  * What to do about a client's thread, and why. ONE action per client:
  *
  *   start    Start thread  · no thread yet
  *            Start thread  · last thread is from Oct 2                the thread is older than 7 business days
- *            Start thread  · the existing thread has used 61% of its context, a new one is cheaper and cleaner
- *            Start thread  · the existing thread is long, a new one keeps the context clean
  *   update   Update thread · thread from Mon, Oct 12 exists           a thread exists and has not been given this
  *            Update thread · new since this thread was updated        the bridge updated it before, with less
  *            Update thread · "<title>" looks like this client         no known thread, but a title matches
@@ -427,12 +440,13 @@ export function hasWaiting(had: string, it: QueueItem): boolean {
  *
  * The thread is the client's linked one when it has one, else the most recently active matched one.
  * `current` is decided by `sent`: the thread and the signature the bridge stored when Update last went.
+ * (0.5.11, Rob 10-15) A thread's length is no reason for a new one: Claude Code compacts it instead.
  */
 export function recommend(
   threads: readonly ClientThread[],
   suggestion: Target | undefined,
   now: number,
-  known: { sent?: Sent | undefined; signature?: string; length?: (sid: string) => Length } = {},
+  known: { sent?: Sent | undefined; signature?: string } = {},
 ): Recommendation {
   const own = threads.filter(t => t.source === 'linked')
   const thread = [...(own.length ? own : threads)].sort((a, b) => b.lastAt - a.lastAt)[0]
@@ -441,9 +455,6 @@ export function recommend(
     // More than 60 days back is old whatever the weekends were: business time is only counted inside that.
     const recent = now - thread.lastAt <= OLD_THREAD_MS && businessMsBetween(thread.lastAt, now) <= RECENT_THREAD_MS
     if (!recent) return { state: 'start', reason: `last thread is from ${monthDay(thread.lastAt)}`, target }
-    const length = known.length?.(thread.sid) ?? null
-    if (length?.by === 'context') return { state: 'start', reason: `the existing thread has used ${length.percent}% of its context, a new one is cheaper and cleaner`, target }
-    if (length?.by === 'rows') return { state: 'start', reason: 'the existing thread is long, a new one keeps the context clean', target }
     const sent = known.sent && known.sent.sid === thread.sid ? known.sent : undefined
     if (sent && known.signature !== undefined && sent.sig === known.signature) return { state: 'current', reason: `Thread updated ${clockText(sent.at, now)}`, target }
     return { state: 'update', reason: sent ? 'new since this thread was updated' : `thread from ${weekdayMonthDay(thread.lastAt)} exists`, target }
@@ -649,7 +660,7 @@ export const rowState = (row: Row): RowState => {
 /**
  * How a row is drawn beyond its recommendation (0.5.2): `needsYou` for a row of the Needs-you list (R4 names a
  * client there with no thread at all), and `percent`, the context reading of the client's thread when it has a
- * fresh one (R8: at 60% or more, no Claim button; a chip for a new thread instead).
+ * fresh one (R8: at 60% or more, no Claim button; 0.5.11: and no chip for a new thread).
  */
 export type RowOptions = { needsYou?: boolean; percent?: number | undefined }
 
@@ -697,7 +708,7 @@ const notMine = (row: Row): boolean => Boolean(row.note) || row.theirs === true 
  */
 export function rowButtons(row: Row): RowButton[] {
   if (notMine(row)) return ['drafts']
-  // R8: Claim in this thread while its context is under 60%; past that, a chip for a new thread is minted and the row has no action
+  // R8: Claim in this thread while its context is under 60%; past that, Drafts alone (0.5.11: no chip for a new thread)
   if (isStillOpenRow(row)) return row.claim ? ['claim', 'drafts'] : ['drafts']
   const state = rowState(row)
   return [state === 'current' ? 'open' : state, 'drafts']

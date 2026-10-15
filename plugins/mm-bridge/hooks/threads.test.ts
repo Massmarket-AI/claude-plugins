@@ -3,9 +3,10 @@ import { describe, expect, test } from 'claude-code/testing'
 import { buildLists, buildQueue, threadTitleShort } from './queue'
 import type { Feed, FeedThread, QueueItem } from './queue'
 import {
-  CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, LONG_CONTEXT_TOKENS, LONG_THREAD_ROWS, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
+  AUTO_NO_DRAFTS_MS, AUTO_QUIET_MS, CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
+  autoUpdatable, autoUpdateDue,
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
-  rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLength, threadLink, threadRows, titleLooksLike, titleSuggestion, waitingText,
+  rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLink, titleLooksLike, titleSuggestion, waitingText,
   newerThreadFor, threadStart,
   CHIP_TITLE_MAX, REFRESH_FAILED, bandText, chipTitle, claimText, isStillOpenRow, staleCopySentence, startKickoff,
   LABEL_MAX, buttonLabel,
@@ -524,9 +525,9 @@ describe('R3 and R8: the rows of the Needs-you pane', () => {
     )
   })
 
-  test('the clients with no thread yet come first and are marked; a client whose thread is old or long is in a thread; an empty group is not drawn', async () => {
-    const long = rowFor(item(ACME), recommend([known('local_a', 'Roof quote', '2026-10-09 15:00')], undefined, NOW, { length: () => ({ by: 'rows' }) }), NOW)
-    // as they come, soonest due first: an old thread, no thread, a long thread, a thread up to date, no thread
+  test('the clients with no thread yet come first and are marked; a client whose thread is old, or whose thread lacks what waits, is in a thread; an empty group is not drawn', async () => {
+    const long = rowFor(item(ACME), recommend([known('local_a', 'Roof quote', '2026-10-09 15:00')], undefined, NOW), NOW)
+    // as they come, soonest due first: an old thread, no thread, a thread to update, a thread up to date, no thread
     const groups = rowGroups([stale, start, long, current, { ...start, projectId: BOLT, client: 'Bolt Staffing' }])
     expect(groups.map(g => [g.heading, g.rows.map(r => `${r.mark}${r.n}. ${r.row.client}`)])).toEqual([
       ['New: no thread yet (2)', ['◆ 1. Cedar Dental', '◆ 2. Bolt Staffing']],
@@ -601,80 +602,85 @@ describe('the three states: start, update, current', () => {
   })
 })
 
-describe('a long thread: Start thread is the recommendation', () => {
+describe('(0.5.11) a long thread is not replaced: Claude Code compacts it', () => {
   const DAY = 24 * 3_600_000
-  const reading = (percentUsed: number, tokensUsed: number, ageMs = 0, contextWindow = 1_000_000) => ({ percentUsed, tokensUsed, contextWindow, at: NOW - ageMs })
 
-  test('the limits', async () => {
-    expect([LONG_CONTEXT_PERCENT, LONG_CONTEXT_TOKENS, LONG_THREAD_ROWS, CONTEXT_READING_MAX_AGE_MS]).toEqual([60, 300_000, 1500, 7 * DAY])
-  })
-
-  test('59% and 299,999 tokens: not long, even with 5,000 rows', async () => {
-    expect(threadLength(reading(59, 299_999), 5000, NOW)).toBeNull()
-    expect(threadLength(reading(0, 0), 5000, NOW)).toBeNull()
-  })
-
-  test('60%: long, by the context, with the percent', async () => {
-    expect(threadLength(reading(60, 120_000, 0, 200_000), 3, NOW)).toEqual({ by: 'context', percent: 60 })
-    expect(threadLength(reading(87.4, 174_800, 0, 200_000), undefined, NOW)).toEqual({ by: 'context', percent: 87 })
-  })
-
-  test('300,000 tokens at 30% of a 1M window: long', async () => {
-    expect(threadLength(reading(30, 300_000), undefined, NOW)).toEqual({ by: 'context', percent: 30 })
-  })
-
-  test('a reading 8 days old is ignored and the rows decide; one 7 days old still counts', async () => {
-    expect(threadLength(reading(95, 950_000, 8 * DAY), 100, NOW)).toBeNull()
-    expect(threadLength(reading(95, 950_000, 8 * DAY), 1500, NOW)).toEqual({ by: 'rows' })
-    expect(threadLength(reading(10, 10_000, 8 * DAY), 5000, NOW)).toEqual({ by: 'rows' })
-    expect(threadLength(reading(95, 950_000, 7 * DAY), 3, NOW)).toEqual({ by: 'context', percent: 95 })
-  })
-
-  test('with no reading: 1,499 rows is not long, 1,500 is, and a feed with no rows never makes a thread long', async () => {
-    expect(threadLength(undefined, 1499, NOW)).toBeNull()
-    expect(threadLength(undefined, 1500, NOW)).toEqual({ by: 'rows' })
-    expect(threadLength(undefined, undefined, NOW)).toBeNull()
-  })
-
-  test('a thread\'s rows are those of the client\'s newest session in it; a feed without `rows` gives none', async () => {
-    const pairs = pairsOf({ 'cli-new': 'local_a', 'cli-old': 'local_a', 'cli-b': 'local_b' })
-    const withRows = (t: FeedThread, rows: number): FeedThread => ({ ...t, rows })
-    const feed = [withRows(declared(ACME, 'cli-new', '2026-10-12 10:00'), 40), withRows(declared(ACME, 'cli-old', '2026-10-05 10:00'), 2000), withRows(declared(BOLT, 'cli-b', '2026-10-08 10:00'), 1700)]
-    expect(threadRows('local_a', ACME, feed, pairs)).toBe(40)
-    expect(threadRows('local_b', BOLT, feed, pairs)).toBe(1700)
-    expect(threadRows('local_b', ACME, feed, pairs)).toBeUndefined()
-    expect(threadRows('local_a', ACME, [declared(ACME, 'cli-new', '2026-10-12 10:00')], pairs)).toBeUndefined()
+  test('the limits: 60% still takes Claim off a row, and a reading older than 7 days says nothing', async () => {
+    expect([LONG_CONTEXT_PERCENT, CONTEXT_READING_MAX_AGE_MS]).toEqual([60, 7 * DAY])
   })
 
   const thread = known('local_a', 'Roof quote', '2026-10-09 15:00')
   const sig = signatureOf(item(ACME))
   const sent = { sid: 'local_a', sig, at: et('2026-10-12 09:30') }
 
-  test('a long thread is Start thread, whether it would have been Update or current, and says why', async () => {
-    for (const known of [{}, { sent, signature: sig }]) {
-      expect(recommend([thread], undefined, NOW, { ...known, length: () => ({ by: 'context', percent: 61 }) })).toEqual({
-        state: 'start', reason: 'the existing thread has used 61% of its context, a new one is cheaper and cleaner', target: { sid: 'local_a', title: 'Roof quote', suggested: false },
-      })
-      expect(recommend([thread], undefined, NOW, { ...known, length: () => ({ by: 'rows' }) })).toMatchObject({ state: 'start', reason: 'the existing thread is long, a new one keeps the context clean' })
-    }
-    expect(rowDetail(rowFor(item(ACME), recommend([thread], undefined, NOW, { length: () => ({ by: 'context', percent: 61 }) }), NOW))).toBe(
-      'drafts ready · Start thread: the existing thread has used 61% of its context, a new one is cheaper and cleaner',
-    )
-    expect(rowDetail(rowFor(item(ACME), recommend([thread], undefined, NOW, { length: () => ({ by: 'rows' }) }), NOW))).toBe('drafts ready · Start thread: the existing thread is long, a new one keeps the context clean')
+  test('a thread 61% full is Update thread when it lacks what waits, and Open thread when it has it: never Start for its length', async () => {
+    expect(recommend([thread], undefined, NOW)).toEqual({ state: 'update', reason: 'thread from Fri, Oct 9 exists', target: { sid: 'local_a', title: 'Roof quote', suggested: false } })
+    expect(recommend([thread], undefined, NOW, { sent, signature: sig }).state).toBe('current')
+    const row = rowFor(item(ACME), recommend([thread], undefined, NOW), NOW, { percent: 61 })
+    expect(rowButtons(row)).toEqual(['update', 'drafts'])
+    expect(rowDetail(row)).toBe('drafts ready · Update thread: thread from Fri, Oct 9 exists')
+    // an old thread is still Start, for being old
+    expect(recommend([known('local_old', 'Intake', '2026-09-22 10:00')], undefined, NOW)).toMatchObject({ state: 'start', reason: 'last thread is from Sep 22' })
+  })
+})
+
+describe('(0.5.11) a client\'s thread updated by itself: which clients, and when', () => {
+  const MIN = 60_000
+  // the fixtures, at NOW (11 AM): Acme has drafts ready (they cover 8 AM mail); Bolt has two messages (9 and 10 AM)
+  // and no package; Cedar has a task alone (the feed gives no creation time: its newest is its due time, 4 PM)
+  const pkg = (state: 'held_by_me' | 'held_by_other' | 'stale' | 'prepared', by = '') => ({ id: PKG, state, by, at: null, unsent: 1, newer: 0 })
+
+  test('the waits: 10 quiet minutes, then drafts ready or a 60-minute-old message', async () => {
+    expect([AUTO_QUIET_MS, AUTO_NO_DRAFTS_MS]).toEqual([10 * MIN, 60 * MIN])
   })
 
-  test('a thread that is not long is judged as before, and the length is asked of the thread that would be used', async () => {
-    const asked: string[] = []
-    const length = (sid: string) => {
-      asked.push(sid)
-      return null
-    }
-    expect(recommend([thread], undefined, NOW, { length }).state).toBe('update')
-    expect(recommend([thread], undefined, NOW, { sent, signature: sig, length }).state).toBe('current')
-    expect(asked).toEqual(['local_a', 'local_a'])
-    // an old thread is Start for being old: its length is not asked
-    expect(recommend([known('local_old', 'Intake', '2026-09-22 10:00')], undefined, NOW, { length }).reason).toBe('last thread is from Sep 22')
-    expect(asked.length).toBe(2)
+  test('drafts ready: it goes once nothing newer has come for 10 minutes', async () => {
+    expect(autoUpdateDue(item(ACME), NOW)).toBe(true)
+    const fresh = (minutes: number) => ({ ...item(ACME), newest: { mail: 0, pkg: NOW - minutes * MIN, task: 0 } })
+    expect(autoUpdateDue(fresh(9), NOW)).toBe(false)
+    expect(autoUpdateDue(fresh(10), NOW)).toBe(true)
+    // the package itself rebuilt 5 minutes ago: not quiet yet
+    expect(autoUpdateDue({ ...item(ACME), packageUpdatedAt: new Date(NOW - 5 * MIN).toISOString() }, NOW)).toBe(false)
+    expect(autoUpdateDue({ ...item(ACME), packageUpdatedAt: new Date(NOW - 10 * MIN).toISOString() }, NOW)).toBe(true)
+  })
+
+  test('messages and no drafts: it goes once the newest message is 60 minutes old, and with drafts ready after 10 quiet minutes', async () => {
+    // Bolt's newest message came at 10 AM
+    expect(autoUpdateDue(item(BOLT), NOW)).toBe(true)
+    expect(autoUpdateDue(item(BOLT), NOW - MIN)).toBe(false)
+    const lately = { ...item(BOLT), newest: { mail: NOW - 15 * MIN, pkg: 0, task: 0 } }
+    expect(autoUpdateDue(lately, NOW)).toBe(false)
+    // drafts ready (prepared, or held by the person) do not wait the hour; drafts out of date do
+    expect(autoUpdateDue({ ...lately, open: pkg('prepared') }, NOW)).toBe(true)
+    expect(autoUpdateDue({ ...lately, open: pkg('held_by_me') }, NOW)).toBe(true)
+    expect(autoUpdateDue({ ...lately, open: pkg('stale') }, NOW)).toBe(false)
+    expect(autoUpdateDue({ ...lately, kind: 'ready', packageId: PKG }, NOW)).toBe(true)
+    // nothing goes while the client is still writing, drafts or not
+    const writing = { ...item(BOLT), newest: { mail: NOW - 5 * MIN, pkg: 0, task: 0 }, open: pkg('prepared') }
+    expect(autoUpdateDue(writing, NOW)).toBe(false)
+  })
+
+  test('a task alone: it goes after the 10 quiet minutes; a due time ahead is not something that arrived', async () => {
+    expect(item(CEDAR).messages).toBe(0)
+    expect(autoUpdateDue(item(CEDAR), NOW)).toBe(true)
+    const created = (minutes: number) => ({ ...item(CEDAR), newest: { mail: 0, pkg: 0, task: NOW - minutes * MIN } })
+    expect(autoUpdateDue(created(5), NOW)).toBe(false)
+    expect(autoUpdateDue(created(10), NOW)).toBe(true)
+  })
+
+  test('which clients: never one a teammate has, a package someone else holds, an internal project, or one being checked or still open', async () => {
+    expect([ACME, BOLT, CEDAR].map(pid => autoUpdatable(item(pid), NOW))).toEqual([true, true, true])
+    expect(autoUpdatable({ ...item(ACME), theirs: 'Dana' }, NOW)).toBe(false)
+    // a package a teammate holds, on a client listed for a task of the person's own
+    expect(autoUpdatable({ ...item(CEDAR), open: pkg('held_by_other', 'Dana') }, NOW)).toBe(false)
+    // (the founder) a stale package a teammate has
+    expect(autoUpdatable({ ...item(BOLT), open: pkg('stale', 'Dana') }, NOW)).toBe(false)
+    expect(autoUpdatable({ ...item(BOLT), open: pkg('stale') }, NOW)).toBe(true)
+    expect(autoUpdatable({ ...item(CEDAR), internal: true }, NOW)).toBe(false)
+    // R8: our reply is being checked, or the check found something still open
+    const HOUR = 60 * MIN
+    expect(autoUpdatable({ ...item(ACME), lastOut: NOW - 5 * MIN, check: { sendAt: NOW - HOUR, stillOpen: [], covers: 0 } }, NOW)).toBe(false)
+    expect(autoUpdatable({ ...item(ACME), lastOut: NOW - HOUR, check: { sendAt: NOW - HOUR, stillOpen: ['the quote'], covers: 0 } }, NOW)).toBe(false)
   })
 })
 
