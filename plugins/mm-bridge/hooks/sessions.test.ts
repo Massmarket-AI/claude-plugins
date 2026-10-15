@@ -1565,3 +1565,50 @@ describe('0.5.11: a client\'s thread updated by itself is sent once, whoever cho
     expect(w.stored('mm.updating')).toEqual({})
   })
 })
+
+// ======================================================================== 0.5.13
+
+describe('0.5.13: the cap\'s line in the notice log, once per client per hour in fifteen running threads (10-15: fifteen identical lines for one client within 40 seconds)', () => {
+  test('fifteen running threads choose from the same capped syncs: one line for the client in the hour, the next after the hour; nothing is sent, recorded or claimed', async () => {
+    const drafts = [{
+      package_id: 'aaaaaaaa-bbbb-4ccc-8ddd-000000000094', project_id: pid(94), project_name: 'Client Nine Four', status: 'prepared', covers_through: ago(3), drafts_ready: 1, drafts_unsent: 1,
+      flagged_for_rob: false, picked_up_by: null, picked_up_at: null, project_owner_email: ME,
+    }]
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts, mail: [] }
+    const ids = Array.from({ length: 15 }, (_, i) => `local_cap_${i + 1}`)
+    const w = fakeApp(feed, ids.map(sessionId => ({ sessionId })), [], { every: true })
+    const LINKED = ids[14] as string
+    w.put('mm.links', { [pid(94)]: LINKED })
+    // the thread that polls is none of theirs: each chooses from the sync on record (a /mm in one of them, every five
+    // minutes, stands in for the poller's syncs)
+    w.put('mm.lease', { owner: 'cli:local_nobody', until: NOW + 24 * 3_600_000 })
+    // the day's cap holds for hours: forty updates in the last day, none of them in the last hour
+    w.put('mm.autoupdates', Array.from({ length: 40 }, (_, i) => ({
+      at: NOW - (2 * 60 + i * 10) * 60_000, pid: pid(500 + i), client: `Client ${i}`, sig: '00000000', sid: `local_x${i}`, by: 'local_y', ok: true, reason: 'x',
+    })))
+    const threads = ids.map(id => w.session(id))
+    const a = threads[0]
+    const lines = () => w.written.filter(f => f.path.endsWith('bridge-notices.log')).flatMap(f => f.text.split('\n')).filter(l => l.includes('not updated Client Nine Four'))
+    await mm(a, '')
+    for (const t of threads) await startIn(t)
+    await w.advance(4_000)
+    await settleAll()
+    await w.advance(3_100)
+    await settleAll()
+    for (let i = 1; i <= 95; i++) {
+      await w.advance(60_000)
+      await settleAll()
+      if (i % 5 === 0) await mm(a, '')
+      // due from the sync at 10 minutes, capped at every sync since, chosen from in each of fourteen threads: one line
+      if (i === 60) expect(lines().length).toBe(1)
+    }
+    // the next one once the first is an hour old, once
+    expect(lines().length).toBe(2)
+    expect(lines().every(l => l.includes(`not updated Client Nine Four (${pid(94)}) sig `) && l.endsWith('this computer updated 12 threads in the last hour or 40 in the last day'))).toBe(true)
+    expect(Object.keys(w.stored('mm.capLogged') as object)).toEqual([pid(94)])
+    // ⛔ no decision changed: nothing sent, nothing recorded for the client, nothing claimed
+    expect(w.sends()).toEqual([])
+    expect(((w.stored('mm.autoupdates') ?? []) as Array<{ pid: string }>).filter(r => r.pid === pid(94))).toEqual([])
+    expect(w.stored('mm.updating') ?? {}).toEqual({})
+  })
+})
