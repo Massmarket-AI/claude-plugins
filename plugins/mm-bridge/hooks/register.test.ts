@@ -353,14 +353,19 @@ const ACME_HERE_CHIP = {
   args: { title: 'Do it here: Acme Roofing: review the reply drafts', tldr: 'Acme Roofing needs you: Acme Roofing · reply ready due tomorrow 8 AM. Recommended: Do it here.', prompt: ACME_KICKOFF },
 }
 
+/** (0.5.11, Opus 10-15, verbatim) A kickoff sent by itself for drafts that are ready: shown, never taken. */
+const NOT_TAKEN = (pid: string, name: string) =>
+  `[mm-link ${pid}] The reply drafts for ${name} (OW project ${pid}) are ready in package aaaaaaaa. Load the client's project skill first, then follow client-reply-prep §9 to show the five-part pickup view for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. Send nothing without my go.`
+/** (0.5.11, Opus 10-15, verbatim) Bolt's kickoff sent by itself: no package yet, so prep builds one, and it is not taken. */
+const BOLT_AUTO_KICKOFF = `[mm-link ${BOLT}] Bolt Staffing (Sam) (OW project ${BOLT}) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9 AM ET. Load the client's project skill first, then follow client-reply-prep: no package exists yet, so run prep (§2) to build one, then show the five-part pickup view without taking the package: no pickup call until I answer here. Then wait for me. Send nothing without my go.`
 /**
  * (0.5.11, Rob 10-15: "I think we should start updating threads automatically") What a sync sends by itself into
- * Bolt's linked thread when it is another thread: Update's own message.
+ * Bolt's linked thread when it is another thread: Update's first line, then the words that never take a package.
  */
 const BOLT_AUTO_UPDATE = (sid: string) => ({
   server: 'ccd_session_mgmt',
   tool: 'send_message',
-  args: { session_id: sid, message: `New since this thread last worked on this client: 2 messages waiting.\n${BOLT_KICKOFF}` },
+  args: { session_id: sid, message: `New since this thread last worked on this client: 2 messages waiting.\n${BOLT_AUTO_KICKOFF}` },
 })
 
 /** (0.5.4, C3, verbatim) The band's sentence, in every thread, for a client with no thread whose one chip is in `place` (this world's own thread, by default). */
@@ -5008,15 +5013,30 @@ describe('R8: sent · checking, then clear or still open (Rob, 2026-10-13: "yes 
     expect(w.threads.get('local_a')).toMatchObject({ title: '✓ Acme Roofing · clear 11 AM', pinned: false })
   })
 
-  test('from 60% of its context: no Claim button, and (0.5.11) no chip for a fresh thread either: Drafts alone', async ($, on) => {
+  // (0.5.11, Opus 10-15: "drop the 60% check on Claim too")
+  test('from 60% of its context: (0.5.11) Claim in this thread still shows and still works; no chip for a fresh thread', async ($, on) => {
     const w = world(on, { feed: acmeFeed(CHECKED), store: { 'mm.links': { [ACME]: SELF }, 'mm.ctx': { [SELF]: { tokensUsed: 700_000, contextWindow: 1_000_000, percentUsed: 70, at: NOW - HOUR } } } })
     await tickOnce($, w)
     expect(w.threads.get(SELF)).toMatchObject({ title: STILL, pinned: true })
     const ui = await pane($)
-    expect(await buttonsOf(ui, ACME)).toEqual(['Drafts'])
+    expect(await buttonsOf(ui, ACME)).toEqual(['Claim in this thread', 'Drafts'])
+    await ui.press({ key: `claim:${ACME}` })
+    expect(await lines(ui)).toContain('Picking up Acme Roofing in this thread.')
     await ui.unmount()
+    expect(w.prompts.map(p => p.text)).toEqual([expect.stringMatching(/^Still open for Acme Roofing after our reply of /)])
     expect(w.minted().filter(c => String(c.args.title).includes('Acme'))).toEqual([])
     expect(starts(w)).toEqual([])
+  })
+
+  test('(0.5.11) a client still open, its thread another one 90% full: Claim in <client>\'s thread shows and sends there', async ($, on) => {
+    const w = acmeWorld(on, { feed: acmeFeed(CHECKED), store: { 'mm.threads': PAIRS, 'mm.ctx': { local_a: { tokensUsed: 900_000, contextWindow: 1_000_000, percentUsed: 90, at: NOW - HOUR } } } })
+    await mm($, '')
+    const ui = await pane($)
+    expect(await buttonsOf(ui, ACME)).toEqual(['Claim in Acme Roofing\'s thread', 'Drafts'])
+    await ui.press({ key: `claim:${ACME}` })
+    await ui.unmount()
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
+    expect(String(sends(w)[0]?.args.message)).toMatch(/^Still open for Acme Roofing after our reply of /)
   })
 
   test('Claim reads the feed first: a client no longer open after our reply gets nothing', async ($, on) => {
@@ -6233,8 +6253,8 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
   const after = async (w: { clock: { advance: (ms: number) => Promise<void> } }, minutes: number) => {
     for (let i = 0; i < minutes; i++) await w.clock.advance(60_000)
   }
-  /** Update's own message for Acme, drafts ready. */
-  const ACME_UPDATE = `New since this thread last worked on this client: drafts ready.\n${ACME_KICKOFF}`
+  /** (0.5.11, Opus 10-15) Update's message for Acme, drafts ready, in the words that never take the package. */
+  const ACME_UPDATE = `New since this thread last worked on this client: drafts ready.\n${NOT_TAKEN(ACME, 'Acme Roofing Pat')}`
   /** Acme alone: drafts ready, covering mail three hours old; nothing else in the feed. */
   const acmeOnly = (over: Record<string, unknown> = {}): Feed => {
     const f = feed({ mail: [], tickets: {}, threads: [] })
@@ -6298,7 +6318,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     await after(w, 6)
     expect(sends(w).map(c => c.args.session_id)).toEqual(['local_b'])
     expect(String(sends(w)[0]?.args.message).startsWith(`New since this thread last worked on this client: 1 message waiting.\n[mm-link ${BOLT}] `)).toBe(true)
-    expect(String(sends(w)[0]?.args.message)).toContain('no package exists yet, so run prep first')
+    expect(String(sends(w)[0]?.args.message)).toContain('no package exists yet, so run prep (§2) to build one, then show the five-part pickup view without taking the package: no pickup call until I answer here.')
   })
 
   test('a message 15 minutes old with drafts ready for it: it goes after the 10 quiet minutes, without waiting the hour', async ($, on) => {
@@ -6310,7 +6330,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     await tickOnce($, w)
     await w.clock.advance(3_000)
     expect(sends(w).map(c => c.args.session_id)).toEqual(['local_b'])
-    expect(String(sends(w)[0]?.args.message)).toContain('Pick up the reply drafts for Bolt Staffing (Sam)')
+    expect(String(sends(w)[0]?.args.message)).toBe(`New since this thread last worked on this client: 1 message waiting.\n${NOT_TAKEN(BOLT, 'Bolt Staffing (Sam)')}`)
   })
 
   test('a task alone: it goes after the 10 quiet minutes (its due time ahead is not something that arrived)', async ($, on) => {

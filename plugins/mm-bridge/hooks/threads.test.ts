@@ -3,7 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import { buildLists, buildQueue, threadTitleShort } from './queue'
 import type { Feed, FeedThread, QueueItem } from './queue'
 import {
-  AUTO_NO_DRAFTS_MS, AUTO_QUIET_MS, CONTEXT_READING_MAX_AGE_MS, LABEL, LONG_CONTEXT_PERCENT, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
+  AUTO_NO_DRAFTS_MS, AUTO_QUIET_MS, LABEL, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
   autoUpdatable, autoUpdateDue,
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLink, titleLooksLike, titleSuggestion, waitingText,
@@ -603,20 +603,14 @@ describe('the three states: start, update, current', () => {
 })
 
 describe('(0.5.11) a long thread is not replaced: Claude Code compacts it', () => {
-  const DAY = 24 * 3_600_000
-
-  test('the limits: 60% still takes Claim off a row, and a reading older than 7 days says nothing', async () => {
-    expect([LONG_CONTEXT_PERCENT, CONTEXT_READING_MAX_AGE_MS]).toEqual([60, 7 * DAY])
-  })
-
   const thread = known('local_a', 'Roof quote', '2026-10-09 15:00')
   const sig = signatureOf(item(ACME))
   const sent = { sid: 'local_a', sig, at: et('2026-10-12 09:30') }
 
-  test('a thread 61% full is Update thread when it lacks what waits, and Open thread when it has it: never Start for its length', async () => {
+  test('a thread is Update thread when it lacks what waits, and Open thread when it has it, whatever its length: there is no length to ask', async () => {
     expect(recommend([thread], undefined, NOW)).toEqual({ state: 'update', reason: 'thread from Fri, Oct 9 exists', target: { sid: 'local_a', title: 'Roof quote', suggested: false } })
     expect(recommend([thread], undefined, NOW, { sent, signature: sig }).state).toBe('current')
-    const row = rowFor(item(ACME), recommend([thread], undefined, NOW), NOW, { percent: 61 })
+    const row = rowFor(item(ACME), recommend([thread], undefined, NOW), NOW)
     expect(rowButtons(row)).toEqual(['update', 'drafts'])
     expect(rowDetail(row)).toBe('drafts ready · Update thread: thread from Fri, Oct 9 exists')
     // an old thread is still Start, for being old
@@ -1193,20 +1187,19 @@ describe('R4 and R8: the rows', () => {
     const [far] = buildQueue(later, NOW)
     expect(rowFor(far as QueueItem, fresh, NOW, { needsYou: true }).title).toBe('🟡 2d left · Cedar Dental · task')
   })
-  test('R8: still open after our reply, with a thread: its name, its items under it, and Claim in this thread under 60% (none from 60%)', async () => {
+  test('R8: still open after our reply, with a thread: its name, its items under it, and Claim in this thread ((0.5.11) whatever the thread\'s length)', async () => {
     const f: Feed = { ...FEED, drafts: [{ ...(FEED.drafts?.[0] as object), last_outbound_at: at('2026-10-12 10:00'), checked_send_at: at('2026-10-12 10:00'), still_open: ['the logo file'] } as never] }
     const it = buildQueue(f, NOW).find(i => i.projectId === ACME) as QueueItem
     const withThread = { state: 'update' as const, reason: 'thread from Sun, Oct 11 exists', target: { sid: 'local_a', title: 'Roof quote', suggested: false } }
-    const row = rowFor(it, withThread, NOW, { needsYou: true, percent: 55 })
+    const row = rowFor(it, withThread, NOW, { needsYou: true })
     expect(row).toMatchObject({ title: '🟡 Acme Roofing · still open after your reply', stillOpen: ['the logo file'], claim: true })
     expect(isStillOpenRow(row)).toBe(true)
     expect(rowButtons(row)).toEqual(['claim', 'drafts'])
     expect(LABEL.claim).toBe('Claim in this thread')
     expect(rowDetail(row)).toBe('drafts ready')
     expect(paneText([row], 'H', 'N')).toContain('   - the logo file')
-    const long = rowFor(it, withThread, NOW, { needsYou: true, percent: 61 })
-    expect(long.claim).toBe(false)
-    expect(rowButtons(long)).toEqual(['drafts'])
+    // (0.5.11, Opus 10-15) no length takes Claim off any more; a row an older version drew with no Claim keeps none
+    expect(rowButtons({ ...row, claim: false })).toEqual(['drafts'])
     // no thread to claim it in: the row is an ordinary one
     expect(rowFor(it, fresh, NOW, { needsYou: true }).stillOpen).toBeUndefined()
   })
@@ -1422,3 +1415,47 @@ describe('0.5.10: R1b counts only evidence dated at or after the candidate\'s ow
     expect(newerThreadFor(ACME, 'local_new', { [ACME]: 'local_new' }, [oldRow, declared(ACME, 'cli-new', '2026-10-15 10:40')], reopened, busy)).toBeUndefined()
   })
 })
+
+// ---------------------------------------------------------------- (0.5.11) the words of an update sent by itself
+
+describe('(0.5.11, Opus 10-15) an update sent by itself never takes the package; a pressed Update says what it said before', () => {
+  const pkg = (state: 'held_by_me' | 'held_by_other' | 'stale' | 'prepared', by = '') => ({ id: PKG, state, by, at: null, unsent: 1, newer: 0 })
+  /**
+   * For each case, the pressed text exactly as ded42364 (0.5.10, main) wrote it, captured from that commit's own
+   * kickoffText on these fixtures; and the text an update sent by itself carries (Opus's words for 2, 4, 5 and 6).
+   */
+  const CASES: Array<{ name: string; it: QueueItem; pressed: string; plain: string; auto: string }> = [
+    { name: "1 held by me", it: { ...item(ACME), open: pkg('held_by_me') }, pressed: "New since this thread last worked on this client: 1 draft not sent.\n[mm-link 11111111-1111-1111-1111-111111111111] Carry on with the reply drafts for Acme Roofing Pat (OW project 11111111-1111-1111-1111-111111111111). I already picked up package aaaaaaaa: 1 draft(s) not sent yet. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the five-part pickup view and wait for me. Send nothing without my go.", plain: "[mm-link 11111111-1111-1111-1111-111111111111] Carry on with the reply drafts for Acme Roofing Pat (OW project 11111111-1111-1111-1111-111111111111). I already picked up package aaaaaaaa: 1 draft(s) not sent yet. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the five-part pickup view and wait for me. Send nothing without my go.", auto: "New since this thread last worked on this client: 1 draft not sent.\n[mm-link 11111111-1111-1111-1111-111111111111] Carry on with the reply drafts for Acme Roofing Pat (OW project 11111111-1111-1111-1111-111111111111). I already picked up package aaaaaaaa: 1 draft(s) not sent yet. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the five-part pickup view and wait for me. Send nothing without my go." },
+    { name: "2 prepared for me", it: item(ACME), pressed: "New since this thread last worked on this client: drafts ready.\n[mm-link 11111111-1111-1111-1111-111111111111] Pick up the reply drafts for Acme Roofing Pat (OW project 11111111-1111-1111-1111-111111111111). Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package aaaaaaaa and wait for me. Send nothing without my go.", plain: "[mm-link 11111111-1111-1111-1111-111111111111] Pick up the reply drafts for Acme Roofing Pat (OW project 11111111-1111-1111-1111-111111111111). Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package aaaaaaaa and wait for me. Send nothing without my go.", auto: "New since this thread last worked on this client: drafts ready.\n[mm-link 11111111-1111-1111-1111-111111111111] The reply drafts for Acme Roofing Pat (OW project 11111111-1111-1111-1111-111111111111) are ready in package aaaaaaaa. Load the client's project skill first, then follow client-reply-prep §9 to show the five-part pickup view for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. Send nothing without my go." },
+    { name: "3 held by a teammate", it: { ...item(BOLT), open: pkg('held_by_other', 'Dana') }, pressed: "New since this thread last worked on this client: 2 messages waiting, drafts with Dana.\n[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): Dana picked up the reply drafts (package aaaaaaaa) and has 1 not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.", plain: "[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): Dana picked up the reply drafts (package aaaaaaaa) and has 1 not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.", auto: "New since this thread last worked on this client: 2 messages waiting, drafts with Dana.\n[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): Dana picked up the reply drafts (package aaaaaaaa) and has 1 not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go." },
+    { name: "3 stale, a teammate has it", it: { ...item(BOLT), open: pkg('stale', 'Dana') }, pressed: "New since this thread last worked on this client: 2 messages waiting, drafts out of date.\n[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): Dana has the reply drafts (package aaaaaaaa), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.", plain: "[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): Dana has the reply drafts (package aaaaaaaa), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.", auto: "New since this thread last worked on this client: 2 messages waiting, drafts out of date.\n[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): Dana has the reply drafts (package aaaaaaaa), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go." },
+    { name: "4 stale, messages waiting", it: { ...item(BOLT), open: pkg('stale') }, pressed: "New since this thread last worked on this client: 2 messages waiting, drafts out of date.\n[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9 AM ET. Load the client's project skill first, then follow client-reply-prep §9: package aaaaaaaa exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.", plain: "[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9 AM ET. Load the client's project skill first, then follow client-reply-prep §9: package aaaaaaaa exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.", auto: "New since this thread last worked on this client: 2 messages waiting, drafts out of date.\n[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9 AM ET. Package aaaaaaaa is marked out of date. Load the client's project skill first, then show me what the client sent, the current drafts and what is due, and wait for me. Do not take the package or rebuild the drafts until I answer here. Send nothing without my go." },
+    { name: "5 prepared, messages waiting", it: { ...item(BOLT), open: pkg('prepared') }, pressed: "New since this thread last worked on this client: 2 messages waiting, drafts ready.\n[mm-link 22222222-2222-2222-2222-222222222222] Pick up the reply drafts for Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222). Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package aaaaaaaa and wait for me. Send nothing without my go.", plain: "[mm-link 22222222-2222-2222-2222-222222222222] Pick up the reply drafts for Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222). Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package aaaaaaaa and wait for me. Send nothing without my go.", auto: "New since this thread last worked on this client: 2 messages waiting, drafts ready.\n[mm-link 22222222-2222-2222-2222-222222222222] The reply drafts for Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222) are ready in package aaaaaaaa. Load the client's project skill first, then follow client-reply-prep §9 to show the five-part pickup view for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. Send nothing without my go." },
+    { name: "6 messages, no package", it: item(BOLT), pressed: "New since this thread last worked on this client: 2 messages waiting.\n[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9 AM ET. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.", plain: "[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9 AM ET. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.", auto: "New since this thread last worked on this client: 2 messages waiting.\n[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9 AM ET. Load the client's project skill first, then follow client-reply-prep: no package exists yet, so run prep (§2) to build one, then show the five-part pickup view without taking the package: no pickup call until I answer here. Then wait for me. Send nothing without my go." },
+    { name: "7 tasks only", it: item(CEDAR), pressed: "New since this thread last worked on this client: 1 task due.\n[mm-link 33333333-3333-3333-3333-333333333333] Cedar Dental (OW project 33333333-3333-3333-3333-333333333333) has 1 committed task(s) due Mon, Oct 12 4 PM ET. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.", plain: "[mm-link 33333333-3333-3333-3333-333333333333] Cedar Dental (OW project 33333333-3333-3333-3333-333333333333) has 1 committed task(s) due Mon, Oct 12 4 PM ET. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.", auto: "New since this thread last worked on this client: 1 task due.\n[mm-link 33333333-3333-3333-3333-333333333333] Cedar Dental (OW project 33333333-3333-3333-3333-333333333333) has 1 committed task(s) due Mon, Oct 12 4 PM ET. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go." },
+    { name: "ok", it: { ...item(BOLT), kind: 'ok' as const, ok: { sends: 'Dana' }, open: pkg('prepared') }, pressed: "New since this thread last worked on this client: needs your OK · Dana sends, 2 messages waiting, drafts ready.\n[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): reply package aaaaaaaa is flagged for my OK, and Dana sends it. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go.", plain: "[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): reply package aaaaaaaa is flagged for my OK, and Dana sends it. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go.", auto: "New since this thread last worked on this client: needs your OK · Dana sends, 2 messages waiting, drafts ready.\n[mm-link 22222222-2222-2222-2222-222222222222] Bolt Staffing (Sam) (OW project 22222222-2222-2222-2222-222222222222): reply package aaaaaaaa is flagged for my OK, and Dana sends it. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go." },
+  ]
+
+  for (const c of CASES) {
+    test(`case ${c.name}: pressed and chip texts as ded42364's, byte for byte; sent by itself, ${c.auto === c.pressed ? 'the same' : 'its own words'}`, async () => {
+      expect(kickoffText(c.it, { update: true })).toBe(c.pressed)
+      expect(kickoffText(c.it)).toBe(c.plain)
+      expect(kickoffText(c.it, { update: true, auto: true })).toBe(c.auto)
+    })
+  }
+
+  test('cases 2, 4, 5 and 6 differ when sent by itself; 1, 3, 7 and the founder\'s OK do not', async () => {
+    expect(CASES.filter(c => c.auto !== c.pressed).map(c => c.name)).toEqual(['2 prepared for me', '4 stale, messages waiting', '5 prepared, messages waiting', '6 messages, no package'])
+  })
+
+  test('⛔ no text sent by itself asks to take the package', async () => {
+    for (const c of CASES) {
+      const text = kickoffText(c.it, { update: true, auto: true })
+      expect(text, c.name).not.toContain('Pick up the reply drafts')
+      expect(text, c.name).not.toContain('so pick it up')
+      // the first line is Update's, as pressed
+      expect(text.split('\n')[0], c.name).toBe(c.pressed.split('\n')[0])
+    }
+  })
+})
+

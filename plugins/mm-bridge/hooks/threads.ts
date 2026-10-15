@@ -31,14 +31,9 @@ export const RECENT_THREAD_MS = 7 * DAY
 /** Last activity further back than this is old, decided without counting business time (no calendar walk for a date years back). */
 export const OLD_THREAD_MS = 60 * DAY
 
-/**
- * (R8) A thread's own reading of its context window at or past this percent: its row offers no Claim. (0.5.11, Rob
- * 10-15: "Can you just automatically compress context at 60% instead of 100% to save tokens?") It no longer makes a
- * thread one to replace: Claude Code compacts a long thread instead (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE).
- */
-export const LONG_CONTEXT_PERCENT = 60
-/** A reading older than this says nothing. */
-export const CONTEXT_READING_MAX_AGE_MS = 7 * DAY
+// (0.5.11, Rob 10-15: "Can you just automatically compress context at 60% instead of 100% to save tokens?") A thread's
+// length decides nothing any more: Claude Code compacts a long thread (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE), so it is
+// never one to replace, and its row offers Claim whatever its length.
 
 /** A thread as the desktop app lists it. `link` is the app's own link to it, kept only when it is that thread's. */
 export type AppThread = { sessionId: string; title?: string; pinned?: boolean; isArchived?: boolean; lastActivityAt?: string; link?: string }
@@ -489,8 +484,13 @@ export function waitingText(it: QueueItem): string {
  *   6. client messages with no package yet
  *   7. committed tasks only (a package that is out of date, or another owner's, changes nothing here:
  *      the client is in the list for the task)
+ * ⛔ (0.5.11) `auto`: the message an update sent by itself carries (`autoUpdate`), which no person pressed for. It
+ *    never takes the package (client-reply-prep §9.1's pickup call): taken by a send nobody pressed for, OW would
+ *    show it held by the person, teammates would be refused it (409 held_by_another), and the 24-hour "nobody
+ *    picked this up" warning would stop counting it. Cases 2, 4, 5 and 6 then have words of their own (Opus's,
+ *    10-15, verbatim); 1, 3, 7 and the founder's OK are as pressed. A pressed Update's text is unchanged.
  */
-export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: Replaced | undefined } = {}): string {
+export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: Replaced | undefined; auto?: boolean } = {}): string {
   const id = it.projectId
   const who = `${it.projectName} (OW project ${id})`
   // (R17) nothing due: the kickoff says no due time (the clause is left out, never "due Invalid Date")
@@ -498,11 +498,16 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
   const replyDue = due ? `, reply due ${due}` : ''
   const tasksDue = due ? ` due ${due}` : ''
   const o = it.open ?? null
+  // (0.5.11, Opus 10-15, verbatim) cases 2 and 5 sent by itself: the pickup view, and no pickup call
+  const notTaken = (pkg: string): string =>
+    `[mm-link ${id}] The reply drafts for ${who} are ready in package ${pkg}. Load the client's project skill first, then follow client-reply-prep §9 to show the five-part pickup view for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. Send nothing without my go.`
   const body =
     o?.state === 'held_by_me' && it.packageId
       ? `[mm-link ${id}] Carry on with the reply drafts for ${who}. I already picked up package ${it.packageId.slice(0, 8)}: ${o.unsent} draft(s) not sent yet${o.newer > 0 ? `, and ${o.newer} client message(s) arrived since` : ''}. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the five-part pickup view and wait for me. Send nothing without my go.`
       : it.packageId
-        ? `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${it.packageId.slice(0, 8)} and wait for me. Send nothing without my go.`
+        ? opts.auto
+          ? notTaken(it.packageId.slice(0, 8))
+          : `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${it.packageId.slice(0, 8)} and wait for me. Send nothing without my go.`
         : it.kind === 'ok' && o
           ? okKickoff(it, o)
         : o?.state === 'held_by_other'
@@ -511,11 +516,19 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
           ? // (the founder) a stale package a teammate has, not held: Opus's words, 10-13
             `[mm-link ${id}] ${who}: ${o.by} has the reply drafts (package ${o.id.slice(0, 8)}), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`
           : o?.state === 'stale' && it.messages > 0
-            ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: package ${o.id.slice(0, 8)} exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.`
+            ? opts.auto
+              ? // (0.5.11, Opus 10-15, verbatim) case 4 sent by itself
+                `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Package ${o.id.slice(0, 8)} is marked out of date. Load the client's project skill first, then show me what the client sent, the current drafts and what is due, and wait for me. Do not take the package or rebuild the drafts until I answer here. Send nothing without my go.`
+              : `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: package ${o.id.slice(0, 8)} exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.`
             : o?.state === 'prepared' && it.messages > 0
-              ? `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${o.id.slice(0, 8)} and wait for me. Send nothing without my go.`
+              ? opts.auto
+                ? notTaken(o.id.slice(0, 8))
+                : `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${o.id.slice(0, 8)} and wait for me. Send nothing without my go.`
               : it.messages > 0
-                ? `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
+                ? opts.auto
+                  ? // (0.5.11, Opus 10-15, verbatim) case 6 sent by itself
+                    `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep: no package exists yet, so run prep (§2) to build one, then show the five-part pickup view without taking the package: no pickup call until I answer here. Then wait for me. Send nothing without my go.`
+                  : `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
                 : `[mm-link ${id}] ${who} has ${it.tasks} committed task(s)${tasksDue}. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`
   if (opts.update) return `New since this thread last worked on this client: ${waitingText(it)}.\n${body}`
   const handover = opts.replaces ? handoverText(it, opts.replaces) : ''
@@ -659,10 +672,10 @@ export const rowState = (row: Row): RowState => {
 
 /**
  * How a row is drawn beyond its recommendation (0.5.2): `needsYou` for a row of the Needs-you list (R4 names a
- * client there with no thread at all), and `percent`, the context reading of the client's thread when it has a
- * fresh one (R8: at 60% or more, no Claim button; 0.5.11: and no chip for a new thread).
+ * client there with no thread at all). (0.5.11: no context reading any more; R8's Claim shows whatever the
+ * thread's length.)
  */
-export type RowOptions = { needsYou?: boolean; percent?: number | undefined }
+export type RowOptions = { needsYou?: boolean }
 
 export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: RowOptions = {}): Row {
   // a client whose drafts a teammate holds, and that is not the viewer's to act on: who to ask, and no action
@@ -689,8 +702,9 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: Ro
     ...(note ? { note } : {}),
     // (the founder's alone, 0.5.1) a teammate's to see through: no action, with a sentence or without one
     ...(withMate && it.theirs ? { theirs: true } : {}),
-    // R8: what is still open, drawn under the row, and whether its one action is Claim in this thread
-    ...(still ? { stillOpen: [...still.items], claim: !(typeof opts.percent === 'number' && opts.percent >= LONG_CONTEXT_PERCENT) } : {}),
+    // R8: what is still open, drawn under the row, and its one action, Claim in this thread ((0.5.11, Opus 10-15)
+    // whatever the thread's length: a long thread is compacted, not replaced)
+    ...(still ? { stillOpen: [...still.items], claim: true } : {}),
     ...(checking ? { checking: true as const } : {}),
   }
 }
@@ -708,7 +722,7 @@ const notMine = (row: Row): boolean => Boolean(row.note) || row.theirs === true 
  */
 export function rowButtons(row: Row): RowButton[] {
   if (notMine(row)) return ['drafts']
-  // R8: Claim in this thread while its context is under 60%; past that, Drafts alone (0.5.11: no chip for a new thread)
+  // R8: Claim in this thread ((0.5.11) whatever the thread's length; a row an older version drew with no Claim keeps none)
   if (isStillOpenRow(row)) return row.claim ? ['claim', 'drafts'] : ['drafts']
   const state = rowState(row)
   return [state === 'current' ? 'open' : state, 'drafts']

@@ -8,7 +8,7 @@ import {
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
-  CONTEXT_READING_MAX_AGE_MS, LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
+  LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, staleCopySentence, startKickoff, threadLink, titleSuggestion,
   REFRESH_FAILED, autoUpdatable, autoUpdateDue, bandText, chipTitle, waitingText,
 } from './threads'
@@ -37,10 +37,11 @@ import type { AppThread, ContextReading, Fold, Pairs, Recommendation, Replaced, 
 // client that needs a new thread (`autoChips`): a chip starts nothing until the person clicks it.
 // ⛔ (0.5.11, Rob 10-15: "I think we should start updating threads automatically") ONE exception, and only while
 //    auto is on (/mm auto, the switch auto-start has had since 0.5.7): after each sync, a client on the person's own
-//    list whose linked thread lacks what is waiting gets Update's own message, through Update's own send and
-//    guards, once the client has been quiet AUTO_QUIET_MS and its drafts are ready (or an hour has passed), within
-//    AUTO_UPDATES_PER_HOUR and AUTO_UPDATES_PER_DAY on this computer, and never from a thread into itself
-//    (`autoUpdates`). It stamps nothing and claims nothing: an automatic send is nobody's act (R11).
+//    list whose linked thread lacks what is waiting gets Update's message (in words that never take the package:
+//    kickoffText's `auto`), through Update's own send and guards, once the client has been quiet AUTO_QUIET_MS and
+//    its drafts are ready (or an hour has passed), within AUTO_UPDATES_PER_HOUR and AUTO_UPDATES_PER_DAY on this
+//    computer, and never from a thread into itself (`autoUpdates`). It stamps nothing and claims nothing: an
+//    automatic send is nobody's act (R11).
 // ⛔ CLAUDE CANNOT DO EITHER. The model can call the `mm` tool, and the tool runs the same `runCommand`:
 //    there, and for a /mm command that did not come from the person's own prompt (a message from another
 //    session, a scheduled task, a channel, another plugin), `update` and `start` are refused before
@@ -1593,9 +1594,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
             signature: had && hasWaiting(had.sig, it) ? had.sig : signatureOf(it),
           })
     recs[it.projectId] = rec
-    // (R8) the context reading of the thread the row acts on, when it has a fresh one: past 60%, no Claim button
-    const target = rec.target && !rec.target.suggested ? rec.target.sid : undefined
-    return rowFor(it, chipLine(it, rec), now, { needsYou, percent: target ? freshPercent(readings[target], now) : undefined })
+    return rowFor(it, chipLine(it, rec), now, { needsYou })
   }
   const rows = items.map(it => rowOf(it, true))
   // (R8, Opus decision 2) a client being checked is under `Checking your reply`, with a recommendation on record
@@ -1684,11 +1683,6 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
 }
 
 /** The sync record a pass made, stored; and, when the pass was over the feed this session read last, kept with it (recentFeed). */
-/** (R8) The percent of its context a thread's own reading says it has used, when the reading is fresh enough to say anything. */
-function freshPercent(r: ContextReading | undefined, now: number): number | undefined {
-  if (!r || typeof r !== 'object' || !Number.isFinite(r.at) || now - r.at > CONTEXT_READING_MAX_AGE_MS) return undefined
-  return typeof r.percentUsed === 'number' && Number.isFinite(r.percentUsed) ? r.percentUsed : undefined
-}
 
 async function storeLast($: EngineInterface, feed: Feed, last: Last): Promise<void> {
   await $.store.set('mm.last', last)
@@ -2890,8 +2884,9 @@ async function autoUpdateClaim($: EngineInterface, it: QueueItem, sid: string, s
 
 /**
  * (0.5.11, Rob 10-15: "so the draft is ready when I open the thread up") Sends the client's update by itself, once this
- * session's claim has held (another session's write since means that session sends it): exactly what Update sends
- * (`kickoffText(cur, { update: true })`), through Update's own send (`sendInto`), after Update's guards, all of them,
+ * session's claim has held (another session's write since means that session sends it): what Update sends, in the
+ * words for a send no person pressed for (`kickoffText(cur, { update: true, auto: true })`: ⛔ the package is never
+ * taken), through Update's own send (`sendInto`), after Update's guards, all of them,
  * asked again now: the client's link is still this thread and the thread is no other client's; the app answers for
  * the thread by id, open; the feed is read once before the send (with no feed, nothing goes), and as it has the client
  * NOW, the client is still on the person's own list, still one to update by itself, still due, and still carries what
@@ -2953,7 +2948,8 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
     entry = made
     let why: string | null
     try {
-      const r = await sendInto($, cur.client, pid, false, sid, kickoffText(cur, { update: true }), true)
+      // ⛔ (0.5.11, Opus 10-15) the words for a send no person pressed for: the package is never taken (`auto`)
+      const r = await sendInto($, cur.client, pid, false, sid, kickoffText(cur, { update: true, auto: true }), true)
       why = r === null ? null : typeof r === 'object' ? 'a message to this client was already going out' : r
     } catch (err) {
       why = errorText(err)
