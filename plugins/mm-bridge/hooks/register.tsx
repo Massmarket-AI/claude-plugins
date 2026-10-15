@@ -11,6 +11,7 @@ import {
   LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, staleCopySentence, startKickoff, threadLink, titleSuggestion,
   REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, bandText, chipTitle, ownPackage, seenNow, waitingText,
+  START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary,
 } from './threads'
 import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
 
@@ -97,7 +98,7 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.5.11'
+const VERSION = '0.5.12'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -2053,9 +2054,12 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
     notes: (await storeGet<BandNote[]>($, 'mm.notes', [])).filter(n => n && typeof n.text === 'string' && now - n.at < NOTE_SHOW_MS).map(n => n.text),
   })
   if (!text) return { text: '', at: last.at }
+  // (0.5.12) the Start all button, when two or more clients need a new thread (or one a capped press left)
+  const offer = await startAllOffer($)
+  const all = offer > 0 ? { startAll: offer } : {}
   // In a waiting client's thread the line carries the button that opens its part of the pane.
   const mine = me ? ownerOf(me, links) : undefined
-  return mine && items.some(i => i.projectId === mine) ? { text, drafts: true, at: last.at } : { text, at: last.at }
+  return mine && items.some(i => i.projectId === mine) ? { text, drafts: true, at: last.at, ...all } : { text, at: last.at, ...all }
 }
 
 /** Works the band's line out again and redraws it when it changed. */
@@ -2064,7 +2068,7 @@ async function refreshBand($: EngineInterface): Promise<void> {
     const band = await bandLine($)
     const { value: was } = await $.state.get(BAND)
     // (0.5.4) the sync it was drawn from is kept with it, so a thread can tell it is behind the store (`catchUp`)
-    if ((was?.text ?? '') !== band.text || Boolean(was?.drafts) !== Boolean(band.drafts) || was?.at !== band.at) await $.state.set(BAND, band)
+    if ((was?.text ?? '') !== band.text || Boolean(was?.drafts) !== Boolean(band.drafts) || was?.at !== band.at || (was?.startAll ?? 0) !== (band.startAll ?? 0)) await $.state.set(BAND, band)
   } catch {
     // the band is a convenience: it never breaks a sync or a command
   }
@@ -3230,7 +3234,16 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
   const openNow = async (): Promise<string | null> => {
     const title = startTitle(it)
     const prompt = startKickoff(it, await replaced($, it, pass), now)
-    const started = await startNow($, title, prompt)
+    // (0.5.12) a Start all in another thread, or a start by itself, is starting this client now: not twice
+    const key = `${it.projectId}\n${sigHash(signature)}`
+    if (!(await claimStart($, it.projectId, key, me, now))) return `${it.client}'s thread is being started from another thread. It will be under Pinned in a moment.`
+    let opened: StartedNow
+    try {
+      opened = await startNow($, title, prompt)
+    } finally {
+      await releaseStart($, key, me)
+    }
+    const started = opened
     if (started.ok) {
       await adoptStarted($, it, started.sid, prompt, me, now)
       return `Started ${it.client}'s thread: "${title}". It is under Pinned.`
@@ -3290,6 +3303,174 @@ async function placeChip($: EngineInterface, me: string, projectId: string, at: 
     return fresh
   })
   for (const [k, c] of ownChips) if (c.threadId === me && c.projectId === projectId && c.at === at) ownChips.set(k, { ...c, place })
+}
+
+// ---------------------------------------------------------------- (0.5.12) Start all
+
+/**
+ * (0.5.12, Rob 10-15: no clicks at all) The clients on the person's own Needs-you list that need a new thread now, as
+ * the stored sync has them, soonest due first: the row's one action is Start (`rowButtons`, as the pane draws it) and
+ * the client has no linked thread. A client linked to a thread that is old keeps its own row's Start: Start all is for
+ * clients with no thread of their own.
+ */
+function needingThreads(last: Last, links: Readonly<Record<string, string>>, now: number): QueueItem[] {
+  if (!Array.isArray(last.items)) return []
+  return last.items
+    .filter(it => {
+      const rec = storedRec(last, it.projectId)
+      if (!rec || rec.state !== 'start' || !isUuid(it.projectId) || links[it.projectId] !== undefined) return false
+      return rowButtons(rowFor(it, rec, now, { needsYou: true }))[0] === 'start'
+    })
+    .sort(byDue)
+}
+
+/**
+ * (0.5.12) How many clients the Start all button offers, or 0 when it is not drawn: two or more that need a new thread
+ * (with one, its row's own Start is the button), or one left over by a press that stopped at START_ALL_MAX (the band
+ * said so, and the button stays for the second press while that line shows). From what is stored only.
+ */
+async function startAllOffer($: EngineInterface): Promise<number> {
+  const last = await storeGet<Last | null>($, 'mm.last', null)
+  if (!last || !Array.isArray(last.items) || !(await sessionTools($)).start) return 0
+  const now = await $.clock.now()
+  const n = needingThreads(last, await storeGet<Record<string, string>>($, 'mm.links', {}), now).length
+  if (n >= 2) return n
+  const left = await storeGet<{ at?: number } | null>($, 'mm.startAllLeft', null)
+  return n === 1 && left && now - Number(left.at) < NOTE_SHOW_MS ? 1 : 0
+}
+
+/** (0.5.12) A Start all running in this session: a second press, or /mm start all, does nothing meanwhile. */
+let startingAll = false
+
+/**
+ * (0.5.12) A start claimed for a client (`mm.starting`, a lease per client and signature, as the thread started by itself
+ * claims it): false when another press or thread holds an unexpired claim for the client, whatever it carries. Over the
+ * store's fresh copy.
+ */
+async function claimStart($: EngineInterface, pid: string, key: string, me: string, now: number): Promise<boolean> {
+  let mine = false
+  await patchStore<Record<string, { owner?: string; until?: number }>>($, 'mm.starting', {}, fresh => {
+    for (const [k, v] of Object.entries(fresh)) if (!v || !(Number(v.until) > now)) delete fresh[k]
+    if (Object.entries(fresh).some(([k, v]) => k.startsWith(`${pid}\n`) && v?.owner !== me)) return false
+    fresh[key] = { owner: me, until: now + STARTING_MS }
+    mine = true
+  })
+  return mine
+}
+/** (0.5.12) The claim let go, when it is still this session's. */
+async function releaseStart($: EngineInterface, key: string, me: string): Promise<void> {
+  await patchStore<Record<string, { owner?: string }>>($, 'mm.starting', {}, fresh => {
+    if (fresh[key]?.owner !== me) return false
+    delete fresh[key]
+  }).catch(() => {})
+}
+
+/** (0.5.12) What one client's turn in a Start all came to. */
+type StartAllOne = { done: 'started' } | { done: 'failed'; why: string } | { done: 'skipped'; why: string }
+
+/**
+ * (0.5.12) One client's thread, in a Start all: ⛔ checked again just before it runs, and skipped if the client has a
+ * live linked thread now (a thread linked meanwhile, by a person, a marker or a sync; one the app says is gone does not
+ * count), a press on its own row is in flight, or another press or thread is starting it (`mm.starting`). Then claimed
+ * and held as a row's press holds it (its row's Start does nothing meanwhile), started as a single Start starts a
+ * thread (`startNow`, user_asked, the person's press) with its kickoff in the words that never take the package
+ * (`startAllKickoff`), and recorded and linked as a single Start does (`adoptStarted`: what the thread has, the link, the
+ * claim and the stamp; the sync after it pins and names it). Logged either way.
+ */
+async function startOneOfAll($: EngineInterface, it: QueueItem, pass: Pass, me: string): Promise<StartAllOne> {
+  const pid = it.projectId
+  if (pressing.has(pid)) return { done: 'skipped', why: 'its own Start is running' }
+  const linked = (await storeGet<Record<string, string>>($, 'mm.links', {}))[pid]
+  if (linked !== undefined && (await lookup($, linked)) !== 'gone') return { done: 'skipped', why: 'it has a thread now' }
+  const now = await $.clock.now()
+  const key = `${pid}\n${sigHash(signatureOf(it))}`
+  if (!(await claimStart($, pid, key, me, now))) return { done: 'skipped', why: 'another thread is starting it' }
+  const hold = ++pressCount
+  pressing.set(pid, hold)
+  try {
+    const title = startTitle(it)
+    const prompt = startAllKickoff(it, await replaced($, it, pass), now)
+    const answer = await startNow($, title, prompt)
+    const client = cleanName(it.client)
+    await logAuto($, `${answer.ok ? 'started' : 'not started'} ${client} (${pid}) sig ${sigHash(signatureOf(it))}: Start all, pressed${answer.ok ? '' : `; ${short(answer.text, 160)}`}`)
+    if (!answer.ok) return { done: 'failed', why: short(answer.text).replace(/\.+$/, '') }
+    await adoptStarted($, it, answer.sid, prompt, me, now)
+    return { done: 'started' }
+  } finally {
+    if (pressing.get(pid) === hold) pressing.delete(pid)
+    await releaseStart($, key, me)
+  }
+}
+
+/**
+ * (0.5.12, Rob 10-15: "no clicks at all") Start all: the person's one press (the band's or the pane's Start all button)
+ * or their typed /mm start all opens a thread for each client that needs one (`needingThreads`), one after another,
+ * never two at once, at most START_ALL_MAX for a press (the rest wait for a second press; the band says how many),
+ * each one checked again just before it runs (`startOneOfAll`). One line says what it came to (`startAllSummary`), in
+ * the band of every thread and above the list. ⛔ Only from the person's press or command: never from a timer, a sync,
+ * the tool or another session. Nothing it does starts anything by itself later.
+ */
+async function startAll($: EngineInterface): Promise<string> {
+  if (startingAll) return 'Start all is already running.'
+  startingAll = true
+  try {
+    if (!(await sessionTools($)).start) return 'Start all needs the app\'s start_session, which this thread does not have: press Start thread on each row.'
+    const me = await selfId($)
+    let last = await storeGet<Last | null>($, 'mm.last', null)
+    const at = await $.clock.now()
+    if (!last || last.error || !Array.isArray(last.items) || !Number.isFinite(last.at) || at - last.at > STALE_SYNC_MS) last = await sync($)
+    const want = needingThreads(last, await storeGet<Record<string, string>>($, 'mm.links', {}), at)
+    if (!want.length) return startAllSummary([], [], [], 0)
+    const pass: Pass = { last, live: new Map(), pairs: {}, listed: true, unseen: new Set(), stored: true }
+    const started: string[] = []
+    const failed: Array<{ client: string; why: string }> = []
+    const skipped: Array<{ client: string; why: string }> = []
+    let reached = 0
+    // one after another: each start is answered before the next is asked for
+    for (const it of want) {
+      if (started.length + failed.length >= START_ALL_MAX) break
+      reached++
+      const client = cleanName(it.client)
+      const one = await startOneOfAll($, it, pass, me)
+      if (one.done === 'started') started.push(client)
+      else if (one.done === 'failed') failed.push({ client, why: one.why })
+      else skipped.push({ client, why: one.why })
+    }
+    const left = want.length - reached
+    await patchStore<{ at?: number }>($, 'mm.startAllLeft', {}, fresh => {
+      if (left > 0) fresh.at = at
+      else if (fresh.at === undefined) return false
+      else delete fresh.at
+    }).catch(() => {})
+    const line = startAllSummary(started, failed, skipped, left)
+    await bandNote($, line, `startall\n${me}\n${at}`)
+    return line
+  } finally {
+    startingAll = false
+  }
+}
+
+/** (0.5.12) The Start all button, in the band or the pane: the person's press. The line says it is at it first, then what it came to; the list is brought up to date after. */
+async function pressStartAll($: EngineInterface): Promise<void> {
+  if (startingAll) return
+  let said: string
+  try {
+    await say($, 'Starting the threads that are missing…', false).catch(() => {})
+    said = await startAll($)
+  } catch (err) {
+    said = errorText(err)
+  }
+  try {
+    await say($, said)
+    await refreshBand($)
+  } catch {
+    // the thread went away while the press was in flight
+  }
+  try {
+    await refreshList($)
+  } catch (err) {
+    await refreshFailed($, `start all: ${errorText(err)}`)
+  }
 }
 
 /** One chip a thread mints by itself: for a client, a need, and what it carries. `place`: the thread it is in, as the band names it. */
@@ -4431,6 +4612,8 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
   // The pane: this thread's client on top when it is a waiting client's thread, the list under it. It opens
   // at once from what the last sync stored, and the list is brought up to date after (S2).
   if (verb !== 'link' && verb !== 'start' && verb !== 'update') return showList($, press)
+  // (0.5.12) /mm start all, typed by the person (anyone else was refused above): Start all
+  if (verb === 'start' && arg.toLowerCase() === 'all') return startAll($)
   const feed = await fetchFeed($)
   // The name is settled before anything is touched: no client, or more than one, does nothing at all.
   // (any client the pane lists, in the list or in one of the two groups under it; for `link`, any client
@@ -4839,6 +5022,7 @@ export const register: Register = on => {
         <Text>{bandWords(band.text, true)}</Text>
         <Button key="mm-open-list" label="Open list" onPress={() => void openList($)} />
         {band.drafts ? <Button key="mm-open-drafts" label="Drafts" onPress={() => void openDrafts($)} /> : null}
+        {band.startAll ? <Button key="mm-start-all" label={startAllLabel(band.startAll)} variant="primary" onPress={() => void pressStartAll($)} /> : null}
       </Box>
     )
   })
@@ -4869,6 +5053,8 @@ export const register: Register = on => {
     if (!hasList && !client.text) return <Text dimColor>{CHECKING}</Text>
     // (0.5.5) the thread drawing this pane, as the timer already learnt it: a row says "this thread" only of it
     const here = await knownSelf($)
+    // (0.5.12) the Start all button, from what is stored: two or more clients that need a new thread
+    const offer = hasList ? await startAllOffer($) : 0
     const drawRow = (row: Row, lead: string) => (
       <Box flexDirection="column" marginTop={1}>
         <Text>{`${lead} ${row.title}`}</Text>
@@ -4895,6 +5081,7 @@ export const register: Register = on => {
           </Box>
         ) : null}
         {hasList && queue ? <Text bold>{queue.header}</Text> : <Text dimColor>{CHECKING}</Text>}
+        {offer > 0 ? <Button key="mm-start-all" label={startAllLabel(offer)} variant="primary" onPress={() => void pressStartAll($)} /> : null}
         {notice?.text ? <Text>{notice.text}</Text> : null}
         {hasList && queue?.warning ? <Text>{queue.warning}</Text> : null}
         {hasList && queue
