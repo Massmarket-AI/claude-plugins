@@ -46,7 +46,9 @@ export type AppThread = { sessionId: string; title?: string; pinned?: boolean; i
 /**
  * Claude Code session id → the app thread it runs in, as each session records about itself. `at` is when the
  * pair was last written (a session writes it again once a day, and a pair not written for 30 days is
- * forgotten); `since` (0.5.9) is when it was first written for that thread, kept through those rewrites.
+ * forgotten); `since` (0.5.9) is when it was first written for that thread, written with every first write and
+ * kept through those rewrites. A pair with no `since` (written before 0.5.9, or found late in the app's records
+ * and dated then) says nothing about when its thread started.
  */
 export type Pairs = Record<string, { app: string; at: number; since?: number }>
 
@@ -219,17 +221,18 @@ export function autoLinkFate(projectId: string, sid: string, feedThreads: readon
 }
 
 /**
- * (0.5.9) When a thread started, as far as the bridge knows: the earliest any Claude Code session recorded itself
- * running in it (`pairs`: the first time each pair was written, `since`, or `at` for a pair written before
- * 0.5.9). Undefined when no session of the thread has a pair. ⛔ Never its last activity: typing in a thread
- * later does not make it newer.
+ * (0.5.9) When a thread started, as far as the bridge knows: the earliest any Claude Code session was first
+ * recorded running in it (each pair's `since`). Undefined, START-UNKNOWN, when no session of the thread has a pair,
+ * or when any of its pairs has no `since` (review of 54a0437d, M1: a pair written before 0.5.9 carries its last
+ * daily rewrite, and one the app's records gave late carries the day it was found; neither is when the thread
+ * started). ⛔ Never its last activity: typing in a thread later does not make it newer.
  */
 export function threadStart(sid: string, pairs: Pairs): number | undefined {
   let start: number | undefined
   for (const p of Object.values(pairs)) {
     if (!p || p.app !== sid) continue
-    const t = typeof p.since === 'number' && Number.isFinite(p.since) ? p.since : p.at
-    if (typeof t === 'number' && Number.isFinite(t) && (start === undefined || t < start)) start = t
+    if (typeof p.since !== 'number' || !Number.isFinite(p.since)) return undefined
+    if (start === undefined || p.since < start) start = p.since
   }
   return start
 }
@@ -240,9 +243,9 @@ export function threadStart(sid: string, pairs: Pairs): number | undefined {
  * app's list, not archived, not the linked thread, linked to no client, not one the person unlinked, not one a
  * client was moved off (`released`), not reached by sessions of more than one client (`shared`), not
  * another client's by the feed or by its marker (`declaredOther`), and it opened with this client's own marker
- * or its sessions declared this client alone (`onlyClients`). Its start (`threadStart`) must be LATER than the
- * linked thread's (the linked thread's start: `threadStart`, else its last activity; neither known, nothing
- * moves), and the newest start wins.
+ * or its sessions declared this client alone (`onlyClients`). Its start (`threadStart`) must be known, and LATER
+ * than both the linked thread's start and its last activity (M1: whichever of them is known and later; neither
+ * known, nothing moves). The newest start wins. ⛔ A candidate whose start is unknown is never one.
  * ⛔ The newest thread, never the most recently active: typing in the old thread later never pulls the link back.
  * ⛔ Only for a link the bridge made by itself: the caller never asks this for a link the person made.
  */
@@ -264,13 +267,9 @@ export function newerThreadFor(
   const unlinked = skip.unlinked ?? {}
   const released = skip.released ?? []
   const shared = skip.shared ?? sharedThreads(feedThreads, pairs)
-  const own = live.get(linked)
-  let from = threadStart(linked, pairs)
-  if (from === undefined) {
-    const t = ms(own?.lastActivityAt)
-    from = Number.isFinite(t) ? t : undefined
-  }
-  if (from === undefined) return undefined
+  const known = [threadStart(linked, pairs), ms(live.get(linked)?.lastActivityAt)].filter((t): t is number => typeof t === 'number' && Number.isFinite(t))
+  if (!known.length) return undefined
+  const from = Math.max(...known)
   let best: { sid: string; start: number } | undefined
   for (const s of live.values()) {
     const sid = s.sessionId

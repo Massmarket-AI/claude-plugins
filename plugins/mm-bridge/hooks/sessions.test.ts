@@ -1036,9 +1036,9 @@ const row = (n: number, session: string, at: number) => ({ project_id: pid(n), s
  * linked to nobody. The feed names each thread's session `cli-old-<n>` / `cli-new-<n>`; the old thread's own
  * session (`cli:<thread>` in this fake app) has a pair too, so its own timer writes it again.
  * `marked`: the new thread opened with the client's marker. `listed`: the feed lists its session for the client.
- * `auto: false`: the old link is one the person made.
+ * `auto: false`: the old link is one the person made. `legacy`: every pair as 0.5.8 wrote it, with no `since`.
  */
-async function replay(n: number, opts: { marked?: boolean; listed?: boolean; auto?: boolean } = {}) {
+async function replay(n: number, opts: { marked?: boolean; listed?: boolean; auto?: boolean; legacy?: boolean } = {}) {
   const name = `Client R${n}`
   const ids = { hub: `local_r1b_hub_${n}`, old: `local_r1b_old_${n}`, fresh: `local_r1b_new_${n}` }
   // a client message at 10 AM on 10-15: due within the pin's window
@@ -1052,7 +1052,8 @@ async function replay(n: number, opts: { marked?: boolean; listed?: boolean; aut
     { sessionId: ids.fresh, title: `${name}: resume`, lastActivityAt: iso(REPLAY_AT) },
   ])
   await w.advance(REPLAY_AT - NOW)
-  w.put('mm.threads', { [`cli:${ids.old}`]: { app: ids.old, at: OLD_START }, [`cli-old-${n}`]: { app: ids.old, at: OLD_START }, [`cli-new-${n}`]: { app: ids.fresh, at: NEW_START } })
+  const pair = (app: string, at: number) => (opts.legacy ? { app, at } : { app, at, since: at })
+  w.put('mm.threads', { [`cli:${ids.old}`]: pair(ids.old, OLD_START), [`cli-old-${n}`]: pair(ids.old, OLD_START), [`cli-new-${n}`]: pair(ids.fresh, NEW_START) })
   w.put('mm.links', { [pid(n)]: ids.old })
   if (opts.auto !== false) w.put('mm.auto', { [pid(n)]: { sid: ids.old, miss: 0, made: Date.parse('2026-10-15T10:32:47-04:00') } })
   w.put('mm.titles', { [ids.old]: `${name} lending` })
@@ -1130,12 +1131,13 @@ describe('R1b (0.5.9, Rob 10-15: "Can we have it update to attach to the most re
       ['archived', r => void Object.assign(r.w.app.get(r.fresh) ?? {}, { isArchived: true }), { marked: true, listed: true }],
       ['shared: its sessions declared two clients', (r, n) => {
         r.feed.threads?.push(row(OTHER, `cli-new-${n}-b`, REPLAY_AT))
-        r.w.put('mm.threads', { ...(r.w.stored('mm.threads') as Record<string, unknown>), [`cli-new-${n}-b`]: { app: r.fresh, at: NEW_START } })
+        r.w.put('mm.threads', { ...(r.w.stored('mm.threads') as Record<string, unknown>), [`cli-new-${n}-b`]: { app: r.fresh, at: NEW_START, since: NEW_START } })
       }, { marked: true, listed: true }],
       ['declared for another client by the feed (declaredOther)', (r, n) => r.feed.threads?.push(row(OTHER, `cli-new-${n}`, REPLAY_AT)), { marked: true }],
       ['OW marks its session sole: false', (r, n) => r.feed.threads?.push({ ...row(n, `cli-new-${n}`, REPLAY_AT), sole: false }), { marked: true }],
       ['marked for another client', r => r.w.put('mm.marked', { [r.fresh]: pid(OTHER) }), { listed: true }],
-      ['started before the linked thread', (r, n) => r.w.put('mm.threads', { ...(r.w.stored('mm.threads') as Record<string, unknown>), [`cli-new-${n}`]: { app: r.fresh, at: OLD_START - HOUR_MS } }), { marked: true, listed: true }],
+      ['started before the linked thread', (r, n) => r.w.put('mm.threads', { ...(r.w.stored('mm.threads') as Record<string, unknown>), [`cli-new-${n}`]: { app: r.fresh, at: OLD_START - HOUR_MS, since: OLD_START - HOUR_MS } }), { marked: true, listed: true }],
+      ['its start unknown: paired late, or before 0.5.9 (M1)', (r, n) => r.w.put('mm.threads', { ...(r.w.stored('mm.threads') as Record<string, unknown>), [`cli-new-${n}`]: { app: r.fresh, at: REPLAY_AT } }), { marked: true, listed: true }],
     ]
     let n = 160
     for (const [name, change, opts] of ways) {
@@ -1168,19 +1170,59 @@ describe('R1b (0.5.9, Rob 10-15: "Can we have it update to attach to the most re
     expect(r.w.app.get(r.fresh)?.pinned).toBe(true)
   })
 
+  test('[M1] a store from before 0.5.9 (no pair has `since`): nothing moves anywhere on the first 0.5.9 syncs, marker or not', async () => {
+    for (const n of [174, 175]) {
+      const r = await replay(n, { legacy: true, marked: n === 174, listed: true })
+      for (let i = 0; i < 3; i++) {
+        await mm(r.hubSession, '')
+        await r.w.advance(6 * 60_000)
+      }
+      stillOld(r, n)
+      expect(r.w.app.get(r.fresh)).toMatchObject({ title: `Client R${n}: resume`, pinned: false })
+    }
+  })
+
+  test('[M1 probe] the client on B (started 10-10, active 10-15 09:00, its pair rewritten 10-14 08:00 by 0.5.8), an older thread A (used 10-14 noon, its pair as old): no move on the first 0.5.9 sync', async () => {
+    const n = 176
+    const name = `Client R${n}`
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, drafts: [], mail: [mail(n, name, -49)], threads: [row(n, 'cli-b-176', Date.parse('2026-10-15T09:00:00-04:00')), row(n, 'cli-a-176', Date.parse('2026-10-14T12:00:00-04:00'))] }
+    const w = fakeApp(feed, [
+      { sessionId: 'local_m1_hub', title: 'Hub', lastActivityAt: iso(REPLAY_AT) },
+      { sessionId: 'local_m1_b', title: `🟡 late · ${name} · reply`, pinned: true, lastActivityAt: '2026-10-15T13:00:00.000Z' },
+      { sessionId: 'local_m1_a', title: 'Thread A', lastActivityAt: '2026-10-14T16:00:00.000Z' },
+    ])
+    await w.advance(REPLAY_AT - NOW)
+    w.put('mm.threads', { 'cli-b-176': { app: 'local_m1_b', at: Date.parse('2026-10-14T08:00:00-04:00') }, 'cli-a-176': { app: 'local_m1_a', at: Date.parse('2026-10-14T12:00:00-04:00') } })
+    w.put('mm.links', { [pid(n)]: 'local_m1_b' })
+    w.put('mm.auto', { [pid(n)]: { sid: 'local_m1_b', miss: 0, made: Date.parse('2026-10-10T09:00:00-04:00') } })
+    await mm(w.session('local_m1_hub'), '')
+    expect(linksOf(w)).toEqual({ [pid(n)]: 'local_m1_b' })
+    expect(w.app.get('local_m1_a')).toMatchObject({ title: 'Thread A', pinned: false })
+  })
+
+  test('[L3] a feed that lists no sessions at all moves nothing, even to a thread that opened with the client\'s marker', async () => {
+    for (const [n, threads] of [[177, []], [178, undefined]] as const) {
+      const r = await replay(n, { marked: true })
+      if (threads) r.feed.threads = [...threads]
+      else delete r.feed.threads
+      await mm(r.hubSession, '')
+      stillOld(r, n)
+    }
+  })
+
   test('the linked thread with no pair is dated by its last activity; with neither, nothing moves', async () => {
     const dated = await replay(171, { listed: true })
-    dated.w.put('mm.threads', { 'cli-new-171': { app: dated.fresh, at: NEW_START } })
+    dated.w.put('mm.threads', { 'cli-new-171': { app: dated.fresh, at: NEW_START, since: NEW_START } })
     await mm(dated.hubSession, '')
     expect(linksOf(dated.w)).toEqual({ [pid(171)]: dated.fresh })
     // its last activity is later than the new thread's start: no move
     const later = await replay(172, { listed: true })
-    later.w.put('mm.threads', { 'cli-new-172': { app: later.fresh, at: OLD_START } })
+    later.w.put('mm.threads', { 'cli-new-172': { app: later.fresh, at: OLD_START, since: OLD_START } })
     await mm(later.hubSession, '')
     expect(linksOf(later.w)[pid(172)]).toBe(later.old)
     // no pair and no last activity: unknown, so nothing moves
     const blank = await replay(173, { listed: true })
-    blank.w.put('mm.threads', { 'cli-new-173': { app: blank.fresh, at: NEW_START } })
+    blank.w.put('mm.threads', { 'cli-new-173': { app: blank.fresh, at: NEW_START, since: NEW_START } })
     const old = blank.w.app.get(blank.old) as unknown as Record<string, unknown>
     delete old.lastActivityAt
     await mm(blank.hubSession, '')
@@ -1220,19 +1262,30 @@ describe('0.5.9: a marker takes a client from a link the bridge made by itself; 
     expect(r.w.stored('mm.released')).toEqual([r.old])
   })
 
-  test('another session\'s older copy of the links written over the marker\'s link (B1): the check 1 to 3 seconds later takes the client back from the bridge\'s thread', async () => {
-    const r = await replay(183)
-    await mm(r.hubSession, '')
-    await submit(r.w.session(r.fresh), `[mm-link ${pid(183)}] Resume Client R183's thread. One client only.`)
-    expect(linksOf(r.w)).toEqual({ [pid(183)]: r.fresh })
-    // a sync in another thread that read the links before the marker writes its copy back
-    r.w.put('mm.links', { [pid(183)]: r.old })
-    await r.w.advance(3_000)
-    expect(linksOf(r.w)).toEqual({ [pid(183)]: r.fresh })
-    await r.w.advance(6 * 60_000)
-    await mm(r.hubSession, '')
-    expect(r.w.app.get(r.old)).toMatchObject({ title: 'Client R183 lending', pinned: false })
-    expect(r.w.app.get(r.fresh)?.pinned).toBe(true)
+  test('[L1] the marker\'s check 1 to 3 seconds later takes the client back only while the store says the bridge linked the other thread by itself, and the person has not acted on it', async () => {
+    const take = async (n: number, after: (r: Awaited<ReturnType<typeof replay>>) => void) => {
+      const r = await replay(n)
+      await mm(r.hubSession, '')
+      await submit(r.w.session(r.fresh), `[mm-link ${pid(n)}] Resume Client R${n}'s thread. One client only.`)
+      expect(linksOf(r.w)).toEqual({ [pid(n)]: r.fresh })
+      after(r)
+      await r.w.advance(3_000)
+      return linksOf(r.w)[pid(n)] === r.fresh ? 'fresh' : 'old'
+    }
+    const autoOld = (r: Awaited<ReturnType<typeof replay>>, n: number) => ({ [pid(n)]: { sid: r.old, miss: 0, made: REPLAY_AT } })
+    // (B1) another session that read the store before the marker writes its copy back, the link and its auto record: taken back
+    expect(await take(183, r => {
+      r.w.put('mm.links', { [pid(183)]: r.old })
+      r.w.put('mm.auto', autoOld(r, 183))
+    })).toBe('fresh')
+    // the same copy, while the person's act names the old thread: left
+    expect(await take(184, r => {
+      r.w.put('mm.links', { [pid(184)]: r.old })
+      r.w.put('mm.auto', autoOld(r, 184))
+      r.w.put('mm.acted', { [pid(184)]: { sid: r.old, at: r.w.now() } })
+    })).toBe('old')
+    // the link alone written back, with no auto record naming the old thread: left
+    expect(await take(185, r => r.w.put('mm.links', { [pid(185)]: r.old }))).toBe('old')
   })
 
   test('a client the person linked keeps its thread: the marker records the thread and answers with the stale copy\'s sentence, exactly as before', async () => {

@@ -209,21 +209,37 @@ const WRAP_NOTES = /\n\nShared notes folder for this group of sessions \([^\n]*$
  * instruction): …`. On 10-15 a dozen threads started together: the first opened without it and its marker counted;
  * every later one opened with it, before the wrapper, and none of their markers did.
  */
-const APP_NOTE = /^<system-reminder>\n[\s\S]*?\n<\/system-reminder>(?:\n\n|\n(?=<system-reminder>\n))/
+const NOTE_OPEN = '<system-reminder>\n'
+const NOTE_CLOSE = '</system-reminder>'
 /** The most app notes taken off the front of one message. */
 const APP_NOTES_MAX = 10
 /**
+ * (0.5.9) The message after the app's notes in front of it. ⛔ Fails closed (review of 54a0437d, L4): each note runs
+ * from `<system-reminder>\n` to the FIRST `</system-reminder>`, which must begin a line and be followed by a blank
+ * line (then the message) or at once by the next note. Anything else (a close tag inside a line, a second open tag
+ * inside the note, CRLF, no close tag, more than APP_NOTES_MAX notes) gives the message back as it is: it begins
+ * with `<system-reminder>`, so neither the wrapper nor a marker is read in it.
+ */
+function afterAppNotes(text: string): string {
+  let rest = text
+  for (let n = 0; n < APP_NOTES_MAX && rest.startsWith(NOTE_OPEN); n++) {
+    const close = rest.indexOf(NOTE_CLOSE)
+    if (close < 0 || rest[close - 1] !== '\n') return text
+    if (rest.slice(NOTE_OPEN.length, close).includes('<system-reminder>')) return text
+    const after = rest.slice(close + NOTE_CLOSE.length)
+    if (after.startsWith('\n\n')) return after.slice(2)
+    if (!after.startsWith(`\n${NOTE_OPEN}`)) return text
+    rest = after.slice(1)
+  }
+  return text
+}
+/**
  * (0.5.8) The prompt a message carries: the message itself, or, when it begins with the app's wrapper, the task
  * after it, its notes line taken off. `task`: it began `Task (…):`, the form the app sends as `auto-continuation`.
- * (0.5.9) The app's own notes in front of it are taken off first: the message begins after them.
+ * (0.5.9) The app's own notes in front of it are taken off first: the message begins after them (`afterAppNotes`).
  */
 function promptOf(text: string): { prompt: string; task: boolean } {
-  let body = text
-  for (let n = 0; n < APP_NOTES_MAX; n++) {
-    const note = APP_NOTE.exec(body)
-    if (!note) break
-    body = body.slice(note[0].length)
-  }
+  const body = afterAppNotes(text)
   const task = WRAP_TASK.exec(body)
   let rest = task ? body.slice(task[0].length) : body
   const background = WRAP_BACKGROUND.exec(rest)
@@ -783,6 +799,23 @@ function applyChanges<V>(fresh: Record<string, V>, before: Readonly<Record<strin
   return changed
 }
 
+/**
+ * (0.5.9, review of 54a0437d, L2) `applyChanges` for the links, where ⛔ a thread is one client's: a client this pass
+ * links to a thread that another client holds in the store's fresh copy (another session linked it while this pass
+ * ran) keeps what the store has for it.
+ */
+function applyLinkChanges(fresh: Record<string, string>, before: Readonly<Record<string, string>>, after: Readonly<Record<string, string>>): boolean {
+  const prior = { ...fresh }
+  applyChanges(fresh, before, after)
+  for (const [pid, sid] of Object.entries(fresh)) {
+    if (prior[pid] === sid) continue
+    if (!Object.entries(fresh).some(([other, held]) => other !== pid && held === sid)) continue
+    if (prior[pid] === undefined) delete fresh[pid]
+    else fresh[pid] = prior[pid] as string
+  }
+  return !sameValue(fresh, prior)
+}
+
 /** The same for a list of thread ids: what the pass took off it comes off, what it added goes on, the rest is the store's. */
 function applyListChanges(fresh: string[], before: readonly string[], after: readonly string[]): boolean {
   const off = before.filter(x => !after.includes(x))
@@ -832,12 +865,13 @@ async function recordSelf($: EngineInterface): Promise<void> {
   if (mine && mine.app === app && now - mine.at < DAY_MS) return
   const write = () =>
     patchStore<Pairs>($, 'mm.threads', {}, pairs => {
-      // (0.5.9) when the pair was first written for this thread is kept through the daily rewrite: it is the
-      // thread's start for R1b (`threadStart`), and a thread the person goes back to is not made newer by it.
-      // (A first write is `at` alone, as before: `since` is only written once it differs.)
+      // (0.5.9) when the pair was first written for this thread: written with every first write, and kept through
+      // the daily rewrite. It is the thread's start for R1b (`threadStart`), so a thread the person goes back to is
+      // not made newer by it. ⛔ A pair written before 0.5.9 has none and gets none (M1): its `at` is its last
+      // rewrite, not when the thread started, and its thread's start stays unknown.
       const was = pairs[cli]
-      const first = was && was.app === app ? (typeof was.since === 'number' && Number.isFinite(was.since) ? was.since : was.at) : undefined
-      pairs[cli] = typeof first === 'number' && Number.isFinite(first) && first < now ? { app, at: now, since: first } : { app, at: now }
+      if (!was || was.app !== app) pairs[cli] = { app, at: now, since: now }
+      else pairs[cli] = typeof was.since === 'number' && Number.isFinite(was.since) ? { app, at: now, since: was.since } : { app, at: now }
       for (const [k, v] of Object.entries(pairs)) if (!v || now - v.at > PAIR_KEEP_MS) delete pairs[k]
     })
   // gone a moment later (another session's write met this one, or this one was never made): written again.
@@ -969,6 +1003,7 @@ async function readRecords($: EngineInterface, now: number, live: ReadonlyMap<st
     }
     // A record just opened is the app's own word: it wins over a pair a session wrote down. Oldest first,
     // so where two records name one session the more recently modified thread has it.
+    // (0.5.9, M1) dated the day it was found, with no `since`: when its thread started is not known from it
     for (const r of said.sort((a, b) => a.mtimeMs - b.mtimeMs)) found[r.cli] = { app: r.app, at: now }
     // A record opened earlier whose pair has since dropped out of the store gives it back without being
     // opened again, unless another thread has that session by now.
@@ -1215,9 +1250,12 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // the person put on left alone); the pin lands on the new one in the pass below.
   // ⛔ Only a link in `auto`: one the person made, or that a closing route or their own act took out of `auto`,
   //    never moves this way. ⛔ Once per feed, as the undo above (`known`), never on an empty list (not
-  //    `complete`), and never from or to a thread that cannot be seen. ⛔ A thread is one client's: a thread
-  //    linked to any client, this pass's moves included, is never taken.
-  if (!known && listed.complete) {
+  //    `complete`), never on a feed that lists no sessions at all (L3), and never from or to a thread that cannot
+  //    be seen. ⛔ A thread is one client's: a thread linked to any client, this pass's moves included, is never
+  //    taken. ⛔ Checked again on the store just before the links are written (`moves`, M2).
+  /** (0.5.9) The links R1b moved in this pass: client, the thread it had, the thread it moved to. */
+  const moves: Array<{ pid: string; from: string; to: string }> = []
+  if (!known && listed.complete && feedThreads.length > 0) {
     const shared = sharedThreads(feedThreads, pairs)
     const left = Array.isArray(released) ? released : []
     for (const [pid, a] of Object.entries(auto)) {
@@ -1227,6 +1265,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
       links[pid] = sid
       auto[pid] = { sid, miss: 0, made: now }
       undone.push(a.sid)
+      moves.push({ pid, from: a.sid, to: sid })
     }
   }
 
@@ -1566,9 +1605,34 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // done: what makes a link the bridge's own (its auto record) and the names to give back are written
   // BEFORE the links, and taken away only AFTER them. A link the bridge made never stands without its auto
   // record, so it can always be let go; one it lets go keeps its record until the link itself is gone.
+  // ⛔ (0.5.9, review of 54a0437d) The links this pass made by itself (R1, R1b) are checked again on the store first,
+  // and one is dropped, link and auto record both, so the store keeps what was written while this pass waited on the
+  // app: (L2) another client holds its thread now (one thread, one client); (M2) an R1b move whose client the person
+  // acted on meanwhile (a /mm link, a press, a claim: the auto record no longer names the thread it had, or their
+  // act names that thread). (The pins and names it touched are put right by the next sync.)
+  const made = Object.keys(links).filter(pid => links[pid] !== was.links[pid])
+  if (made.length) {
+    const freshLinks = await storeGet<Record<string, string>>($, 'mm.links', {})
+    const freshAuto = await storeGet<Auto>($, 'mm.auto', {})
+    const freshActed = await storeGet<Acted>($, 'mm.acted', {})
+    /** Whether the store has `other` on this thread now (not merely as this pass read it, when the pass takes it off). */
+    const holds = (other: string, sid: string): boolean => freshLinks[other] === sid && !(was.links[other] === sid && links[other] !== sid)
+    for (const pid of made) {
+      const sid = links[pid] as string
+      const m = moves.find(x => x.pid === pid)
+      const taken = Object.keys(freshLinks).some(other => other !== pid && holds(other, sid))
+      const acted = m !== undefined && (freshAuto[pid]?.sid !== m.from || freshActed[pid]?.sid === m.from)
+      if (!taken && !acted) continue
+      if (was.links[pid] === undefined) delete links[pid]
+      else links[pid] = was.links[pid] as string
+      const before = was.auto[pid]
+      if (before) auto[pid] = copyOf(before)
+      else delete auto[pid]
+    }
+  }
   await patchStore<Auto>($, 'mm.auto', {}, (fresh, stored) => applyChanges(fresh, was.auto, auto, 'set') || !stored)
   await patchStore<Record<string, string>>($, 'mm.titles', {}, fresh => applyChanges(fresh, was.titles, titles, 'set'))
-  await patchStore<Record<string, string>>($, 'mm.links', {}, (fresh, stored) => applyChanges(fresh, was.links, links) || !stored)
+  await patchStore<Record<string, string>>($, 'mm.links', {}, (fresh, stored) => applyLinkChanges(fresh, was.links, links) || !stored)
   // ⛔ The person's unpins BEFORE the pin records (F7): the pass that sees a pin taken off by hand both
   // records it and turns our pin record into not ours. Written the other way round, a refused second write
   // left neither, and the next sync pinned the thread again.
@@ -4011,10 +4075,16 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
   // (0.5.9, Rob 10-15: "You should be able to relink these when you're asked to") And a client the bridge linked
   // by itself (`mm.auto`) may be moved here: that link is not the person's. The thread it had is given back on the
   // next sync (`mm.released`: its own name, our pin off). ⛔ A client the person linked is still refused.
-  /** For anything but the person: the thread the client may be taken from (one gone, or one the bridge linked by itself). */
+  /** For anything but the person: a thread the client may be taken from because the app says it is gone. */
   let allowed: string | undefined
-  /** (0.5.9) That thread, when it is the bridge's own link: given back once this thread has the client. */
-  let bridgeHeld: string | undefined
+  /** This thread is another client's: the sentence, the client's name wherever it can still be read. */
+  const ownedBy = async (owner: string, me: string): Promise<string> => {
+    const pin = (await storeGet<Record<string, Pin>>($, 'mm.pins', {}))[me]
+    const here = await desktopOnly(async () => asThread(await mcpJson($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' })), null)
+    // the client's name wherever it can still be read; failing all of that, the sentence names no one
+    const other = ownerName(owner, queue, pin, here?.title) || 'another client'
+    return `This thread is ${other}'s. Only the person can move it: they type /mm link ${named.client}.`
+  }
   if (verb === 'link' && by !== 'person') {
     const me = await selfId($)
     if (me && me in (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))) {
@@ -4022,18 +4092,13 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
     }
     const links = await storeGet<Record<string, string>>($, 'mm.links', {})
     const owner = me ? ownerOf(me, links) : undefined
-    if (owner !== undefined && owner !== named.projectId) {
-      const pin = (await storeGet<Record<string, Pin>>($, 'mm.pins', {}))[me]
-      const here = await desktopOnly(async () => asThread(await mcpJson($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' })), null)
-      // the client's name wherever it can still be read; failing all of that, the sentence names no one
-      const other = ownerName(owner, queue, pin, here?.title) || 'another client'
-      return `This thread is ${other}'s. Only the person can move it: they type /mm link ${named.client}.`
-    }
+    if (owner !== undefined && owner !== named.projectId) return ownedBy(owner, me)
     // (a thread the app says is gone, or archived, holds nothing; one it cannot answer for is still there)
+    // (0.5.9) a thread the bridge linked by itself passes here: the write below takes the client from it only while
+    // the store, read after the sync, still says the bridge made that link (`autoNow`, M3)
     const holder = links[named.projectId]
-    if (holder !== undefined && holder !== me) {
-      if ((await storeGet<Auto>($, 'mm.auto', {}))[named.projectId]?.sid === holder) bridgeHeld = holder
-      else if ((await lookup($, holder)) !== 'gone') return alreadyHas(named.client)
+    if (holder !== undefined && holder !== me && (await storeGet<Auto>($, 'mm.auto', {}))[named.projectId]?.sid !== holder) {
+      if ((await lookup($, holder)) !== 'gone') return alreadyHas(named.client)
       allowed = holder
     }
   }
@@ -4059,23 +4124,34 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
   /** The thread that had the client when this one took it. */
   let had: string | undefined
   let refused = false
+  /** (0.5.9, L5) The client this thread became meanwhile, for anything but the person. */
+  let ownerNow: string | undefined
   await patchStore<Record<string, string>>($, 'mm.links', {}, links => {
     const holder = links[pid]
-    // ⛔ (0.5.9) for anything but the person, checked again on the fresh copy: a client the person linked to another
-    // thread meanwhile stays there
-    if (by !== 'person' && holder !== undefined && holder !== me && holder !== allowed && holder !== autoNow) {
-      refused = true
-      return false
+    if (by !== 'person') {
+      // ⛔ (0.5.9) checked again on the fresh copy: this thread is not now another client's (L5), and a client the
+      // person linked to another thread meanwhile stays there (M3): only a gone thread, or one the bridge linked
+      // by itself as the store says after the sync, gives it up
+      const owner = ownerOf(me, links)
+      if (owner !== undefined && owner !== pid) {
+        ownerNow = owner
+        return false
+      }
+      if (holder !== undefined && holder !== me && holder !== allowed && holder !== autoNow) {
+        refused = true
+        return false
+      }
     }
     // ⛔ a thread is one client's: linked here by hand, it is no longer any other client's
     for (const k of Object.keys(links)) if (links[k] === me && k !== pid) delete links[k]
     had = holder !== me ? holder : undefined
     links[pid] = me
   })
+  if (ownerNow !== undefined) return ownedBy(ownerNow, me)
   if (refused) return alreadyHas(named.client)
   // (0.5.9) the thread the bridge had linked the client to by itself is given back on the next sync
   const given = had
-  if (by !== 'person' && given !== undefined && (given === bridgeHeld || given === autoNow)) {
+  if (by !== 'person' && given !== undefined && given === autoNow) {
     await patchStore<string[]>($, 'mm.released', [], released => {
       if (released.includes(given)) return false
       released.push(given)
@@ -4196,13 +4272,15 @@ async function linkFromMarker($: EngineInterface, text: string, origin: string |
     const released = await storeGet<string[]>($, 'mm.released', [])
     if (Array.isArray(released) && released.includes(me)) return
     const auto = await storeGet<Auto>($, 'mm.auto', {})
+    const acted = await storeGet<Acted>($, 'mm.acted', {})
     let again = false
     await patchStore<Record<string, string>>($, 'mm.links', {}, links => {
       const holder = links[projectId]
       const owner = ownerOf(me, links)
       if (holder === me || (owner !== undefined && owner !== projectId)) return false
-      // (0.5.9) the thread the bridge had linked by itself, that this marker took the client from, is no holder either
-      if (holder !== undefined && auto[projectId]?.sid !== holder && holder !== autoHolder) return false
+      // a holder is taken from only while the store says the bridge linked it by itself, and (0.5.9, review of
+      // 54a0437d, L1) while the person has not acted on it
+      if (holder !== undefined && (auto[projectId]?.sid !== holder || acted[projectId]?.sid === holder)) return false
       links[projectId] = me
       again = true
     })
