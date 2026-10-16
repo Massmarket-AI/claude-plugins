@@ -9,7 +9,7 @@ import {
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLink, titleLooksLike, titleSuggestion, waitingText,
   newerThreadFor, threadStart,
   CHIP_TITLE_MAX, REFRESH_FAILED, bandText, chipTitle, claimText, isStillOpenRow, staleCopySentence, startKickoff,
-  START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary,
+  START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary, startMissingLabel,
   LABEL_MAX, buttonLabel,
 } from './threads'
 import type { AppThread, ClientThread, Pairs, Platform } from './threads'
@@ -1536,13 +1536,16 @@ describe('(0.5.11, Opus 10-15) an update sent by itself never takes the package;
 
   test('(0.5.12) Start all\'s one line: started, not started and why, skipped and why, and how many are left for a second press', async () => {
     expect(START_ALL_MAX).toBe(8)
-    expect(startAllLabel(3)).toBe('Start all (3)')
+    expect(startAllLabel(3)).toBe('Start missing threads (3)')
+    // (0.5.14) the band's button: always drawn, All threads started when none is missing
+    expect(startMissingLabel(2)).toBe('Start missing threads (2)')
+    expect(startMissingLabel(0)).toBe('All threads started')
     expect(startAllSummary([], [], [], 0)).toBe('No client needs a new thread now.')
     expect(startAllSummary(['Acme Roofing'], [], [], 0)).toBe('Started 1 thread: Acme Roofing.')
     expect(startAllSummary(['Acme Roofing', 'Cedar Dental'], [{ client: 'Bolt Staffing', why: 'the app did not answer in 15 seconds' }], [{ client: 'Dune Co', why: 'it has a thread now' }], 1)).toBe(
-      'Started 2 threads: Acme Roofing, Cedar Dental. Not started: Bolt Staffing (the app did not answer in 15 seconds). Skipped: Dune Co (it has a thread now). 1 more needs a thread: press Start all again.',
+      'Started 2 threads: Acme Roofing, Cedar Dental. Not started: Bolt Staffing (the app did not answer in 15 seconds). Skipped: Dune Co (it has a thread now). 1 more needs a thread: press Start missing threads again.',
     )
-    expect(startAllSummary(['A'], [], [], 3)).toBe('Started 1 thread: A. 3 more need a thread: press Start all again.')
+    expect(startAllSummary(['A'], [], [], 3)).toBe('Started 1 thread: A. 3 more need a thread: press Start missing threads again.')
   })
 })
 

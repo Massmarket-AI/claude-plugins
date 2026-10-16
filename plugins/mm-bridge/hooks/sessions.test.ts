@@ -406,34 +406,26 @@ describe('S3: a press answers within 100 ms of fake time while OW takes 5 second
     return { w, hub, hubId, queue, notice, closeouts }
   }
 
-  test('the band\'s Open list and a typed /mm open the pane at once, drawn from the last sync; the refresh draws it again', async () => {
-    const { w, hub, hubId, queue, closeouts } = await slowOw('s3l')
+  test('(0.5.14) the band carries Start missing threads, not Open list; a typed /mm opens the pane at once, drawn from the last sync; the refresh draws it again', async () => {
+    const { w, hub } = await slowOw('s3l')
     const t0 = w.now()
-    // the band's button, in a thread whose pane has nothing drawn yet
+    // the band's one button, in a thread whose pane has nothing drawn yet: Client Two has no thread
+    const band = await bandButtons(hub)
+    expect([...band.keys()]).toEqual(['mm-start-missing'])
+    expect(band.get('mm-open-list')).toBeUndefined()
+    // a typed /mm in another thread: the pane at once, from the 9 AM sync, and its answer once the feed has answered
     const other = w.session('local_s3la')
-    const open = (await bandButtons(hub)).get('mm-open-list')
-    expect(open).toBeDefined()
-    const before = w.opened.length
-    open?.()
-    await settle()
-    expect(w.now() - t0).toBeLessThanOrEqual(100)
-    expect(w.opened.slice(before)).toEqual([{ thread: hubId, id: 'mm-queue' }])
-    expect(queue()?.header).toBe('Needs you now (2)')
-    // drawn from the 9 AM sync, and it says so; the feed is being asked, and has not answered
-    expect(queue()?.note).toContain('Updated 13:00 UTC')
-    const asked = closeouts()
-    await w.advance(5_000)
-    await settle()
-    expect(closeouts()).toBe(asked)
-    expect(queue()?.note).toContain('Updated 13:06 UTC')
-    // a typed /mm in another thread: the same at once, and its answer once the feed has answered
     const opens = w.opened.length
     const typed = mm(other, '')
     await settle()
+    expect(w.now() - t0).toBeLessThanOrEqual(100)
     expect(w.opened.slice(opens)).toEqual([{ thread: 'local_s3la', id: 'mm-queue' }])
-    expect((w.view('local_s3la', 'queue') as Queue | undefined)?.header).toBe('Needs you now (2)')
+    const otherQueue = () => w.view('local_s3la', 'queue') as Queue | undefined
+    expect(otherQueue()?.header).toBe('Needs you now (2)')
+    expect(otherQueue()?.note).toContain('Updated 13:00 UTC')
     await w.advance(5_000)
     expect(await typed).toBe('2 clients need you; 1 thread pinned. The list is in the side pane.')
+    expect(otherQueue()?.note).toContain('Updated 13:06 UTC')
   })
 
   test('Update says it is checking at once and sends exactly once when the feed answers; Start answers at once; Open and Drafts draw within 100 ms; each refresh then draws the list again', async () => {

@@ -2141,9 +2141,9 @@ describe('F9: a thread that linked itself gets the pin and the name, and nothing
     expect(w.fetched.filter(u => u.includes('/reply-package')).length).toBe(1)
     // no message; the timer's own chips: (R4) for the two clients with no thread, and (0.5.4, C1) this thread's client's
     expect(w.acted()).toEqual([CEDAR_AUTO_CHIP, ACME_HERE_CHIP, BOLT_AUTO_CHIP])
-    // the band is the way in: it names this thread's client and carries the Drafts button
+    // the band is the way in: it names this thread's client and carries the Drafts button (0.5.14: after Start missing threads)
     const band = await $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'AbovePrompt', props: BAND_PROPS })
-    expect(await buttons(band)).toEqual([['mm-open-list', 'Open list'], ['mm-open-drafts', 'Drafts']])
+    expect(await buttons(band)).toEqual([['mm-start-missing', 'Start missing threads (2)'], ['mm-open-drafts', 'Drafts']])
     await band.press({ key: 'mm-open-drafts' })
     expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Needs you' }])
     await band.unmount()
@@ -2454,7 +2454,8 @@ describe('starts a program: the system\'s opener takes the person to the thread'
     await ui.press({ key: `drafts:${ACME}` })
     await ui.press({ key: `start:${CEDAR}` })
     const band = await bandOf($)
-    await band.press({ key: 'mm-open-list' })
+    // (0.5.14) the band's one button now: with no start_session here, its press says so and calls nothing
+    await band.press({ key: 'mm-start-missing' })
     await band.unmount()
     await ui.unmount()
     expect(w.ran).toEqual([])
@@ -3025,7 +3026,7 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
   })
 })
 
-describe('the band above the prompt: the way to the list from any thread', () => {
+describe('the band above the prompt: what needs the person, from any thread', () => {
   /**
    * The band as it is drawn: its texts and its buttons. Where the bridge draws nothing it hands the band on
    * to the engine, and in a test nothing is beneath it to draw: that is "nothing drawn".
@@ -3047,7 +3048,7 @@ describe('the band above the prompt: the way to the list from any thread', () =>
     await w.clock.advance(4_000)
   }
 
-  test('clients waiting, every one in a thread: how many, and the button that opens the list', async ($, on) => {
+  test('clients waiting, every one in a thread: how many, and (0.5.14) the band\'s button reads All threads started', async ($, on) => {
     const w = world(on, {
       feed: feed({ threads: [declared(ACME, 'cli-acme', 30), declared(BOLT, 'cli-bolt', 20), declared(CEDAR, 'cli-cedar', 10)] }),
       threads: [thread('local_a', 'Roof quote', 30), thread('local_b', 'Staffing plan', 20), thread('local_c', 'Intake', 10)],
@@ -3055,7 +3056,7 @@ describe('the band above the prompt: the way to the list from any thread', () =>
     })
     await started($, w)
     // (0.5.2, R9) how many are pinned, then the most specific alert: an update ready on a pinned thread
-    expect(await drawn($)).toEqual({ texts: ['Needs you: 3 pinned. An update is ready to claim in the Cedar Dental thread.'], buttons: [['mm-open-list', 'Open list']] })
+    expect(await drawn($)).toEqual({ texts: ['Needs you: 3 pinned. An update is ready to claim in the Cedar Dental thread.'], buttons: [['mm-start-missing', 'All threads started']] })
   })
 
   test('some with no thread yet: the line names them (R4, R9), and (0.5.4, C3) where each one\'s chip is', async ($, on) => {
@@ -3063,7 +3064,7 @@ describe('the band above the prompt: the way to the list from any thread', () =>
     await started($, w)
     expect(await drawn($)).toEqual({
       texts: [`Needs you: 1 pinned · 2 with no thread: Cedar Dental, Bolt Staffing. ${chipIn('Cedar Dental', '4 PM')} ${chipIn('Bolt Staffing', 'Tue 9 AM')}`],
-      buttons: [['mm-open-list', 'Open list']],
+      buttons: [['mm-start-missing', 'Start missing threads (2)']],
     })
   })
 
@@ -3073,7 +3074,7 @@ describe('the band above the prompt: the way to the list from any thread', () =>
     // (0.5.4, C3) the no-thread chips are in this thread, Acme's: the band names a thread of the bridge's by its client
     expect(await drawn($)).toEqual({
       texts: [`Needs you: 1 pinned · 2 with no thread: Cedar Dental, Bolt Staffing. ${chipIn('Cedar Dental', '4 PM', 'Acme Roofing')} ${chipIn('Bolt Staffing', 'Tue 9 AM', 'Acme Roofing')}`],
-      buttons: [['mm-open-list', 'Open list'], ['mm-open-drafts', 'Drafts']],
+      buttons: [['mm-start-missing', 'Start missing threads (2)'], ['mm-open-drafts', 'Drafts']],
     })
   })
 
@@ -3083,21 +3084,51 @@ describe('the band above the prompt: the way to the list from any thread', () =>
     expect((await drawn($)).texts).toEqual([`Needs you: 0 pinned · 1 with no thread: Cedar Dental. ${chipIn('Cedar Dental', '4 PM')}`])
   })
 
-  test('Open list opens the Needs-you pane in this thread, by the person\'s press; it sends nothing', async ($, on) => {
-    const w = acmeWorld(on)
+  test('(0.5.14, Rob 10-16) Start missing threads took Open list\'s place: always drawn, primary with how many, dim as All threads started with none', async ($, on) => {
+    const w = world(on, { tools: 'start' })
     await started($, w)
-    const before = w.acted().length
+    const props = async () => {
+      const band = await bandOf($)
+      const out = (await band.findAll({ type: 'Button' })).map(b => ({ key: String(b.key), label: String(b.props.label), variant: b.props.variant, dimColor: b.props.dimColor }))
+      await band.unmount()
+      return out
+    }
+    expect(await props()).toEqual([{ key: 'mm-start-missing', label: 'Start missing threads (3)', variant: 'primary', dimColor: undefined }])
+    // ⛔ Open list is gone from the band (and so is 0.5.12's separate Start all there): /mm opens the list
     const band = await bandOf($)
-    await band.press({ key: 'mm-open-list' })
+    expect((await buttons(band)).map(b => b[0])).not.toContain('mm-open-list')
+    expect((await buttons(band)).map(b => b[0])).not.toContain('mm-start-all')
+    // its press is Start all's: the three missing threads, one after another, in the words that never take the package
+    await band.press({ key: 'mm-start-missing' })
     await band.unmount()
-    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Needs you' }])
-    // the press sent nothing and made no chip (the timer's own chips came before it)
-    expect(w.acted().length).toBe(before)
+    expect(starts(w).map(c => c.args.title)).toEqual(['Cedar Dental: reply to the client', 'Acme Roofing: review the reply drafts', 'Bolt Staffing: reply to the client'])
+    expect(w.toasts.at(-1)).toBe('Started 3 threads: Cedar Dental, Acme Roofing, Bolt Staffing.')
+    // the sync after links them: nothing is missing, and the button stays, dim
+    await w.clock.advance(1_500)
+    expect(await props()).toEqual([{ key: 'mm-start-missing', label: 'All threads started', variant: undefined, dimColor: true }])
+    // a press with nothing missing only checks again: it starts nothing and says so
+    const again = await bandOf($)
+    await again.press({ key: 'mm-start-missing' })
+    await again.unmount()
+    expect(starts(w).length).toBe(3)
+    expect(w.toasts.at(-1)).toBe('No client needs a new thread now.')
+    // /mm still opens the list in this thread
+    const before = w.opened.length
+    expect(await mm($, '')).toContain('The list is in the side pane.')
+    expect(w.opened.slice(before)).toEqual([{ id: 'mm-queue', title: 'Needs you' }])
+  })
+
+  test('(0.5.14) the band\'s press sends nothing into any thread and opens no pane: it only starts the missing threads', async ($, on) => {
+    const w = acmeWorld(on, { tools: 'start' })
+    await started($, w)
+    const band = await bandOf($)
+    expect(await buttons(band)).toEqual([['mm-start-missing', 'Start missing threads (2)']])
+    const opened = w.opened.length
+    await band.press({ key: 'mm-start-missing' })
+    await band.unmount()
+    expect(w.opened.length).toBe(opened)
     expect(sends(w)).toEqual([])
-    expect(w.prompts).toEqual([])
-    const ui = await pane($)
-    expect((await lines(ui))[0]).toBe('Needs you now (3)')
-    await ui.unmount()
+    expect(starts(w).map(c => c.args.title)).toEqual(['Cedar Dental: reply to the client', 'Bolt Staffing: reply to the client'])
   })
 
   test('⛔ it draws from what is stored: no feed call and no app call, in a thread that does not do the syncing', async ($, on) => {
@@ -3123,7 +3154,7 @@ describe('the band above the prompt: the way to the list from any thread', () =>
   test('nobody needs the person: the line says so, from a sync that worked and is fresh (R9)', async ($, on) => {
     const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: {} }) })
     await started($, w)
-    expect(await drawn($)).toEqual({ texts: ['Nothing needs you in the next 24 hours.'], buttons: [['mm-open-list', 'Open list']] })
+    expect(await drawn($)).toEqual({ texts: ['Nothing needs you in the next 24 hours.'], buttons: [['mm-start-missing', 'All threads started']] })
   })
 
   test('nothing is drawn while the bridge is paused, and it comes back on resume', async ($, on) => {
@@ -3168,7 +3199,7 @@ describe('the band above the prompt: the way to the list from any thread', () =>
     await started($, w)
     const band = await $.ui.mount({ plugin: 'mm-bridge', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
     expect(await lines(band)).toEqual([`Needs you: 1 pinned · 2 with no thread: Cedar Dental, Bolt Staffing. ${chipIn('Cedar Dental', '4 PM')} ${chipIn('Bolt Staffing', 'Tue 9 AM')}`])
-    expect(await buttons(band)).toEqual([['mm-open-list', 'Open list']])
+    expect(await buttons(band)).toEqual([['mm-start-missing', 'Start missing threads (2)']])
     await band.unmount()
   })
 })
@@ -6943,6 +6974,8 @@ describe('0.5.12: Start all (Rob, 10-15: no clicks at all; the app starts a thre
     return out
   }
   const startAllOn = async (ui: Drawing) => (await buttons(ui)).filter(b => b[0] === 'mm-start-all').map(b => b[1])
+  /** (0.5.14) The band's one Start button, always drawn: Start missing threads (n), or All threads started. */
+  const bandStart = async ($: Engine) => (await bandButtons($)).filter(b => b[0] === 'mm-start-missing')
   /** Each start's prompt, in the order the app was asked. */
   const prompts = (w: { calls: Call[] }) => starts(w).map(c => String(c.args.prompt))
   /** The Start all words of each of the three clients (0.5.11's `auto`, with no Update line): Acme's drafts shown, never taken. */
@@ -6952,35 +6985,35 @@ describe('0.5.12: Start all (Rob, 10-15: no clicks at all; the app starts a thre
   /** `n` clients, each with a message an hour or more old and no thread: all need a new thread. */
   const many = (n: number): Feed => feed({ drafts: [], tickets: {}, mail: Array.from({ length: n }, (_, i) => mailFor(pidOf(i), `Client ${i}`, 1 + i)) })
 
-  test('N = 0: no Start all button anywhere; /mm start all says so and starts nothing', async ($, on) => {
+  test('N = 0: no Start all button in the pane; (0.5.14) the band\'s reads All threads started; /mm start all says so and starts nothing', async ($, on) => {
     const w = world(on, { tools: 'start', feed: feed({ drafts: [], mail: [], tickets: {} }) })
     await mm($, '')
     const ui = await pane($)
     expect(await startAllOn(ui)).toEqual([])
     await ui.unmount()
-    expect((await bandButtons($)).filter(b => b[0] === 'mm-start-all')).toEqual([])
+    expect(await bandStart($)).toEqual([['mm-start-missing', 'All threads started']])
     expect(await mm($, 'start all')).toBe('No client needs a new thread now.')
     expect(starts(w)).toEqual([])
   })
 
-  test('N = 1: no Start all button; the row\'s own Start stays (and /mm start all, typed, starts that one)', async ($, on) => {
+  test('N = 1: no Start all button in the pane; the row\'s own Start stays; (0.5.14) the band\'s says 1 (and /mm start all, typed, starts that one)', async ($, on) => {
     const w = world(on, { tools: 'start', feed: feed({ drafts: [], mail: [] }) })
     await mm($, '')
     const ui = await pane($)
     expect(await startAllOn(ui)).toEqual([])
     expect(await buttonsOf(ui, CEDAR)).toEqual(['Start thread', 'Drafts'])
     await ui.unmount()
-    expect((await bandButtons($)).filter(b => b[0] === 'mm-start-all')).toEqual([])
+    expect(await bandStart($)).toEqual([['mm-start-missing', 'Start missing threads (1)']])
     expect(await mm($, 'start all')).toBe('Started 1 thread: Cedar Dental.')
     expect(prompts(w)).toEqual([CEDAR_KICKOFF])
   })
 
-  test('N = 2: Start all (2) in the pane and the band; one press starts both, one after another, soonest due first, in the words that never take the package', async ($, on) => {
+  test('N = 2: Start missing threads (2) in the pane and the band; one press starts both, one after another, soonest due first, in the words that never take the package', async ($, on) => {
     const w = world(on, { tools: 'start', feed: feed({ drafts: [] }), startTakesMs: 500 })
     await mm($, '')
     const ui = await pane($)
-    expect(await startAllOn(ui)).toEqual(['Start all (2)'])
-    expect(await bandButtons($)).toEqual([['mm-open-list', 'Open list'], ['mm-start-all', 'Start all (2)']])
+    expect(await startAllOn(ui)).toEqual(['Start missing threads (2)'])
+    expect(await bandButtons($)).toEqual([['mm-start-missing', 'Start missing threads (2)']])
     const pressed = ui.press({ key: 'mm-start-all' })
     await w.clock.advance(2_000)
     await pressed
@@ -7001,12 +7034,12 @@ describe('0.5.12: Start all (Rob, 10-15: no clicks at all; the app starts a thre
     expect(await bandTexts($)).toContain(line)
     expect(notices(w)).toContain(`started Cedar Dental (${CEDAR}) sig`)
     expect(notices(w)).toContain('Start all, pressed')
-    // pinned and named by the sync after; nothing left to start, so no button
+    // pinned and named by the sync after; nothing left to start, so no button in the pane, and the band's reads so
     await w.clock.advance(1_500)
     expect(w.threads.get('local_started_1')).toMatchObject({ title: CEDAR_TITLE, pinned: true })
     expect(w.threads.get('local_started_2')).toMatchObject({ title: BOLT_TITLE, pinned: true })
     expect(await startAllOn(ui)).toEqual([])
-    expect((await bandButtons($)).filter(b => b[0] === 'mm-start-all')).toEqual([])
+    expect(await bandStart($)).toEqual([['mm-start-missing', 'All threads started']])
     await ui.unmount()
   })
 
@@ -7014,8 +7047,8 @@ describe('0.5.12: Start all (Rob, 10-15: no clicks at all; the app starts a thre
     const w = world(on, { tools: 'start' })
     await mm($, '')
     const band = await bandOf($)
-    expect((await buttons(band)).filter(b => b[0] === 'mm-start-all')).toEqual([['mm-start-all', 'Start all (3)']])
-    await band.press({ key: 'mm-start-all' })
+    expect((await buttons(band)).filter(b => b[0] === 'mm-start-missing')).toEqual([['mm-start-missing', 'Start missing threads (3)']])
+    await band.press({ key: 'mm-start-missing' })
     await band.unmount()
     expect(prompts(w)).toEqual([CEDAR_KICKOFF, ACME_ALL, BOLT_AUTO_KICKOFF])
     for (const [p, pid] of prompts(w).map((p, i) => [p, [CEDAR, ACME, BOLT][i]] as const)) expect(p.startsWith(`[mm-link ${pid}] `)).toBe(true)
@@ -7035,17 +7068,17 @@ describe('0.5.12: Start all (Rob, 10-15: no clicks at all; the app starts a thre
     const w = world(on, { tools: 'start', feed: many(9) })
     await mm($, '')
     const ui = await pane($)
-    expect(await startAllOn(ui)).toEqual(['Start all (9)'])
+    expect(await startAllOn(ui)).toEqual(['Start missing threads (9)'])
     await ui.press({ key: 'mm-start-all' })
     expect(starts(w).length).toBe(8)
     const first = String(w.toasts.at(-1))
     expect(first.startsWith('Started 8 threads: ')).toBe(true)
-    expect(first.endsWith(' 1 more needs a thread: press Start all again.')).toBe(true)
-    expect(await bandTexts($)).toContain('1 more needs a thread: press Start all again.')
+    expect(first.endsWith(' 1 more needs a thread: press Start missing threads again.')).toBe(true)
+    expect(await bandTexts($)).toContain('1 more needs a thread: press Start missing threads again.')
     // the one left: the button stays, in the pane and the band
     await w.clock.advance(1_500)
-    expect(await startAllOn(ui)).toEqual(['Start all (1)'])
-    expect((await bandButtons($)).filter(b => b[0] === 'mm-start-all')).toEqual([['mm-start-all', 'Start all (1)']])
+    expect(await startAllOn(ui)).toEqual(['Start missing threads (1)'])
+    expect(await bandStart($)).toEqual([['mm-start-missing', 'Start missing threads (1)']])
     await ui.press({ key: 'mm-start-all' })
     expect(starts(w).length).toBe(9)
     expect(String(w.toasts.at(-1))).toMatch(/^Started 1 thread: Client \d\.$/)
@@ -7090,7 +7123,7 @@ describe('0.5.12: Start all (Rob, 10-15: no clicks at all; the app starts a thre
     const band = await bandOf($)
     const a = ui.press({ key: 'mm-start-all' })
     const b = ui.press({ key: 'mm-start-all' })
-    const c = band.press({ key: 'mm-start-all' })
+    const c = band.press({ key: 'mm-start-missing' })
     await w.clock.advance(200)
     expect(await mm($, 'start all')).toBe('Start all is already running.')
     await w.clock.advance(5_000)
@@ -7154,16 +7187,22 @@ describe('0.5.12: Start all (Rob, 10-15: no clicks at all; the app starts a thre
     const w = world(on, { tools: 'start', store: { 'mm.autostart': { on: false } } })
     await tickOnce($, w)
     for (let i = 0; i < 30; i++) await w.clock.advance(60_000)
-    expect((await bandButtons($)).filter(b => b[0] === 'mm-start-all')).toEqual([['mm-start-all', 'Start all (3)']])
+    expect(await bandStart($)).toEqual([['mm-start-missing', 'Start missing threads (3)']])
     expect(starts(w)).toEqual([])
   })
 
-  test('where the app gives no start_session, there is no Start all button, and /mm start all says to use each row', async ($, on) => {
+  test('where the app gives no start_session, there is no Start all button in the pane, and /mm start all says to use each row', async ($, on) => {
     const w = world(on, { tools: 'spawn' })
     await mm($, '')
     const ui = await pane($)
     expect(await startAllOn(ui)).toEqual([])
     await ui.unmount()
+    // (0.5.14) the band's button is always drawn; its press says the same and starts nothing
+    expect(await bandStart($)).toEqual([['mm-start-missing', 'Start missing threads (3)']])
+    const band = await bandOf($)
+    await band.press({ key: 'mm-start-missing' })
+    await band.unmount()
+    expect(w.toasts.at(-1)).toBe('Start all needs the app\'s start_session, which this thread does not have: press Start thread on each row.')
     expect(await mm($, 'start all')).toBe('Start all needs the app\'s start_session, which this thread does not have: press Start thread on each row.')
     expect(starts(w)).toEqual([])
     expect(w.minted()).toEqual([])
