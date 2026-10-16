@@ -3847,7 +3847,7 @@ const CHIP_CARD_BACKGROUND =
  *                   "No pending task with id ... never being queued in this
  *                   session"
  *
- * Result that day: two Deviate chips and two Remver chips on Rob's surface, and
+ * Result that day: two chips each for two clients on Rob's surface, and
  * no session able to clean up after another.
  *
  * ⛔ THE RULE FROM NOW ON. A session mints only what the feed lists under
@@ -4171,7 +4171,7 @@ function renderChipContext(payload) {
     // a second mint added nothing and that its response listed every pending
     // chip in the app. Neither holds: every `spawn_task` call adds a chip, and
     // the response covers the calling session's own chips only. On 2026-10-02
-    // that put two Deviate chips and two Remver chips on Rob's surface, with no
+    // that put two chips each for two clients on Rob's surface, with no
     // session able to dismiss another's. So this branch now says the opposite:
     // do NOT call `spawn_task` for a task that is listed here.
     //

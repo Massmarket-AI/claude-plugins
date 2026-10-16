@@ -5566,7 +5566,7 @@ describe('0.5.3: a thread\'s chips pass runs every 15 seconds; minting and the f
 
 // ======================================================================== 0.5.5
 
-describe('0.5.5: a row says "this thread" only in the thread it acts on (Rob, 10-14: Black-Peak\'s Claim, drawn in the Buy Oklahoma thread)', () => {
+describe('0.5.5: a row says "this thread" only in the thread it acts on (Rob, 10-14: one client\'s Claim, drawn in another client\'s thread)', () => {
   const SENT_AT = ago(0.25)
   const CHECKED = { last_outbound_at: SENT_AT, checked_send_at: SENT_AT, checked_at: ago(0.1), still_open: ['the logo file'], answered: [] }
 

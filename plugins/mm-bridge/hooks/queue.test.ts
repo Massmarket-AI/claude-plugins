@@ -796,8 +796,8 @@ describe('B4: a package flagged for the founder lists for him whoever owns the c
 })
 
 describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the reply time, flagged and not', () => {
-  // Rob's 16 rows, 10-13, by shape (names made up): Mugen, ReGen, Remver and Talon were stale packages a
-  // teammate sends (R1); Agile, Deviate and William Fiore current flagged packages a teammate sends (R2).
+  // Rob's 16 rows, 10-13, by shape (names made up): four clients were stale packages a teammate sends (R1);
+  // three others were current flagged packages a teammate sends (R2).
   const SENT_BY = 'builder-b@example.com'
   const pkg = (over: Record<string, unknown> = {}) => draft(P1, 'Acme Roofing — Pat', { project_owner_email: SENT_BY, ...over })
   /** A client message, on the teammate's client, received at the given New York time. */

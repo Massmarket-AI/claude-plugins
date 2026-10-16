@@ -924,7 +924,7 @@ describe('0.5.6: Start moves the chip to the thread it is pressed in (Rob, 10-14
   test('the chip in Y; Start pressed in X: X mints, Y\'s is superseded and Y withdraws it on its pass; one live chip; again in X: already here; a third thread says where it is now', async () => {
     const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(81, 'Client Eight One', 1)] }
     const [Y, X, Z] = ['local_mvy', 'local_mvx', 'local_mvz']
-    const w = fakeApp(feed, [{ sessionId: Y, title: 'Deviate Media HighLevel Build' }, { sessionId: X, title: 'Where I am' }, { sessionId: Z, title: 'Elsewhere' }], [], { every: true })
+    const w = fakeApp(feed, [{ sessionId: Y, title: 'Fabrikam Media HighLevel Build' }, { sessionId: X, title: 'Where I am' }, { sessionId: Z, title: 'Elsewhere' }], [], { every: true })
     const [ys, xs, zs] = [Y, X, Z].map(id => w.session(id))
     // Y polls: with no prompt of the person's anywhere yet, the client's one chip is minted there (C3)
     w.put('mm.lease', { owner: `cli:${Y}`, until: NOW + 24 * 3_600_000 })
@@ -938,7 +938,7 @@ describe('0.5.6: Start moves the chip to the thread it is pressed in (Rob, 10-14
     await mm(xs, '')
     expect(await press(xs, `start:${pid(81)}`)).toBe(true)
     await settleAll()
-    expect(notice()).toBe('A chip for Client Eight One is ready here: click Start on it. The one in "Deviate Media HighLevel Build" is withdrawn.')
+    expect(notice()).toBe('A chip for Client Eight One is ready here: click Start on it. The one in "Fabrikam Media HighLevel Build" is withdrawn.')
     // Y withdraws its own on its next pass; exactly one live chip, X's
     await w.advance(15_000)
     await settleAll()
