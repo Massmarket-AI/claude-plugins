@@ -11,7 +11,7 @@ import {
   LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, staleCopySentence, startKickoff, threadLink, titleSuggestion,
   REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, bandText, chipTitle, ownPackage, seenNow, waitingText,
-  START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary,
+  START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary, startMissingLabel,
 } from './threads'
 import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
 
@@ -29,6 +29,9 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 // (no thread, or the existing one is old or long), Update (the thread lacks what is waiting now), or Open
 // (it already has it). And: "How do we open this panel up in other threads where it's not already open?"
 // So every desktop thread carries one line above the prompt with a button that opens the list.
+// (0.5.14, Rob 2026-10-16: "I don't really think we even need to be able to open list. We just need to be able to
+// start missing threads or start all threads. It should just pretty much always be 'start missing threads.'") So
+// that button is Start missing threads now, always drawn; /mm still opens the list.
 //
 // ⛔ NEVER BY ITSELF. Linking, pinning and renaming are the only things a sync does. A message goes into a
 // thread only from a button the person pressed in the pane or a /mm command the person typed: updateThread
@@ -98,7 +101,7 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.5.13'
+const VERSION = '0.5.14'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -1898,12 +1901,12 @@ async function ownIn($: EngineInterface, items: readonly QueueItem[]): Promise<Q
 }
 
 /**
- * The pane, as the person asked for it (/mm, the band's Open list, the tool's ""): ONE pane with two parts in
+ * The pane, as the person asked for it (/mm, the band's Drafts, the tool's ""): ONE pane with two parts in
  * a thread that is a waiting client's, the client's part on top and the Needs-you list under it; the list
  * alone in any other thread (Rob, 2026-10-12: "Needs you shows up on the bottom half of the panel on the
  * right, and the one for that specific client shows up on the top half").
  * S2: it opens AT ONCE, drawn from what the last sync stored; the list is then brought up to date and drawn
- * again, and the client part with it when what it shows changed. A press (`press`, the band's button) may take
+ * again, and the client part with it when what it shows changed. A press (`press`, the band's Drafts) may take
  * a feed this session read less than a minute ago; a typed /mm asks OW again.
  * ⛔ Opened only because the person asked. Nothing opens a pane from a timer: the API has no way to make
  *    one available without drawing it, and drawing it opens a closed side panel.
@@ -2000,7 +2003,8 @@ function isFresh(last: Last, projectId: string): boolean {
 /**
  * The one line above the prompt, in every desktop thread (Rob, 2026-10-12: "How do we open this panel up
  * in other threads where it's not already open?"): what needs the person, by R9. In a thread that is a waiting
- * client's, its second button opens that client's part of the pane. '' draws nothing: no sync on record yet,
+ * client's, its second button opens that client's part of the pane. (0.5.14) Its first button is always Start missing
+ * threads (`missing`: how many clients need a new thread now, 0 for All threads started). '' draws nothing: no sync on record yet,
  * the bridge paused, a terminal session, or no tracker token on this computer.
  * ⛔ From what is stored only: the last sync, the links, the chips, and this thread's id as the timer already
  *    learnt it. No feed call, no app call, no sync.
@@ -2062,12 +2066,12 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
     notes: (await storeGet<BandNote[]>($, 'mm.notes', [])).filter(n => n && typeof n.text === 'string' && now - n.at < NOTE_SHOW_MS).map(n => n.text),
   })
   if (!text) return { text: '', at: last.at }
-  // (0.5.12) the Start all button, when two or more clients need a new thread (or one a capped press left)
-  const offer = await startAllOffer($)
-  const all = offer > 0 ? { startAll: offer } : {}
+  // (0.5.14) the Start missing threads button, always on the band: how many clients a press of it would start now, as
+  // Start all counts them (`needingThreads`); 0 draws All threads started
+  const missing = needingThreads(last, links, now).length
   // In a waiting client's thread the line carries the button that opens its part of the pane.
   const mine = me ? ownerOf(me, links) : undefined
-  return mine && items.some(i => i.projectId === mine) ? { text, drafts: true, at: last.at, ...all } : { text, at: last.at, ...all }
+  return mine && items.some(i => i.projectId === mine) ? { text, drafts: true, at: last.at, missing } : { text, at: last.at, missing }
 }
 
 /** Works the band's line out again and redraws it when it changed. */
@@ -2076,7 +2080,7 @@ async function refreshBand($: EngineInterface): Promise<void> {
     const band = await bandLine($)
     const { value: was } = await $.state.get(BAND)
     // (0.5.4) the sync it was drawn from is kept with it, so a thread can tell it is behind the store (`catchUp`)
-    if ((was?.text ?? '') !== band.text || Boolean(was?.drafts) !== Boolean(band.drafts) || was?.at !== band.at || (was?.startAll ?? 0) !== (band.startAll ?? 0)) await $.state.set(BAND, band)
+    if ((was?.text ?? '') !== band.text || Boolean(was?.drafts) !== Boolean(band.drafts) || was?.at !== band.at || (was?.missing ?? 0) !== (band.missing ?? 0)) await $.state.set(BAND, band)
   } catch {
     // the band is a convenience: it never breaks a sync or a command
   }
@@ -3358,9 +3362,10 @@ function needingThreads(last: Last, links: Readonly<Record<string, string>>, now
 }
 
 /**
- * (0.5.12) How many clients the Start all button offers, or 0 when it is not drawn: two or more that need a new thread
- * (with one, its row's own Start is the button), or one left over by a press that stopped at START_ALL_MAX (the band
- * said so, and the button stays for the second press while that line shows). From what is stored only.
+ * (0.5.12) How many clients the pane's Start all button offers, or 0 when it is not drawn: two or more that need a new
+ * thread (with one, its row's own Start is the button), or one left over by a press that stopped at START_ALL_MAX (the
+ * band said so, and the button stays for the second press while that line shows). From what is stored only. (0.5.14)
+ * The band's button is always drawn, from `needingThreads` itself: `bandLine`.
  */
 async function startAllOffer($: EngineInterface): Promise<number> {
   const last = await storeGet<Last | null>($, 'mm.last', null)
@@ -3436,7 +3441,7 @@ async function startOneOfAll($: EngineInterface, it: QueueItem, pass: Pass, me: 
 }
 
 /**
- * (0.5.12, Rob 10-15: "no clicks at all") Start all: the person's one press (the band's or the pane's Start all button)
+ * (0.5.12, Rob 10-15: "no clicks at all") Start all: the person's one press (the band's Start missing threads, 0.5.14, or the pane's)
  * or their typed /mm start all opens a thread for each client that needs one (`needingThreads`), one after another,
  * never two at once, at most START_ALL_MAX for a press (the rest wait for a second press; the band says how many),
  * each one checked again just before it runs (`startOneOfAll`). One line says what it came to (`startAllSummary`), in
@@ -4517,16 +4522,6 @@ async function toggleFold($: EngineInterface, key: Fold): Promise<void> {
   }
 }
 
-/** The band's button: the Needs-you list, in this thread, as /mm opens it (a press: S2). Sends nothing. */
-async function openList($: EngineInterface): Promise<void> {
-  try {
-    await runCommand($, '', 'person', true)
-  } catch (err) {
-    await say($, errorText(err))
-  }
-  await refreshBand($)
-}
-
 /** The band's second button, in a waiting client's thread: the pane with that client's part on top, as /mm view opens it (a press: S2). Sends nothing. */
 async function openDrafts($: EngineInterface): Promise<void> {
   try {
@@ -4538,7 +4533,7 @@ async function openDrafts($: EngineInterface): Promise<void> {
 }
 
 /**
- * /mm, and the `mm` tool. `by` is who ran it. `press` is the band's buttons, which run /mm and /mm view: the
+ * /mm, and the `mm` tool. `by` is who ran it. `press` is the band's Drafts button, which runs /mm view: the
  * list may then be brought up to date with a feed this session read less than a minute ago (S2).
  * ⛔ `update` and `start` are the person's alone. For anyone else (Claude through the tool, a /mm that came
  * from another session, a schedule, a channel or a plugin) they are refused here, first, before anything
@@ -5041,7 +5036,9 @@ export const register: Register = on => {
     return answer
   })
 
-  // The band: one line above the prompt in every desktop thread, with the button that opens the list.
+  // The band: one line above the prompt in every desktop thread. (0.5.14) Its first button is Start missing threads,
+  // always drawn: primary with how many clients need a new thread, or dim as All threads started when none do; a press
+  // of it is Start all's (`pressStartAll`) either way. It took Open list's place: /mm opens the list.
   // ⛔ It draws what `refreshBand` last worked out from the store. No feed call and no app call from here.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const { value: band } = await $.state.get(BAND)
@@ -5050,12 +5047,16 @@ export const register: Register = on => {
     const { Box, Button, Text } = $.ui.resolve(e) as Partial<ReturnType<typeof $.ui.resolve>> & Pick<ReturnType<typeof $.ui.resolve>, 'Box' | 'Text'>
     // a surface that draws no button there says how to open the list instead
     if (!Button) return <Text>{bandWords(band.text, false)}</Text>
+    const missing = Number(band.missing) || 0
     return (
       <Box flexDirection="row" gap={1}>
         <Text>{bandWords(band.text, true)}</Text>
-        <Button key="mm-open-list" label="Open list" onPress={() => void openList($)} />
+        {missing > 0 ? (
+          <Button key="mm-start-missing" label={startMissingLabel(missing)} variant="primary" onPress={() => void pressStartAll($)} />
+        ) : (
+          <Button key="mm-start-missing" label={startMissingLabel(0)} dimColor onPress={() => void pressStartAll($)} />
+        )}
         {band.drafts ? <Button key="mm-open-drafts" label="Drafts" onPress={() => void openDrafts($)} /> : null}
-        {band.startAll ? <Button key="mm-start-all" label={startAllLabel(band.startAll)} variant="primary" onPress={() => void pressStartAll($)} /> : null}
       </Box>
     )
   })

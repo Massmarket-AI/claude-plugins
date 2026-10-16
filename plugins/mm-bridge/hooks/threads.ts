@@ -638,8 +638,21 @@ export function startKickoff(it: QueueItem, replaces: Replaced | undefined, now:
  */
 export const START_ALL_MAX = 8
 
-/** (0.5.12) The Start all button, with how many clients need a new thread now. */
-export const startAllLabel = (n: number): string => `Start all (${n})`
+/**
+ * (0.5.12) The Start all button, with how many clients need a new thread now. (0.5.14, Rob 10-16: "It should just
+ * pretty much always be 'start missing threads.'") Named for what it does, in the pane and on the band alike; the
+ * typed command is still /mm start all.
+ */
+export const startAllLabel = (n: number): string => `Start missing threads (${n})`
+
+/** (0.5.14) The band's Start missing threads button when no client needs a new thread: drawn dim, and a press only checks again. */
+export const ALL_STARTED = 'All threads started'
+
+/**
+ * (0.5.14) The band's one button, always drawn (it took Open list's place): Start missing threads with how many, or
+ * All threads started when there are none. Either way a press is Start all's (`pressStartAll`).
+ */
+export const startMissingLabel = (n: number): string => (n > 0 ? startAllLabel(n) : ALL_STARTED)
 
 /**
  * (0.5.12) The first message of a thread Start all opens: the new-thread kickoff (`startKickoff`) in the words that never
@@ -665,7 +678,7 @@ export function startAllSummary(started: readonly string[], failed: ReadonlyArra
   if (started.length) out.push(`Started ${started.length} thread${started.length === 1 ? '' : 's'}: ${started.join(', ')}.`)
   if (failed.length) out.push(`Not started: ${failed.map(f => `${f.client} (${f.why})`).join('; ')}.`)
   if (skipped.length) out.push(`Skipped: ${skipped.map(f => `${f.client} (${f.why})`).join('; ')}.`)
-  if (left > 0) out.push(`${left} more need${left === 1 ? 's' : ''} a thread: press Start all again.`)
+  if (left > 0) out.push(`${left} more need${left === 1 ? 's' : ''} a thread: press Start missing threads again.`)
   return out.join(' ') || 'No client needs a new thread now.'
 }
 
@@ -843,7 +856,8 @@ export function buttonLabel(verb: RowButton, row: Row, here: string | undefined)
 /**
  * The band's line as it is drawn: as it is beside its button, and with how to open the list where the
  * band can carry no button. (On this build the band is raised on the terminal and desktop surfaces only,
- * and both draw a Button.)
+ * and both draw a Button.) (0.5.14) The band's button is Start missing threads now, not Open list: /mm opens the
+ * list, from the band of a surface with no button as from any other.
  */
 export const bandWords = (text: string, hasButton: boolean): string => (hasButton ? text : `${text} · type /mm to open the list`)
 

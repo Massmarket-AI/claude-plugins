@@ -83,8 +83,12 @@ export type MmNotice = { text: string; at: number }
  * `text` draws nothing. `drafts` is true in a thread that is a waiting client's: the line then carries a
  * second button that opens that client's pane.
  */
-/** `at` (0.5.4): the sync the line was worked out from. `startAll` (0.5.12): the Start all button, with how many clients need a new thread. */
-export type MmBand = { text: string; drafts?: boolean; at?: number; startAll?: number }
+/**
+ * `at` (0.5.4): the sync the line was worked out from. `missing` (0.5.14): how many clients need a new thread now, for
+ * the band's Start missing threads button, which is always drawn (0 or absent: All threads started). (0.5.12's
+ * `startAll` is no longer written or read.)
+ */
+export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number }
 
 declare module 'claude-code' {
   interface PluginState {
