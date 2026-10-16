@@ -2407,7 +2407,7 @@ type MintSpec = { it: QueueItem; signature: string; need: 'start' | 'long' | 'he
 type Minted = { made: true } | { made: false; why: 'no-answer' } | { made: false; why: 'refused' | 'no-tool'; text: string }
 
 /**
- * Mints one chip and records it. R10 (Rob, 2026-10-13: Start on ELV Capital Homes said nothing and made no chip,
+ * Mints one chip and records it. R10 (Rob, 2026-10-13: Start on a client said nothing and made no chip,
  * and the store held no `mm.chips` at all, so the app's `spawn_task` never answered): the app is given
  * APP_WAIT_MS. When it has not answered by then, `no-answer`, and nothing is recorded yet; should its answer
  * come later, the chip is recorded then, so that this thread can withdraw it like any other.
@@ -3735,7 +3735,7 @@ async function chipsPass($: EngineInterface): Promise<void> {
 
 /**
  * (0.5.3) The person wrote in the thread linked to a client while a chip for a new thread to replace that thread
- * was waiting (R3, R8; Rob 10-14: sixteen copies of Crucial Hire's stayed while he went on in its thread): the
+ * was waiting (R3, R8; Rob 10-14: sixteen copies of one client's stayed while he went on in its thread): the
  * claim is recorded (`mm.claimedHere`), every thread's chips pass withdraws its own copy, and none is minted again
  * until something newer comes for the client or its link moves (`claimHolds`). This thread withdraws its own now.
  * (0.5.4) The fresh-thread chip is this thread's own now (C1); a `Do it here` chip is never claimed this way.

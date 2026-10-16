@@ -431,7 +431,7 @@ export function autoUpdatable(it: QueueItem, now: number): boolean {
 }
 
 /**
- * (0.5.11, Rob 10-15: "Joe's call from Second Peak Training ended a little while back... I don't understand why it
+ * (0.5.11, Rob 10-15: "[A client]'s call ended a little while back... I don't understand why it
  * hasn't already handed the new context there so the draft is ready when I open the thread up") Whether it is time
  * to update a client's thread by itself, from what this bridge has seen of the client (`seen`, for what it has
  * NOW: the caller gives the record of this signature only). (Review of PR #15, F3) The bridge has seen it, unchanged,
@@ -829,8 +829,8 @@ const isHere = (row: Row, here: string | undefined): boolean => Boolean(here) &&
 export const LABEL_MAX = 40
 
 /**
- * (0.5.5, Rob 10-14: in the Buy Oklahoma thread's pane, Black-Peak's row offered "Claim in this thread", as if it would
- * claim Black-Peak there) A row's button as it is drawn in the thread `here`: `Claim in this thread` only in the thread it
+ * (0.5.5, Rob 10-14: in one client's thread pane, another client's row offered "Claim in this thread", as if it would
+ * claim that client there) A row's button as it is drawn in the thread `here`: `Claim in this thread` only in the thread it
  * acts on; in any other, `Claim in <client>'s thread`, the client's name cut to keep the label within LABEL_MAX.
  */
 export function buttonLabel(verb: RowButton, row: Row, here: string | undefined): string {
