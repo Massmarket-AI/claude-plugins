@@ -55,6 +55,10 @@
  * which mm-hooks plugin build and which auto-update setting sent them
  * (`X-MM-Client`, `X-MM-Plugin`, `X-MM-Autoupdate`).
  *
+ * A mod's tool calls are not work (0.11.8, 2026-10-16): a tool call the
+ * mm-bridge mod made by itself (`toolu_plugin_` on its `tool_use_id`) writes no
+ * worklog row and is not counted in the Stop line; see PLUGIN TOOL CALLS.
+ *
  * Identity: reuses the SAME per-member `team_auth_tokens` UUID already handed
  * out for the Chrome extension (rollout/slips/), via env var MM_TRACKER_TOKEN.
  * No new credential to mint or distribute.
@@ -143,7 +147,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.11.7";
+const HOOK_VERSION = "0.11.8";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -6740,7 +6744,64 @@ function postToolUseDeadline() {
   return hardExitAt - POST_TOOL_USE_SAVE_MARGIN_MS;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// PLUGIN TOOL CALLS (0.11.8, 2026-10-16) — a mod's call is not work.
+//
+// The mm-bridge mod calls the desktop app's tools by itself, on its timer, in
+// every open thread: `get_usage` every 5 minutes (bridge up to 0.5.10), and
+// `list_sessions`, `get_session`, `set_session_title`, `set_pinned`,
+// `send_message`, `start_session`, `spawn_task` and `dismiss_task` from its
+// sync and chip passes. Claude Code runs a mod's `$.mcp.call` through the same
+// tool pipeline as a model's call, so PostToolUse fires for each one, in the
+// thread's session, with the prompt id of the thread's last prompt. Every one
+// became a worklog row, 12 an hour around the clock, and held the thread's
+// window open all day: on 2026-10-15 Rob's Homestretch thread had 169 such rows
+// of 228, and his day read 296 client hours.
+//
+// ⛔ HOW ONE IS KNOWN. Claude Code gives a mod's call a `tool_use_id` that
+// begins `toolu_plugin_` (read from Claude Code 2.1.296 and the desktop app's
+// 2.1.299: `{ type: "tool_use", id: "toolu_plugin_" + uuid, caller: { type:
+// "direct" } }`). The hook input carries no other mark: no caller, no plugin
+// name, and the same session, cwd and prompt id as the model's own calls. A
+// model's call has an API id (`toolu_01…`), which never holds that prefix.
+//
+// ⛔ WHAT IS SKIPPED: the worklog row, the Stop line's count, the title read,
+// the turn-origin read and the declaration capture. Nothing is sent for it.
+// ⛔ WHAT STAYS: the `delivered_chip` ack. A card a mod put on screen for one
+// of the chips this session was served is still a delivered chip; the ack
+// matches only served fingerprints, as before, and saves the session state
+// only when it changed it.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** The `tool_use_id` prefix Claude Code gives a call a mod made (`$.mcp.call` / `$.tool.call`). */
+const PLUGIN_TOOL_USE_ID_PREFIX = "toolu_plugin_";
+
+/** True when this PostToolUse is for a call a mod made, not the model. */
+function isPluginToolCall(payload) {
+  const id = payload && payload.tool_use_id;
+  return typeof id === "string" && id.indexOf(PLUGIN_TOOL_USE_ID_PREFIX) === 0;
+}
+
+/** A mod's call: the chip ack only, and no worklog row. See PLUGIN TOOL CALLS. */
+async function handlePluginToolCall(payload) {
+  if (!cardDeliveryTool(payload)) return;
+  const sessionId = payload.session_id;
+  const state = loadSessionState(sessionId);
+  const ackedBefore = state.ackedChips.length;
+  const failuresBefore = state.chipAckFailures;
+  await ackDeliveredChip(payload, state, postToolUseDeadline());
+  if (state.ackedChips.length !== ackedBefore || state.chipAckFailures !== failuresBefore) {
+    saveSessionState(sessionId, state);
+  }
+}
+
 async function handlePostToolUse(payload) {
+  // ⛔ A mod's own call is not work: no row (PLUGIN TOOL CALLS, 0.11.8).
+  if (isPluginToolCall(payload)) {
+    await handlePluginToolCall(payload);
+    return;
+  }
+
   const sessionId = payload.session_id;
   const toolName = payload.tool_name || "unknown_tool";
   const toolInput = payload.tool_input || {};
