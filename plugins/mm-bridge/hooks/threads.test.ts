@@ -10,7 +10,7 @@ import {
   newerThreadFor, threadStart,
   CHIP_TITLE_MAX, REFRESH_FAILED, bandText, chipTitle, claimText, isStillOpenRow, staleCopySentence, startKickoff,
   START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary, startMissingLabel,
-  LABEL_MAX, buttonLabel,
+  LABEL_MAX, buttonLabel, cardReady, needsCard,
 } from './threads'
 import type { AppThread, ClientThread, Pairs, Platform } from './threads'
 
@@ -1546,6 +1546,33 @@ describe('(0.5.11, Opus 10-15) an update sent by itself never takes the package;
       'Started 2 threads: Acme Roofing, Cedar Dental. Not started: Bolt Staffing (the app did not answer in 15 seconds). Skipped: Dune Co (it has a thread now). 1 more needs a thread: press Start missing threads again.',
     )
     expect(startAllSummary(['A'], [], [], 3)).toBe('Started 1 thread: A. 3 more need a thread: press Start missing threads again.')
+  })
+
+  // (0.5.16, Rob 10-19: "When it says it actually has to be started by me saying it here in the thread, that causes issues.")
+  test('(0.5.16) the app\'s answer that it starts a thread only on the person\'s own words is told from any other refusal, and becomes a count of Start cards', async () => {
+    const USER_WORDS = 'Start sessions only on the user\'s own words to you here; this turn runs an automated event, another session\'s message, or the task another session gave you. Propose the session instead (initiation "own_initiative")'
+    expect(needsCard(USER_WORDS)).toBe(true)
+    expect(needsCard(USER_WORDS.replace(/'/g, '\u2019'))).toBe(true)
+    expect(needsCard('mm-bridge: $.mcp.call: START SESSIONS ONLY ON THE USER\'S OWN WORDS TO YOU HERE.')).toBe(true)
+    expect(needsCard('Propose the session instead.')).toBe(true)
+    // ⛔ narrow: every other refusal still reads as the error it is
+    for (const other of [
+      'Starting sessions is not enabled here.',
+      'Starting sessions is turned off for this one.',
+      'The app refuses a start on a turn it did not get from the user.',
+      'mm-bridge: $.mcp.call: no connected MCP tool "start_session" on a server named "ccd_session"',
+      'the app did not answer in 15 seconds',
+      'The user words this differently.',
+      '',
+    ]) expect(needsCard(other), other).toBe(false)
+    expect(cardReady('Cedar Dental')).toBe('A Start card for Cedar Dental is ready here: click Start on it.')
+    expect(startAllSummary([], [], [], 0, 3)).toBe('3 ready to start here: click Start on each card.')
+    expect(startAllSummary(['Cedar Dental'], [], [], 0, 1)).toBe('Started 1 thread: Cedar Dental. 1 ready to start here: click Start on its card.')
+    expect(startAllSummary(['A'], [], [{ client: 'B', why: 'it has a thread now' }], 2, 4)).toBe(
+      'Started 1 thread: A. 4 ready to start here: click Start on each card. Skipped: B (it has a thread now). 2 more need a thread: press Start missing threads again.',
+    )
+    // with no cards, the line is 0.5.12's, word for word
+    expect(startAllSummary(['A'], [], [], 3, 0)).toBe(startAllSummary(['A'], [], [], 3))
   })
 })
 

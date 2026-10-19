@@ -11,7 +11,7 @@ import {
   LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, staleCopySentence, startKickoff, threadLink, titleSuggestion,
   REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, bandText, chipTitle, ownPackage, seenNow, waitingText,
-  START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary, startMissingLabel,
+  START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary, startMissingLabel, cardReady, needsCard,
 } from './threads'
 import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
 
@@ -2503,8 +2503,12 @@ async function sawTools($: EngineInterface, tools: { start: boolean; spawn: bool
 /** The engine's word for a call to a tool the app does not give this session. */
 const noTool = (err: unknown): boolean => /no connected MCP tool/i.test(errorText(err))
 
-/** What start_session answered for a thread started now: the new thread's id when the answer gives it. */
-type StartedNow = { ok: true; sid?: string | undefined } | { ok: false; why: 'refused' | 'no-answer' | 'no-tool'; text: string }
+/**
+ * What start_session answered for a thread started now: the new thread's id when the answer gives it. (0.5.16)
+ * `needs-card`: the app starts a thread only on the person's own words in this thread (`needsCard`), so the press
+ * makes the client's Start card here instead, and the app's sentence is never shown.
+ */
+type StartedNow = { ok: true; sid?: string | undefined } | { ok: false; why: 'refused' | 'no-answer' | 'no-tool' | 'needs-card'; text: string }
 
 /**
  * (0.5.7) Starts the client's thread now: `start_session` with `initiation: "user_asked"`, for a person's Start (the
@@ -2528,11 +2532,12 @@ async function startNow($: EngineInterface, title: string, prompt: string): Prom
       await sawTools($, { start: false, spawn: true })
       return { ok: false, why: 'no-tool', text: errorText(err) }
     }
-    return { ok: false, why: 'refused', text: errorText(err) }
+    const said = errorText(err)
+    return { ok: false, why: needsCard(said) ? 'needs-card' : 'refused', text: said }
   }
   if (!answered.ok) return { ok: false, why: 'no-answer', text: `the app did not answer in ${APP_WAIT_MS / 1000} seconds` }
   const text = textOf(answered.value)
-  if (answered.value.isError) return { ok: false, why: 'refused', text }
+  if (answered.value.isError) return { ok: false, why: needsCard(text) ? 'needs-card' : 'refused', text }
   const sid = /\bsession_id:\s*(local_[A-Za-z0-9_-]{1,100})/.exec(text)?.[1]
   return { ok: true, sid }
 }
@@ -3261,11 +3266,16 @@ function scheduleOwnCheck($: EngineInterface, me: string, round = 0): void {
  * `typed` is the person's own /mm start <client>: it always mints. The chip on record for this thread may
  * be one the person dismissed, which the bridge cannot see; the new one supersedes it.
  * R10: the press has already said it is making the chip (`press`); the app is given APP_WAIT_MS to answer.
+ * (0.5.16, Rob 10-19) Where the app will not start it from this thread's turn (it starts one only on the person's own
+ * words here: `needsCard`), the press makes the client's Start card here instead, as the chip below, and says so in
+ * one short line (`cardReady`). The app's sentence is never shown.
  */
 async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed: boolean): Promise<string> {
   const now = await $.clock.now()
   const me = await selfId($)
   const signature = signatureOf(it)
+  /** (0.5.16) The app wanted the person's own words for the start: the card below is a Start card, and its line says so. */
+  let card = false
   // (0.5.7, Rob 10-14: "can we just straight start sessions now?") Where the app gives this session start_session,
   // Start opens the client's thread at once, with the kickoff a chip would carry. Where it does not, the chip below.
   const openNow = async (): Promise<string | null> => {
@@ -3285,6 +3295,11 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
       await adoptStarted($, it, started.sid, prompt, me, now)
       return `Started ${it.client}'s thread: "${title}". It is under Pinned.`
     }
+    // (0.5.16) the app wants the person's own words here: the Start card below, and never its sentence
+    if (started.why === 'needs-card') {
+      card = true
+      return null
+    }
     // (the app's own sentence, without its last full stop: the line has its own)
     if (started.why !== 'no-tool') return `Could not start ${it.client}'s thread: ${short(started.text).replace(/\.+$/, '')}. Type /mm start ${it.client} to try again.`
     return null
@@ -3293,40 +3308,70 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
     const said = await openNow()
     if (said !== null) return said
   }
-  // ⛔ One chip per client in a thread. The button, with a chip for this client carrying this already in this
-  //    thread (or one on its way): nothing is minted.
+  // A client that already has a thread: the new one is asked to look at how the old one ended (handoverText).
+  const kickoff = async (): Promise<string> => startKickoff(it, await replaced($, it, pass), now)
+  let made = await startCard($, it, me, now, kickoff, typed)
+  if (made.made === 'no' && made.why === 'no-tool' && !card) {
+    // (0.5.7) the app no longer gives this session spawn_task: Start opens the thread
+    const said = await openNow()
+    if (said !== null) return said
+    // (0.5.16) and where the app wants the person's own words for that, its card after all, now that the bridge
+    // knows which of its tools makes one (`sawTools`)
+    if (card) made = await startCard($, it, me, now, kickoff, typed)
+  }
+  const what = card ? `A Start card for ${it.client}` : `A chip for ${it.client}`
+  if (made.made === 'here') return `${what} is already here: click Start on it.`
+  if (made.made === 'no') return made.why === 'no-answer' ? NO_ANSWER(it.client) : `Could not create the chip: ${short(made.text)}`
+  const ready = card ? cardReady(it.client) : `A chip for ${it.client} is ready here: click Start on it.`
+  if (!made.moved) return ready
+  // its thread's name: as the pass saw it, as the chip was minted with, else as the app says it now
+  const from = made.moved
+  let title = cleanTitle(pass.live.get(from.threadId)?.title ?? '') || from.place || ''
+  if (!title) {
+    const found = await lookup($, from.threadId)
+    title = typeof found === 'object' ? cleanTitle(found.title ?? '') : ''
+  }
+  return `${ready} The one in "${title || 'another thread'}" is withdrawn.`
+}
+
+/**
+ * What a person's Start made in this thread (`startCard`): nothing, as the client's chip or card carrying this is
+ * here already (`here`); a new one (`new`), with the chip it moved here from another thread (`moved`, the last of
+ * them); or none, and why (`no`).
+ */
+type StartCard = { made: 'here' } | { made: 'new'; moved?: Chip | undefined } | { made: 'no'; why: 'no-answer' | 'refused' | 'no-tool'; text: string }
+
+/**
+ * The client's chip, or where the app has only start_session its Start card (`mintChip`), in this thread, for the
+ * person's press: Start (`startThread`) and, (0.5.16) where the app wants the person's own words, Start all
+ * (`startOneOfAll`). The kickoff is asked for only once the guard below lets the card be made.
+ * ⛔ One chip per client in a thread. The button, with a chip for this client carrying this already in this
+ *    thread (or one on its way): nothing is minted, unless `typed` (the person's own /mm start, which always mints).
+ */
+async function startCard($: EngineInterface, it: QueueItem, me: string, now: number, kickoff: () => Promise<string>, typed: boolean): Promise<StartCard> {
+  const signature = signatureOf(it)
   const before = await chipsOf($, now)
   const minted = `${it.projectId}\n${me}\n${signature}`
   // (F4) this session's own chip the store lost counts as here; one the store holds is judged as the store has it
   const ownLive = [...ownChips.values()].some(c => c.threadId === me && c.projectId === it.projectId && !c.superseded && c.signature === signature && !before.some(s => sameChip(s, c)))
   if (!typed && me && (before.some(c => c.projectId === it.projectId && !c.superseded && c.threadId === me && c.signature === signature) || ownLive || mintedHere.has(minted) || minting.has(minted))) {
-    return `A chip for ${it.client} is already here: click Start on it.`
+    return { made: 'here' }
   }
-  // A client that already has a thread: the new one is asked to look at how the old one ended (handoverText).
-  const prompt = startKickoff(it, await replaced($, it, pass), now)
+  const prompt = await kickoff()
   // (0.5.6, Rob 10-14: "Start in the thread that I click it on") the client's chip in another thread, moved here
   const elsewhere = before.filter(c => c.projectId === it.projectId && !c.superseded && c.threadId !== me)
   const made = await mintChip($, { it, signature, need: 'start', auto: false, title: startTitle(it), tldr: startTldr(it, now), prompt, me, now })
-  // (0.5.7) the app no longer gives this session spawn_task: Start opens the thread
-  if (!made.made && made.why === 'no-tool') return (await openNow()) ?? `Could not create the chip: ${short(made.text)}`
-  if (!made.made) return made.why === 'no-answer' ? NO_ANSWER(it.client) : `Could not create the chip: ${short(made.text)}`
+  if (!made.made) return made.why === 'no-answer' ? { made: 'no', why: 'no-answer', text: `the app did not answer in ${APP_WAIT_MS / 1000} seconds` } : { made: 'no', why: made.why, text: made.text }
   // (0.5.6) where it is, as the band and the other threads' rows name it: asked for after the answer, never before it
   void placeChip($, me, it.projectId, now).catch(() => {})
-  if (!elsewhere.length) return `A chip for ${it.client} is ready here: click Start on it.`
+  if (!elsewhere.length) return { made: 'new' }
   // Only once the one here is made: the other is superseded, and the thread it is in withdraws it on its next
   // chips pass (a chip can be withdrawn only by the thread that minted it).
   await patchChips($, now, fresh => {
     for (const f of fresh) if (elsewhere.some(c => sameChip(c, f))) f.superseded = true
     return fresh
   }).catch(err => noteFailure($, 'start: the chip moved here', err))
-  // its thread's name: as the pass saw it, as the chip was minted with, else as the app says it now
-  const from = elsewhere.at(-1) as Chip
-  let title = cleanTitle(pass.live.get(from.threadId)?.title ?? '') || from.place || ''
-  if (!title) {
-    const found = await lookup($, from.threadId)
-    title = typeof found === 'object' ? cleanTitle(found.title ?? '') : ''
-  }
-  return `A chip for ${it.client} is ready here: click Start on it. The one in "${title || 'another thread'}" is withdrawn.`
+  return { made: 'new', moved: elsewhere.at(-1) }
 }
 
 /** (0.5.6) A chip the person made here, given the name of the thread it is in once the app says it (`ownPlace`). */
@@ -3403,8 +3448,11 @@ async function releaseStart($: EngineInterface, key: string, me: string): Promis
   }).catch(() => {})
 }
 
-/** (0.5.12) What one client's turn in a Start all came to. */
-type StartAllOne = { done: 'started' } | { done: 'failed'; why: string } | { done: 'skipped'; why: string }
+/**
+ * (0.5.12) What one client's turn in a Start all came to. (0.5.16) `card`: its Start card is here for the person to click.
+ * `cardsOnly`: the app answered that it starts a thread only on the person's own words here, whatever became of the card.
+ */
+type StartAllOne = { done: 'started' } | { done: 'card' } | { done: 'failed'; why: string; cardsOnly?: true } | { done: 'skipped'; why: string }
 
 /**
  * (0.5.12) One client's thread, in a Start all: ⛔ checked again just before it runs, and skipped if the client has a
@@ -3414,8 +3462,12 @@ type StartAllOne = { done: 'started' } | { done: 'failed'; why: string } | { don
  * thread (`startNow`, user_asked, the person's press) with its kickoff in the words that never take the package
  * (`startAllKickoff`), and recorded and linked as a single Start does (`adoptStarted`: what the thread has, the link, the
  * claim and the stamp; the sync after it pins and names it). Logged either way.
+ * (0.5.16, Rob 10-19) Where the app wants the person's own words for the start (`needsCard`), or once it has said so
+ * earlier in this press (`cardsOnly`: start_session is not asked again), the client's Start card is made here instead,
+ * with the same kickoff, under a single Start's guards (`startCard`: one per client in a thread, moved here from
+ * another thread). The app's sentence goes nowhere the person reads.
  */
-async function startOneOfAll($: EngineInterface, it: QueueItem, pass: Pass, me: string): Promise<StartAllOne> {
+async function startOneOfAll($: EngineInterface, it: QueueItem, pass: Pass, me: string, cardsOnly: boolean): Promise<StartAllOne> {
   const pid = it.projectId
   if (pressing.has(pid)) return { done: 'skipped', why: 'its own Start is running' }
   const linked = (await storeGet<Record<string, string>>($, 'mm.links', {}))[pid]
@@ -3426,14 +3478,27 @@ async function startOneOfAll($: EngineInterface, it: QueueItem, pass: Pass, me: 
   const hold = ++pressCount
   pressing.set(pid, hold)
   try {
-    const title = startTitle(it)
-    const prompt = startAllKickoff(it, await replaced($, it, pass), now)
-    const answer = await startNow($, title, prompt)
     const client = cleanName(it.client)
-    await logAuto($, `${answer.ok ? 'started' : 'not started'} ${client} (${pid}) sig ${sigHash(signatureOf(it))}: Start all, pressed${answer.ok ? '' : `; ${short(answer.text, 160)}`}`)
-    if (!answer.ok) return { done: 'failed', why: short(answer.text).replace(/\.+$/, '') }
-    await adoptStarted($, it, answer.sid, prompt, me, now)
-    return { done: 'started' }
+    let prompt: string | undefined
+    const kickoff = async (): Promise<string> => (prompt ??= startAllKickoff(it, await replaced($, it, pass), now))
+    if (!cardsOnly) {
+      const title = startTitle(it)
+      const answer = await startNow($, title, await kickoff())
+      const card = !answer.ok && answer.why === 'needs-card'
+      await logAuto($, `${answer.ok ? 'started' : 'not started'} ${client} (${pid}) sig ${sigHash(signatureOf(it))}: Start all, pressed${answer.ok ? '' : card ? '; the app starts one only on the person\'s own words here: a Start card instead' : `; ${short(answer.text, 160)}`}`)
+      if (answer.ok) {
+        await adoptStarted($, it, answer.sid, await kickoff(), me, now)
+        return { done: 'started' }
+      }
+      if (!card) return { done: 'failed', why: short(answer.text).replace(/\.+$/, '') }
+    }
+    const made = await startCard($, it, me, now, kickoff, false)
+    if (made.made === 'no') {
+      await logAuto($, `no card for ${client} (${pid}) sig ${sigHash(signatureOf(it))}: Start all, pressed; ${short(made.text, 160)}`)
+      return { done: 'failed', why: needsCard(made.text) ? 'its card was not made' : short(made.text).replace(/\.+$/, ''), cardsOnly: true }
+    }
+    if (cardsOnly) await logAuto($, `card for ${client} (${pid}) sig ${sigHash(signatureOf(it))}: Start all, pressed${made.made === 'here' ? '; one was here already' : ''}`)
+    return { done: 'card' }
   } finally {
     if (pressing.get(pid) === hold) pressing.delete(pid)
     await releaseStart($, key, me)
@@ -3447,6 +3512,10 @@ async function startOneOfAll($: EngineInterface, it: QueueItem, pass: Pass, me: 
  * each one checked again just before it runs (`startOneOfAll`). One line says what it came to (`startAllSummary`), in
  * the band of every thread and above the list. ⛔ Only from the person's press or command: never from a timer, a sync,
  * the tool or another session. Nothing it does starts anything by itself later.
+ * (0.5.16, Rob 10-19: "This message is getting really long.") The first time in a press the app answers that it starts
+ * a thread only on the person's own words here, start_session is asked no more in that press: that client and every
+ * one after it (up to START_ALL_MAX in all) get their Start card here, and the line counts them. A card starts nothing
+ * until the person clicks Start on it.
  */
 async function startAll($: EngineInterface): Promise<string> {
   if (startingAll) return 'Start all is already running.'
@@ -3463,16 +3532,24 @@ async function startAll($: EngineInterface): Promise<string> {
     const started: string[] = []
     const failed: Array<{ client: string; why: string }> = []
     const skipped: Array<{ client: string; why: string }> = []
+    const cards: string[] = []
+    /** (0.5.16) The app has said, in this press, that it starts a thread only on the person's own words here. */
+    let cardsOnly = false
     let reached = 0
     // one after another: each start is answered before the next is asked for
     for (const it of want) {
-      if (started.length + failed.length >= START_ALL_MAX) break
+      if (started.length + failed.length + cards.length >= START_ALL_MAX) break
       reached++
       const client = cleanName(it.client)
-      const one = await startOneOfAll($, it, pass, me)
+      const one = await startOneOfAll($, it, pass, me, cardsOnly)
       if (one.done === 'started') started.push(client)
-      else if (one.done === 'failed') failed.push({ client, why: one.why })
-      else skipped.push({ client, why: one.why })
+      else if (one.done === 'card') {
+        cards.push(client)
+        cardsOnly = true
+      } else if (one.done === 'failed') {
+        failed.push({ client, why: one.why })
+        if (one.cardsOnly) cardsOnly = true
+      } else skipped.push({ client, why: one.why })
     }
     const left = want.length - reached
     await patchStore<{ at?: number }>($, 'mm.startAllLeft', {}, fresh => {
@@ -3480,7 +3557,7 @@ async function startAll($: EngineInterface): Promise<string> {
       else if (fresh.at === undefined) return false
       else delete fresh.at
     }).catch(() => {})
-    const line = startAllSummary(started, failed, skipped, left)
+    const line = startAllSummary(started, failed, skipped, left, cards.length)
     await bandNote($, line, `startall\n${me}\n${at}`)
     return line
   } finally {
