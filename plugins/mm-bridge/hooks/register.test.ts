@@ -7208,3 +7208,128 @@ describe('0.5.12: Start all (Rob, 10-15: no clicks at all; the app starts a thre
     expect(w.minted()).toEqual([])
   })
 })
+
+// ======================================================================== 0.5.16
+
+describe('0.5.16: a refused Start becomes a Start card, never a wall of errors (Rob, 10-19: "When it says it actually has to be started by me saying it here in the thread, that causes issues.")', () => {
+  /** The app's answer to a start from a turn that is not the person's own words in this thread (Claude.app, 10-19). */
+  const USER_WORDS = 'Start sessions only on the user\'s own words to you here; this turn runs an automated event, another session\'s message, or the task another session gave you. Propose the session instead (initiation "own_initiative")'
+  /** Any part of the app's sentence, anywhere the person reads it. */
+  const APP_TEXT = /own words|Propose the session|automated event|initiation/
+  const bandTexts = async ($: Engine) => {
+    const band = await bandOf($)
+    const out = (await lines(band)).join(' ')
+    await band.unmount()
+    return out
+  }
+  const pressBand = async ($: Engine, key = 'mm-start-missing') => {
+    const band = await bandOf($)
+    await band.press({ key })
+    await band.unmount()
+  }
+  const chipsFor = (w: { stored: Record<string, unknown> }, pid: string) => ((w.stored['mm.chips'] ?? []) as Array<{ projectId: string; threadId: string; prompt: string; taskId: string; superseded?: boolean }>).filter(c => c.projectId === pid && !c.superseded)
+  const ACME_ALL = NOT_TAKEN(ACME, 'Acme Roofing Pat')
+
+  test('(a) a single Start the app refuses for want of the person\'s own words: the Start card here, carrying the kickoff, and one short line; pressed again, no second card', async ($, on) => {
+    const w = world(on, { tools: 'start', startFails: USER_WORDS })
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: `start:${CEDAR}` })
+    // asked once to start it now, then the card
+    expect(starts(w).length).toBe(1)
+    expect(proposals(w).map(c => c.args)).toMatchObject([{ initiation: 'own_initiative', title: 'Cedar Dental: reply to the client', prompt: CEDAR_KICKOFF, context: 'fresh' }])
+    expect(w.toasts.at(-1)).toBe('A Start card for Cedar Dental is ready here: click Start on it.')
+    expect(await lines(ui)).toContain('A Start card for Cedar Dental is ready here: click Start on it.')
+    expect(chipsFor(w, CEDAR)).toMatchObject([{ threadId: SELF, prompt: CEDAR_KICKOFF, taskId: chipId(1) }])
+    // nothing started, nothing linked
+    expect((w.stored['mm.links'] as Record<string, string> | undefined)?.[CEDAR]).toBeUndefined()
+    expect(w.stored['mm.starting']).toEqual({})
+    // pressed again in this thread: one card per client here
+    await ui.press({ key: `start:${CEDAR}` })
+    expect(proposals(w).length).toBe(1)
+    expect(w.toasts.at(-1)).toBe('A Start card for Cedar Dental is already here: click Start on it.')
+    // ⛔ the app's sentence is shown nowhere
+    expect(w.toasts.join('\n')).not.toMatch(APP_TEXT)
+    expect((await lines(ui)).join('\n')).not.toMatch(APP_TEXT)
+    expect(JSON.stringify(w.stored['mm.notes'] ?? [])).not.toMatch(APP_TEXT)
+    await ui.unmount()
+  })
+
+  test('(b) Start all, the app refusing the first for want of the person\'s own words: start_session is asked once, then a Start card for each of the three, one short line, and no app text in the band', async ($, on) => {
+    const w = world(on, { tools: 'start', startFails: USER_WORDS })
+    await mm($, '')
+    await pressBand($)
+    // ⛔ start_session (user_asked) once in the press: not once per client
+    expect(starts(w).map(c => c.args.initiation)).toEqual(['user_asked'])
+    // a card for every client, each with the kickoff Start all would have opened it with
+    expect(proposals(w).map(c => c.args.prompt)).toEqual([CEDAR_KICKOFF, ACME_ALL, BOLT_AUTO_KICKOFF])
+    expect(proposals(w).every(c => c.args.initiation === 'own_initiative')).toBe(true)
+    for (const pid of [CEDAR, ACME, BOLT]) expect(chipsFor(w, pid).map(c => c.threadId)).toEqual([SELF])
+    const line = '3 ready to start here: click Start on each card.'
+    expect(w.toasts.at(-1)).toBe(line)
+    expect(await bandTexts($)).toContain(line)
+    expect((w.stored['mm.notes'] as Array<{ text: string }>).map(n => n.text)).toEqual([line])
+    // ⛔ the app's sentence is in no line the person reads
+    expect(JSON.stringify(w.stored['mm.notes'])).not.toMatch(APP_TEXT)
+    expect(w.toasts.join('\n')).not.toMatch(APP_TEXT)
+    expect(await bandTexts($)).not.toMatch(APP_TEXT)
+    // nothing started or linked; every claim let go
+    const links = (w.stored['mm.links'] ?? {}) as Record<string, string>
+    for (const pid of [CEDAR, ACME, BOLT]) expect(links[pid]).toBeUndefined()
+    expect(w.stored['mm.starting']).toEqual({})
+    // pressed again: asked once more, and no second card for any of them
+    await pressBand($)
+    expect(starts(w).length).toBe(2)
+    expect(proposals(w).length).toBe(3)
+    expect(w.toasts.at(-1)).toBe(line)
+  })
+
+  test('(c) Start all, the app starting the first and refusing the second: 1 started, and Start cards for the other 2 (start_session not asked for the third)', async ($, on) => {
+    let asked = 0
+    const w = world(on, { tools: 'start', startRefuses: () => (++asked === 2 ? USER_WORDS : undefined) })
+    await mm($, '')
+    expect(await mm($, 'start all')).toBe('Started 1 thread: Cedar Dental. 2 ready to start here: click Start on each card.')
+    expect(starts(w).map(c => String(c.args.prompt))).toEqual([CEDAR_KICKOFF, ACME_ALL])
+    expect(proposals(w).map(c => c.args.prompt)).toEqual([ACME_ALL, BOLT_AUTO_KICKOFF])
+    // the one started is linked as Start all links it; the other two wait as cards here
+    expect((w.stored['mm.links'] as Record<string, string>)[CEDAR]).toBe('local_started_1')
+    expect(chipsFor(w, ACME).map(c => c.threadId)).toEqual([SELF])
+    expect(chipsFor(w, BOLT).map(c => c.threadId)).toEqual([SELF])
+    expect(JSON.stringify(w.stored['mm.notes'])).not.toMatch(APP_TEXT)
+    expect(w.stored['mm.starting']).toEqual({})
+  })
+
+  test('(d) any other refusal is still a failure: Start all says it briefly (the app\'s text cut to 200 characters), makes no card, and still starts the rest', async ($, on) => {
+    const LONG = `Starting sessions is turned off for this workspace. ${'Ask the person who runs it. '.repeat(20)}`
+    const w = world(on, { tools: 'start', startRefuses: args => (String(args.prompt).includes(BOLT) ? LONG : undefined) })
+    await mm($, '')
+    const said = await mm($, 'start all')
+    expect(said.startsWith('Started 2 threads: Cedar Dental, Acme Roofing. Not started: Bolt Staffing (Starting sessions is turned off for this workspace. Ask the person')).toBe(true)
+    const why = /Not started: Bolt Staffing \((.*)\)\.$/.exec(said)?.[1] ?? ''
+    expect(why.length).toBeLessThanOrEqual(200)
+    expect(said).not.toContain('ready to start here')
+    expect(proposals(w)).toEqual([])
+    expect(starts(w).length).toBe(3)
+    expect((w.stored['mm.notes'] as Array<{ text: string }>).map(n => n.text)).toEqual([said])
+  })
+
+  test('(d) a single Start refused for another reason: the failure, as before, and no card', async ($, on) => {
+    const w = world(on, { tools: 'start', startFails: 'Starting sessions is not enabled here.' })
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: `start:${CEDAR}` })
+    expect(w.toasts.at(-1)).toBe('Could not start Cedar Dental\'s thread: Starting sessions is not enabled here. Type /mm start Cedar Dental to try again.')
+    expect(proposals(w)).toEqual([])
+    expect(w.stored['mm.chips']).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('a thread started by itself that the app refuses this way: the card, as before (autoStart unchanged), and its sentence in no band note', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: cedarAlone(), startFails: USER_WORDS })
+    await tickOnce($, w)
+    await w.clock.advance(3_000)
+    expect(starts(w).length).toBe(1)
+    expect(proposals(w).map(c => c.args.prompt)).toEqual([CEDAR_KICKOFF])
+    expect(JSON.stringify(w.stored['mm.notes'] ?? [])).not.toMatch(APP_TEXT)
+  })
+})

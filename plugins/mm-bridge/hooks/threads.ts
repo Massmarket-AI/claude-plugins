@@ -669,13 +669,28 @@ export function startAllKickoff(it: QueueItem, replaces: Replaced | undefined, n
 }
 
 /**
+ * (0.5.16, Rob 10-19: "When it says it actually has to be started by me saying it here in the thread, that causes
+ * issues.") The app's answer when it will not start a thread from this turn: it starts one (`user_asked`) only on the
+ * person's own typed words in this thread, and a press in a thread that some other session started, or that an
+ * automatic Update woke last, is not that. Its sentence: `Start sessions only on the user's own words to you here;
+ * this turn runs an automated event, ... Propose the session instead (initiation "own_initiative")`. Told by its two
+ * stable parts and nothing broader, so that any other refusal still reads as the error it is.
+ */
+export const needsCard = (text: string): boolean => /\buser['’]s own words\b|\bpropose the session instead\b/i.test(text)
+
+/** (0.5.16) What a press says when the app wants the person's own words and a card was made instead (`needsCard`). */
+export const cardReady = (client: string): string => `A Start card for ${client} is ready here: click Start on it.`
+
+/**
  * (0.5.12) The one line a Start all leaves, in the band of every thread and above the list: the threads it started,
  * the ones the app did not start and why, the ones it skipped (a thread or another start got there first), and how
- * many still need a thread after the cap (START_ALL_MAX) for a second press.
+ * many still need a thread after the cap (START_ALL_MAX) for a second press. (0.5.16) And how many wait as Start cards
+ * in this thread, where the app wanted the person's own words (`needsCard`): a count, never the app's sentence.
  */
-export function startAllSummary(started: readonly string[], failed: ReadonlyArray<{ client: string; why: string }>, skipped: ReadonlyArray<{ client: string; why: string }>, left: number): string {
+export function startAllSummary(started: readonly string[], failed: ReadonlyArray<{ client: string; why: string }>, skipped: ReadonlyArray<{ client: string; why: string }>, left: number, cards = 0): string {
   const out: string[] = []
   if (started.length) out.push(`Started ${started.length} thread${started.length === 1 ? '' : 's'}: ${started.join(', ')}.`)
+  if (cards > 0) out.push(`${cards} ready to start here: click Start on ${cards === 1 ? 'its card' : 'each card'}.`)
   if (failed.length) out.push(`Not started: ${failed.map(f => `${f.client} (${f.why})`).join('; ')}.`)
   if (skipped.length) out.push(`Skipped: ${skipped.map(f => `${f.client} (${f.why})`).join('; ')}.`)
   if (left > 0) out.push(`${left} more need${left === 1 ? 's' : ''} a thread: press Start missing threads again.`)
