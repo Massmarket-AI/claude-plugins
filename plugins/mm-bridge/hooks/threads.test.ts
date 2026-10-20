@@ -521,7 +521,7 @@ describe('R3 and R8: the rows of the Needs-you pane', () => {
         '   2 messages waiting · Update thread: "Bolt Staffing invoice question" looks like this client',
         '   [ Update thread ] [ Drafts ]',
         '',
-        'Updated 15:00 UTC for builder-a@example.com. Pins: overdue by up to 3 business days, or due within the next 24 business hours. Weekends do not count. Threads for these clients link themselves; use Update or Start on a row to pick one up.',
+        'Updated 15:00 UTC for builder-a@example.com. Pins: overdue (anything still open since Thu Oct 15), or due within the next 24 business hours. Weekends do not count. Threads for these clients link themselves; use Update or Start on a row to pick one up.',
       ].join('\n'),
     )
   })

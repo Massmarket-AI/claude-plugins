@@ -44,7 +44,7 @@ export const next = (e: unknown) => e
  * `every`: the clock's repeating timers run too (a session's minute tick and its 15-second chips pass); left
  * out, only its one-off timers do, as before.
  */
-export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessionId: string }>, unlisted: readonly string[] = [], opts: { every?: boolean; tools?: 'spawn' | 'start' | 'both' } = {}) {
+export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessionId: string }>, unlisted: readonly string[] = [], opts: { every?: boolean; tools?: 'spawn' | 'start' | 'both'; now?: number } = {}) {
   /** (0.5.7) The session tools as the engine lists them; left out, the listing names neither, as before 0.5.7. */
   const toolNames = opts.tools
     ? [...(opts.tools !== 'start' ? ['mcp__ccd_session__spawn_task'] : []), ...(opts.tools !== 'spawn' ? ['mcp__ccd_session__start_session'] : []), 'mcp__ccd_session__dismiss_task']
@@ -53,7 +53,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   const stored: Record<string, string> = {}
   /** Sets of `key` refused next: `skip` sets first go through, then `times` are refused. */
   const refusing = { key: '', times: 0, skip: 0 }
-  let time = NOW
+  /** `now`: the clock starts there (left out, NOW). */
+  let time = opts.now ?? NOW
   const timers: Array<{ at: number; fn: () => void; done: boolean }> = []
   const app = new Map<string, FakeThread>()
   for (const t of threads) app.set(t.sessionId, { title: t.sessionId, pinned: false, isArchived: false, lastActivityAt: ago(1), remoteControlActive: false, ...t })
