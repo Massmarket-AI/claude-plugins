@@ -1,26 +1,28 @@
 // Pure queue logic for the Massmarket bridge: no `$`, so tests can call it directly.
 //
-// What pins (Rob, 2026-10-08): "for what shows up in the pins, we really just want to be talking about
-// what's going on right now, nothing more than 3 days old." A client pins when one of these is true:
-//   - an unanswered client message whose reply is due (24 business hours after it arrived) between
-//     3 business days ago and 24 business hours from now
-//   - a prepared reply package (drafts ready) less than 3 business days past its reply time
-//   - a reply package the viewer picked up, with a draft not sent, pins like a prepared one
-//   - a ticket with a date WE committed to, between 3 business days overdue and 24 business hours from now
-//     (clients never set dates; SLA and phase dates are not promises and do not pin)
+// What is listed (Rob, 2026-10-20: "everything since last Thursday that wasn't closed should always show up
+// now, and we can keep it clean going forward"): everything still open whose due time is on or after
+// LIST_FLOOR_MS (Thu 2026-10-15 12:00 AM ET), however overdue, and everything not due yet, however far ahead.
+// (Until 2026-10-20 the cut was 3 business days back; Rob replaced it with LIST_FLOOR_MS.) That is:
+//   - an unanswered client message (its reply is due 24 business hours after it arrived)
+//   - a prepared reply package (drafts ready)
+//   - a reply package the viewer picked up, with a draft not sent, like a prepared one
+//   - a ticket with a date WE committed to (clients never set dates; SLA and phase dates are not promises
+//     and do not list)
 //   - for the founder alone: a reply package flagged for his OK, whoever owns the client (kind `ok`); one a
 //     teammate sends only once its reply is due (0.5.1, R2: until then it is theirs to decide)
+// A listed client pins while what it must act by is past or within the next 24 business hours (`pinsNow`).
 // Work that must start now at 1.5 h a day waits for real hour estimates (quote line items).
 //
 // Two more lists are built beside that one (buildLists), and neither pins or is counted: clients whose
-// reply drafts a teammate holds (not the viewer's to act on), and clients whose only items are more than
-// 3 business days overdue (so that nothing drops off silently).
+// reply drafts a teammate holds (not the viewer's to act on), and clients whose only items were due before
+// the floor (so that nothing drops off silently).
 //
 // Every client clock here counts business time (Rob, 2026-10-12: "the weekends don't count as days towards
 // the 24-hour response time... We're only counting business days in our timelines for clients"): Saturday
 // and Sunday, America/New_York, contribute zero. See ./business-time.ts.
 
-import { businessDeadline, businessMsBetween } from './business-time'
+import { businessDeadline, businessMsBetween, subtractBusinessMs } from './business-time'
 
 export type FeedMail = {
   message_id_key: string
@@ -124,7 +126,7 @@ export type Feed = {
  *   stale          drafts exist but are marked out of date, and nobody holds it; for the founder, `by` is the
  *                  teammate it is with when it is a teammate's (R1, 0.5.1), else ''
  *   prepared       drafts are ready, but the client does not pin for the viewer on them (another owner's
- *                  client, or a package older than the window)
+ *                  client, or a package due before the list's floor)
  * `unsent` is the drafts not sent on a held package, the drafts ready otherwise. `newer` is the client
  * messages that arrived after a package the viewer holds was written.
  */
@@ -233,29 +235,55 @@ export const decidesText = (who: string): string => `${MAY_NEED_OK} · ${who} de
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
 /**
- * Both windows are business time: 3 business days back, 24 business hours ahead. (0.5.2, R1) The list holds
- * everything the feed gives that is overdue by up to 3 business days or not due yet, however far ahead; the
- * 24 business hours ahead are the pin's window (`pinsNow`): a client's thread pins while something of it must
- * be acted on within them, or already should have been.
+ * The list's floor (Rob, 2026-10-20: "everything since last Thursday that wasn't closed should always show up
+ * now, and we can keep it clean going forward"). Replaces the rolling 3-business-day cut of 2026-10-08. Anything
+ * still open whose due time is on or after it stays on the Needs-you list however overdue; only what was due
+ * before it goes under Older. Thu 2026-10-15 12:00 AM ET: the week the team installed the bridge.
+ */
+export const LIST_FLOOR_MS = Date.parse('2026-10-15T04:00:00Z')
+/**
+ * The pin's window, in business time: 24 business hours ahead (`pinsNow`). A client's thread pins while
+ * something of it must be acted on within them, or already should have been. (0.5.2, R1) The list itself holds
+ * everything not due yet, however far ahead.
+ */
+export const WINDOW_AHEAD_MS = DAY
+/**
+ * The 2026-10-08 cut (3 business days back), kept only as the list's least reach: the floor widens the list
+ * and never narrows it. From Tue 2026-10-20 12:00 AM ET on, everything due before the floor is more than 3
+ * business days overdue, so this decides nothing and the floor alone is the cut; it only keeps a clock before
+ * that day (the tests' fixed early-October dates) reading as it did. (Until 2026-10-20 the cut was 3 business
+ * days back; Rob replaced it with LIST_FLOOR_MS.)
  */
 export const WINDOW_BACK_MS = 3 * DAY
-export const WINDOW_AHEAD_MS = DAY
 /**
  * (0.5.2, R8) How long a send waits for the server's check before the client is listed as it was: a check that
  * never lands does not keep a client off the list. Real time (it is not a client's clock).
  */
 export const CHECK_WAIT_MS = 2 * HOUR
 export const MAX_PINS = 8
+/** The least mail look-back asked of OW, in business hours (Rob, 2026-10-13: "expanding that to 7 days"). */
+export const MAIL_LOOKBACK_MIN_HOURS = 168
+/** The most: OW's `mail_hours` cap from 2026-10-20 (it took 1 to 168 before). */
+export const MAIL_LOOKBACK_MAX_HOURS = 720
+
 /**
- * How far back the feed is asked for client mail, in business hours: OW's `mail_hours`, which takes 1 to
- * 168. A reply is due 24 business hours after a message, and a client goes under Older once that is more
- * than 3 business days past, so mail belongs under Older only when it is more than 96 business hours old.
- * The 96 asked for until 2026-10-13 meant Older could never hold any mail (review of 79cbc596, F1). Rob, that
- * day: "I kind of do think expanding that to 7 days would be better." The list keeps its 3-business-day
- * cut; mail 3 to 7 business days overdue goes under Older. Mail OW sends from further back than this is read
- * the same way, and goes under Older too.
+ * Business hours of mail to ask OW for: back to 24 business hours before the floor (mail due on the floor arrived then), at least 168, at most 720 (OW's cap from 2026-10-20).
+ *
+ * A reply is due 24 business hours after a message, so every message whose reply is due on or after the floor
+ * arrived on or after `subtractBusinessMs(LIST_FLOOR_MS, DAY)` (Wed 2026-10-14 12:00 AM ET). Mail OW sends from
+ * further back is read the same way, and goes under Older. The 168 (the look-back since 2026-10-13, review of
+ * 79cbc596, F1) is the least: it is what this asks for until Fri 2026-10-23 12:00 AM ET, so it is safe to ship
+ * before OW's 720 cap deploys; from then on it asks for more than 168, which an OW that still caps at 168
+ * refuses (HTTP 400). Past 720 (from Wed 2026-11-25) mail due just after the floor starts to fall out of the
+ * look-back; "keep it clean going forward" is what keeps that list short.
  */
-export const MAIL_LOOKBACK_HOURS = 168
+export function mailLookbackHours(now: number): number {
+  const from = subtractBusinessMs(LIST_FLOOR_MS, DAY)
+  // a stretch too long to hold 720 business hours is not walked day by day (businessWithin)
+  if (!businessWithin(from, now, MAIL_LOOKBACK_MAX_HOURS * HOUR)) return MAIL_LOOKBACK_MAX_HOURS
+  const since = businessMsBetween(from, now)
+  return Math.min(MAIL_LOOKBACK_MAX_HOURS, Math.max(MAIL_LOOKBACK_MIN_HOURS, Math.ceil(since / HOUR)))
+}
 
 const ms = (iso: string | null | undefined): number => {
   const t = iso ? Date.parse(iso) : NaN
@@ -324,9 +352,10 @@ function businessWithin(fromMs: number, toMs: number, limit: number): boolean {
  *             viewer's to act on (Rob, 2026-10-12: "They should only be seeing theirs... when you pass it
  *             to somebody else, it should show up for only the person who's passed it"). Never pinned,
  *             never counted. The pane lists them under `With a teammate (n)`.
- *   older     its only items are more than 3 business days overdue (Rob, 2026-10-12: two clients with
+ *   older     its only items were due before the floor, LIST_FLOOR_MS (Rob, 2026-10-12: two clients with
  *             unanswered mail from ten and six days ago were not shown at all). Never pinned, never
- *             counted. The pane lists them last, under `Older (n)`, most overdue first.
+ *             counted. The pane lists them last, under `Older (n)`, most overdue first. (Until 2026-10-20
+ *             the cut was 3 business days back; Rob replaced it with LIST_FLOOR_MS.)
  */
 export type Lists = { queue: QueueItem[]; teammate: QueueItem[]; older: QueueItem[]; checking: QueueItem[] }
 
@@ -501,14 +530,18 @@ export function feedClients(feed: Feed): KnownClient[] {
 }
 
 /**
- * One pass over the feed. `older` false: what is overdue by up to 3 business days or due within the next
- * 24 business hours. `older` true: only what is more than 3 business days overdue, by the same rules of
- * whose it is.
+ * One pass over the feed. `older` false: everything still open that was due on or after the floor
+ * (LIST_FLOOR_MS), however overdue, and everything not due yet, however far ahead. `older` true: only what was
+ * due before the floor, by the same rules of whose it is. (Until 2026-10-20 the cut was 3 business days back;
+ * Rob replaced it with LIST_FLOOR_MS.)
  */
 function build(feed: Feed, now: number, older: boolean): QueueItem[] {
-  const tooOld = (due: number): boolean => due < now && !businessWithin(due, now, WINDOW_BACK_MS)
-  // (0.5.2, R1) not due yet: listed however far ahead; whether it pins is `pinsNow`
-  const inWindow = (due: number): boolean => Number.isFinite(due) && (older ? tooOld(due) : due < now ? businessWithin(due, now, WINDOW_BACK_MS) : true)
+  // Under Older: due before the floor, and more than 3 business days ago (WINDOW_BACK_MS: from Tue 2026-10-20
+  // 12:00 AM ET on, everything due before the floor is, so the floor alone decides)
+  const tooOld = (due: number): boolean => due < now && due < LIST_FLOOR_MS && !businessWithin(due, now, WINDOW_BACK_MS)
+  // (0.5.2, R1) everything else with a due time is the current pass's: overdue since the floor, or not due yet
+  // however far ahead; whether it pins is `pinsNow`
+  const inWindow = (due: number): boolean => Number.isFinite(due) && (older ? tooOld(due) : !tooOld(due))
   /** (R8) Our newest send to each client, from every row of it the feed gives one on. */
   const lastOut = lastOutbound(feed)
   /** (R18) The internal projects: by the feed's own flag on any row, else by id. */
@@ -585,8 +618,8 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
   const staleTheirs = new Map<string, string>()
   /**
    * (the founder) For each client with a stale package a teammate has: that teammate, and the client messages
-   * waiting after its drafts, in this pass's window. Counted only for the client's place under With a teammate,
-   * once nothing else of the founder's lists the client (below).
+   * waiting after its drafts, on this pass's side of the floor. Counted only for the client's place under With
+   * a teammate, once nothing else of the founder's lists the client (below).
    */
   const staleMail = new Map<string, { name: string; mail: Array<{ m: FeedMail; due: number }> }>()
   for (const d of feed.drafts ?? []) {
@@ -617,7 +650,7 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     // (R17, R18) no reply time for a package the feed gives none, or on an internal project: Infinity
     const noDue = d.due_at === null || internal.has(d.project_id)
     const due = noDue ? Infinity : typeof d.due_at === 'string' && Number.isFinite(ms(d.due_at)) ? ms(d.due_at) : Number.isFinite(ms(d.covers_through)) ? businessDeadline(ms(d.covers_through), DAY) : now
-    // (this pass's side of the window: not yet 3 business days past its reply time, or only what is past that)
+    // (this pass's side of the floor: its reply time on or after LIST_FLOOR_MS, or only what was due before it)
     const inReach = noDue ? !older : older ? tooOld(due) : !tooOld(due)
     // `by`: the teammate who holds it; for the founder, also the teammate a stale package is with (R1), so
     // that its pane names them instead of inviting him to pick it up

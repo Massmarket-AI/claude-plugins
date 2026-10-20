@@ -52,7 +52,8 @@ export type MmRow = {
 /**
  * `rows` are the clients that need the viewer now. `teammate` and `older` are the two groups under them,
  * closed until the person opens one: clients whose drafts a teammate holds, and clients whose only items
- * are more than 3 business days overdue. Neither is pinned or counted in the header.
+ * were due before the list's floor, Thu 2026-10-15 (until 2026-10-20 the cut was 3 business days back; Rob
+ * replaced it with LIST_FLOOR_MS). Neither is pinned or counted in the header.
  */
 export type MmQueue = {
   header: string

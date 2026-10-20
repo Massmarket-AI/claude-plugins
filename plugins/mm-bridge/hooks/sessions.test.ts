@@ -14,7 +14,7 @@ const mail = (n: number, name: string, hoursAgo = 2) => ({
 })
 
 describe('F1: the feed is asked for mail far enough back for Older to hold any', () => {
-  test('the closeout feed is asked for 168 business hours of mail, OW\'s most', async () => {
+  test('the closeout feed is asked for 168 business hours of mail on a clock before Fri Oct 23 (the least, mailLookbackHours)', async () => {
     const feed: Feed = { member: ME, role: 'founder', mail: [mail(1, 'Client One')], tickets: {}, threads: [] }
     const w = fakeApp(feed, [{ sessionId: 'local_hub' }])
     await mm(w.session('local_hub'), '')
@@ -32,6 +32,27 @@ describe('F1: the feed is asked for mail far enough back for Older to hold any',
     const last = w.stored('mm.last') as { items: unknown[]; older?: Array<{ projectId: string }> }
     expect(last.items).toEqual([])
     expect(last.older?.map(i => i.projectId)).toEqual([pid(1)])
+  })
+
+  test('(0.5.19, Rob 2026-10-20) on Mon Nov 2 the feed is asked for mail back to the floor, and mail since the floor is on the list however late', async () => {
+    // Mon Nov 2, 9 AM in New York (standard time). From Wed Oct 14 12:00 AM (24 business hours before the floor) to
+    // then: Oct 14, 15, 16 (72) + Oct 19 to 23 (120) + Oct 26 to 30 (120) + Nov 2 to 9 AM (9) = 321 business hours
+    const now = Date.parse('2026-11-02T09:00:00-05:00')
+    const feed: Feed = {
+      member: ME, role: 'founder', tickets: {}, threads: [],
+      mail: [
+        // received Fri Oct 16 10 AM: its reply was due Mon Oct 19, after the floor
+        { ...mail(1, 'Client One'), received_at: '2026-10-16T14:00:00Z' },
+        // received Tue Oct 13 10 AM: its reply was due Wed Oct 14, before the floor
+        { ...mail(2, 'Client Two'), received_at: '2026-10-13T14:00:00Z' },
+      ],
+    }
+    const w = fakeApp(feed, [{ sessionId: 'local_hub' }], [], { now })
+    await mm(w.session('local_hub'), '')
+    expect(w.fetched.filter(u => u.includes('/closeout'))).toEqual(['https://onboarding-wizard.massmarket.ai/api/ext/closeout?mail_hours=321'])
+    const last = w.stored('mm.last') as { items: Array<{ projectId: string }>; older?: Array<{ projectId: string }> }
+    expect(last.items.map(i => i.projectId)).toEqual([pid(1)])
+    expect(last.older?.map(i => i.projectId)).toEqual([pid(2)])
   })
 })
 
