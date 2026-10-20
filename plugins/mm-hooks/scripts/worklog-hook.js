@@ -55,6 +55,10 @@
  * which mm-hooks plugin build and which auto-update setting sent them
  * (`X-MM-Client`, `X-MM-Plugin`, `X-MM-Autoupdate`).
  *
+ * A mod's tool calls are not work (0.11.8, 2026-10-16): a tool call the
+ * mm-bridge mod made by itself (`toolu_plugin_` on its `tool_use_id`) writes no
+ * worklog row and is not counted in the Stop line; see PLUGIN TOOL CALLS.
+ *
  * Identity: reuses the SAME per-member `team_auth_tokens` UUID already handed
  * out for the Chrome extension (rollout/slips/), via env var MM_TRACKER_TOKEN.
  * No new credential to mint or distribute.
@@ -143,7 +147,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.11.7";
+const HOOK_VERSION = "0.11.9";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -301,6 +305,49 @@ const SESSION_STATE_DIR = (() => {
   const root = stateRootDir();
   return root ? path.join(root, "sessions") : null;
 })();
+
+/**
+ * ⛔ A SESSION'S CLIENT AND TASK OUTLIVE THE 48-HOUR PRUNE (0.11.9, 2026-10-19).
+ * A state file goes once it has been unused for 48 hours (pruneStateFiles), and
+ * the declarations went with it: a thread resumed after a weekend sent every row
+ * with no client until someone loaded the client's skill again, and those rows
+ * were billed to nobody. Seen on Rob's own client thread, idle from 2026-10-16
+ * 20:49Z and resumed on 10-19 with `declared_skill: null` until he re-declared.
+ *
+ * So the declarations alone are also kept in a small record of their own,
+ * `<homedir>/.claude/mm-hooks/state/declarations/<session id>.json`: the client,
+ * the task, when each was declared, and where the session's transcript is. Every
+ * save writes it beside the state file, and every load takes the newer of the
+ * two for each declaration (adoptNewerDeclarations). A session whose state file
+ * was pruned starts again from its last declarations, with their original times,
+ * not from none.
+ *
+ * The 48-hour prune never looks in this folder. A record goes at SessionStart
+ * (pruneDeclarationRecords) once it has been unused for 48 hours AND its
+ * transcript is gone, which is when Claude Code can no longer resume the
+ * session; or once it has been unused for DECLARATION_KEEP_MAX_MS, transcript or
+ * not. A record that names no transcript keeps the old 48 hours.
+ *
+ * ⛔ WHY ON THIS MACHINE, NOT FROM THE SERVER. The other way would ask OW for the
+ * session's last declaration on the first row after a gap. That puts a request
+ * on the tool-call path, inside its 6 s budget; needs a new read route for a
+ * member's token; and fails exactly when OW is slow or down. This needs none of
+ * it and ships with the hook alone.
+ *
+ * Only a session the payload names has a record. Nothing in it is ever sent.
+ */
+const DECLARATION_STATE_DIR = (() => {
+  const root = stateRootDir();
+  return root ? path.join(root, "declarations") : null;
+})();
+/** A state file unused for longer than this goes (pruneStateFiles). */
+const STATE_UNUSED_MS = 48 * 3600 * 1000;
+/** A declarations record unused for longer than this goes, transcript or not. */
+const DECLARATION_KEEP_MAX_MS = 90 * 24 * 3600 * 1000;
+/** A temporary file writeDeclarationRecord leaves when its rename is refused. */
+const DECLARATION_TEMP_RE = /^\.tmp-\d+-[0-9a-f]{8}$/;
+/** This run's transcript, from the payload (see transcriptPathKept). Null until main() reads it. */
+let HOOK_TRANSCRIPT_PATH = null;
 
 /**
  * ⛔ READ-ONLY. The pre-2026-09-29 location, `<cwd>/.claude/.worklog-state/`.
@@ -485,7 +532,18 @@ function stateString(value) {
   return typeof value === "string" && value ? value : null;
 }
 
+/**
+ * This session's state. ⛔ Each declaration is the newer of the state file's and
+ * the declarations record's: once the state file has been pruned, that is the
+ * record's (see DECLARATION_STATE_DIR).
+ */
 function loadSessionState(sessionId) {
+  const state = loadSessionStateFromFile(sessionId);
+  adoptNewerDeclarations(readDeclarationRecord(sessionId), state);
+  return state;
+}
+
+function loadSessionStateFromFile(sessionId) {
   try {
     const parsed = readSessionStateFile(sessionId);
     const state = {
@@ -584,15 +642,23 @@ function keepNewerDeclarations(file, state) {
   } catch {
     return;
   }
-  if (!disk || typeof disk !== "object") return;
+  adoptNewerDeclarations(disk, state);
+}
+
+/**
+ * For each declaration, take `source`'s copy into `state` when it is the newer
+ * one, or when `state` has none. A copy without a readable `*_at` is never taken.
+ */
+function adoptNewerDeclarations(source, state) {
+  if (!source || typeof source !== "object") return;
   DECLARATION_KEYS.forEach(([key, atKey]) => {
-    const value = stateString(disk[key]);
-    const diskMs = declarationMs(disk[atKey]);
-    if (!value || !Number.isFinite(diskMs)) return;
+    const value = stateString(source[key]);
+    const sourceMs = declarationMs(source[atKey]);
+    if (!value || !Number.isFinite(sourceMs)) return;
     const ownMs = declarationMs(state[atKey]);
-    if (!stateString(state[key]) || !Number.isFinite(ownMs) || diskMs > ownMs) {
+    if (!stateString(state[key]) || !Number.isFinite(ownMs) || sourceMs > ownMs) {
       state[key] = value;
-      state[atKey] = stateString(disk[atKey]);
+      state[atKey] = stateString(source[atKey]);
     }
   });
 }
@@ -600,12 +666,94 @@ function keepNewerDeclarations(file, state) {
 function saveSessionState(sessionId, state) {
   const file = stateFilePath(sessionId);
   if (!file) return;
+  // Read once, before the state file is written: the newer of each declaration
+  // in the two survives the save, and the record keeps the transcript it names.
+  const record = readDeclarationRecord(sessionId);
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     keepNewerDeclarations(file, state);
+    adoptNewerDeclarations(record, state);
     fs.writeFileSync(file, JSON.stringify(state), "utf8");
   } catch {
     /* best-effort */
+  }
+  writeDeclarationRecord(sessionId, state, record);
+}
+
+/** This session's declarations record, or null for a payload that names no session. */
+function declarationRecordFile(sessionId) {
+  return DECLARATION_STATE_DIR && isSessionKey(sessionId)
+    ? path.join(DECLARATION_STATE_DIR, sessionStateFileName(sessionId))
+    : null;
+}
+
+/** A JSON object read from `file`, or null when there is none that reads. Never throws. */
+function readJsonObject(file) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What this session's declarations record holds, or null. */
+function readDeclarationRecord(sessionId) {
+  const file = declarationRecordFile(sessionId);
+  return file ? readJsonObject(file) : null;
+}
+
+/** A transcript path as a record keeps it: an absolute path of sane length, or null. */
+function transcriptPathKept(value) {
+  return typeof value === "string" && value.length <= 4096 && path.isAbsolute(value) ? value : null;
+}
+
+/**
+ * Write this session's declarations record whole: to a temporary name in the
+ * same folder, then renamed into place, as a task file is (taskOriginWrite), so
+ * a parallel load reads the old record or the new one, never half of either.
+ * Written only once the session has declared something. The transcript is this
+ * run's, or the one `previous` named when this payload carries none. Every save
+ * writes it, so its modification time is when the session was last used.
+ * Never throws.
+ */
+function writeDeclarationRecord(sessionId, state, previous) {
+  const file = declarationRecordFile(sessionId);
+  if (!file) return;
+  const record = {
+    declared_skill: stateString(state.declared_skill),
+    declared_skill_at: stateString(state.declared_skill_at),
+    declared_task: stateString(state.declared_task),
+    declared_task_at: stateString(state.declared_task_at),
+    transcript_path:
+      HOOK_TRANSCRIPT_PATH || transcriptPathKept(previous && previous.transcript_path),
+  };
+  if (!record.declared_skill && !record.declared_task) return;
+  const body = JSON.stringify(record);
+  let temp = null;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    temp = path.join(
+      path.dirname(file),
+      `.tmp-${process.pid}-${require("crypto").randomBytes(4).toString("hex")}`,
+    );
+    fs.writeFileSync(temp, body, "utf8");
+    fs.renameSync(temp, file);
+    temp = null;
+  } catch {
+    try {
+      fs.writeFileSync(file, body, "utf8");
+    } catch {
+      /* best-effort */
+    }
+  } finally {
+    if (temp) {
+      try {
+        fs.unlinkSync(temp);
+      } catch {
+        /* never written */
+      }
+    }
   }
 }
 
@@ -613,15 +761,65 @@ function saveSessionState(sessionId, state) {
 // folder's state directory nor the per-session one grows unbounded. It only
 // ever looks inside those two; the legacy <cwd>/.claude/.worklog-state/ is
 // never touched, and neither is anything that is not a plain file.
-function pruneOldState() {
+//
+// ⛔ The declarations records are pruned by their own rule, and at SessionStart
+// only: that rule looks for each old record's transcript, which is more than a
+// tool call should wait on, and sessions start often enough to keep the folder
+// small. See DECLARATION_STATE_DIR.
+function pruneOldState(event) {
   pruneStateFiles(STATE_DIR);
   pruneStateFiles(SESSION_STATE_DIR);
+  if (event === "SessionStart") pruneDeclarationRecords();
+}
+
+/**
+ * Drop the declarations records no session can use any more: one unused for 48
+ * hours whose transcript is gone or was never named, and any unused for
+ * DECLARATION_KEEP_MAX_MS. Only this hook's own files go — a record, or a
+ * temporary file a refused rename left — never anything else in the folder.
+ * Never throws.
+ */
+function pruneDeclarationRecords() {
+  const dir = DECLARATION_STATE_DIR;
+  if (!dir) return;
+  let names = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  const now = Date.now();
+  names.forEach((name) => {
+    try {
+      const temp = DECLARATION_TEMP_RE.test(name);
+      if (!temp && !/\.json$/.test(name)) return;
+      const p = path.join(dir, name);
+      const stat = fs.lstatSync(p);
+      if (!stat.isFile() || stat.mtimeMs >= now - STATE_UNUSED_MS) return;
+      if (!temp && stat.mtimeMs >= now - DECLARATION_KEEP_MAX_MS && transcriptStillThere(p)) return;
+      fs.unlinkSync(p);
+    } catch {
+      /* this entry only */
+    }
+  });
+}
+
+/** Does the record at `file` name a transcript that is still on disk? Never throws. */
+function transcriptStillThere(file) {
+  const record = readJsonObject(file);
+  const transcript = transcriptPathKept(record && record.transcript_path);
+  if (!transcript) return false;
+  try {
+    return fs.statSync(transcript).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function pruneStateFiles(dir) {
   if (!dir) return;
   try {
-    const cutoff = Date.now() - 48 * 3600 * 1000;
+    const cutoff = Date.now() - STATE_UNUSED_MS;
     for (const name of fs.readdirSync(dir)) {
       if (name === "debug.log") continue;
       try {
@@ -3843,7 +4041,7 @@ const CHIP_CARD_BACKGROUND =
  *                   "No pending task with id ... never being queued in this
  *                   session"
  *
- * Result that day: two Deviate chips and two Remver chips on Rob's surface, and
+ * Result that day: two chips each for two clients on Rob's surface, and
  * no session able to clean up after another.
  *
  * ⛔ THE RULE FROM NOW ON. A session mints only what the feed lists under
@@ -4167,7 +4365,7 @@ function renderChipContext(payload) {
     // a second mint added nothing and that its response listed every pending
     // chip in the app. Neither holds: every `spawn_task` call adds a chip, and
     // the response covers the calling session's own chips only. On 2026-10-02
-    // that put two Deviate chips and two Remver chips on Rob's surface, with no
+    // that put two chips each for two clients on Rob's surface, with no
     // session able to dismiss another's. So this branch now says the opposite:
     // do NOT call `spawn_task` for a task that is listed here.
     //
@@ -6740,7 +6938,64 @@ function postToolUseDeadline() {
   return hardExitAt - POST_TOOL_USE_SAVE_MARGIN_MS;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// PLUGIN TOOL CALLS (0.11.8, 2026-10-16) — a mod's call is not work.
+//
+// The mm-bridge mod calls the desktop app's tools by itself, on its timer, in
+// every open thread: `get_usage` every 5 minutes (bridge up to 0.5.10), and
+// `list_sessions`, `get_session`, `set_session_title`, `set_pinned`,
+// `send_message`, `start_session`, `spawn_task` and `dismiss_task` from its
+// sync and chip passes. Claude Code runs a mod's `$.mcp.call` through the same
+// tool pipeline as a model's call, so PostToolUse fires for each one, in the
+// thread's session, with the prompt id of the thread's last prompt. Every one
+// became a worklog row, 12 an hour around the clock, and held the thread's
+// window open all day: on 2026-10-15 Rob's Homestretch thread had 169 such rows
+// of 228, and his day read 296 client hours.
+//
+// ⛔ HOW ONE IS KNOWN. Claude Code gives a mod's call a `tool_use_id` that
+// begins `toolu_plugin_` (read from Claude Code 2.1.296 and the desktop app's
+// 2.1.299: `{ type: "tool_use", id: "toolu_plugin_" + uuid, caller: { type:
+// "direct" } }`). The hook input carries no other mark: no caller, no plugin
+// name, and the same session, cwd and prompt id as the model's own calls. A
+// model's call has an API id (`toolu_01…`), which never holds that prefix.
+//
+// ⛔ WHAT IS SKIPPED: the worklog row, the Stop line's count, the title read,
+// the turn-origin read and the declaration capture. Nothing is sent for it.
+// ⛔ WHAT STAYS: the `delivered_chip` ack. A card a mod put on screen for one
+// of the chips this session was served is still a delivered chip; the ack
+// matches only served fingerprints, as before, and saves the session state
+// only when it changed it.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** The `tool_use_id` prefix Claude Code gives a call a mod made (`$.mcp.call` / `$.tool.call`). */
+const PLUGIN_TOOL_USE_ID_PREFIX = "toolu_plugin_";
+
+/** True when this PostToolUse is for a call a mod made, not the model. */
+function isPluginToolCall(payload) {
+  const id = payload && payload.tool_use_id;
+  return typeof id === "string" && id.indexOf(PLUGIN_TOOL_USE_ID_PREFIX) === 0;
+}
+
+/** A mod's call: the chip ack only, and no worklog row. See PLUGIN TOOL CALLS. */
+async function handlePluginToolCall(payload) {
+  if (!cardDeliveryTool(payload)) return;
+  const sessionId = payload.session_id;
+  const state = loadSessionState(sessionId);
+  const ackedBefore = state.ackedChips.length;
+  const failuresBefore = state.chipAckFailures;
+  await ackDeliveredChip(payload, state, postToolUseDeadline());
+  if (state.ackedChips.length !== ackedBefore || state.chipAckFailures !== failuresBefore) {
+    saveSessionState(sessionId, state);
+  }
+}
+
 async function handlePostToolUse(payload) {
+  // ⛔ A mod's own call is not work: no row (PLUGIN TOOL CALLS, 0.11.8).
+  if (isPluginToolCall(payload)) {
+    await handlePluginToolCall(payload);
+    return;
+  }
+
   const sessionId = payload.session_id;
   const toolName = payload.tool_name || "unknown_tool";
   const toolInput = payload.tool_input || {};
@@ -8183,9 +8438,12 @@ async function main() {
   CONSENT_CWD_REL = CONSENT_ROOT ? cwdRelativeToRoot(CONSENT_ROOT, sessionCwd) : null;
 
   const event = payload.hook_event_name || "";
+  // Kept in this session's declarations record so the prune can tell whether
+  // Claude Code could still resume it (see DECLARATION_STATE_DIR). Never sent.
+  HOOK_TRANSCRIPT_PATH = transcriptPathKept(payload.transcript_path);
 
   ensureStateDir();
-  pruneOldState();
+  pruneOldState(event);
 
   try {
     if (event === "PostToolUse") {

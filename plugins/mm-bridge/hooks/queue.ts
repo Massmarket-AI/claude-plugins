@@ -607,7 +607,7 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     const sender = typeof d.project_owner_email === 'string' ? d.project_owner_email.toLowerCase() : ''
     const mates = founder && (held ? holder !== me : sender !== '' && sender !== me)
     // ⛔ R1 (0.5.1): a stale package a teammate has never puts a row on the founder's list, flagged or not
-    // (Rob's 16 rows, 10-13: Mugen, ReGen, Remver and Talon were answered by hand; the owner's stale reminder
+    // (Rob's 16 rows, 10-13: four such clients were answered by hand; the owner's stale reminder
     // carries what is still open). So it is never a package that waits for his OK. (A stale package is held
     // by nobody: it is the owner's on record.)
     const staleTheirsHere = mates && d.status === 'stale'

@@ -431,7 +431,7 @@ export function autoUpdatable(it: QueueItem, now: number): boolean {
 }
 
 /**
- * (0.5.11, Rob 10-15: "Joe's call from Second Peak Training ended a little while back... I don't understand why it
+ * (0.5.11, Rob 10-15: "[A client]'s call ended a little while back... I don't understand why it
  * hasn't already handed the new context there so the draft is ready when I open the thread up") Whether it is time
  * to update a client's thread by itself, from what this bridge has seen of the client (`seen`, for what it has
  * NOW: the caller gives the record of this signature only). (Review of PR #15, F3) The bridge has seen it, unchanged,
@@ -638,8 +638,21 @@ export function startKickoff(it: QueueItem, replaces: Replaced | undefined, now:
  */
 export const START_ALL_MAX = 8
 
-/** (0.5.12) The Start all button, with how many clients need a new thread now. */
-export const startAllLabel = (n: number): string => `Start all (${n})`
+/**
+ * (0.5.12) The Start all button, with how many clients need a new thread now. (0.5.14, Rob 10-16: "It should just
+ * pretty much always be 'start missing threads.'") Named for what it does, in the pane and on the band alike; the
+ * typed command is still /mm start all.
+ */
+export const startAllLabel = (n: number): string => `Start missing threads (${n})`
+
+/** (0.5.14) The band's Start missing threads button when no client needs a new thread: drawn dim, and a press only checks again. */
+export const ALL_STARTED = 'All threads started'
+
+/**
+ * (0.5.14) The band's one button, always drawn (it took Open list's place): Start missing threads with how many, or
+ * All threads started when there are none. Either way a press is Start all's (`pressStartAll`).
+ */
+export const startMissingLabel = (n: number): string => (n > 0 ? startAllLabel(n) : ALL_STARTED)
 
 /**
  * (0.5.12) The first message of a thread Start all opens: the new-thread kickoff (`startKickoff`) in the words that never
@@ -656,16 +669,31 @@ export function startAllKickoff(it: QueueItem, replaces: Replaced | undefined, n
 }
 
 /**
+ * (0.5.16, Rob 10-19: "When it says it actually has to be started by me saying it here in the thread, that causes
+ * issues.") The app's answer when it will not start a thread from this turn: it starts one (`user_asked`) only on the
+ * person's own typed words in this thread, and a press in a thread that some other session started, or that an
+ * automatic Update woke last, is not that. Its sentence: `Start sessions only on the user's own words to you here;
+ * this turn runs an automated event, ... Propose the session instead (initiation "own_initiative")`. Told by its two
+ * stable parts and nothing broader, so that any other refusal still reads as the error it is.
+ */
+export const needsCard = (text: string): boolean => /\buser['’]s own words\b|\bpropose the session instead\b/i.test(text)
+
+/** (0.5.16) What a press says when the app wants the person's own words and a card was made instead (`needsCard`). */
+export const cardReady = (client: string): string => `A Start card for ${client} is ready here: click Start on it.`
+
+/**
  * (0.5.12) The one line a Start all leaves, in the band of every thread and above the list: the threads it started,
  * the ones the app did not start and why, the ones it skipped (a thread or another start got there first), and how
- * many still need a thread after the cap (START_ALL_MAX) for a second press.
+ * many still need a thread after the cap (START_ALL_MAX) for a second press. (0.5.16) And how many wait as Start cards
+ * in this thread, where the app wanted the person's own words (`needsCard`): a count, never the app's sentence.
  */
-export function startAllSummary(started: readonly string[], failed: ReadonlyArray<{ client: string; why: string }>, skipped: ReadonlyArray<{ client: string; why: string }>, left: number): string {
+export function startAllSummary(started: readonly string[], failed: ReadonlyArray<{ client: string; why: string }>, skipped: ReadonlyArray<{ client: string; why: string }>, left: number, cards = 0): string {
   const out: string[] = []
   if (started.length) out.push(`Started ${started.length} thread${started.length === 1 ? '' : 's'}: ${started.join(', ')}.`)
+  if (cards > 0) out.push(`${cards} ready to start here: click Start on ${cards === 1 ? 'its card' : 'each card'}.`)
   if (failed.length) out.push(`Not started: ${failed.map(f => `${f.client} (${f.why})`).join('; ')}.`)
   if (skipped.length) out.push(`Skipped: ${skipped.map(f => `${f.client} (${f.why})`).join('; ')}.`)
-  if (left > 0) out.push(`${left} more need${left === 1 ? 's' : ''} a thread: press Start all again.`)
+  if (left > 0) out.push(`${left} more need${left === 1 ? 's' : ''} a thread: press Start missing threads again.`)
   return out.join(' ') || 'No client needs a new thread now.'
 }
 
@@ -829,8 +857,8 @@ const isHere = (row: Row, here: string | undefined): boolean => Boolean(here) &&
 export const LABEL_MAX = 40
 
 /**
- * (0.5.5, Rob 10-14: in the Buy Oklahoma thread's pane, Black-Peak's row offered "Claim in this thread", as if it would
- * claim Black-Peak there) A row's button as it is drawn in the thread `here`: `Claim in this thread` only in the thread it
+ * (0.5.5, Rob 10-14: in one client's thread pane, another client's row offered "Claim in this thread", as if it would
+ * claim that client there) A row's button as it is drawn in the thread `here`: `Claim in this thread` only in the thread it
  * acts on; in any other, `Claim in <client>'s thread`, the client's name cut to keep the label within LABEL_MAX.
  */
 export function buttonLabel(verb: RowButton, row: Row, here: string | undefined): string {
@@ -843,7 +871,8 @@ export function buttonLabel(verb: RowButton, row: Row, here: string | undefined)
 /**
  * The band's line as it is drawn: as it is beside its button, and with how to open the list where the
  * band can carry no button. (On this build the band is raised on the terminal and desktop surfaces only,
- * and both draw a Button.)
+ * and both draw a Button.) (0.5.14) The band's button is Start missing threads now, not Open list: /mm opens the
+ * list, from the band of a surface with no button as from any other.
  */
 export const bandWords = (text: string, hasButton: boolean): string => (hasButton ? text : `${text} · type /mm to open the list`)
 

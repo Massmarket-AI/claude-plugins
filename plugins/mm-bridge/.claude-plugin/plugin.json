@@ -1,6 +1,6 @@
 {
   "name": "mm-bridge",
-  "version": "0.5.14",
+  "version": "0.5.18",
   "description": "Massmarket bridge: pins and names each client thread with what is due, shows the reply drafts in a side pane, updates a client's thread when something new arrives, never sends to a client",
   "author": {
     "name": "Massmarket AI"
