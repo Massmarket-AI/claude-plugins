@@ -2259,7 +2259,9 @@ async function rcFollowsPin($: EngineInterface): Promise<void> {
   if (rcPassing.has(id)) return
   rcPassing.add(id)
   try {
-    const listed = await desktopOnly(() => mcpJsonWithin($, 'ccd_session_mgmt', 'list_sessions', { limit: 200 }), null)
+    // (0.5.21) the 60 most recent threads, as `sessions()` asks: the app's answer for 200 (about 92,000 characters on
+    // Rob's computer, 10-20) came back as no list, so the pass never ran. The pinned threads were all in the top 32.
+    const listed = await desktopOnly(() => mcpJsonWithin($, 'ccd_session_mgmt', 'list_sessions', { limit: 60 }), null)
     if (!Array.isArray(listed)) return
     const me = await desktopOnly(() => mcpJsonWithin($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' }), null)
     const threads: RcThread[] = []
