@@ -123,7 +123,11 @@ describe('the name leads with the hours (Rob, 2026-10-12)', () => {
 
   test('late: hours under 24 business hours, whole business days from there, and a weekend adds nothing', async () => {
     const due = t('2026-10-09 15:00') // Friday 3 PM
-    expect(clockLead(due, t('2026-10-09 15:20'))).toBe('1h late') // never 0h
+    // (0.5.14) under an hour reads `<1h`: never 0h, and 13 minutes is not an hour
+    expect(clockLead(due, t('2026-10-09 15:13'))).toBe('<1h late')
+    expect(clockLead(due, t('2026-10-09 15:59'))).toBe('<1h late')
+    expect(clockLead(due, t('2026-10-09 16:00'))).toBe('1h late')
+    expect(clockLead(due, t('2026-10-09 16:29'))).toBe('1h late')
     expect(clockLead(due, t('2026-10-09 20:00'))).toBe('5h late')
     expect(clockLead(due, t('2026-10-10 12:00'))).toBe('9h late') // Saturday noon: only Friday evening counted
     expect(clockLead(due, t('2026-10-11 23:00'))).toBe('9h late') // Sunday night: still nine
@@ -136,7 +140,8 @@ describe('the name leads with the hours (Rob, 2026-10-12)', () => {
 
   test('left: hours under 24 business hours, whole business days beyond, and a weekend adds nothing', async () => {
     const due = t('2026-10-12 15:00') // Monday 3 PM
-    expect(clockLead(due, t('2026-10-12 14:50'))).toBe('1h left')
+    expect(clockLead(due, t('2026-10-12 14:50'))).toBe('<1h left')
+    expect(clockLead(due, t('2026-10-12 14:00'))).toBe('1h left')
     expect(clockLead(due, t('2026-10-12 12:00'))).toBe('3h left')
     expect(clockLead(due, t('2026-10-11 09:00'))).toBe('15h left') // Sunday: Monday's fifteen hours
     expect(clockLead(due, t('2026-10-10 09:00'))).toBe('15h left') // Saturday: the same
@@ -189,6 +194,10 @@ describe('the name leads with the hours (Rob, 2026-10-12)', () => {
     // a client whose own name looks like a clock is still a name where no clock leads
     expect(clientInTitle('🔴 3h left · 2d left · reply')).toBe('2d left')
     expect(clientInTitle('3h left of the day')).toBe('3h left of the day')
+    // (0.5.14) under an hour, either way
+    expect(clientInTitle('🔴 <1h late · Acme Roofing · reply')).toBe('Acme Roofing')
+    expect(clientInTitle('🔴 <1h left · Bolt Staffing · task')).toBe('Bolt Staffing')
+    expect(titleNames('🔴 <1h late · Acme Roofing · reply', 'Acme Roofing')).toBe(true)
   })
 
   test('a time as the pane writes it: alone when it is today, with the weekday when it is not', async () => {
@@ -637,7 +646,7 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
     expect(due).toMatchObject({ projectId: P1, kind: 'ok', ok: { sends: 'Builder B' } })
     expect(due?.theirs).toBeUndefined()
     expect(waitingText(due as QueueItem)).toBe('needs your OK · Builder B sends, drafts ready')
-    expect(titleFor(due as QueueItem, TUE)).toBe('🔴 1h late · Acme Roofing · needs your OK')
+    expect(titleFor(due as QueueItem, TUE)).toBe('🔴 <1h late · Acme Roofing · needs your OK') // (0.5.14) eight minutes late
   })
 
   test('nobody else gets such a row: for a builder or a pm the same feed lists nothing', async () => {
@@ -658,7 +667,7 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
     expect(NOBODY).toBe('nobody on record')
     expect(waitingText(it as QueueItem)).toBe('needs your OK · nobody on record sends, drafts with J Smith')
     expect(withTeammate(it as QueueItem)).toBe(false)
-    expect(titleFor(it as QueueItem, TUE)).toBe('🔴 1h late · Acme Roofing · needs your OK · with J Smith')
+    expect(titleFor(it as QueueItem, TUE)).toBe('🔴 <1h late · Acme Roofing · needs your OK · with J Smith')
   })
 
   test('a stale one a teammate sends is no such row (R1); the words a stale package has stay for the kickoff', async () => {

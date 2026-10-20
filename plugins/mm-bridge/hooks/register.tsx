@@ -101,7 +101,7 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.5.17'
+const VERSION = '0.5.18'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -342,9 +342,12 @@ const listedIn = (last: Last | null | undefined): QueueItem[] => [
 ]
 /**
  * A pin the person took off a thread the bridge had pinned: when, and the newest time of each kind of
- * thing its client had then. The thread is not pinned again until one of them is newer.
+ * thing its client had then. The thread is not pinned again until one of them is newer, or (0.5.14) until the
+ * client's act-by time passes when it was still ahead with the pin on. `seen`: the sync before the one that found
+ * the pin off, when the pin was still on as far as the bridge knew (a record an older version made has none: `at`
+ * stands in).
  */
-type Unpinned = { at: number; mail: number; pkg: number; task: number }
+type Unpinned = { at: number; mail: number; pkg: number; task: number; seen?: number }
 /**
  * (0.5.3) The person went on in the client's linked thread while a chip for a new thread (R3, or R8's long-thread
  * one) was waiting: in which thread, when, and the newest time of each kind of thing the client had then. Until
@@ -1316,7 +1319,19 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // It is remembered with the newest time of each kind of thing the client had then, and the thread is not
   // pinned again until one of them is newer, or the person presses Update or Start for the client or types
   // /mm link there (`pinAgain`), or pins it again themselves. Its name is kept up to date all the while.
-  const newestOf = (it: QueueItem): Omit<Unpinned, 'at'> => ({ mail: Number(it.newest?.mail) || 0, pkg: Number(it.newest?.pkg) || 0, task: Number(it.newest?.task) || 0 })
+  // ⛔ (0.5.14) Or until it is late. On 2026-10-16 a client's reply came due at 11:59 AM ET. The pin on its thread
+  // had come off the evening before and nothing new came, so the thread sat unpinned while the Needs-you list
+  // showed it late, and Rob asked why it was late there but not pinned. A hand unpin now holds only while the
+  // item is still ahead of its time: once the client's act-by time passes after the pin came off, the thread is
+  // pinned again, once for that act-by time. A pin the person takes off a thread that is already late stays off
+  // until something newer comes, as before. "After the pin came off" is measured from `seen`, the last sync
+  // before the one that found the pin off: the pin was on then, as far as the bridge knew. An act-by time
+  // between those two syncs (five minutes apart, or a night apart on a computer that slept) may have come
+  // before the unpin or after it; the thread is pinned again, once (a missed reply costs more than one pin).
+  // After that pin the sync that finds it off again is later than the act-by time, so a second unpin stands.
+  const newestOf = (it: QueueItem): Omit<Unpinned, 'at' | 'seen'> => ({ mail: Number(it.newest?.mail) || 0, pkg: Number(it.newest?.pkg) || 0, task: Number(it.newest?.task) || 0 })
+  /** (0.5.14) When the pin of a thread this sync finds off was last known to be on: the sync before this one. */
+  const pinSeen = Number.isFinite(before?.at) ? Math.min(before?.at as number, now) : now
   for (const sid of Object.keys(unpinned)) if (gone.has(sid)) delete unpinned[sid]
   for (const it of items) {
     const sid = links[it.projectId]
@@ -1327,14 +1342,18 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
       continue
     }
     const pin = pins[sid]
-    if (pin?.byUs && pin.projectId === it.projectId && !(sid in unpinned)) unpinned[sid] = { at: now, ...newestOf(it) }
+    if (pin?.byUs && pin.projectId === it.projectId && !(sid in unpinned)) unpinned[sid] = { at: now, ...newestOf(it), seen: pinSeen }
   }
-  /** Whether the person's unpin of this thread still stands: nothing new for its client since. */
+  /** Whether the person's unpin of this thread still stands: nothing new for its client since, and (0.5.14) its act-by time has not passed since the pin came off. */
   const staysOff = (sid: string, it: QueueItem): boolean => {
     const u = unpinned[sid]
     if (!u) return false
     const n = newestOf(it)
-    if (n.mail <= (Number(u.mail) || 0) && n.pkg <= (Number(u.pkg) || 0) && n.task <= (Number(u.task) || 0)) return true
+    const nothingNew = n.mail <= (Number(u.mail) || 0) && n.pkg <= (Number(u.pkg) || 0) && n.task <= (Number(u.task) || 0)
+    const act = Number.isFinite(it.actBy) ? (it.actBy as number) : it.dueAt
+    const on = Number.isFinite(u.seen) ? (u.seen as number) : Number(u.at) || 0
+    const lateSince = Number.isFinite(act) && act <= now && act > on
+    if (nothingNew && !lateSince) return true
     delete unpinned[sid]
     return false
   }

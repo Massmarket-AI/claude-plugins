@@ -847,15 +847,16 @@ export function needsLine(it: QueueItem, now: number): string {
 }
 
 /**
- * The business-time distance to a due instant, as a thread's name leads with it: `5h late`, `3d late`,
+ * The business-time distance to a due instant, as a thread's name leads with it: `<1h late`, `5h late`, `3d late`,
  * `3h left`, `2d left`. Hours under 24 business hours, whole business days from there. Weekends do not count.
  */
 export function clockLead(due: number, now: number): string {
   const late = due < now
   const span = late ? businessMsBetween(due, now) : businessMsBetween(now, due)
+  // (0.5.14) under an hour: `<1h`, so a reply 13 minutes late does not read as an hour late (it read `1h`)
   // under a business day: 1 to 23 hours (59 minutes short of a day is 23h, not 24h); from there, whole days
   // R16 (0.5.2): whole business days COMPLETED (Math.floor): 1.49 and 1.51 days both read `1d`, 2.0 reads `2d`
-  const n = span < DAY ? `${Math.min(23, Math.max(1, Math.round(span / HOUR)))}h` : `${Math.floor(span / DAY)}d`
+  const n = span < HOUR ? '<1h' : span < DAY ? `${Math.min(23, Math.round(span / HOUR))}h` : `${Math.floor(span / DAY)}d`
   return `${n} ${late ? 'late' : 'left'}`
 }
 
@@ -903,7 +904,7 @@ export function clientInTitle(title: string): string {
   const first = parts[0]?.trim() ?? ''
   // what leads the name: the clock, or (in a name of the bridge's only) who holds the drafts, or (0.5.2) that
   // the client has no thread
-  const lead = /^\d+[hd] (?:late|left)$/.test(first) || (marked && parts.length > 2 && /^with \S/.test(first)) || (marked && first === 'NO THREAD')
+  const lead = /^(?:<1h|\d+[hd]) (?:late|left)$/.test(first) || (marked && parts.length > 2 && /^with \S/.test(first)) || (marked && first === 'NO THREAD')
   return lead ? (parts[1]?.trim() ?? '') : first
 }
 

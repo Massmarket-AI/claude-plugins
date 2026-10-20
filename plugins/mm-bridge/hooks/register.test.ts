@@ -3895,8 +3895,9 @@ describe('(t) a pin the person took off by hand stays off', () => {
     expect(w.threads.get('local_b')?.pinned).toBe(false)
     expect(pinCalls(w)).toEqual([])
     // remembered with when, and the newest of each kind of thing the client had then
-    // (the first sync after the pin came off: the timer's, six minutes in)
-    expect(w.stored['mm.unpinned']).toEqual({ local_b: { at: NOW + 360_000, mail: NOW - HOUR, pkg: 0, task: 0 } })
+    // (the first sync after the pin came off: the timer's, six minutes in), and (0.5.14) `seen`, the sync before it,
+    // when the pin was still on (the first, four seconds in)
+    expect(w.stored['mm.unpinned']).toEqual({ local_b: { at: NOW + 360_000, mail: NOW - HOUR, pkg: 0, task: 0, seen: NOW + 4_000 } })
     // it is still linked, it is not counted as pinned, and its record is no longer ours
     expect((w.stored['mm.last'] as { pinned: number }).pinned).toBe(0)
     expect((w.stored['mm.pins'] as Record<string, unknown>).local_b).toEqual({ projectId: BOLT, client: 'Bolt Staffing', byUs: false })
@@ -4030,6 +4031,99 @@ describe('(t) a pin the person took off by hand stays off', () => {
     await mm($, '')
     expect(w.threads.get('local_b')).toMatchObject({ title: BOLT_TITLE, pinned: false })
     expect(pinCalls(w).filter(c => c.endsWith('true'))).toEqual([])
+  })
+})
+
+describe('(t2) 0.5.14: a pin taken off by hand stays off only while the item is ahead of its time (Rob, 2026-10-16)', () => {
+  /** Monday noon in New York: Bolt's reply is due an hour from NOW. */
+  const DUE = NOW + HOUR
+  /** Bolt wrote so many hours ago, its reply due at `due`, and (`more`) whatever else came since. */
+  const boltFeed = (due = DUE, hoursAgo = 1, more: Array<ReturnType<typeof mailFor>> = []) =>
+    feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', hoursAgo, { reply_due_at: new Date(due).toISOString() }), ...more] })
+  /** Bolt's thread is linked, and pinned by us. */
+  const pinned = (on: On, due = DUE) =>
+    world(on, {
+      feed: boltFeed(due),
+      threads: [thread('local_b', '🔴 1h left · Bolt Staffing · reply', 20, { pinned: true }), thread('local_x', 'Unrelated notes', 5)],
+      // auto off: these are about the person's own unpin, timed by the syncs alone (as in (t))
+      store: { 'mm.links': { [BOLT]: 'local_b' }, 'mm.pins': { local_b: ourPin(BOLT, 'Bolt Staffing') }, 'mm.titles': { local_b: 'Staffing plan' }, 'mm.autostart': { on: false } },
+    })
+  const setPin = (w: { threads: Map<string, Thread> }, pinnedNow: boolean) => {
+    const t = w.threads.get('local_b')
+    if (t) t.pinned = pinnedNow
+  }
+  /** The bridge's pins: each time it put a pin on a thread. */
+  const pinsOn = (w: { writes: () => string[] }) => w.writes().filter(c => c.startsWith('set_pinned') && c.endsWith('true'))
+  const off = (w: { stored: Record<string, unknown> }) => Object.keys((w.stored['mm.unpinned'] ?? {}) as Record<string, unknown>)
+  const ours = (w: { stored: Record<string, unknown> }) => (w.stored['mm.pins'] as Record<string, { byUs: boolean }>).local_b?.byUs
+
+  test('taken off while the reply is ahead: off until it is late, then pinned again once; taken off again once late, it stays off', async ($, on) => {
+    const w = pinned(on)
+    await tickOnce($, w)
+    expect(w.threads.get('local_b')?.pinned).toBe(true)
+    setPin(w, false)
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(false)
+    expect(off(w)).toEqual(['local_b'])
+    // still ahead, ten minutes to go: off, sync after sync, its name kept up to date
+    await w.clock.advance(50 * 60_000)
+    await mm($, '')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 <1h left · Bolt Staffing · reply', pinned: false })
+    expect(pinsOn(w)).toEqual([])
+    // noon passes with nothing new: the timer's next sync pins it again, as ours, and the record goes
+    await w.clock.advance(15 * 60_000)
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 <1h late · Bolt Staffing · reply', pinned: true })
+    expect(pinsOn(w)).toEqual(['set_pinned | local_b | true'])
+    expect(off(w)).toEqual([])
+    expect(ours(w)).toBe(true)
+    // taken off again, now that it is late: it stays off, sync after sync
+    setPin(w, false)
+    await w.clock.advance(2 * HOUR)
+    await mm($, '')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 2h late · Bolt Staffing · reply', pinned: false })
+    expect(pinsOn(w)).toHaveLength(1)
+    expect(off(w)).toEqual(['local_b'])
+    expect(await mm($, 'status')).toContain('pins you took off: 1')
+    // until something newer comes: a third message from Bolt pins it again, as before 0.5.14
+    w.setFeed(boltFeed(DUE, 1, [mailFor(BOLT, 'Bolt Staffing (Sam)', -3)]))
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(true)
+    expect(pinsOn(w)).toHaveLength(2)
+    expect(off(w)).toEqual([])
+  })
+
+  test('taken off when it is already late: it stays off, sync after sync', async ($, on) => {
+    const w = pinned(on, NOW - 30 * 60_000)
+    await tickOnce($, w)
+    expect(w.threads.get('local_b')?.pinned).toBe(true)
+    setPin(w, false)
+    await w.clock.advance(3 * HOUR)
+    await mm($, '')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 4h late · Bolt Staffing · reply', pinned: false })
+    expect(pinsOn(w)).toEqual([])
+    expect(off(w)).toEqual(['local_b'])
+  })
+
+  test('the 10-16 case: a record an older version made (no `seen`), its pin taken off the evening before, is pinned again once the reply is late', async ($, on) => {
+    // Bolt wrote 15 hours ago, the pin came off 13 hours ago (Sunday 10 PM ET), nothing new since; due at noon
+    const w = world(on, {
+      feed: boltFeed(DUE, 15),
+      threads: [thread('local_b', '🔴 1h left · Bolt Staffing · reply', 20, { pinned: false }), thread('local_x', 'Unrelated notes', 5)],
+      store: {
+        'mm.links': { [BOLT]: 'local_b' },
+        'mm.pins': { local_b: { projectId: BOLT, client: 'Bolt Staffing', byUs: false } },
+        'mm.titles': { local_b: 'Staffing plan' },
+        'mm.unpinned': { local_b: { at: NOW - 13 * HOUR, mail: NOW - 15 * HOUR, pkg: 0, task: 0 } },
+        'mm.autostart': { on: false },
+      },
+    })
+    await tickOnce($, w)
+    expect(w.threads.get('local_b')?.pinned).toBe(false)
+    expect(off(w)).toEqual(['local_b'])
+    await w.clock.advance(70 * 60_000)
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 <1h late · Bolt Staffing · reply', pinned: true })
+    expect(pinsOn(w)).toEqual(['set_pinned | local_b | true'])
+    expect(off(w)).toEqual([])
   })
 })
 
