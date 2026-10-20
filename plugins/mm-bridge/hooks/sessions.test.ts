@@ -1789,6 +1789,24 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(rcCalls(w).length).toBe(2)
   })
 
+  test('the app answers "unavailable" to a switch on: no record, the thread waits 15 minutes as after a refusal, then is asked again', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_v', pinned: true }], { before: w => w.rcStates.set('local_rc_v', 'unavailable') })
+    expect(rcCalls(w)).toEqual([['local_rc_v', true]])
+    expect(thread(w, 'local_rc_v').remoteControlActive).toBe(false)
+    expect(w.stored('mm.rc')).toBeUndefined()
+    expect(w.stored('mm.rcwait')).toEqual({ local_rc_v: { until: NOW + 4_000 + WAIT, activity: thread(w, 'local_rc_v').lastActivityAt } })
+    // ticks at 1 to 15 minutes, unused: the last is still 4 seconds short of the wait's end
+    for (let i = 0; i < 15; i++) await tickOnce(w)
+    expect(rcCalls(w).length).toBe(1)
+    // the app can now: asked again once the wait is over, and on record
+    w.rcStates.delete('local_rc_v')
+    await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_v', true], ['local_rc_v', true]])
+    expect(thread(w, 'local_rc_v').remoteControlActive).toBe(true)
+    expect(Object.keys(w.stored('mm.rc') as object)).toEqual(['local_rc_v'])
+    expect(w.stored('mm.rcwait')).toEqual({})
+  })
+
   test('the app does not answer in 15 seconds: no record, the thread waits as after a refusal, and no second pass starts while one waits', async () => {
     const ids = Array.from({ length: 6 }, (_, i) => `local_rc_n${i + 1}`)
     const { w } = await running(ids.map(sessionId => ({ sessionId, pinned: true })), { before: w => ids.forEach(id => w.silentRc.add(id)) })

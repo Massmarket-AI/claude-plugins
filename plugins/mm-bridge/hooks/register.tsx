@@ -2224,6 +2224,17 @@ function rcThread(raw: unknown): RcThread | null {
 }
 
 /**
+ * (0.5.19) The app answers the state afterwards (`remoteControlState`: on, off, connecting, unavailable); "unavailable"
+ * is a refusal. A switch on is done when the state is on or connecting, a switch off when it is off; any other state is
+ * a refusal. An answer that names no state counts as done.
+ */
+function rcDone(answer: unknown, enabled: boolean): boolean {
+  const state = answer && typeof answer === 'object' ? (answer as { remoteControlState?: unknown }).remoteControlState : undefined
+  if (typeof state !== 'string') return true
+  return enabled ? state === 'on' || state === 'connecting' : state === 'off'
+}
+
+/**
  * (0.5.19) Remote Control follows the pin. Run by the thread that polls, on each tick, while /mm rc is on: with it
  * off, nothing is asked of the app. Each open thread, as the app answers now (its list leaves this thread out, so
  * `get_session self` too), beside the threads the bridge switched on (`mm.rc`):
@@ -2233,7 +2244,8 @@ function rcThread(raw: unknown): RcThread | null {
  *   - not pinned, on record: switched off if it is on, and taken off the record;
  *   - not pinned, not on record: nothing. ⛔ Never switches off Remote Control the bridge did not switch on.
  * A thread on record that the app did not list is left as it is. No list from the app: no pass (unknown is never
- * none). A call the app refuses, or does not answer in APP_WAIT_MS, writes no record, and the thread waits
+ * none). A call the app refuses (an error, or a state that is not the one asked for: `rcDone`), or does not answer
+ * in APP_WAIT_MS, writes no record, and the thread waits
  * RC_WAIT_MS (`mm.rcwait`) unless it is used meanwhile: an unloaded thread, one waiting on the person to answer a
  * request, one started from another device. At most RC_MAX_CALLS calls in a pass.
  */
@@ -2284,7 +2296,8 @@ async function rcFollowsPin($: EngineInterface): Promise<void> {
       calls++
       let ok = false
       try {
-        ok = (await within($, mcpJson($, 'ccd_session_mgmt', 'set_remote_control', { session_id: t.sid, enabled }))).ok
+        const answered = await within($, mcpJson($, 'ccd_session_mgmt', 'set_remote_control', { session_id: t.sid, enabled }))
+        ok = answered.ok && rcDone(answered.value, enabled)
       } catch {
         ok = false // refused
       }
@@ -5216,7 +5229,7 @@ export const register: Register = on => {
       await $.tool.register({
         name: 'mm',
         description:
-          'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "link <client>" (make this thread that client\'s: a name or project id of any client in the feed), "unlink", "pause", "resume". Starting or updating a client thread is for the person only: they press the button in the pane or type /mm start <client> or /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
+          'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "link <client>" (make this thread that client\'s: a name or project id of any client in the feed), "unlink", "pause", "resume", "rc on|off" (whether Remote Control follows the pin on this computer). Starting or updating a client thread is for the person only: they press the button in the pane or type /mm start <client> or /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
         inputSchema: { type: 'object', properties: { args: { type: 'string', description: 'what follows /mm' } } },
         isDeferred: false,
       })

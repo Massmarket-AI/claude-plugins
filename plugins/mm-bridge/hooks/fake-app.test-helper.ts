@@ -75,6 +75,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   const refuseRc = new Map<string, string>()
   /** (0.5.19) Threads whose Remote Control call the app never answers. */
   const silentRc = new Set<string>()
+  /** (0.5.19) Threads the app answers this state for (on, off, connecting, unavailable), whatever was asked. */
+  const rcStates = new Map<string, string>()
   const text = (value: unknown): Mcp => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }], isError: false })
   const views = new Map<string, Map<string, unknown>>()
 
@@ -105,13 +107,14 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           if (tool === 'set_session_title' && t) t.title = String(args.title)
           if (tool === 'set_pinned' && failPins.has(id)) return { content: [{ type: 'text', text: 'set_pinned failed' }], isError: true }
           if (tool === 'set_pinned' && t) t.pinned = Boolean(args.pinned)
-          // (0.5.19) as the app answers set_remote_control: the state afterwards, or its refusal
+          // (0.5.19) as the app answers set_remote_control: the state afterwards (Claude.app, 10-20), or its refusal
           if (tool === 'set_remote_control') {
             if (silentRc.has(id)) return new Promise<Mcp>(() => undefined)
             const refusal = refuseRc.get(id) ?? (t ? undefined : `Session ${id} not found.`)
             if (refusal !== undefined) return { content: [{ type: 'text', text: refusal }], isError: true }
-            if (t) t.remoteControlActive = Boolean(args.enabled)
-            return text(args.enabled ? 'on' : 'off')
+            const state = rcStates.get(id) ?? (args.enabled ? 'on' : 'off')
+            if (t && (state === 'on' || state === 'off')) t.remoteControlActive = state === 'on'
+            return text({ sessionId: id, remoteControlState: state })
           }
           if (tool === 'get_usage') return text({ context: { status: 'unavailable' } })
           // (0.5.7) a tool this session does not have, as the engine answers for one
@@ -211,6 +214,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
     failPins,
     refuseRc,
     silentRc,
+    rcStates,
     session,
     /** The fake clock now. */
     now: () => time,
