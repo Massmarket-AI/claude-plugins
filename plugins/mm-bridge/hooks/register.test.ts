@@ -4,7 +4,7 @@ import type { Engine, FoundElement } from 'claude-code/testing'
 
 import type { Feed } from './queue'
 import { isNewerVersion } from './queue'
-import { PANE_SENTENCE, recommend } from './threads'
+import { PANE_SENTENCE, REFRESH_FAILED, recommend } from './threads'
 
 // The bridge against a pretend desktop app, a pretend feed and a pretend store. Nothing here reaches the
 // live feed or a real thread, and every client is made up.
@@ -102,6 +102,8 @@ type WorldOptions = {
   startRefuses?: (args: Record<string, unknown>) => string | undefined
   /** (0.5.11, review of PR #15) The feed takes this long to answer its n-th read (the closeout feed only). */
   fetchTakesMs?: (n: number) => number
+  /** (0.5.17) How the closeout feed answers its next read: no answer at all (`network`), that status, or (undefined) as `feedStatus` says. */
+  feedRead?: () => 'network' | number | undefined
   /**
    * (0.5.11, review of PR #15, F4) The time-tracking hook on this computer: one that counts the bridge's turns as
    * automatic (left out: 0.11.7's rule), one older than 0.11.5 (`old`), or none that can be read (`missing`).
@@ -210,8 +212,10 @@ function world(on: On, opts: WorldOptions = {}) {
       const ms = opts.fetchTakesMs(++feedReads)
       if (ms > 0) await clock.sleep(ms)
     }
+    const read = e.url.includes('/closeout') ? opts.feedRead?.() : undefined
+    if (read === 'network') return { deny: 'fetch failed: socket hang up' }
     const body = e.url.includes('/reply-package') ? { markdown: '## Acme Roofing\n\n1. What the client sent' } : theFeed
-    const status = !e.url.includes('/reply-package') && opts.feedStatus ? opts.feedStatus() : 200
+    const status = typeof read === 'number' ? read : !e.url.includes('/reply-package') && opts.feedStatus ? opts.feedStatus() : 200
     return { value: { status, ok: status === 200, headers: {}, text: JSON.stringify(status === 200 ? body : { error: 'boom' }) } }
   })
   // A pretend disk: the tracker token, and whatever record files a test puts under the app's data folder.
@@ -7331,5 +7335,83 @@ describe('0.5.16: a refused Start becomes a Start card, never a wall of errors (
     expect(starts(w).length).toBe(1)
     expect(proposals(w).map(c => c.args.prompt)).toEqual([CEDAR_KICKOFF])
     expect(JSON.stringify(w.stored['mm.notes'] ?? [])).not.toMatch(APP_TEXT)
+  })
+})
+
+// ======================================================================== 0.5.17: a press's refresh tries once more
+// Rob, 10-19: OW's closeout feed answered 500 now and then (a database read past its timeout), and
+// every press that met one drew "Couldn't refresh the list".
+
+describe('(0.5.17) a press\'s refresh asks OW once more when the feed answered 5xx or not at all', () => {
+  /**
+   * This thread is Acme's and the timer's first sync is on record; a minute on, the band's Drafts brings the list up
+   * to date with a fresh read (`recentFeed`). `answers` is how the closeout feed answers each read from the press on.
+   */
+  const pressDrafts = async ($: Engine, on: On, answers: Array<'network' | number>) => {
+    const plan: Array<'network' | number> = []
+    const w = world(on, { store: { 'mm.links': { [ACME]: SELF } }, feedRead: () => plan.shift() })
+    await tickOnce($, w)
+    await w.clock.advance(61_000)
+    plan.push(...answers)
+    const before = closeouts(w)
+    const band = await bandOf($)
+    await band.press({ key: 'mm-open-drafts' })
+    await band.unmount()
+    const ui = await pane($)
+    const shown = await lines(ui)
+    await ui.unmount()
+    return { w, reads: closeouts(w) - before, shown, error: w.stored['mm.refreshError'] as { reason?: string } | undefined }
+  }
+
+  for (const first of [500, 503, 'network'] as const) {
+    test(`a first read that got ${first === 'network' ? 'no answer' : first} is tried once more; its answer is the list, and nothing says the refresh failed`, async ($, on) => {
+      const { reads, shown, error } = await pressDrafts($, on, [first, 200])
+      expect(reads).toBe(2)
+      expect(shown).toContain('Needs you now (3)')
+      expect(shown).not.toContain(REFRESH_FAILED)
+      expect(error).toBeUndefined()
+    })
+  }
+
+  test('two 5xx: two reads, never a third, and the refresh fails as before', async ($, on) => {
+    const { reads, shown, error } = await pressDrafts($, on, [500, 503, 200])
+    expect(reads).toBe(2)
+    expect(shown).toContain(REFRESH_FAILED)
+    expect(error?.reason).toContain('closeout HTTP 503')
+  })
+
+  for (const status of [401, 404]) {
+    test(`a ${status} is not tried again: one read, and the refresh fails as before`, async ($, on) => {
+      const { reads, shown, error } = await pressDrafts($, on, [status, 200])
+      expect(reads).toBe(1)
+      expect(shown).toContain(REFRESH_FAILED)
+      expect(error?.reason).toContain(`closeout HTTP ${status}`)
+    })
+  }
+
+  test('⛔ the timer\'s sync reads once, as before: one read a sync, whatever the feed answers', async ($, on) => {
+    const old = { at: NOW - 10 * 60_000, member: ME, items: [], pinned: 0, recs: {} }
+    const w = world(on, { store: { 'mm.last': old }, feedRead: () => 500 })
+    await tickOnce($, w)
+    expect(closeouts(w)).toBe(1)
+    expect((w.stored['mm.last'] as { error?: string }).error).toContain('closeout HTTP 500')
+    // the sync on record failed, so the next tick syncs again: one more read, not two
+    await w.clock.advance(60_000)
+    expect(closeouts(w)).toBe(2)
+  })
+
+  test('⛔ the read that guards an Update reads once, as before: on a 503 nothing is sent and the feed is not asked again', async ($, on) => {
+    const plan: Array<'network' | number> = []
+    const w = world(on, { threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autostart': { on: false } }, feedRead: () => plan.shift() })
+    await mm($, '')
+    const ui = await pane($)
+    plan.push(503, 200)
+    const before = closeouts(w)
+    await ui.press({ key: `update:${ACME}` })
+    await w.clock.advance(2_000)
+    expect(closeouts(w) - before).toBe(1)
+    expect(sends(w)).toEqual([])
+    expect(w.toasts.join(' ')).toContain('Nothing was sent')
+    await ui.unmount()
   })
 })
