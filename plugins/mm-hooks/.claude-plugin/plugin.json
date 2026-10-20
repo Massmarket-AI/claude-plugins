@@ -1,6 +1,6 @@
 {
   "name": "mm-hooks",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Keeps the Massmarket worklog hook on this computer current, with nothing for the person to do.",
   "author": {
     "name": "Massmarket AI"
