@@ -18,7 +18,7 @@ export const ME = 'owner@example.com'
 /** A made-up project id: `0000000n-0000-4000-8000-00000000000n`. */
 export const pid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`
 
-export type FakeThread = { sessionId: string; title: string; pinned: boolean; isArchived: boolean; lastActivityAt: string }
+export type FakeThread = { sessionId: string; title: string; pinned: boolean; isArchived: boolean; lastActivityAt: string; remoteControlActive: boolean }
 type Hook = ($: unknown, e: Record<string, unknown>, next: (e: unknown) => unknown) => Promise<unknown>
 type Mcp = { content: Array<{ type: 'text'; text: string }>; isError: boolean }
 
@@ -56,7 +56,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   let time = NOW
   const timers: Array<{ at: number; fn: () => void; done: boolean }> = []
   const app = new Map<string, FakeThread>()
-  for (const t of threads) app.set(t.sessionId, { title: t.sessionId, pinned: false, isArchived: false, lastActivityAt: ago(1), ...t })
+  for (const t of threads) app.set(t.sessionId, { title: t.sessionId, pinned: false, isArchived: false, lastActivityAt: ago(1), remoteControlActive: false, ...t })
   const calls: Array<{ tool: string; args: Record<string, unknown> }> = []
   /** What the bridge added to each thread's transcript. */
   const appends: Array<{ thread: string; text: string }> = []
@@ -71,6 +71,10 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   let feedStatus = 200
   /** Threads the app refuses to pin. */
   const failPins = new Set<string>()
+  /** (0.5.19) Threads the app refuses Remote Control for, with the words it refuses in. */
+  const refuseRc = new Map<string, string>()
+  /** (0.5.19) Threads whose Remote Control call the app never answers. */
+  const silentRc = new Set<string>()
   const text = (value: unknown): Mcp => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }], isError: false })
   const views = new Map<string, Map<string, unknown>>()
 
@@ -101,6 +105,14 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           if (tool === 'set_session_title' && t) t.title = String(args.title)
           if (tool === 'set_pinned' && failPins.has(id)) return { content: [{ type: 'text', text: 'set_pinned failed' }], isError: true }
           if (tool === 'set_pinned' && t) t.pinned = Boolean(args.pinned)
+          // (0.5.19) as the app answers set_remote_control: the state afterwards, or its refusal
+          if (tool === 'set_remote_control') {
+            if (silentRc.has(id)) return new Promise<Mcp>(() => undefined)
+            const refusal = refuseRc.get(id) ?? (t ? undefined : `Session ${id} not found.`)
+            if (refusal !== undefined) return { content: [{ type: 'text', text: refusal }], isError: true }
+            if (t) t.remoteControlActive = Boolean(args.enabled)
+            return text(args.enabled ? 'on' : 'off')
+          }
           if (tool === 'get_usage') return text({ context: { status: 'unavailable' } })
           // (0.5.7) a tool this session does not have, as the engine answers for one
           if ((opts.tools === 'start' && tool === 'spawn_task') || (opts.tools === 'spawn' && tool === 'start_session')) {
@@ -111,7 +123,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           if (tool === 'start_session' && args.initiation === 'own_initiative') return text(`Proposed "${String(args.title)}" (task_id: task_p${String(calls.length).padStart(7, '0')}). The user sees a card.`)
           if (tool === 'start_session') {
             const sid = `local_started_${++started}`
-            app.set(sid, { sessionId: sid, title: String(args.title), pinned: false, isArchived: false, lastActivityAt: new Date(time).toISOString() })
+            app.set(sid, { sessionId: sid, title: String(args.title), pinned: false, isArchived: false, lastActivityAt: new Date(time).toISOString(), remoteControlActive: false })
             return text(`Started session "${String(args.title)}" (session_id: ${sid}, name: started-${started}). It runs on its own.`)
           }
           if (tool === 'send_message') return text(`Message delivered to session ${id}.`)
@@ -197,6 +209,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
     fetched,
     opened,
     failPins,
+    refuseRc,
+    silentRc,
     session,
     /** The fake clock now. */
     now: () => time,
