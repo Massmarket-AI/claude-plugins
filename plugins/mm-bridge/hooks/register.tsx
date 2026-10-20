@@ -101,7 +101,7 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.5.16'
+const VERSION = '0.5.17'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -742,10 +742,20 @@ function feedThreadsOf(feed: Feed): FeedThread[] {
   return (Array.isArray(feed.threads) ? feed.threads : []).filter(t => t && isUuid(t.project_id) && typeof t.session_id === 'string' && SESSION_ID.test(t.session_id))
 }
 
+/** (0.5.17) A feed read that failed. `retryable`: OW answered 5xx, or the call got no answer at all. */
+class FeedReadError extends Error {
+  constructor(message: string, readonly retryable: boolean) {
+    super(message)
+  }
+}
+
 async function fetchFeed($: EngineInterface): Promise<Feed> {
+  const init = { headers: { Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER } }
   // (OW's most: mail old enough to go under Older is in the feed, MAIL_LOOKBACK_HOURS)
-  const r = await $.http.fetch(`${EXT}/closeout?mail_hours=${MAIL_LOOKBACK_HOURS}`, { headers: { Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER } })
-  const failed = () => new Error(`closeout HTTP ${r.status}: ${short(r.text, 160)}`)
+  const r = await $.http.fetch(`${EXT}/closeout?mail_hours=${MAIL_LOOKBACK_HOURS}`, init).catch((err: unknown) => {
+    throw new FeedReadError(errorText(err), true)
+  })
+  const failed = () => new FeedReadError(`closeout HTTP ${r.status}: ${short(r.text, 160)}`, r.status >= 500)
   if (!r.ok) throw failed()
   const feed = JSON.parse(r.text) as Feed | null
   // ⛔ A 200 that is not a feed (neither `tickets` nor `mail` in it) is a failed call, not "nobody needs
@@ -757,12 +767,30 @@ async function fetchFeed($: EngineInterface): Promise<Feed> {
 
 /**
  * The feed for a press's refresh (S2): the one this session read last, while it is younger than
- * FEED_REUSE_MS and the store still holds the sync record made from it; else OW is asked again.
+ * FEED_REUSE_MS and the store still holds the sync record made from it; else OW is asked again, with one
+ * more try (`fetchFeedTwice`).
  */
 async function recentFeed($: EngineInterface): Promise<Feed> {
   const r = recent
   if (r?.wrote && (await $.clock.now()) - r.at < FEED_REUSE_MS && JSON.stringify(await storeGet<Last | null>($, 'mm.last', null)) === r.wrote) return r.feed
-  return fetchFeed($)
+  return fetchFeedTwice($)
+}
+
+/**
+ * (0.5.17; Rob, 10-19: OW's closeout feed answered 500 now and then, and a press that met one
+ * drew "Couldn't refresh the list") A press's refresh asks OW ONE more time, at once, when the first read got
+ * a 5xx or no answer at all. Anything else (a 4xx, a 200 that is not a feed, no tracker token) is not tried
+ * again, and neither is the second read: its failure is the press's, as before. Only `recentFeed` reads
+ * through here: ⛔ the timer's sync, and the reads that guard a send (Update, Claim, an update sent by
+ * itself), read once, as before.
+ */
+async function fetchFeedTwice($: EngineInterface): Promise<Feed> {
+  try {
+    return await fetchFeed($)
+  } catch (err) {
+    if (!(err instanceof FeedReadError && err.retryable)) throw err
+    return fetchFeed($)
+  }
 }
 
 async function storeGet<T>($: EngineInterface, key: string, fallback: T): Promise<T> {
