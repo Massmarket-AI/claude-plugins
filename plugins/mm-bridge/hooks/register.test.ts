@@ -880,9 +880,9 @@ describe('R6: the commands', () => {
     const w = world(on)
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     expect(w.registered.length).toBe(2)
-    expect(w.registered[0]).toBe('Massmarket: /mm (what needs you) · /mm link <client> · /mm update <client> · /mm start <client> · /mm view · /mm unlink · /mm status · /mm pause|resume')
+    expect(w.registered[0]).toBe('Massmarket: /mm (what needs you) · /mm link <client> · /mm update <client> · /mm start <client> · /mm view · /mm unlink · /mm status · /mm pause|resume · /mm rc on|off')
     expect(w.registered[1]).toBe(
-      'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "link <client>" (make this thread that client\'s: a name or project id of any client in the feed), "unlink", "pause", "resume". Starting or updating a client thread is for the person only: they press the button in the pane or type /mm start <client> or /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
+      'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "link <client>" (make this thread that client\'s: a name or project id of any client in the feed), "unlink", "pause", "resume", "rc on|off" (whether Remote Control follows the pin on this computer). Starting or updating a client thread is for the person only: they press the button in the pane or type /mm start <client> or /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
     )
     // neither verb is offered to Claude as something the tool takes
     expect(w.registered[1]).not.toContain('"update <client>"')

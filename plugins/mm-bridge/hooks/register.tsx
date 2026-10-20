@@ -62,6 +62,8 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 //    client is clear its thread is unpinned whoever pinned it (R14), once per clear (0.5.3, `mm.cleared`: a
 //    thread the person pins again after its client cleared stays pinned). Otherwise it only unpins a thread
 //    it pinned itself, and never an internal project's thread (R18).
+//    (0.5.19, Rob 10-20) One exception, only on a computer where the person typed /mm rc on: Remote Control
+//    follows the pin on any thread (`rcFollowsPin`). It never switches off Remote Control it did not switch on.
 // ⛔ A thread the person unlinked never links itself again, and gets its own name back.
 // ⛔ A thread that linked itself gets the pin and the name, nothing more, until the person acts on it; and
 //    the link is undone once the feed stops listing that thread's session for the client, or (B3) its
@@ -101,7 +103,7 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.5.19'
+const VERSION = '0.5.20'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -2187,6 +2189,146 @@ async function setViewOnce($: EngineInterface): Promise<void> {
   if (set) await done()
 }
 
+// ---------------------------------------------------------------- (0.5.19) Remote Control follows the pin
+
+/** (0.5.19) The most set_remote_control calls one pass makes: the rest wait for the next tick. */
+const RC_MAX_CALLS = 10
+/** (0.5.19) A thread the app refused Remote Control for, or did not answer for, is not asked again for this long, unless it was used since. */
+const RC_WAIT_MS = 15 * 60_000
+/** (0.5.19) The threads whose Remote Control the bridge switched on (`mm.rc`): when it did. */
+type RcRecord = Record<string, { at: number }>
+/** (0.5.19) The threads the app refused or did not answer (`mm.rcwait`): skipped before `until` while their last activity is still `activity`. */
+type RcWait = Record<string, { until: number; activity: string }>
+/** (0.5.19) A thread as the pass reads it: these fields of the app's answer and nothing else. */
+type RcThread = { sid: string; pinned: boolean; on: boolean; activity: string }
+/** (0.5.19) The sessions whose pass is waiting on the app: a second pass is not started in that session meanwhile. */
+const rcPassing = new Set<string>()
+
+/**
+ * (0.5.19, Rob 10-20: "Can you turn Remote Control on when they get pinned? Automatically.") The desktop app never
+ * unloads an idle thread that has Remote Control on, so Remote Control is kept to the pinned threads. Whether it
+ * follows the pin on this computer: off unless the person typed /mm rc on (`mm.rcpin`). The plugin reaches every
+ * teammate's computer, so it is a switch per computer, and off by default.
+ */
+async function rcPinOn($: EngineInterface): Promise<boolean> {
+  const v = await storeGet<{ on?: unknown } | null>($, 'mm.rcpin', null)
+  return v?.on === true
+}
+
+/**
+ * (0.5.19) A thread from the app's answer, kept to what the pass reads. Null for an archived thread, one with no id,
+ * or one whose answer does not say whether Remote Control is on (unknown is never off). The app leaves `pinned` out
+ * for a thread it never recorded a pin for: not pinned.
+ */
+function rcThread(raw: unknown): RcThread | null {
+  const t = raw as { sessionId?: unknown; pinned?: unknown; remoteControlActive?: unknown; lastActivityAt?: unknown; isArchived?: unknown } | null | undefined
+  if (!t || typeof t !== 'object' || typeof t.sessionId !== 'string' || !SESSION_ID.test(t.sessionId) || t.isArchived) return null
+  if (typeof t.remoteControlActive !== 'boolean') return null
+  return { sid: t.sessionId, pinned: t.pinned === true, on: t.remoteControlActive, activity: typeof t.lastActivityAt === 'string' ? t.lastActivityAt : '' }
+}
+
+/**
+ * (0.5.19) The app answers the state afterwards (`remoteControlState`: on, off, connecting, unavailable); "unavailable"
+ * is a refusal. A switch on is done when the state is on or connecting, a switch off when it is off; any other state is
+ * a refusal. An answer that names no state counts as done.
+ */
+function rcDone(answer: unknown, enabled: boolean): boolean {
+  const state = answer && typeof answer === 'object' ? (answer as { remoteControlState?: unknown }).remoteControlState : undefined
+  if (typeof state !== 'string') return true
+  return enabled ? state === 'on' || state === 'connecting' : state === 'off'
+}
+
+/**
+ * (0.5.19) Remote Control follows the pin. Run by the thread that polls, on each tick, while /mm rc is on: with it
+ * off, nothing is asked of the app. Each open thread, as the app answers now (its list leaves this thread out, so
+ * `get_session self` too), beside the threads the bridge switched on (`mm.rc`):
+ *   - pinned, off, not on record: switched on, and put on record;
+ *   - pinned, off, on record: the person switched it off by hand. It stays off while the thread stays pinned;
+ *   - pinned, on: nothing;
+ *   - not pinned, on record: switched off if it is on, and taken off the record;
+ *   - not pinned, not on record: nothing. ⛔ Never switches off Remote Control the bridge did not switch on.
+ * A thread on record that the app did not list is left as it is. No list from the app: no pass (unknown is never
+ * none). A call the app refuses (an error, or a state that is not the one asked for: `rcDone`), or does not answer
+ * in APP_WAIT_MS, writes no record, and the thread waits
+ * RC_WAIT_MS (`mm.rcwait`) unless it is used meanwhile: an unloaded thread, one waiting on the person to answer a
+ * request, one started from another device. At most RC_MAX_CALLS calls in a pass.
+ */
+async function rcFollowsPin($: EngineInterface): Promise<void> {
+  if (!(await rcPinOn($)) || (await $.store.get('mm.paused'))) return
+  const id = await instanceId($)
+  if (rcPassing.has(id)) return
+  rcPassing.add(id)
+  try {
+    const listed = await desktopOnly(() => mcpJsonWithin($, 'ccd_session_mgmt', 'list_sessions', { limit: 200 }), null)
+    if (!Array.isArray(listed)) return
+    const me = await desktopOnly(() => mcpJsonWithin($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' }), null)
+    const threads: RcThread[] = []
+    for (const raw of [me, ...listed]) {
+      const t = rcThread(raw)
+      if (t && !threads.some(x => x.sid === t.sid)) threads.push(t)
+    }
+    const now = await $.clock.now()
+    const shaped = (v: unknown) => (v !== null && typeof v === 'object' && !Array.isArray(v) ? v : {}) as Record<string, unknown>
+    const record = shaped(await $.store.get('mm.rc')) as RcRecord
+    const waits = shaped(await $.store.get('mm.rcwait')) as RcWait
+    // a wait written more than a day ago is dropped
+    const old = (w: unknown) => !(w && typeof w === 'object' && now - (Number((w as { until?: unknown }).until) - RC_WAIT_MS) <= DAY_MS)
+    if (Object.values(waits).some(old)) {
+      await patchStore<RcWait>($, 'mm.rcwait', {}, fresh => {
+        for (const [sid, w] of Object.entries(fresh)) if (old(w)) delete fresh[sid]
+      })
+    }
+    let calls = 0
+    for (const t of threads) {
+      const wait = Object.hasOwn(waits, t.sid) ? waits[t.sid] : undefined
+      if (wait && now < Number(wait.until) && wait.activity === t.activity) continue
+      const mine = Object.hasOwn(record, t.sid)
+      let enabled: boolean
+      if (t.pinned && !t.on && !mine) enabled = true
+      else if (!t.pinned && mine && t.on) enabled = false
+      else {
+        // not pinned, on record, already off: off the record. Every other case: nothing.
+        if (!t.pinned && mine) {
+          await patchStore<RcRecord>($, 'mm.rc', {}, fresh => {
+            if (!Object.hasOwn(fresh, t.sid)) return false
+            delete fresh[t.sid]
+          })
+        }
+        continue
+      }
+      if (calls >= RC_MAX_CALLS) continue
+      calls++
+      let ok = false
+      try {
+        const answered = await within($, mcpJson($, 'ccd_session_mgmt', 'set_remote_control', { session_id: t.sid, enabled }))
+        ok = answered.ok && rcDone(answered.value, enabled)
+      } catch {
+        ok = false // refused
+      }
+      const at = await $.clock.now()
+      if (!ok) {
+        await patchStore<RcWait>($, 'mm.rcwait', {}, fresh => {
+          fresh[t.sid] = { until: at + RC_WAIT_MS, activity: t.activity }
+        })
+        continue
+      }
+      await patchStore<RcRecord>($, 'mm.rc', {}, fresh => {
+        if (enabled) fresh[t.sid] = { at }
+        else if (Object.hasOwn(fresh, t.sid)) delete fresh[t.sid]
+        else return false
+      })
+      if (wait) {
+        await patchStore<RcWait>($, 'mm.rcwait', {}, fresh => {
+          if (!Object.hasOwn(fresh, t.sid)) return false
+          delete fresh[t.sid]
+        })
+      }
+    }
+  } finally {
+    rcPassing.delete(id)
+  }
+}
+
 async function tick($: EngineInterface): Promise<void> {
   /** (fix round 1, L12) The sync this tick ran failed: the time of the sync on record it was to replace. */
   let failed: { at: number | null } | null = null
@@ -2221,6 +2363,8 @@ async function tick($: EngineInterface): Promise<void> {
           throw err
         }
       }
+      // (0.5.19, Rob 10-20) Remote Control follows the pin while /mm rc is on: off, it asks the app nothing
+      await rcFollowsPin($).catch(err => noteFailure($, 'remote control', err))
       // R15: the thread list's view, once on this machine
       await setViewOnce($).catch(() => {})
     }
@@ -4684,6 +4828,14 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       ? 'Auto-start and auto-update are on: a client\'s new thread starts by itself, and its thread is updated by itself when something new arrives.'
       : 'Auto-start and auto-update are off: a client\'s new thread waits as a card for you to start, and its thread waits for you to press Update.'
   }
+  // (0.5.19, Rob 10-20) whether Remote Control follows the pin on this computer (off unless turned on)
+  if (verb === 'rc') {
+    if (arg !== 'on' && arg !== 'off') return `Remote Control follows the pin: ${(await rcPinOn($)) ? 'on' : 'off'} on this computer. Type /mm rc on or /mm rc off.`
+    await $.store.set('mm.rcpin', { on: arg === 'on' })
+    return arg === 'on'
+      ? 'Remote Control follows the pin on this computer: a pinned thread gets Remote Control, and loses it again when it is unpinned if the bridge turned it on.'
+      : 'Remote Control no longer follows the pin on this computer. Threads keep the Remote Control they have now.'
+  }
   if (verb === 'status') {
     const last = await storeGet<Last | null>($, 'mm.last', null)
     const lease = await storeGet<{ owner: string; until: number } | null>($, 'mm.lease', null)
@@ -4699,6 +4851,7 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       `poller: ${lease?.owner === (await instanceId($)) ? 'this thread' : 'another thread'}`,
       `paused: ${Boolean(await $.store.get('mm.paused'))}`,
       `auto-start and auto-update: ${(await autoStartOn($)) ? 'on' : 'off'}`,
+      `remote control follows the pin: ${(await rcPinOn($)) ? 'on' : 'off'}`,
       `last error: ${last?.error ?? 'none'}`,
     ].join('\n')
   }
@@ -5075,12 +5228,12 @@ export const register: Register = on => {
     try {
       await $.command.register({
         name: 'mm',
-        description: 'Massmarket: /mm (what needs you) · /mm link <client> · /mm update <client> · /mm start <client> · /mm view · /mm unlink · /mm status · /mm pause|resume',
+        description: 'Massmarket: /mm (what needs you) · /mm link <client> · /mm update <client> · /mm start <client> · /mm view · /mm unlink · /mm status · /mm pause|resume · /mm rc on|off',
       })
       await $.tool.register({
         name: 'mm',
         description:
-          'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "link <client>" (make this thread that client\'s: a name or project id of any client in the feed), "unlink", "pause", "resume". Starting or updating a client thread is for the person only: they press the button in the pane or type /mm start <client> or /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
+          'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "link <client>" (make this thread that client\'s: a name or project id of any client in the feed), "unlink", "pause", "resume", "rc on|off" (whether Remote Control follows the pin on this computer). Starting or updating a client thread is for the person only: they press the button in the pane or type /mm start <client> or /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
         inputSchema: { type: 'object', properties: { args: { type: 'string', description: 'what follows /mm' } } },
         isDeferred: false,
       })

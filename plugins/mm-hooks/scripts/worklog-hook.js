@@ -4642,10 +4642,11 @@ function emitSessionContext(text) {
  * off for this member, the request failed, the payload was unsigned or stale,
  * or the server predates `session_text`.
  *
- * Byte for byte the server's SESSION_TEXT (src/lib/ext/session-text.ts): 779
- * bytes on 7 lines, ASCII, no trailing newline. ⛔ Its length is a budget: the
- * terminal task list below shares SESSION_CONTEXT_PREVIEW_BUDGET with it, and at
- * 779 characters it leaves 478 for task lines.
+ * Byte for byte the server's SESSION_TEXT (src/lib/ext/session-text.ts): 859
+ * bytes on 8 lines, ASCII, no trailing newline (line 7, the ticket-id line, is
+ * 2026-10-20's). ⛔ Its length is a budget: the terminal task list below shares
+ * SESSION_CONTEXT_PREVIEW_BUDGET with it, and at 859 characters it leaves 398
+ * for task lines: five typical client lines, the 0.11.4 floor.
  */
 const TRACKING_INSTRUCTION_FALLBACK = [
   "Massmarket time tracking: this session's work is recorded by client and task.",
@@ -4654,7 +4655,8 @@ const TRACKING_INSTRUCTION_FALLBACK = [
   '  node ~/.claude/mm-hooks/worklog-hook.js --task "<task>"',
   '  (Windows PowerShell: node "$env:USERPROFILE\\.claude\\mm-hooks\\worklog-hook.js" --task "<task>")',
   '  Example: --task "Phase 1 nurture sequence copy"',
-  "- Decide the task from the work; do not ask the team member. No ticket is needed. Never put secrets, passwords or personal details in the label.",
+  '  Working an OW ticket? Start the task with its 8-character id: --task "f779a7a0 Fix inbound router"',
+  "- Decide the task from the work; do not ask the team member. Never put secrets, passwords or personal details in the label.",
 ].join("\n");
 
 /** SPEC v2 §2.1: a served `session_text` longer than this is not used. */

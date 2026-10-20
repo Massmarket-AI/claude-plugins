@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { ME, NOW, ago, bandButtons, fakeApp, hooks, mm, next, paneButtons, pid, press, tool } from './fake-app.test-helper'
+import type { FakeThread } from './fake-app.test-helper'
 import type { Feed } from './queue'
 import { staleCopySentence } from './threads'
 
@@ -34,7 +35,7 @@ describe('F1: the feed is asked for mail far enough back for Older to hold any',
     expect(last.older?.map(i => i.projectId)).toEqual([pid(1)])
   })
 
-  test('(0.5.19, Rob 2026-10-20) on Mon Nov 2 the feed is asked for mail back to the floor, and mail since the floor is on the list however late', async () => {
+  test('(0.5.20, Rob 2026-10-20) on Mon Nov 2 the feed is asked for mail back to the floor, and mail since the floor is on the list however late', async () => {
     // Mon Nov 2, 9 AM in New York (standard time). From Wed Oct 14 12:00 AM (24 business hours before the floor) to
     // then: Oct 14, 15, 16 (72) + Oct 19 to 23 (120) + Oct 26 to 30 (120) + Nov 2 to 9 AM (9) = 321 business hours
     const now = Date.parse('2026-11-02T09:00:00-05:00')
@@ -1623,5 +1624,263 @@ describe('0.5.13: the cap\'s line in the notice log, once per client per hour in
     expect(w.sends()).toEqual([])
     expect(((w.stored('mm.autoupdates') ?? []) as Array<{ pid: string }>).filter(r => r.pid === pid(94))).toEqual([])
     expect(w.stored('mm.updating') ?? {}).toEqual({})
+  })
+})
+
+// ======================================================================== 0.5.19
+
+describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer where /mm rc is on', () => {
+  const RC_ON = 'Remote Control follows the pin on this computer: a pinned thread gets Remote Control, and loses it again when it is unpinned if the bridge turned it on.'
+  const RC_OFF = 'Remote Control no longer follows the pin on this computer. Threads keep the Remote Control they have now.'
+  const rcSays = (state: 'on' | 'off') => `Remote Control follows the pin: ${state} on this computer. Type /mm rc on or /mm rc off.`
+  const HUB = 'local_rc_hub'
+  const DAY = 24 * 3_600_000
+  const WAIT = 15 * 60_000
+  const quiet = (): Feed => ({ member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [] })
+  type World = ReturnType<typeof fakeApp>
+  const rcCalls = (w: World) => w.calls.filter(c => c.tool === 'set_remote_control').map(c => [String(c.args.session_id), c.args.enabled])
+  /** The list the pass reads (list_sessions for 200): asked for only while the switch is on. */
+  const passLists = (w: World) => w.calls.filter(c => c.tool === 'list_sessions' && c.args.limit === 200).length
+  const thread = (w: World, sid: string) => w.app.get(sid) as FakeThread
+  const tickOnce = async (w: World) => {
+    await w.advance(60_000)
+    await settleAll()
+  }
+  /**
+   * The app with this thread (HUB, which polls) and the given threads; its first tick has run. Remote Control follows
+   * the pin unless `on` is false. `before` is run before that tick.
+   */
+  async function running(threads: Array<Partial<FakeThread> & { sessionId: string }>, opts: { on?: boolean; hub?: Partial<FakeThread>; before?: (w: World) => void } = {}) {
+    const w = fakeApp(quiet(), [{ sessionId: HUB, ...opts.hub }, ...threads], [], { every: true })
+    const hub = w.session(HUB)
+    if (opts.on !== false) w.put('mm.rcpin', { on: true })
+    opts.before?.(w)
+    await startIn(hub)
+    await w.advance(4_000)
+    await settleAll()
+    return { w, hub }
+  }
+
+  test('off by default: a pinned thread without Remote Control is left so, and the app is asked nothing for it', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_a', pinned: true }, { sessionId: 'local_rc_b', remoteControlActive: true }], { on: false })
+    for (let i = 0; i < 3; i++) await tickOnce(w)
+    expect(rcCalls(w)).toEqual([])
+    expect(passLists(w)).toBe(0)
+    expect(thread(w, 'local_rc_a').remoteControlActive).toBe(false)
+    expect(thread(w, 'local_rc_b').remoteControlActive).toBe(true)
+    expect(w.stored('mm.rc')).toBeUndefined()
+    expect(w.stored('mm.rcpin')).toBeUndefined()
+  })
+
+  test('/mm rc, /mm rc on, /mm rc off say the switch and set it; /mm status says it after the auto-start line; Claude can set it through the tool', async () => {
+    const w = fakeApp(quiet(), [{ sessionId: HUB }])
+    const hub = w.session(HUB)
+    expect(await mm(hub, 'rc')).toBe(rcSays('off'))
+    expect(await mm(hub, 'status')).toContain('\nauto-start and auto-update: on\nremote control follows the pin: off\nlast error: ')
+    expect(await mm(hub, 'rc on')).toBe(RC_ON)
+    expect(w.stored('mm.rcpin')).toEqual({ on: true })
+    expect(await mm(hub, 'rc')).toBe(rcSays('on'))
+    expect(await mm(hub, 'status')).toContain('\nauto-start and auto-update: on\nremote control follows the pin: on\nlast error: ')
+    expect(await mm(hub, 'rc off')).toBe(RC_OFF)
+    expect(w.stored('mm.rcpin')).toEqual({ on: false })
+    expect(await mm(hub, 'rc maybe')).toBe(rcSays('off'))
+    expect(w.stored('mm.rcpin')).toEqual({ on: false })
+    expect(await tool(hub, 'rc on')).toBe(RC_ON)
+    expect(w.stored('mm.rcpin')).toEqual({ on: true })
+    expect(await tool(hub, 'rc')).toBe(rcSays('on'))
+    // the command itself asks the app nothing
+    expect(rcCalls(w)).toEqual([])
+  })
+
+  test('rule a: a pinned thread without Remote Control gets it, once, and goes on record; the next ticks leave it as it is', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_a', pinned: true }, { sessionId: 'local_rc_u' }])
+    expect(rcCalls(w)).toEqual([['local_rc_a', true]])
+    expect(thread(w, 'local_rc_a').remoteControlActive).toBe(true)
+    expect(w.stored('mm.rc')).toEqual({ local_rc_a: { at: NOW + 4_000 } })
+    for (let i = 0; i < 3; i++) await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_a', true]])
+    expect(thread(w, 'local_rc_u').remoteControlActive).toBe(false)
+    expect(thread(w, HUB).remoteControlActive).toBe(false)
+  })
+
+  test('rule b: the person switches off Remote Control the bridge turned on: it stays off while the thread stays pinned; unpinned and pinned again, it gets it again', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_b', pinned: true }])
+    expect(rcCalls(w)).toEqual([['local_rc_b', true]])
+    thread(w, 'local_rc_b').remoteControlActive = false
+    for (let i = 0; i < 5; i++) await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_b', true]])
+    expect(thread(w, 'local_rc_b').remoteControlActive).toBe(false)
+    expect(Object.keys(w.stored('mm.rc') as object)).toEqual(['local_rc_b'])
+    // unpinned with it off: off the record (rule e), no call; pinned again: a pin of its own, so it gets it again
+    thread(w, 'local_rc_b').pinned = false
+    await tickOnce(w)
+    expect(w.stored('mm.rc')).toEqual({})
+    expect(rcCalls(w).length).toBe(1)
+    thread(w, 'local_rc_b').pinned = true
+    await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_b', true], ['local_rc_b', true]])
+    expect(thread(w, 'local_rc_b').remoteControlActive).toBe(true)
+  })
+
+  test('rule c: a pinned thread that has Remote Control already: no call and no record, so unpinning it later leaves it on', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_c', pinned: true, remoteControlActive: true }])
+    for (let i = 0; i < 3; i++) await tickOnce(w)
+    expect(rcCalls(w)).toEqual([])
+    expect(w.stored('mm.rc')).toBeUndefined()
+    thread(w, 'local_rc_c').pinned = false
+    for (let i = 0; i < 3; i++) await tickOnce(w)
+    expect(rcCalls(w)).toEqual([])
+    expect(thread(w, 'local_rc_c').remoteControlActive).toBe(true)
+  })
+
+  test('rule d: a thread the bridge gave Remote Control is unpinned: switched off and taken off the record, once', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_d', pinned: true }, { sessionId: 'local_rc_keep', pinned: true }])
+    expect(rcCalls(w)).toEqual([['local_rc_d', true], ['local_rc_keep', true]])
+    thread(w, 'local_rc_d').pinned = false
+    await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_d', true], ['local_rc_keep', true], ['local_rc_d', false]])
+    expect(thread(w, 'local_rc_d').remoteControlActive).toBe(false)
+    expect(thread(w, 'local_rc_keep').remoteControlActive).toBe(true)
+    expect(Object.keys(w.stored('mm.rc') as object)).toEqual(['local_rc_keep'])
+    for (let i = 0; i < 3; i++) await tickOnce(w)
+    expect(rcCalls(w).length).toBe(3)
+  })
+
+  test('rule e: a thread on record, unpinned, whose Remote Control is off already: taken off the record, with no call', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_e' }], { before: w => w.put('mm.rc', { local_rc_e: { at: NOW - 3_600_000 } }) })
+    expect(rcCalls(w)).toEqual([])
+    expect(w.stored('mm.rc')).toEqual({})
+  })
+
+  test('rule f: ⛔ the person\'s own Remote Control on an unpinned thread, this one included, is never switched off', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_f', remoteControlActive: true }], { hub: { remoteControlActive: true } })
+    for (let i = 0; i < 5; i++) await tickOnce(w)
+    expect(rcCalls(w)).toEqual([])
+    expect(thread(w, 'local_rc_f').remoteControlActive).toBe(true)
+    expect(thread(w, HUB).remoteControlActive).toBe(true)
+    expect(w.stored('mm.rc')).toBeUndefined()
+  })
+
+  test('rule g: a thread on record that the app does not list is left on record, and nothing is asked about it', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_x' }], { before: w => w.put('mm.rc', { local_rc_gone: { at: NOW - 3_600_000 } }) })
+    for (let i = 0; i < 3; i++) await tickOnce(w)
+    expect(rcCalls(w)).toEqual([])
+    expect(w.stored('mm.rc')).toEqual({ local_rc_gone: { at: NOW - 3_600_000 } })
+    expect(w.calls.filter(c => JSON.stringify(c.args).includes('local_rc_gone'))).toEqual([])
+  })
+
+  test('this thread pinned gets Remote Control through get_session self (the app\'s list leaves it out)', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_o' }], { hub: { pinned: true } })
+    expect(rcCalls(w)).toEqual([[HUB, true]])
+    expect(thread(w, HUB).remoteControlActive).toBe(true)
+    expect(w.stored('mm.rc')).toEqual({ [HUB]: { at: NOW + 4_000 } })
+  })
+
+  test('a refusal writes no record; the thread is not asked again for 15 minutes while it is unused, and is asked again once it is used', async () => {
+    const REFUSAL = 'Remote Control requires an active session. Send a message first.'
+    const { w } = await running([{ sessionId: 'local_rc_r', pinned: true }], { before: w => w.refuseRc.set('local_rc_r', REFUSAL) })
+    expect(rcCalls(w)).toEqual([['local_rc_r', true]])
+    expect(w.stored('mm.rc')).toBeUndefined()
+    const activity = thread(w, 'local_rc_r').lastActivityAt
+    expect(w.stored('mm.rcwait')).toEqual({ local_rc_r: { until: NOW + 4_000 + WAIT, activity } })
+    for (let i = 0; i < 10; i++) await tickOnce(w)
+    expect(rcCalls(w).length).toBe(1)
+    // the person sends a message there, and the app takes it now
+    thread(w, 'local_rc_r').lastActivityAt = new Date(w.now()).toISOString()
+    w.refuseRc.delete('local_rc_r')
+    await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_r', true], ['local_rc_r', true]])
+    expect(thread(w, 'local_rc_r').remoteControlActive).toBe(true)
+    expect(Object.keys(w.stored('mm.rc') as object)).toEqual(['local_rc_r'])
+    // and its wait is cleared
+    expect(w.stored('mm.rcwait')).toEqual({})
+  })
+
+  test('a refusal: asked again once 15 minutes have passed, unused; refused again, it waits again', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_s', pinned: true }], { before: w => w.refuseRc.set('local_rc_s', 'the session is waiting for the user to answer a request') })
+    expect(rcCalls(w).length).toBe(1)
+    // ticks at 1 to 15 minutes: the last, at 15:00, is still 4 seconds short of the wait's end
+    for (let i = 0; i < 15; i++) await tickOnce(w)
+    expect(rcCalls(w).length).toBe(1)
+    await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_s', true], ['local_rc_s', true]])
+    expect(w.stored('mm.rcwait')).toEqual({ local_rc_s: { until: NOW + 16 * 60_000 + WAIT, activity: thread(w, 'local_rc_s').lastActivityAt } })
+    expect(w.stored('mm.rc')).toBeUndefined()
+    for (let i = 0; i < 14; i++) await tickOnce(w)
+    expect(rcCalls(w).length).toBe(2)
+  })
+
+  test('the app answers "unavailable" to a switch on: no record, the thread waits 15 minutes as after a refusal, then is asked again', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_v', pinned: true }], { before: w => w.rcStates.set('local_rc_v', 'unavailable') })
+    expect(rcCalls(w)).toEqual([['local_rc_v', true]])
+    expect(thread(w, 'local_rc_v').remoteControlActive).toBe(false)
+    expect(w.stored('mm.rc')).toBeUndefined()
+    expect(w.stored('mm.rcwait')).toEqual({ local_rc_v: { until: NOW + 4_000 + WAIT, activity: thread(w, 'local_rc_v').lastActivityAt } })
+    // ticks at 1 to 15 minutes, unused: the last is still 4 seconds short of the wait's end
+    for (let i = 0; i < 15; i++) await tickOnce(w)
+    expect(rcCalls(w).length).toBe(1)
+    // the app can now: asked again once the wait is over, and on record
+    w.rcStates.delete('local_rc_v')
+    await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_v', true], ['local_rc_v', true]])
+    expect(thread(w, 'local_rc_v').remoteControlActive).toBe(true)
+    expect(Object.keys(w.stored('mm.rc') as object)).toEqual(['local_rc_v'])
+    expect(w.stored('mm.rcwait')).toEqual({})
+  })
+
+  test('the app does not answer in 15 seconds: no record, the thread waits as after a refusal, and no second pass starts while one waits', async () => {
+    const ids = Array.from({ length: 6 }, (_, i) => `local_rc_n${i + 1}`)
+    const { w } = await running(ids.map(sessionId => ({ sessionId, pinned: true })), { before: w => ids.forEach(id => w.silentRc.add(id)) })
+    expect(rcCalls(w)).toEqual([['local_rc_n1', true]])
+    // each call is given 15 seconds: six take 90, past the next tick, which starts no pass of its own
+    for (let i = 0; i < 6; i++) {
+      await w.advance(15_000)
+      await settleAll()
+    }
+    expect(rcCalls(w)).toEqual(ids.map(id => [id, true]))
+    expect(w.stored('mm.rc')).toBeUndefined()
+    const waits = w.stored('mm.rcwait') as Record<string, { until: number; activity: string }>
+    expect(Object.keys(waits)).toEqual(ids)
+    expect(waits.local_rc_n1).toEqual({ until: NOW + 19_000 + WAIT, activity: thread(w, 'local_rc_n1').lastActivityAt })
+    for (let i = 0; i < 5; i++) await tickOnce(w)
+    expect(rcCalls(w).length).toBe(6)
+  })
+
+  test('at most 10 calls in a pass: twelve pinned threads, ten now and the other two on the next tick', async () => {
+    const ids = Array.from({ length: 12 }, (_, i) => `local_rc_cap${i + 1}`)
+    const { w } = await running(ids.map(sessionId => ({ sessionId, pinned: true })))
+    expect(rcCalls(w).length).toBe(10)
+    expect(new Set(rcCalls(w).map(c => c[0])).size).toBe(10)
+    await tickOnce(w)
+    expect(rcCalls(w).length).toBe(12)
+    expect(new Set(rcCalls(w).map(c => c[0])).size).toBe(12)
+    expect(Object.keys(w.stored('mm.rc') as object).sort()).toEqual([...ids].sort())
+    await tickOnce(w)
+    expect(rcCalls(w).length).toBe(12)
+  })
+
+  test('paused: no calls and no list; resumed, the next tick gives it', async () => {
+    const { w, hub } = await running([{ sessionId: 'local_rc_p', pinned: true }], { before: w => w.put('mm.paused', true) })
+    for (let i = 0; i < 3; i++) await tickOnce(w)
+    expect(rcCalls(w)).toEqual([])
+    expect(passLists(w)).toBe(0)
+    expect(await mm(hub, 'resume')).toBe('Resumed.')
+    await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_p', true]])
+  })
+
+  test('a thread that does not hold the lease asks nothing', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_l', pinned: true }], { before: w => w.put('mm.lease', { owner: 'cli:local_nobody', until: NOW + DAY }) })
+    for (let i = 0; i < 3; i++) await tickOnce(w)
+    expect(rcCalls(w)).toEqual([])
+    expect(passLists(w)).toBe(0)
+  })
+
+  test('a thread whose answer does not say whether Remote Control is on is left alone; a wait written over a day ago is dropped', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_q', pinned: true, remoteControlActive: undefined as unknown as boolean }], {
+      before: w => w.put('mm.rcwait', { local_rc_old: { until: NOW - DAY - 60_000 + WAIT, activity: '' }, local_rc_new: { until: NOW + 60_000, activity: '' } }),
+    })
+    expect(rcCalls(w)).toEqual([])
+    expect(w.stored('mm.rcwait')).toEqual({ local_rc_new: { until: NOW + 60_000, activity: '' } })
   })
 })
