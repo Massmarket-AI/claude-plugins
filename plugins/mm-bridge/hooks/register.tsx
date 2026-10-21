@@ -11,7 +11,7 @@ import {
   LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, staleCopySentence, startKickoff, threadLink, titleSuggestion,
   REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, bandText, chipTitle, ownPackage, seenNow, waitingText,
-  START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary, startMissingLabel, cardReady, needsCard,
+  START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary, startMissingLabel, cardReady, needsCard, AWAY_REASON, markedThreads,
 } from './threads'
 import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
 
@@ -52,6 +52,13 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 //    days, whose row says Start, gets the same update by itself, under the same guards: by itself, an old thread is
 //    updated, never replaced. A client with no linked thread is still started by itself (where the app refuses that,
 //    a card for the person), and a person's Start still opens a fresh thread.
+//    (0.5.23, the cause of the refusals of 10-19 and 10-20) Those starts were for clients whose thread was there all
+//    along: the person works in two Claude profiles on this computer, the app answers "not found" for a thread of the
+//    other profile, and the sync dropped the link. A link now ends only when its thread is archived or deleted: a
+//    "not found" is checked against the app's own record of the thread on disk (`recordOf`). A thread of another
+//    profile stays linked, and in this profile its client's row offers Start and nothing is started or sent by
+//    itself (`away`). And a client with no linked thread gets back the newest open thread that opened with its own
+//    [mm-link] marker (`markedThreads`), before anything is started for it.
 // ⛔ CLAUDE CANNOT DO EITHER. The model can call the `mm` tool, and the tool runs the same `runCommand`:
 //    there, and for a /mm command that did not come from the person's own prompt (a message from another
 //    session, a scheduled task, a channel, another plugin), `update` and `start` are refused before
@@ -70,13 +77,16 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 //    follows the pin on any thread (`rcFollowsPin`). It never switches off Remote Control it did not switch on.
 // ⛔ A thread the person unlinked never links itself again, and gets its own name back.
 // ⛔ A thread that linked itself gets the pin and the name, nothing more, until the person acts on it; and
-//    the link is undone once the feed stops listing that thread's session for the client, or (B3) its
-//    session declares another project too, unless the link was used for a send (R11).
+//    the link is undone once (B3) its session declares another project too, unless the link was used for a
+//    send (R11). (0.5.23) The feed no longer listing that thread's session is not enough: the feed lists only
+//    the last 14 days.
 // ⛔ Where the app's thread list is not there (a terminal session, or an answer that is not a list of
 //    threads), nothing about threads is changed and there is nothing for Update to act on.
 // ⛔ A link is never dropped only because its thread is missing from the app's list (the 60 most recent):
 //    the app is asked for that thread by id, and only "no such thread" or "archived" drops it. An empty
 //    list is this thread alone (the list leaves the calling thread out) and drops nothing at all.
+//    (0.5.23) And "no such thread" drops it only where the app's own record of the thread agrees: none on disk,
+//    or one that says archived, or one in this profile's own folder.
 // ⛔ Feed text and thread titles are data: ids must be uuids, names and titles are cleaned (./queue.ts). A
 //    200 that is not a feed is a failed call. The [mm-link] marker is the person's own prompt's alone.
 // ⛔ A client's link moves from one thread to another in two ways only: the person's /mm link, and a new
@@ -138,10 +148,8 @@ const RECORD_FILE = /^(local_[A-Za-z0-9_-]{1,100})\.json$/
 /** The most record files opened in one sync. */
 const RECORDS_PER_SYNC = 40
 const SESSION_ID = /^[A-Za-z0-9_-]{1,100}$/
-/** A link the bridge made by itself is undone once its thread is missing from the feed's threads this many syncs in a row. */
-const AUTO_MISSES = 3
-/** Two of those misses count only when they are this far apart: three /mm in a row are one sync, not three. */
-const MISS_GAP_MS = 5 * 60_000
+// (0.5.23) AUTO_MISSES and MISS_GAP_MS are gone: a link the bridge made by itself is no longer undone because the
+// feed's threads (the last 14 days) stop listing its thread. Its record keeps `miss` (always 0) for older versions.
 /** The most threads asked for by id in one sync: linked or pinned threads the app's list (its 60 most recent) left out. */
 const LOOKUPS_PER_SYNC = 10
 /** A chip the bridge minted is remembered this long: a thread started from it later than that is a thread like any other. */
@@ -707,9 +715,21 @@ async function sessions($: EngineInterface): Promise<Listed | null> {
 /**
  * One thread, asked for by id: for a linked or pinned thread the app's list left out (the list holds its 60
  * most recent). The thread when it is open; 'gone' ONLY when the app says there is no such thread or shows
- * it archived; 'unknown' for any error, any other answer, or no app to ask. ⛔ Only 'gone' may drop a link.
+ * it archived; 'unknown' for any error, any other answer, or no app to ask. ⛔ Only 'gone' may drop a link,
+ * and (0.5.23) the sync's own pass drops one only on `askApp`'s finer answer, checked against the app's record.
  */
 async function lookup($: EngineInterface, sid: string): Promise<AppThread | 'gone' | 'unknown'> {
+  const found = await askApp($, sid)
+  return found === 'archived' || found === 'notfound' ? 'gone' : found
+}
+
+/**
+ * (0.5.23) `lookup`, with its 'gone' told apart: 'archived' when the app shows the thread archived, 'notfound' when
+ * the app says it has no such thread. The app answers "not found" for a thread of the person's OTHER Claude profile
+ * on this computer as well (checked 2026-10-21: a thread open in one profile is "not found" from a session in the
+ * other), so the sync checks a 'notfound' against the app's own record of the thread before it drops anything.
+ */
+async function askApp($: EngineInterface, sid: string): Promise<AppThread | 'archived' | 'notfound' | 'unknown'> {
   const noSuchThread = (text: string) => text.includes(sid) && /\bnot found\b/i.test(text)
   try {
     // (R10: no answer in time says nothing about the thread)
@@ -717,7 +737,7 @@ async function lookup($: EngineInterface, sid: string): Promise<AppThread | 'gon
     if (!asked.ok) return 'unknown'
     const r = asked.value
     const text = textOf(r)
-    if (r.isError) return noSuchThread(text) ? 'gone' : 'unknown'
+    if (r.isError) return noSuchThread(text) ? 'notfound' : 'unknown'
     let raw: Partial<AppThread> | null
     try {
       raw = JSON.parse(text.slice(text.search(/[[{]/))) as Partial<AppThread> | null
@@ -725,10 +745,10 @@ async function lookup($: EngineInterface, sid: string): Promise<AppThread | 'gon
       return 'unknown' // an answer that is not a thread says nothing about this one
     }
     if (!raw || typeof raw !== 'object' || raw.sessionId !== sid) return 'unknown'
-    return raw.isArchived ? 'gone' : (asThread(raw) ?? 'unknown')
+    return raw.isArchived ? 'archived' : (asThread(raw) ?? 'unknown')
   } catch (err) {
     // the call itself was refused: "no such thread" only when that is what the app said, about this thread
-    return noSuchThread(errorText(err)) ? 'gone' : 'unknown'
+    return noSuchThread(errorText(err)) ? 'notfound' : 'unknown'
   }
 }
 
@@ -1082,6 +1102,119 @@ async function allPairs($: EngineInterface, now: number, live: ReadonlyMap<strin
   return pairs
 }
 
+/** (0.5.23) One of the app's record files on disk: where it is, its folder (one per Claude profile), when it last changed. */
+type RecordFile = { path: string; dir: string; mtimeMs: number }
+
+/**
+ * (0.5.23) The app's record files, listed (not read) once in a sync, and only when the sync needs one: for each thread
+ * id, its files modified in the last RECORD_MAX_AGE_MS, newest first. Null when no platform's folder lists.
+ */
+async function listRecords($: EngineInterface, now: number): Promise<Map<string, RecordFile[]> | null> {
+  for (const root of await recordRoots($)) {
+    const sep = root.includes('\\') ? '\\' : '/'
+    const found = new Map<string, RecordFile[]>()
+    const walk = async (dir: string, depth: number): Promise<void> => {
+      for (const entry of await $.fs.list(dir)) {
+        const path = `${dir}${sep}${entry.name}`
+        if (entry.kind === 'dir') {
+          // records sit two folders down today (one folder per profile); one more level is allowed for
+          if (depth < 3) await walk(path, depth + 1).catch(() => {})
+          continue
+        }
+        const app = entry.kind === 'file' ? RECORD_FILE.exec(entry.name)?.[1] : undefined
+        if (!app || now - entry.mtimeMs > RECORD_MAX_AGE_MS) continue
+        const all = found.get(app) ?? []
+        all.push({ path, dir, mtimeMs: entry.mtimeMs })
+        found.set(app, all)
+      }
+    }
+    try {
+      await walk(root, 0)
+    } catch {
+      continue // this platform's folder is not here: try the next
+    }
+    for (const all of found.values()) all.sort((a, b) => b.mtimeMs - a.mtimeMs)
+    return found
+  }
+  return null
+}
+
+/**
+ * (0.5.23) What the app's own record of one thread says: whether it is archived, and the folder it is in. From each
+ * file ONLY the thread id (it must be this thread's) and `isArchived` are taken; a file of another shape (the app keeps
+ * other files beside its records) is not a record. Undefined when no record says, or the files the sync may open are
+ * spent.
+ */
+async function recordOf($: EngineInterface, files: ReadonlyMap<string, readonly RecordFile[]>, sid: string, budget: { left: number }): Promise<{ archived: boolean; dir: string } | undefined> {
+  for (const file of files.get(sid) ?? []) {
+    if (budget.left <= 0) return undefined
+    budget.left--
+    try {
+      const record = JSON.parse(await $.fs.read(file.path)) as { sessionId?: unknown; isArchived?: unknown }
+      if (record.sessionId === sid && typeof record.isArchived === 'boolean') return { archived: record.isArchived, dir: file.dir }
+    } catch {
+      // unreadable, not JSON, too large: this file says nothing
+    }
+  }
+  return undefined
+}
+
+/**
+ * (0.5.23) Where a thread is that the app could not find from here, by the app's own records on this computer:
+ *   away      its record says it is open, in another profile's folder than this thread's own (or this thread's own
+ *             record cannot be read): the thread is there, in the profile the person is not using now
+ *   here      its record says it is open, in this thread's own folder: the app here would have found it
+ *   archived  its record says it is archived
+ *   none      no record of it changed in RECORD_MAX_AGE_MS, or no records at all on this computer
+ *   unknown   the files this sync may open (RECORDS_PER_SYNC) are spent
+ */
+type RecordSays = 'away' | 'here' | 'archived' | 'none' | 'unknown'
+
+/**
+ * (0.5.23) The app's records as one sync reads them: the folders listed at most once, at most RECORDS_PER_SYNC files
+ * opened in all, this thread's own record first (to know which folder is this profile's). ⛔ READ-ONLY, as
+ * `readRecords`: nothing from a record is kept, logged or sent; the bridge never writes there.
+ *   where      `RecordSays`, for a thread the app here said it has no such thread for
+ *   elsewhere  for a thread whose record is ONLY in another profile's folder (none in this one's), what that record
+ *              says, 'away' or 'archived', without asking the app: the app here cannot see such a thread (it answers
+ *              "not found"), so asking it would spend one of LOOKUPS_PER_SYNC for nothing. Undefined for any other
+ *              thread, or when this thread's own folder is not known: the app is asked, as before.
+ */
+function recordReader($: EngineInterface, now: number, me: string): { where: (sid: string) => Promise<RecordSays>; elsewhere: (sid: string) => Promise<'away' | 'archived' | undefined> } {
+  let files: Promise<Map<string, RecordFile[]> | null> | undefined
+  let mine: Promise<string | undefined> | undefined
+  const budget = { left: RECORDS_PER_SYNC }
+  const list = () => (files ??= listRecords($, now).catch(() => null))
+  const ownDir = () =>
+    (mine ??= (async () => {
+      const all = await list()
+      return all && me ? (await recordOf($, all, me, budget))?.dir : undefined
+    })())
+  return {
+    where: async sid => {
+      const all = await list()
+      if (!all) return 'none'
+      const own = await ownDir()
+      if (!all.get(sid)?.length) return 'none'
+      if (budget.left <= 0) return 'unknown'
+      const said = await recordOf($, all, sid, budget)
+      if (!said) return budget.left <= 0 ? 'unknown' : 'none'
+      if (said.archived) return 'archived'
+      return own !== undefined && said.dir === own ? 'here' : 'away'
+    },
+    elsewhere: async sid => {
+      const all = await list()
+      const files = all?.get(sid)
+      if (!all || !files?.length) return undefined
+      const own = await ownDir()
+      if (own === undefined || files.some(f => f.dir === own)) return undefined
+      const said = await recordOf($, all, sid, budget)
+      if (!said || said.dir === own) return undefined
+      return said.archived ? 'archived' : 'away'
+    },
+  }
+}
+
 /** What a client's thread has now (Update sent it, or a chip it opened with carried it): written last, so the cap keeps the newest. */
 async function putSent($: EngineInterface, projectId: string, sent: Sent): Promise<void> {
   await patchStore<Record<string, Sent>>($, 'mm.sent', {}, all => {
@@ -1130,7 +1263,7 @@ async function claim($: EngineInterface, projectId: string | undefined, sid: str
  * One pass over a feed: threads link themselves, the linked clients' threads are pinned and named up to
  * the cap (a thread the person acted on in the last day first, and never dropped by the cap), the rest
  * are let go, and every client gets its recommendation. `known` carries the pairs of an earlier pass of
- * the same feed: the app's records are looked at once, and a link's misses are counted once, per feed.
+ * the same feed: the app's records are looked at once per feed.
  * ⛔ Sends nothing and starts nothing.
  */
 async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise<Pass> {
@@ -1217,13 +1350,43 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // error, no answer, more of them than one sync asks for) is `unseen`: its link, pin record and title are
   // kept exactly as they are, and nothing is done to it.
   // ⛔ And an empty list never drops anything at all, whatever a lookup says.
+  // ⛔ (0.5.23) "Does not exist" is the app's word only for this profile: the app answers it for a thread of the
+  // person's other Claude profile on this computer too. On 10-19 and 10-20 that dropped the links of every thread of
+  // the other profile, and the clients' next items were started as new threads, which the app refused (14 times). So
+  // a thread the app here has no such thread for is looked up in the app's own records on disk (`recordReader`): one
+  // whose record is open, in another profile's folder, is `away` (and `unseen`: kept exactly as it is). Only a record
+  // that says archived, one in this profile's own folder, or none at all lets "does not exist" stand. A thread whose
+  // record is only in another profile's folder is not asked for at all (`elsewhere`): the app here cannot see it.
   const gone = new Set<string>()
   const unseen = new Set<string>()
+  /** (0.5.23) Linked or pinned threads of another Claude profile: kept as `unseen` keeps them; their clients' rows offer Start. */
+  const away = new Set<string>()
+  const me = await selfId($)
+  const records = recordReader($, now, me)
+  /** The threads this pass has asked the app for by id: at most LOOKUPS_PER_SYNC. */
+  let asked = 0
   const missing = [...new Set([...Object.values(links), ...Object.keys(pins), ...released])].filter(sid => !live.has(sid))
-  for (const [n, sid] of missing.entries()) {
-    const found = n < LOOKUPS_PER_SYNC ? await lookup($, sid) : 'unknown'
+  for (const sid of missing) {
+    // a thread whose record is only in another profile's folder: its record says, and the app is not asked
+    const there = await records.elsewhere(sid)
+    if (there === 'away') {
+      away.add(sid)
+      unseen.add(sid)
+      continue
+    }
+    if (there === 'archived') {
+      if (listed.complete) gone.add(sid)
+      else unseen.add(sid)
+      continue
+    }
+    const found = asked < LOOKUPS_PER_SYNC ? (asked++, await askApp($, sid)) : 'unknown'
     if (found === 'unknown') unseen.add(sid)
-    else if (found !== 'gone') live.set(sid, found)
+    else if (found === 'notfound') {
+      const said = await records.where(sid)
+      if (said === 'away') away.add(sid)
+      if (said === 'away' || said === 'unknown' || !listed.complete) unseen.add(sid)
+      else gone.add(sid)
+    } else if (found !== 'archived') live.set(sid, found)
     else if (listed.complete) gone.add(sid)
     else unseen.add(sid)
   }
@@ -1245,11 +1408,12 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // qualifies: the feed's rows for its thread's sessions name another client (alone, or beside this one;
   // the internal-ops project counts like any other), OW marks such a row `sole: false` (the session declared
   // another project the feed does not list), or the thread opened with an [mm-link] marker for another
-  // client. More quietly, when the feed stops listing its thread's sessions at all, AUTO_MISSES
-  // syncs in a row: those misses are counted once per feed, and only when the feed's list has entries (a
-  // feed with no `threads`, or an empty one, says nothing either way and changes no count), and a miss
-  // counts only when the one before it is MISS_GAP_MS old (three /mm in a row are one sync). A thread that
-  // cannot be seen is left as it is. A link the person made is not in `auto`, and is never undone here.
+  // client. A thread that cannot be seen is left as it is. A link the person made is not in `auto`, and is
+  // never undone here.
+  // (0.5.23) No longer when the feed merely stops listing its thread's sessions (until 0.5.22, after three syncs in a
+  // row): the feed lists the last 14 days only, and a client's thread that went quiet longer than that is still its
+  // thread. A link ends when its thread is archived or deleted (`gone`, above), or here on B3. Its `miss` stays 0,
+  // so a thread still running an older version, which counts misses on the same record, does not reach three.
   const undone: string[] = []
   /** (0.5.10) The bridge links this pass let go here: checked again on the store before the links are written. */
   const drops: Array<{ pid: string; sid: string }> = []
@@ -1262,17 +1426,13 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
       // only through a closing route that succeeded in its own thread (`claimUsed`) or the person's own act (a
       // press, a typed /mm command, an [mm-link] marker); either one takes it out of `auto` before this loop.
       const fate = autoLinkFate(pid, a.sid, feedThreads, pairs, marked)
-      if (fate === 'stays') {
-        a.miss = 0
-        delete a.at
+      if (fate !== 'goes') {
+        // (a feed that lists no threads says nothing either way, and changes nothing, as before)
+        if (fate === 'stays' || feedThreads.length) {
+          a.miss = 0
+          delete a.at
+        }
         continue
-      }
-      if (fate === 'unlisted') {
-        if (!feedThreads.length) continue
-        if (typeof a.at === 'number' && now - a.at < MISS_GAP_MS) continue
-        a.miss = (Number(a.miss) || 0) + 1
-        a.at = now
-        if (a.miss < AUTO_MISSES) continue
       }
       delete auto[pid]
       delete links[pid]
@@ -1316,6 +1476,49 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     if (!sid) continue
     links[it.projectId] = sid
     auto[it.projectId] = { sid, miss: 0, made: now }
+  }
+
+  // (0.5.23) A client on the list that still has no thread takes back the newest thread that opened with its own
+  // [mm-link] marker (`markedThreads`, from the bridge's own record of markers) and is still there: open in the app's
+  // list; or, left out of it, open by the app's own record (another profile's thread: `away`), or by the app's answer
+  // for it by id (this profile's thread, older than the list's 60). It is linked as R1 links (the bridge's own link,
+  // in `auto`), and from then on it is any linked thread: Update when it is recent, the older-thread update when it is
+  // not (`autoUpdateTarget`). ⛔ Only the marker counts, never a title. ⛔ Once per feed (`known`), never on an empty
+  // list, never a thread that is archived, deleted, or cannot be found out about in this sync (the newest one decides:
+  // an older one is never taken past it), and within LOOKUPS_PER_SYNC app calls and RECORDS_PER_SYNC record files.
+  if (!known && listed.complete) {
+    const shared = sharedThreads(feedThreads, pairs)
+    const left = Array.isArray(released) ? released : []
+    for (const it of items) {
+      if (links[it.projectId] !== undefined || !isUuid(it.projectId)) continue
+      for (const sid of markedThreads(it.projectId, links, feedThreads, pairs, { unlinked, released: left, marked, markedAt, shared })) {
+        if (gone.has(sid)) continue
+        let there: 'live' | 'away' | 'skip' | 'stop' = 'stop'
+        if (live.has(sid)) there = live.get(sid)?.isArchived ? 'skip' : 'live'
+        else if (unseen.has(sid)) there = away.has(sid) ? 'away' : 'stop'
+        else {
+          const said = await records.where(sid)
+          if (said === 'away') there = 'away'
+          else if (said === 'archived' || said === 'none') there = 'skip'
+          // this profile's thread, left out of the list (its 60 most recent): the app is asked for it by id
+          else if (said === 'here' && asked < LOOKUPS_PER_SYNC) {
+            asked++
+            const found = await askApp($, sid)
+            if (typeof found === 'object') live.set(sid, found)
+            there = typeof found === 'object' ? 'live' : found === 'unknown' ? 'stop' : 'skip'
+          }
+        }
+        if (there === 'skip') continue
+        if (there === 'stop') break
+        links[it.projectId] = sid
+        auto[it.projectId] = { sid, miss: 0, made: now }
+        if (there === 'away') {
+          away.add(sid)
+          unseen.add(sid)
+        }
+        break
+      }
+    }
   }
 
   // The threads that should be pinned now. R1 (0.5.2, Rob 2026-10-13: "Pinned is something the server
@@ -1592,7 +1795,6 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // only in the thread that minted it, so "here" is this thread's word: it goes on this session's rows,
   // not into the recommendation that is stored for every session.
   const chips = await chipsOf($, now)
-  const me = await selfId($)
   const chipLine = (it: QueueItem, rec: Recommendation): Recommendation => {
     const chip = rec.state === 'start' ? liveChip(chips, it.projectId) : undefined
     if (!chip) return rec
@@ -1617,8 +1819,11 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     // Otherwise ONE of three: Start (no thread, or the thread is old), Update (the thread has not been given
     // what is waiting now), or current (it has: what Update last put there is what would go now). (0.5.11, Rob
     // 10-15) A long thread is not one to replace: Claude Code compacts it.
-    const rec =
-      linked && unseen.has(linked)
+    // (0.5.23) A client whose thread is in the person's other Claude profile: Start here, nothing by itself.
+    const rec: Recommendation =
+      linked && away.has(linked)
+        ? { state: 'start', reason: AWAY_REASON, away: true }
+        : linked && unseen.has(linked)
         ? carried(it)
         : recommend(threads, threads.length ? undefined : titleSuggestion(it.client, links, live, elsewhere), now, {
             sent: had,
@@ -1825,7 +2030,7 @@ function storedRec(last: Last | null, projectId: string): Recommendation | undef
   const t = was.target as { sid?: unknown; title?: unknown; suggested?: unknown } | null | undefined
   const target = t && typeof t === 'object' && typeof t.sid === 'string' && t.sid && typeof t.title === 'string' ? { sid: t.sid, title: t.title, suggested: t.suggested === true } : undefined
   const fresh = was.state !== undefined ? was.fresh === true : state === 'start' && !target
-  return { state, reason: was.reason, ...(target ? { target } : {}), ...(fresh ? { fresh: true as const } : {}) }
+  return { state, reason: was.reason, ...(target ? { target } : {}), ...(fresh ? { fresh: true as const } : {}), ...(was.away === true ? { away: true as const } : {}) }
 }
 
 /**
@@ -3609,7 +3814,8 @@ function needingThreads(last: Last, links: Readonly<Record<string, string>>, now
   return last.items
     .filter(it => {
       const rec = storedRec(last, it.projectId)
-      if (!rec || rec.state !== 'start' || !isUuid(it.projectId) || links[it.projectId] !== undefined) return false
+      // (0.5.23) a client whose linked thread is in another Claude profile has no thread here: as before, when the sync dropped that link
+      if (!rec || rec.state !== 'start' || !isUuid(it.projectId) || (links[it.projectId] !== undefined && rec.away !== true)) return false
       return rowButtons(rowFor(it, rec, now, { needsYou: true }))[0] === 'start'
     })
     .sort(byDue)

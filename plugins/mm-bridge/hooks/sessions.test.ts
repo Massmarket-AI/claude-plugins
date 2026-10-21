@@ -1473,7 +1473,7 @@ describe('0.5.10 (review of 0.5.9, finding 1): a bridge link the sync lets go is
     expect(r.w.app.get(r.old)?.pinned).toBe(true)
   })
 
-  test('the third miss, with the person acting on the thread meanwhile: kept; with nobody acting, let go as before', async () => {
+  test('the third miss, with the person acting on the thread meanwhile or with nobody acting: (0.5.23) kept either way, the feed no longer listing the session is not enough', async () => {
     for (const [n, acts] of [[412, true], [413, false]] as const) {
       const r = await replay(n)
       // the feed stops listing the old thread's session: three syncs, five minutes apart
@@ -1491,7 +1491,7 @@ describe('0.5.10 (review of 0.5.9, finding 1): a bridge link the sync lets go is
         r.w.put('mm.acted', { [pid(n)]: { sid: r.old, at: r.w.now() } })
       })
       await mm(hub, '')
-      expect(linksOf(r.w)[pid(n)], acts ? 'acted' : 'nobody').toBe(acts ? r.old : undefined)
+      expect(linksOf(r.w)[pid(n)], acts ? 'acted' : 'nobody').toBe(r.old)
     }
   })
 })
@@ -1517,7 +1517,7 @@ describe('0.5.11 (review of PR #15, F6): a bridge link let go or kept for the pe
     expect(r.w.stored('mm.ctx')).toEqual({ [r.old]: reading })
   })
 
-  test('with nobody acting, the link is let go on the third miss, as before; `mm.ctx` is untouched', async () => {
+  test('with nobody acting, (0.5.23) the link is kept through the third miss; `mm.ctx` is untouched', async () => {
     const r = await replay(524)
     const reading = { tokensUsed: 1, contextWindow: 10, percentUsed: 10, at: r.w.now() }
     r.w.put('mm.ctx', { [r.old]: reading })
@@ -1527,7 +1527,7 @@ describe('0.5.11 (review of PR #15, F6): a bridge link let go or kept for the pe
       await mm(r.hubSession, '')
       await r.w.advance(6 * 60_000)
     }
-    expect(linksOf(r.w)[pid(524)]).toBeUndefined()
+    expect(linksOf(r.w)[pid(524)]).toBe(r.old)
     expect(r.w.stored('mm.ctx')).toEqual({ [r.old]: reading })
   })
 })

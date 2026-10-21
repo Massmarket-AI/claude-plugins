@@ -7,7 +7,7 @@ import {
   asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, ownPackage, seenNow,
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLink, titleLooksLike, titleSuggestion, waitingText,
-  newerThreadFor, threadStart,
+  newerThreadFor, threadStart, markedThreads, AWAY_REASON,
   CHIP_TITLE_MAX, REFRESH_FAILED, bandText, chipTitle, claimText, isStillOpenRow, staleCopySentence, startKickoff,
   START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary, startMissingLabel,
   LABEL_MAX, buttonLabel, cardReady, needsCard,
@@ -1617,3 +1617,38 @@ describe('(0.5.11, Opus 10-15) an update sent by itself never takes the package;
   })
 })
 
+
+describe('(0.5.23) markedThreads: the threads a client with no linked thread may take back, by its own marker alone', () => {
+  const marked = { local_m1: ACME, local_m2: ACME, local_m3: ACME, local_b: BOLT }
+  test('newest first: by when the marker was recorded; a marker with no time on record by when its thread started; else last', () => {
+    const pairs: Pairs = { 'cli-m3': { app: 'local_m3', at: NOW, since: et('2026-10-05 09:00') } }
+    const markedAt = { local_m1: et('2026-10-01 09:00'), local_m2: et('2026-10-09 09:00') }
+    expect(markedThreads(ACME, {}, [], pairs, { marked, markedAt })).toEqual(['local_m2', 'local_m3', 'local_m1'])
+    // with no time of any kind, a marker still counts, after every dated one
+    expect(markedThreads(ACME, {}, [], {}, { marked, markedAt })).toEqual(['local_m2', 'local_m1', 'local_m3'])
+    expect(markedThreads(BOLT, {}, [], {}, { marked })).toEqual(['local_b'])
+  })
+
+  test('never a thread linked to any client, one the person unlinked, one a client was moved off, one reached by two clients\' sessions, or one the feed gives to another client', () => {
+    const markedAt = { local_m1: et('2026-10-01 09:00'), local_m2: et('2026-10-09 09:00'), local_m3: et('2026-10-05 09:00') }
+    expect(markedThreads(ACME, { [CEDAR]: 'local_m2' }, [], {}, { marked, markedAt })).toEqual(['local_m3', 'local_m1'])
+    expect(markedThreads(ACME, {}, [], {}, { marked, markedAt, unlinked: { local_m2: 1 } })).toEqual(['local_m3', 'local_m1'])
+    expect(markedThreads(ACME, {}, [], {}, { marked, markedAt, released: ['local_m3'] })).toEqual(['local_m2', 'local_m1'])
+    expect(markedThreads(ACME, {}, [], {}, { marked, markedAt, shared: new Set(['local_m1']) })).toEqual(['local_m2', 'local_m3'])
+    const pairs: Pairs = { 'cli-m2': { app: 'local_m2', at: NOW } }
+    expect(markedThreads(ACME, {}, [declared(BOLT, 'cli-m2', '2026-10-09 10:00')], pairs, { marked, markedAt })).toEqual(['local_m3', 'local_m1'])
+  })
+
+  test('⛔ only the marker counts: a thread the feed lists for the client but that has no marker on record is not one; nor is an id that is not an app thread\'s', () => {
+    const pairs: Pairs = { 'cli-a': { app: 'local_a', at: NOW } }
+    expect(markedThreads(ACME, {}, [declared(ACME, 'cli-a', '2026-10-12 10:00')], pairs, { marked: {} })).toEqual([])
+    expect(markedThreads(ACME, {}, [], {}, { marked: { 'not a thread': ACME, 'local_ok': ACME } })).toEqual(['local_ok'])
+  })
+
+  test('a row whose linked thread is in another Claude profile says so, and offers Start', () => {
+    const row = rowFor(item(ACME), { state: 'start', reason: AWAY_REASON, away: true }, NOW, { needsYou: true })
+    expect(row.reason).toBe('its thread is in another Claude profile')
+    expect(rowButtons(row)[0]).toBe('start')
+    expect(row.fresh).toBe(false)
+  })
+})
