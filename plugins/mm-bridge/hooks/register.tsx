@@ -103,7 +103,7 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.5.21'
+const VERSION = '0.5.22'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -324,7 +324,7 @@ type Last = {
   member: string
   /** The clients that need the person now: what pins, and what the header and the band count. */
   items: QueueItem[]
-  /** Clients whose reply drafts a teammate holds, and clients whose only items were due before the list's floor (LIST_FLOOR_MS, Thu 2026-10-15): listed, never pinned, never counted. */
+  /** Clients whose reply drafts a teammate holds, and clients whose only items were due before the list's floor (LIST_FLOOR_MS, Wed 2026-10-14): listed, never pinned, never counted. */
   teammate?: QueueItem[]
   older?: QueueItem[]
   /** (0.5.2, R8) Clients whose package waits for the server's check of our newer send: off the list, not pinned, not counted. */
@@ -757,7 +757,7 @@ class FeedReadError extends Error {
 async function fetchFeed($: EngineInterface): Promise<Feed> {
   const init = { headers: { Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER } }
   // Mail back to 24 business hours before the list's floor, at least 168 and at most 720 business hours
-  // (mailLookbackHours, from this fetch's own now): it asks for 168 until Fri 2026-10-23 12:00 AM ET, and more
+  // (mailLookbackHours, from this fetch's own now): it asks for 168 until Thu 2026-10-22 12:00 AM ET, and more
   // only after that, once OW takes up to 720 (an OW that still caps at 168 answers 400)
   const now = await $.clock.now()
   const r = await $.http.fetch(`${EXT}/closeout?mail_hours=${mailLookbackHours(now)}`, init).catch((err: unknown) => {
@@ -1133,7 +1133,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   const now = await $.clock.now()
   // Three lists, a client in exactly one. Only `items` pins and is counted. The other two are listed
   // under the list, closed: clients whose reply drafts a teammate holds, and clients whose only items were
-  // due before the list's floor, Thu 2026-10-15 (nothing drops off silently). (Until 2026-10-20 the cut was
+  // due before the list's floor, Wed 2026-10-14 (nothing drops off silently). (Until 2026-10-20 the cut was
   // 3 business days back; Rob replaced it with LIST_FLOOR_MS.)
   const lists = buildLists(feed, now)
   const items = lists.queue

@@ -769,7 +769,7 @@ export type RowButton = keyof typeof LABEL
 
 /** R8: the sentence under the list. */
 export const PANE_SENTENCE =
-  'Pins: overdue (anything still open since Thu Oct 15), or due within the next 24 business hours. Weekends do not count. Threads for these clients link themselves; use Update or Start on a row to pick one up.'
+  'Pins: overdue (anything still open since Wed Oct 14), or due within the next 24 business hours. Weekends do not count. Threads for these clients link themselves; use Update or Start on a row to pick one up.'
 
 /** A row of the Needs-you pane (the plugin's state contract holds the shape). */
 export type Row = MmRow
@@ -974,7 +974,7 @@ export type BandFacts = {
   update?: string | undefined
   /** The last sync failed, or is older than STALE_SYNC_MS: never an all-clear from it. */
   stale: boolean
-  /** (fix round 1, F6) The person's own clients listed under Older: their only items were due before the list's floor, Thu 2026-10-15 (until 2026-10-20 the cut was 3 business days back; Rob replaced it with LIST_FLOOR_MS). */
+  /** (fix round 1, F6) The person's own clients listed under Older: their only items were due before the list's floor, Wed 2026-10-14 (until 2026-10-20 the cut was 3 business days back; Rob replaced it with LIST_FLOOR_MS). */
   older?: number
 }
 

@@ -8,10 +8,10 @@ import {
 import type { Feed, QueueItem } from './queue'
 import { handoverText, kickoffText, waitingText } from './threads'
 
-// Most tests here run on clocks in early October 2026, before the list's floor (LIST_FLOOR_MS, Thu Oct 15 12:00 AM
+// Most tests here run on clocks in early October 2026, before the list's floor (LIST_FLOOR_MS, Wed Oct 14 12:00 AM
 // ET). On such a clock the list still reaches 3 business days back (WINDOW_BACK_MS), as it did when they were
 // written: the floor only widens the list. The floor's own tests ("the list's floor", below) run on clocks from
-// Tue Oct 20 on, where the floor alone is the cut (Rob, 2026-10-20).
+// Sat Oct 17 on, where the floor alone is the cut (Rob, 2026-10-20).
 
 const NOW = Date.parse('2026-10-08T15:00:00Z') // 11 AM ET
 const iso = (hoursFromNow: number) => new Date(NOW + hoursFromNow * 3_600_000).toISOString()
@@ -27,12 +27,12 @@ const mail = (pid: string, name: string, receivedH: number, owner: string | null
 
 const feed = (over: Partial<Feed> = {}): Feed => ({ member: 'builder-a@example.com', role: 'builder', ...over })
 
-describe('what is listed and what pins (Rob, 2026-10-20: everything still open since Thu Oct 15)', () => {
+describe('what is listed and what pins (Rob, 2026-10-20: everything still open since Wed Oct 14)', () => {
   test('a message whose reply was due after the floor is listed and pins however late; one due before it is not listed', async () => {
-    // Mon Nov 2, 9 AM in New York (standard time): one reply due Mon Oct 19 (received Fri Oct 16), one due Wed Oct 14
+    // Mon Nov 2, 9 AM in New York (standard time): one reply due Mon Oct 19 (received Fri Oct 16), one due Tue Oct 13
     const nov2 = Date.parse('2026-11-02T09:00:00-05:00')
     const late = { ...mail(P1, 'Contoso Cooling — Sam', 0), received_at: '2026-10-16T14:00:00Z', reply_due_at: '2026-10-19T14:00:00Z' }
-    const before = { ...mail(P2, 'Old Client', 0), received_at: '2026-10-13T14:00:00Z', reply_due_at: '2026-10-14T14:00:00Z' }
+    const before = { ...mail(P2, 'Old Client', 0), received_at: '2026-10-12T14:00:00Z', reply_due_at: '2026-10-13T14:00:00Z' }
     const q = buildQueue(feed({ mail: [late, before] }), nov2)
     expect(q.map(i => i.projectId)).toEqual([P1])
     expect(pinsNow(q[0] as QueueItem, nov2)).toBe(true)
@@ -329,12 +329,12 @@ describe('client clocks count business days (Rob, 2026-10-12: weekends do not co
   })
 
   // (Rob, 2026-10-20) the list reaches back to the floor, LIST_FLOOR_MS, and as far ahead as the feed gives; the
-  // PIN's window is 24 business hours ahead (and everything overdue that is listed). From Tue Oct 20 12:00 AM ET
+  // PIN's window is 24 business hours ahead (and everything overdue that is listed). From Sat Oct 17 12:00 AM ET
   // on, the list's edge is the floor exactly: listed unless due before both now and the floor.
-  test('the list\'s edge is the floor at every moment from Tue Oct 20 on, and the pin\'s 24 business hours ahead, across weekends and the clock change', { timeoutMs: 30_000 }, async () => {
+  test('the list\'s edge is the floor at every moment from Sat Oct 17 on, and the pin\'s 24 business hours ahead, across weekends and the clock change', { timeoutMs: 30_000 }, async () => {
     const HOUR = 3_600_000
     const nows = [
-      et('2026-10-20 00:00'), et('2026-10-20 09:00'), et('2026-10-22 13:37'), et('2026-10-24 11:00'), et('2026-10-25 23:30'),
+      et('2026-10-17 00:00'), et('2026-10-20 00:00'), et('2026-10-20 09:00'), et('2026-10-22 13:37'), et('2026-10-24 11:00'), et('2026-10-25 23:30'),
       Date.UTC(2026, 9, 31, 16), Date.UTC(2026, 10, 1, 12), Date.UTC(2026, 10, 2, 14), Date.UTC(2026, 10, 5, 5), // the weekend the clocks go back
     ]
     let checked = 0
@@ -995,14 +995,14 @@ describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the 
 
 // ---------------------------------------------------------------- the list's floor
 // Rob, 2026-10-20: "everything since last Thursday that wasn't closed should always show up now, and we can keep it
-// clean going forward." LIST_FLOOR_MS is Thu 2026-10-15 12:00 AM in New York. It replaces the 3-business-day cut of
+// clean going forward." LIST_FLOOR_MS is Wed 2026-10-14 12:00 AM in New York. It replaces the 3-business-day cut of
 // 2026-10-08: anything still open whose due time is on or after it stays on the Needs-you list however overdue,
 // and only what was due before it goes under Older.
 
 /** A New York wall time in November 2026, after the clocks go back (standard time, UTC-5), as an instant. */
 const est = (s: string) => Date.parse(`${s.replace(' ', 'T')}:00-05:00`)
 
-describe('the list\'s floor: everything still open since Thu Oct 15 stays on the list (Rob, 2026-10-20)', () => {
+describe('the list\'s floor: everything still open since Wed Oct 14 stays on the list (Rob, 2026-10-20; moved from Thu Oct 15 on 2026-10-21)', () => {
   const THU22 = et('2026-10-22 09:00')
   const NOV2 = est('2026-11-02 09:00')
   const where = (f: Feed, now: number) => {
@@ -1010,9 +1010,37 @@ describe('the list\'s floor: everything still open since Thu Oct 15 stays on the
     return { queue: ids(l.queue), teammate: ids(l.teammate), older: ids(l.older) }
   }
 
-  test('the floor is Thu 2026-10-15 12:00 AM in New York', async () => {
-    expect(LIST_FLOOR_MS).toBe(et('2026-10-15 00:00'))
-    expect(new Date(LIST_FLOOR_MS).toISOString()).toBe('2026-10-15T04:00:00.000Z')
+  test('the floor is Wed 2026-10-14 12:00 AM in New York', async () => {
+    expect(LIST_FLOOR_MS).toBe(et('2026-10-14 00:00'))
+    expect(new Date(LIST_FLOOR_MS).toISOString()).toBe('2026-10-14T04:00:00.000Z')
+  })
+
+  test('(Rob, 2026-10-21) an item due Wed Oct 14 10 AM, still open, is on the Needs-you list on Thu Oct 22; the same due Tue Oct 13 10 AM is under Older', async () => {
+    // a reply (mail received Tue Oct 13 10 AM), a ticket we committed to, and a prepared reply package, each due Wed Oct 14 10 AM
+    const onFloorDay = feed({
+      mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-13 10:00')],
+      tickets: { overdue: [committed(P2, 'Bolt Staffing', at('2026-10-14 10:00'))] },
+      drafts: [draft(P3, 'Cedar Dental', { due_at: at('2026-10-14 10:00') })],
+    })
+    const l = buildLists(onFloorDay, THU22)
+    expect(l.queue.map(i => [i.projectId, i.kind, i.dueAt]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))).toEqual([
+      [P1, 'reply', et('2026-10-14 10:00')],
+      [P2, 'task', et('2026-10-14 10:00')],
+      [P3, 'ready', et('2026-10-14 10:00')],
+    ])
+    expect(l.queue.map(i => pinsNow(i, THU22))).toEqual([true, true, true])
+    expect([l.teammate, l.older]).toEqual([[], []])
+    // the same three due a day earlier, Tue Oct 13 10 AM (mail received Mon Oct 12 10 AM): under Older, not dropped
+    const dayBefore = feed({
+      mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 10:00')],
+      tickets: { overdue: [committed(P2, 'Bolt Staffing', at('2026-10-13 10:00'))] },
+      drafts: [draft(P3, 'Cedar Dental', { due_at: at('2026-10-13 10:00') })],
+    })
+    const o = buildLists(dayBefore, THU22)
+    expect(o.queue).toEqual([])
+    expect(o.teammate).toEqual([])
+    expect(ids(o.older).sort()).toEqual([P1, P2, P3])
+    expect(o.older.map(i => i.dueAt)).toEqual([et('2026-10-13 10:00'), et('2026-10-13 10:00'), et('2026-10-13 10:00')])
   })
 
   test('mail received Fri Oct 16 10 AM, unanswered: on the Needs-you list (not Older) on Thu Oct 22 9 AM and on Mon Nov 2 9 AM, pinned', async () => {
@@ -1029,19 +1057,19 @@ describe('the list\'s floor: everything still open since Thu Oct 15 stays on the
     expect(titleFor(buildQueue(f, NOV2)[0] as QueueItem, NOV2)).toBe('🔴 9d late · Acme Roofing · reply')
   })
 
-  test('mail received Tue Oct 13 10 AM (its reply due Wed Oct 14 10 AM, before the floor): under Older on Thu Oct 22, and after', async () => {
-    const f = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-13 10:00')] })
+  test('mail received Mon Oct 12 10 AM (its reply due Tue Oct 13 10 AM, before the floor): under Older on Thu Oct 22, and after', async () => {
+    const f = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 10:00')] })
     for (const now of [THU22, NOV2]) {
       expect(where(f, now)).toEqual({ queue: [], teammate: [], older: [P1] })
-      expect(buildLists(f, now).older[0]?.dueAt).toBe(et('2026-10-14 10:00'))
+      expect(buildLists(f, now).older[0]?.dueAt).toBe(et('2026-10-13 10:00'))
     }
   })
 
-  test('mail received Wed Oct 14 10 AM (its reply due Thu Oct 15 10 AM, on or after the floor): on the list', async () => {
-    const f = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-14 10:00')] })
+  test('mail received Tue Oct 13 10 AM (its reply due Wed Oct 14 10 AM, on or after the floor): on the list', async () => {
+    const f = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-13 10:00')] })
     for (const now of [THU22, NOV2]) {
       expect(where(f, now)).toEqual({ queue: [P1], teammate: [], older: [] })
-      expect(buildQueue(f, now)[0]?.dueAt).toBe(et('2026-10-15 10:00'))
+      expect(buildQueue(f, now)[0]?.dueAt).toBe(et('2026-10-14 10:00'))
     }
   })
 
@@ -1061,18 +1089,18 @@ describe('the list\'s floor: everything still open since Thu Oct 15 stays on the
       expect([l.teammate, l.older]).toEqual([[], []])
       expect(l.queue.map(i => pinsNow(i, now))).toEqual([true, true])
     }
-    // the same packages due Wed Oct 14, before the floor: under Older, not dropped
+    // the same packages due Tue Oct 13, before the floor: under Older, not dropped
     const before = feed({
       drafts: [
-        draft(P1, 'Acme Roofing', { due_at: at('2026-10-14 15:00') }),
-        draft(P2, 'Bolt Staffing', { package_id: PKG_B, ...pickedUp(ME), due_at: at('2026-10-14 12:00') }),
+        draft(P1, 'Acme Roofing', { due_at: at('2026-10-13 15:00') }),
+        draft(P2, 'Bolt Staffing', { package_id: PKG_B, ...pickedUp(ME), due_at: at('2026-10-13 12:00') }),
       ],
     })
     expect(where(before, NOV2)).toEqual({ queue: [], teammate: [], older: [P2, P1] })
   })
 
-  test('a ticket we committed to, overdue since Fri Oct 16: on the list on Mon Nov 2, pinned; one due Wed Oct 14 is under Older', async () => {
-    const f = feed({ tickets: { overdue: [committed(P1, 'Acme Roofing — Pat', at('2026-10-16 17:00')), committed(P2, 'Bolt Staffing', at('2026-10-14 17:00'))] } })
+  test('a ticket we committed to, overdue since Fri Oct 16: on the list on Mon Nov 2, pinned; one due Tue Oct 13 is under Older', async () => {
+    const f = feed({ tickets: { overdue: [committed(P1, 'Acme Roofing — Pat', at('2026-10-16 17:00')), committed(P2, 'Bolt Staffing', at('2026-10-13 17:00'))] } })
     expect(where(f, NOV2)).toEqual({ queue: [P1], teammate: [], older: [P2] })
     const it = buildQueue(f, NOV2)[0] as QueueItem
     expect(it).toMatchObject({ tasks: 1, dueAt: et('2026-10-16 17:00'), actBy: et('2026-10-16 17:00') })
@@ -1088,34 +1116,36 @@ describe('the list\'s floor: everything still open since Thu Oct 15 stays on the
     expect(q.map(i => (i.actBy as number) < NOV2 && pinsNow(i, NOV2))).toEqual(nine.map(() => true))
   })
 
-  test('before Tue Oct 20 the floor only widened the list: it still reached 3 business days back (WINDOW_BACK_MS)', async () => {
-    // a reply due Wed Oct 14 10 AM, before the floor: listed Mon Oct 19 9 AM (Oct 14 14 h + Oct 15, 16 48 h + Oct 19
-    // 9 h = 71 business hours late), under Older from Tue Oct 20 12:00 AM (86), when the floor alone is the cut
-    const f = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-13 10:00')] })
-    expect(where(f, et('2026-10-19 09:00')).queue).toEqual([P1])
-    expect(where(f, et('2026-10-20 00:00')).older).toEqual([P1])
+  test('before Sat Oct 17 the floor only widened the list: it still reached 3 business days back (WINDOW_BACK_MS)', async () => {
+    // a reply due Tue Oct 13 10 AM, before the floor: listed Fri Oct 16 9 AM (Oct 13 14 h + Oct 14, 15 48 h + Oct 16
+    // 9 h = 71 business hours late), under Older from Sat Oct 17 12:00 AM (86), when the floor alone is the cut
+    const f = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 10:00')] })
+    expect(where(f, et('2026-10-16 09:00')).queue).toEqual([P1])
+    expect(where(f, et('2026-10-17 00:00')).older).toEqual([P1])
   })
 })
 
 describe('the mail look-back reaches the floor (mailLookbackHours): 168 business hours at least, 720 at most', () => {
   const HOUR = 3_600_000
-  /** Wed Oct 14 12:00 AM: 24 business hours before the floor, when mail whose reply is due on the floor arrived. */
-  const FROM = et('2026-10-14 00:00')
+  /** Tue Oct 13 12:00 AM: 24 business hours before the floor, when mail whose reply is due on the floor arrived. */
+  const FROM = et('2026-10-13 00:00')
 
-  test('168 until Fri Oct 23, more after that, 720 at most', async () => {
+  test('168 until Thu Oct 22, more after that, 720 at most', async () => {
     expect(subtractBusinessMs(LIST_FLOOR_MS, 24 * HOUR)).toBe(FROM)
-    // Tue Oct 20 5 PM: Oct 14, 15, 16 (72) + Oct 19 (24) + Oct 20 to 5 PM (17) = 113 business hours, so the least, 168
+    // Tue Oct 20 5 PM: Oct 13, 14, 15, 16 (96) + Oct 19 (24) + Oct 20 to 5 PM (17) = 137 business hours, so the least, 168
     expect(mailLookbackHours(et('2026-10-20 17:00'))).toBe(168)
-    // Thu Oct 22 noon: Oct 14, 15, 16 (72) + Oct 19, 20, 21 (72) + Oct 22 to noon (12) = 156, so 168
-    expect(mailLookbackHours(et('2026-10-22 12:00'))).toBe(168)
-    // Fri Oct 23 12:00 AM: Oct 14, 15, 16 (72) + Oct 19 to 22 (96) = 168 exactly; a minute later 169 (rounded up)
-    expect(mailLookbackHours(et('2026-10-23 00:00'))).toBe(168)
-    expect(mailLookbackHours(et('2026-10-23 00:01'))).toBe(169)
-    // Mon Oct 26 noon: Oct 14, 15, 16 (72) + Oct 19 to 23 (120) + Oct 26 to noon (12) = 204
-    expect(mailLookbackHours(et('2026-10-26 12:00'))).toBe(204)
-    // OW's cap, 720 business hours (30 business days from Oct 14), runs out at the end of Tue Nov 24
-    expect(mailLookbackHours(est('2026-11-24 23:59'))).toBe(720)
-    expect(mailLookbackHours(est('2026-11-25 09:00'))).toBe(720)
+    // Wed Oct 21 noon: Oct 13, 14, 15, 16 (96) + Oct 19, 20 (48) + Oct 21 to noon (12) = 156, so 168
+    expect(mailLookbackHours(et('2026-10-21 12:00'))).toBe(168)
+    // Thu Oct 22 12:00 AM: Oct 13, 14, 15, 16 (96) + Oct 19 to 21 (72) = 168 exactly; a minute later 169 (rounded up)
+    expect(mailLookbackHours(et('2026-10-22 00:00'))).toBe(168)
+    expect(mailLookbackHours(et('2026-10-22 00:01'))).toBe(169)
+    // Thu Oct 22 noon: 168 + Oct 22 to noon (12) = 180
+    expect(mailLookbackHours(et('2026-10-22 12:00'))).toBe(180)
+    // Mon Oct 26 noon: Oct 13, 14, 15, 16 (96) + Oct 19 to 23 (120) + Oct 26 to noon (12) = 228
+    expect(mailLookbackHours(et('2026-10-26 12:00'))).toBe(228)
+    // OW's cap, 720 business hours (30 business days from Oct 13), runs out at the end of Mon Nov 23
+    expect(mailLookbackHours(est('2026-11-23 23:59'))).toBe(720)
+    expect(mailLookbackHours(est('2026-11-24 09:00'))).toBe(720)
     expect(mailLookbackHours(est('2027-03-01 12:00'))).toBe(720)
     // a clock before the floor, and no clock at all: the least
     expect(mailLookbackHours(et('2026-10-13 09:00'))).toBe(168)
@@ -1127,9 +1157,9 @@ describe('the mail look-back reaches the floor (mailLookbackHours): 168 business
       message_id_key: `m-${receivedMs}`, received_at: new Date(receivedMs).toISOString(), sender: 'client@example.com', subject: 'Hi', snippet: 'hello',
       project_id: P1, project_name: 'Acme Roofing', reply_status: 'unanswered', project_owner_email: ME,
     })
-    // every business day from Tue Oct 20 to Tue Nov 24, at 14:00 UTC (10 AM in October, 9 AM once the clocks go back)
+    // every business day from Tue Oct 20 to Mon Nov 23, at 14:00 UTC (10 AM in October, 9 AM once the clocks go back)
     let days = 0
-    for (let d = 0; d < 36; d++) {
+    for (let d = 0; d < 35; d++) {
       const now = Date.UTC(2026, 9, 20 + d, 14)
       const dow = new Date(now).getUTCDay()
       if (dow === 0 || dow === 6) continue
@@ -1143,7 +1173,7 @@ describe('the mail look-back reaches the floor (mailLookbackHours): 168 business
       const earlier = buildLists(feed({ mail: [oldMail(start - 60_000)] }), now)
       expect([ids(earlier.queue), ids(earlier.older)], new Date(now).toISOString()).toEqual([[], [P1]])
     }
-    expect(days).toBe(26)
+    expect(days).toBe(25)
   })
 })
 
@@ -1157,11 +1187,11 @@ describe('(s) nothing drops off silently: a client whose only items were due bef
     expect(l.older.map(i => titleFor(i, MON))).toEqual(['🔴 5d late · Bolt Staffing · reply', '🔴 3d late · Acme Roofing · reply'])
   })
 
-  test('the line between the two is the floor, Thu Oct 15 12:00 AM: due on it is listed however late, due a minute before it is Older', async () => {
-    // replies due (the feed's reply times) Thu Oct 15 12:00 AM and Wed Oct 14 11:59 PM, seen Thu Oct 22 and Mon Nov 2
-    const on = feed({ mail: [mailAt(P1, 'Acme Roofing', '2026-10-14 00:00', '2026-10-15 00:00')] })
-    const before = feed({ mail: [mailAt(P1, 'Acme Roofing', '2026-10-13 23:59', '2026-10-14 23:59')] })
-    expect(et('2026-10-15 00:00')).toBe(LIST_FLOOR_MS)
+  test('the line between the two is the floor, Wed Oct 14 12:00 AM: due on it is listed however late, due a minute before it is Older', async () => {
+    // replies due (the feed's reply times) Wed Oct 14 12:00 AM and Tue Oct 13 11:59 PM, seen Thu Oct 22 and Mon Nov 2
+    const on = feed({ mail: [mailAt(P1, 'Acme Roofing', '2026-10-13 00:00', '2026-10-14 00:00')] })
+    const before = feed({ mail: [mailAt(P1, 'Acme Roofing', '2026-10-12 23:59', '2026-10-13 23:59')] })
+    expect(et('2026-10-14 00:00')).toBe(LIST_FLOOR_MS)
     for (const now of [et('2026-10-22 09:00'), est('2026-11-02 09:00')]) {
       expect(ids(buildLists(on, now).queue)).toEqual([P1])
       expect(buildLists(on, now).older).toEqual([])
