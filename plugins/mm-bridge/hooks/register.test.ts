@@ -1831,7 +1831,9 @@ describe('F6: feed text and thread titles are data', () => {
 })
 
 describe('F7: a link the bridge made by itself is undone when it stops being true', () => {
-  test('[G1] the thread linked itself, then its session went on to a second client: unlinked on the third sync that does not list it, not before', async ($, on) => {
+  // (0.5.23) No longer when the feed merely stops listing its thread's session (until 0.5.22: on the third sync in a
+  // row). The feed lists the last 14 days; a link ends when its thread is archived or deleted, or on B3.
+  test('[G1] the thread linked itself, then the feed stopped listing its session: (0.5.23) it stays linked, sync after sync; a row naming another client for its session lets it go at once (B3)', async ($, on) => {
     let status = 200
     const w = world(on, {
       feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }),
@@ -1854,30 +1856,28 @@ describe('F7: a link the bridge made by itself is undone when it stops being tru
     expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_b', [ACME]: SELF })
     linked()
 
-    // a feed with no `threads`, and one with an empty list, say nothing either way
+    // a feed with no `threads`, one with an empty list, and a feed error say nothing either way
     w.setFeed(feed())
     await sync()
     w.setFeed(feed({ threads: [] }))
     for (let i = 0; i < 4; i++) await sync()
-    linked()
-
-    // the server lists the session under no client now (a hub): the list has other entries, and not this one
-    const hub = feed({ threads: [declared(CEDAR, 'cli-elsewhere', 2)] })
-    w.setFeed(hub)
-    await sync()
-    linked()
-    // a feed error in between does not count, and neither does an empty list
     status = 500
     expect(await sync()).toBe('failed')
     status = 200
-    w.setFeed(feed({ threads: [] }))
-    await sync()
-    w.setFeed(hub)
-    await sync()
     linked()
-    expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_b', [ACME]: SELF })
 
-    // the third sync that does not list it
+    // the server lists other sessions now, and not this one: six syncs, each far enough apart to have counted a miss
+    const hub = feed({ threads: [declared(CEDAR, 'cli-elsewhere', 2)] })
+    w.setFeed(hub)
+    for (let i = 0; i < 6; i++) await sync()
+    expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_b', [ACME]: SELF })
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0, made: expect.any(Number) } })
+    linked()
+    expect(w.stored['mm.unlinked']).toBeUndefined()
+
+    // its own session declared another project too (OW marks its row `sole: false`): let go on this sync (B3), its own
+    // name back and our pin off
+    w.setFeed(feed({ threads: [{ ...declared(ACME, SELF_CLI, 0), sole: false }] }))
     await sync()
     expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_b' })
     expect(w.threads.get(SELF)).toMatchObject({ title: 'My working thread', pinned: false })
@@ -1888,37 +1888,31 @@ describe('F7: a link the bridge made by itself is undone when it stops being tru
     // ⛔ the link the person made is never undone this way
     expect(w.threads.get('local_b')?.title).toMatch(/^🟡 \d+h left · Bolt Staffing · reply · 2 new$/)
     expect(w.threads.get('local_b')?.pinned).toBe(true)
-    const ui = await pane($)
-    expect(await lines(ui)).toContain('drafts ready · Start thread: no thread yet')
-    await ui.unmount()
-
-    // the feed lists it for Acme again: it links itself again
-    w.setFeed(feed({ threads: [declared(ACME, SELF_CLI, 0)] }))
-    await sync()
-    expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_b', [ACME]: SELF })
-    linked()
     expect(w.acted()).toEqual([])
   })
 
-  test('a miss is forgotten when the feed lists the thread again: three in a row, not three in all', async ($, on) => {
-    const w = world(on, { feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.threads': PAIRS } })
-    const listed = feed({ threads: [declared(ACME, 'cli-acme', 30)] })
-    const hub = feed({ threads: [declared(CEDAR, 'cli-elsewhere', 2)] })
-    const sync = async (f: Feed) => {
-      w.setFeed(f)
-      await w.clock.advance(6 * 60_000)
-      await mm($, '')
-    }
+  test('(0.5.23) an older version\'s count of misses on the record is set back to 0 by a feed that lists threads, and left alone by one that lists none', async ($, on) => {
+    const w = world(on, {
+      feed: feed({ threads: [declared(BOLT, 'cli-bolt', 20)] }),
+      threads: [thread('local_a', 'Roof quote', 30), thread('local_b', 'Staffing plan', 20)],
+      store: { 'mm.threads': PAIRS, 'mm.links': { [ACME]: 'local_a' }, 'mm.auto': { [ACME]: { sid: 'local_a', miss: 2, at: NOW - 6 * 60_000, made: NOW - HOUR } } },
+    })
+    // a feed that lists no threads at all: the record is as the older version left it
+    w.setFeed(feed())
     await mm($, '')
-    for (const f of [hub, hub, listed, hub, hub, listed, hub]) await sync(f)
-    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a' })
-    await sync(hub)
-    await sync(hub)
-    expect(w.stored['mm.links']).toEqual({})
-    expect(w.threads.get('local_a')).toMatchObject({ title: 'Roof quote', pinned: false })
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: 'local_a', miss: 2, at: NOW - 6 * 60_000, made: NOW - HOUR } })
+    // one that lists threads, but not this one's session: still linked, and the count is back to 0
+    w.setFeed(feed({ threads: [declared(BOLT, 'cli-bolt', 20)] }))
+    await w.clock.advance(6 * 60_000)
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a', [BOLT]: 'local_b' })
+    expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { sid: 'local_a', miss: 0, made: NOW - HOUR } })
+    expect((w.stored['mm.auto'] as Record<string, { at?: number }>)[ACME]?.at).toBeUndefined()
+    expect(w.threads.get('local_a')?.title).toMatch(/· Acme Roofing ·/)
+    expect(w.threads.get('local_a')?.pinned).toBe(true)
   })
 
-  test('[2.13] three /mm in a row count as one sync: a miss counts only when the one before it is five minutes old', async ($, on) => {
+  test('[2.13] (0.5.23) three /mm in a row, or thirty syncs apart, the feed no longer listing the session never lets the link go', async ($, on) => {
     const w = world(on, {
       feed: feed({ threads: [declared(ACME, 'cli-acme', 30), declared(BOLT, 'cli-bolt', 20)] }),
       threads: [thread('local_a', 'Roof quote', 30), thread('local_b', 'Staffing plan', 20)],
@@ -1929,22 +1923,13 @@ describe('F7: a link the bridge made by itself is undone when it stops being tru
     // the feed stops listing Acme's session; Bolt's is still there
     w.setFeed(feed({ threads: [declared(BOLT, 'cli-bolt', 20)] }))
     for (let i = 0; i < 6; i++) await mm($, '')
+    for (let i = 0; i < 30; i++) {
+      await w.clock.advance(6 * 60_000)
+      await mm($, '')
+    }
     expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a', [BOLT]: 'local_b' })
-    expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { sid: 'local_a', miss: 1, at: NOW } })
-    expect(w.threads.get('local_a')).toMatchObject({ title: ACME_TITLE, pinned: true })
-    // four minutes and fifty-nine seconds later is still the same sync
-    await w.clock.advance(5 * 60_000 - 1_000)
-    for (let i = 0; i < 3; i++) await mm($, '')
-    expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { miss: 1 } })
-    // five minutes after the first counted miss is the second; five after that, the third
-    await w.clock.advance(1_000)
-    for (let i = 0; i < 3; i++) await mm($, '')
-    expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { miss: 2, at: NOW + 5 * 60_000 } })
-    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a', [BOLT]: 'local_b' })
-    await w.clock.advance(5 * 60_000)
-    await mm($, '')
-    expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_b' })
-    expect(w.threads.get('local_a')).toMatchObject({ title: 'Roof quote', pinned: false })
+    expect(w.stored['mm.auto']).toMatchObject({ [ACME]: { sid: 'local_a', miss: 0 } })
+    expect(w.threads.get('local_a')?.title).toMatch(/· Acme Roofing ·/)
     expect(w.acted()).toEqual([])
   })
 
@@ -5979,7 +5964,7 @@ describe('0.5.7: threads the bridge starts by itself (Rob, 10-14 ~13:35 ET: "we 
     w.stored['mm.links'] = { [CEDAR]: 'local_other' }
     await w.clock.advance(15_000)
     expect(w.dismissed()).toEqual([chipId(1)])
-    expect(await mm($, 'auto on')).toBe('Auto-start and auto-update are on: a client\'s new thread starts by itself, and its thread is updated by itself when something new arrives.')
+    expect(await mm($, 'auto on')).toBe('Auto-start and auto-update are on: a client with no thread gets one started by itself, and its thread is updated by itself when something new arrives, an old thread too.')
   })
 
   test('/mm auto off where the app has only spawn_task: today\'s chip', async ($, on) => {
@@ -7507,5 +7492,441 @@ describe('(0.5.17) a press\'s refresh asks OW once more when the feed answered 5
     expect(sends(w)).toEqual([])
     expect(w.toasts.join(' ')).toContain('Nothing was sent')
     await ui.unmount()
+  })
+})
+
+// ======================================================================== 0.5.23
+
+describe('0.5.23 (Rob, 10-21: "change auto-starts to update the older thread"): by itself, an old linked thread is updated, not replaced', () => {
+  const notices = (w: { written: Array<{ path: string; text: string }> }) => w.written.filter(f => f.path.endsWith('bridge-notices.log')).at(-1)?.text ?? ''
+  type Rec = { pid: string; sid: string; ok: boolean | null; reason: string }
+  const records = (w: { stored: Record<string, unknown> }) => (w.stored['mm.autoupdates'] ?? []) as Rec[]
+  const after = async (w: { clock: { advance: (ms: number) => Promise<void> } }, minutes: number) => {
+    for (let i = 0; i < minutes; i++) await w.clock.advance(60_000)
+  }
+  /** To the sync 11 minutes on, the first to find the client seen for 10 minutes, and the 1 to 3 seconds its send waits. */
+  const seenTen = async (w: { clock: { advance: (ms: number) => Promise<void> } }) => {
+    await after(w, 11)
+    await w.clock.advance(3_000)
+  }
+  /** Two weeks back: Mon Sep 28, 10 business days before NOW, so older than 7. */
+  const OLD_H = 14 * 24
+  const ACME_UPDATE = markerFirst(`New since this thread last worked on this client: drafts ready.\n${NOT_TAKEN(ACME, 'Acme Roofing Pat')}`)
+  /** Acme alone: drafts ready; nothing else in the feed. */
+  const acmeOnly = (): Feed => feed({ mail: [], tickets: {}, threads: [] })
+  /** Acme's linked thread was last active two weeks ago: its row says Start, `last thread is from Sep 28`. */
+  const oldWorld = (on: On, more: WorldOptions = {}) =>
+    world(on, { tools: 'start', feed: acmeOnly(), threads: [thread('local_old', 'Roof quote', OLD_H)], ...more, store: { 'mm.links': { [ACME]: 'local_old' }, ...(more.store ?? {}) } })
+
+  test('a linked thread older than 7 business days: Update\'s own message goes into it by itself, under the same wait; no thread is started and no card is made; the log says which kind it was', async ($, on) => {
+    const w = oldWorld(on)
+    await tickOnce($, w)
+    // the row still says Start, and why
+    const before = await pane($)
+    expect(await lines(before)).toContain('drafts ready · Start thread: last thread is from Sep 28')
+    expect(await buttonsOf(before, ACME)).toEqual(['Start thread', 'Drafts'])
+    await before.unmount()
+    // the same 10 minutes from when this bridge first saw it as any update sent by itself
+    await after(w, 10)
+    expect(sends(w)).toEqual([])
+    await after(w, 1)
+    await w.clock.advance(3_000)
+    // into the old thread, in the words that never take the package, the marker first
+    expect(sends(w).map(c => [c.args.session_id, c.args.message])).toEqual([['local_old', ACME_UPDATE]])
+    // ⛔ no start, no proposal card, no chip
+    expect(starts(w)).toEqual([])
+    expect(proposals(w)).toEqual([])
+    expect(w.minted()).toEqual([])
+    expect(w.stored['mm.autostarts']).toBeUndefined()
+    // on record and in the notice log as an older thread updated instead of a new one
+    expect(records(w).map(r => [r.pid, r.sid, r.ok])).toEqual([[ACME, 'local_old', true]])
+    expect(records(w)[0]?.reason).toBe('last thread is from Sep 28, so that thread was updated instead of starting a new one; something new for the client: drafts ready')
+    expect(notices(w)).toMatch(new RegExp(`updated Acme Roofing \\(${ACME}\\) sig [0-9a-f]{8} in local_old: last thread is from Sep 28, so that thread was updated instead of starting a new one; something new for the client: drafts ready`))
+    // the link is the person's as it was; the thread now has what is waiting, so its row says Open
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_old' })
+    expect((w.stored['mm.sent'] as Record<string, { sid: string }>)[ACME]?.sid).toBe('local_old')
+    const ui = await pane($)
+    expect(await buttonsOf(ui, ACME)).toEqual(['Open thread', 'Drafts'])
+    await ui.unmount()
+    // never twice, and still never a start
+    await after(w, 30)
+    expect(sends(w).length).toBe(1)
+    expect(starts(w)).toEqual([])
+  })
+
+  test('an update the row asked for (a recent thread) is logged as before, with no word of an older thread', async ($, on) => {
+    const w = oldWorld(on, { threads: [thread('local_old', 'Roof quote', 30)] })
+    await tickOnce($, w)
+    await seenTen(w)
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_old'])
+    expect(records(w)[0]?.reason).toBe('something new for the client: drafts ready')
+    expect(notices(w)).not.toContain('last thread is from')
+  })
+
+  for (const [name, more] of [
+    ['the time-tracking hook on this computer is older than 0.11.5', { hook: 'old' }],
+    ['/mm auto off', { store: { 'mm.autostart': { on: false } } }],
+    ['the bridge is paused', { store: { 'mm.paused': true } }],
+  ] as Array<[string, WorldOptions]>) {
+    test(`⛔ every guard of an update sent by itself still holds for an old thread: ${name}: nothing is sent, and nothing is started either`, async ($, on) => {
+      const w = oldWorld(on, more)
+      await tickOnce($, w)
+      await after(w, 30)
+      expect(sends(w)).toEqual([])
+      expect(records(w)).toEqual([])
+      expect(starts(w)).toEqual([])
+      expect(w.prompts).toEqual([])
+    })
+  }
+
+  test('a client with no thread: started by itself, as before; the log says no thread yet', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: feed({ drafts: [], mail: [] }) })
+    await tickOnce($, w)
+    await w.clock.advance(3_000)
+    expect(starts(w).length).toBe(1)
+    expect(starts(w)[0]?.args).toMatchObject({ initiation: 'user_asked', context: 'fresh', prompt: CEDAR_KICKOFF })
+    expect(sends(w)).toEqual([])
+    expect(notices(w)).toMatch(new RegExp(`^\\S+ started Cedar Dental \\(${CEDAR}\\) sig [0-9a-f]{8}: no thread yet$`, 'm'))
+    expect((w.stored['mm.autostarts'] as Array<{ pid: string; reason: string }>).map(t => [t.pid, t.reason])).toEqual([[CEDAR, 'no thread yet']])
+  })
+
+  test('a client with no thread whose start the app refuses: the Start card, as before; the log says no thread yet and why', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: feed({ drafts: [], mail: [] }), startFails: 'Start sessions only on the user\'s own words to you here; this turn runs an automated event.' })
+    await tickOnce($, w)
+    await w.clock.advance(3_000)
+    expect(starts(w).length).toBe(1)
+    expect(proposals(w).map(c => c.args.title)).toEqual(['Cedar Dental: reply to the client'])
+    expect(sends(w)).toEqual([])
+    expect(notices(w)).toContain(`not started Cedar Dental (${CEDAR}) sig`)
+    expect(notices(w)).toContain(': no thread yet; Start sessions only on the user\'s own words')
+  })
+
+  test('an old thread that is not the client\'s linked one (the person unlinked it): never updated by itself; the client\'s thread is started, with the hand-over, and the log says last thread is from', async ($, on) => {
+    const f = acmeOnly()
+    f.threads = [declared(ACME, 'cli-acme', OLD_H)]
+    const w = world(on, { tools: 'start', feed: f, threads: [thread('local_a', 'Roof quote', OLD_H)], store: { 'mm.threads': PAIRS, 'mm.unlinked': { local_a: NOW - 48 * HOUR } } })
+    await tickOnce($, w)
+    await w.clock.advance(3_000)
+    expect(starts(w).length).toBe(1)
+    expect(starts(w)[0]?.args.prompt).toBe(`${ACME_KICKOFF}\n\n${HANDOVER('Roof quote', 'local_a', 'Acme Roofing Pat')}`)
+    expect(notices(w)).toMatch(new RegExp(`started Acme Roofing \\(${ACME}\\) sig [0-9a-f]{8}: last thread is from Sep 28$`, 'm'))
+    await after(w, 30)
+    expect(sends(w).filter(c => c.args.session_id === 'local_a')).toEqual([])
+    expect(records(w)).toEqual([])
+  })
+
+  test('the person\'s Start on a client whose linked thread is old: a fresh thread, exactly as before, with the hand-over; the old thread is then never updated by itself', async ($, on) => {
+    const w = oldWorld(on)
+    await tickOnce($, w)
+    const ui = await pane($)
+    await ui.press({ key: `start:${ACME}` })
+    await ui.unmount()
+    expect(starts(w).length).toBe(1)
+    expect(starts(w)[0]?.args).toMatchObject({ initiation: 'user_asked', context: 'fresh' })
+    expect(starts(w)[0]?.args.prompt).toBe(`${ACME_KICKOFF}\n\n${HANDOVER('Roof quote', 'local_old', 'Acme Roofing Pat')}`)
+    expect(w.stored['mm.links']).toMatchObject({ [ACME]: 'local_started_1' })
+    await after(w, 30)
+    expect(sends(w)).toEqual([])
+    expect(starts(w).length).toBe(1)
+  })
+
+  test('Start missing threads, pressed: the clients with no thread get fresh threads, exactly as before; the client whose linked thread is old is not one of them', async ($, on) => {
+    const w = oldWorld(on, { feed: feed({ threads: [] }) })
+    await mm($, '')
+    const band = await bandOf($)
+    expect((await buttons(band)).filter(b => b[0] === 'mm-start-missing')).toEqual([['mm-start-missing', 'Start missing threads (2)']])
+    const pressed = band.press({ key: 'mm-start-missing' })
+    await w.clock.advance(2_000)
+    await pressed
+    await band.unmount()
+    expect(starts(w).map(c => String(c.args.prompt))).toEqual([CEDAR_KICKOFF, BOLT_AUTO_KICKOFF])
+    expect(starts(w).map(c => c.args.initiation)).toEqual(['user_asked', 'user_asked'])
+    expect(w.stored['mm.links']).toMatchObject({ [ACME]: 'local_old', [CEDAR]: 'local_started_1', [BOLT]: 'local_started_2' })
+    expect(sends(w)).toEqual([])
+  })
+
+  test('/mm start typed for that client: a fresh thread as well, never an update', async ($, on) => {
+    const w = oldWorld(on)
+    await tickOnce($, w)
+    expect(await mm($, 'start acme')).toBe('Started Acme Roofing\'s thread: "Acme Roofing: review the reply drafts". It is under Pinned.')
+    expect(starts(w).length).toBe(1)
+    expect(String(starts(w)[0]?.args.prompt).startsWith(`${ACME_KICKOFF}\n\nThis thread replaces "Roof quote" (thread local_old)`)).toBe(true)
+    expect(sends(w)).toEqual([])
+  })
+})
+
+describe('0.5.23 (the 14 refused starts of 10-19 and 10-20): a link lasts until its thread is archived or deleted, and a client with no thread takes back the one that opened with its marker', () => {
+  // The cause, found in the store: the person works in two Claude profiles on this computer. From a session in one,
+  // the app answers "not found" for a thread of the other, and the sync took that as "deleted" and dropped the link.
+  const ROOT = '/home/someone/Library/Application Support/Claude/claude-code-sessions'
+  /** This profile's folder of records, where this thread's own record is; and the other profile's. */
+  const HERE = `${ROOT}/acct-here/org-here`
+  const OTHER = `${ROOT}/acct-other/org-other`
+  /** One record file as the app writes it (only `sessionId` and `isArchived` are ever read from it). */
+  const rec = (dir: string, sid: string, archived = false, mtimeMs = NOW - HOUR) => ({
+    [`${dir}/${sid}.json`]: { text: JSON.stringify({ sessionId: sid, isArchived: archived, title: 'not read', model: 'not read' }), mtimeMs },
+  })
+  const mine = rec(HERE, SELF)
+  type Rec = { pid: string; sid: string; ok: boolean | null; reason: string }
+  const records = (w: { stored: Record<string, unknown> }) => (w.stored['mm.autoupdates'] ?? []) as Rec[]
+  const after = async (w: { clock: { advance: (ms: number) => Promise<void> } }, minutes: number) => {
+    for (let i = 0; i < minutes; i++) await w.clock.advance(60_000)
+  }
+  const acmeOnly = (): Feed => feed({ mail: [], tickets: {}, threads: [] })
+  const recordReads = (w: { reads: string[] }) => w.reads.filter(p => p.includes('claude-code-sessions'))
+  const askedById = (w: { calls: Call[] }, sid: string) => w.calls.filter(c => c.tool === 'get_session' && c.args.session_id === sid)
+  /** Acme is linked to a thread of the other profile, pinned and named there by the bridge. */
+  const awayWorld = (on: On, more: WorldOptions = {}) =>
+    world(on, {
+      tools: 'start',
+      feed: acmeOnly(),
+      threads: [thread('local_other', 'Unrelated notes', 100)],
+      files: { ...mine, ...rec(OTHER, 'local_p2') },
+      ...more,
+      store: { 'mm.links': { [ACME]: 'local_p2' }, 'mm.pins': { local_p2: ourPin(ACME, 'Acme Roofing') }, 'mm.titles': { local_p2: 'Roof quote' }, ...(more.store ?? {}) },
+    })
+
+  // ---- fix 1: keep links
+
+  test('a linked thread of the other profile ("not found" here, its record open in the other profile\'s folder): link, pin record and name are kept; its row offers Start and says why; nothing is started, sent or carded by itself', async ($, on) => {
+    const w = awayWorld(on)
+    await tickOnce($, w)
+    const ui = await pane($)
+    expect(await lines(ui)).toContain('drafts ready · Start thread: its thread is in another Claude profile')
+    expect(await buttonsOf(ui, ACME)).toEqual(['Start thread', 'Drafts'])
+    await ui.unmount()
+    await after(w, 30)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_p2' })
+    expect(w.stored['mm.pins']).toEqual({ local_p2: ourPin(ACME, 'Acme Roofing') })
+    expect(w.stored['mm.titles']).toEqual({ local_p2: 'Roof quote' })
+    // ⛔ by itself: no start, no card, no chip, no message
+    expect(starts(w)).toEqual([])
+    expect(proposals(w)).toEqual([])
+    expect(w.minted()).toEqual([])
+    expect(sends(w)).toEqual([])
+    expect(w.stored['mm.autostarts']).toBeUndefined()
+    // its record said where it is: the app here was never asked for it by id
+    expect(askedById(w, 'local_p2')).toEqual([])
+    // ⛔ only the two records were opened (this thread's own, to know its folder; and that thread's), nothing written there
+    expect(new Set(recordReads(w))).toEqual(new Set([`${HERE}/${SELF}.json`, `${OTHER}/local_p2.json`]))
+    expect(w.written.filter(f => f.path.includes('claude-code-sessions'))).toEqual([])
+  })
+
+  test('back in the other profile (the thread is in the app\'s list again): the link was there all along, and the update goes into that thread by itself', async ($, on) => {
+    const w = awayWorld(on)
+    await tickOnce($, w)
+    await after(w, 20)
+    expect(sends(w)).toEqual([])
+    // the person switches profiles: the thread is this app's again
+    w.threads.set('local_p2', thread('local_p2', 'Roof quote', 2))
+    await after(w, 20)
+    await w.clock.advance(3_000)
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_p2'])
+    expect(records(w).map(r => [r.pid, r.sid, r.ok])).toEqual([[ACME, 'local_p2', true]])
+    expect(starts(w)).toEqual([])
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_p2' })
+  })
+
+  test('the same where this thread\'s own record cannot be read: a "not found" whose record is open counts as the other profile\'s, after the app is asked', async ($, on) => {
+    const w = awayWorld(on, { files: rec(OTHER, 'local_p2') })
+    await tickOnce($, w)
+    expect(askedById(w, 'local_p2').length).toBeGreaterThan(0)
+    await after(w, 30)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_p2' })
+    expect(starts(w)).toEqual([])
+  })
+
+  for (const [name, files] of [
+    ['its record says archived', { ...mine, ...rec(OTHER, 'local_p2', true) }],
+    ['its record is in this thread\'s own folder (the app here would have found it)', { ...mine, ...rec(HERE, 'local_p2') }],
+    ['its record has not changed in 30 days', { ...mine, ...rec(OTHER, 'local_p2', false, NOW - 31 * 24 * HOUR) }],
+    ['there is no record of it at all', { ...mine }],
+    ['no records can be listed on this computer', {}],
+  ] as Array<[string, Record<string, { text: string; mtimeMs: number }>]>) {
+    test(`a linked thread the app here has no such thread for, where ${name}: the link, pin record and name are dropped, as before`, async ($, on) => {
+      const w = awayWorld(on, { tools: undefined, files })
+      await mm($, '')
+      expect(w.stored['mm.links']).toEqual({})
+      expect((w.stored['mm.pins'] as Record<string, unknown>).local_p2).toBeUndefined()
+      const ui = await pane($)
+      expect(await lines(ui)).not.toContain('drafts ready · Start thread: its thread is in another Claude profile')
+      await ui.unmount()
+    })
+  }
+
+  test('the app showing the thread archived still drops the link, whatever its record says', async ($, on) => {
+    const w = awayWorld(on, { tools: undefined, threads: [thread('local_other', 'Unrelated notes', 100), thread('local_p2', 'Roof quote', 5, { isArchived: true })], files: { ...mine, ...rec(HERE, 'local_p2') } })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+  })
+
+  test('forty-five linked threads of the other profile: none asked for by id, at most 40 record files opened in a sync, every link kept', async ($, on) => {
+    const pids = Array.from({ length: 45 }, (_, i) => `55555555-5555-4555-8555-${String(i).padStart(12, '0')}`)
+    const files: Record<string, { text: string; mtimeMs: number }> = { ...mine }
+    for (let i = 0; i < 45; i++) Object.assign(files, rec(OTHER, `local_p${i}`))
+    const links = Object.fromEntries(pids.map((pid, i) => [pid, `local_p${i}`]))
+    const w = world(on, { feed: acmeOnly(), threads: [thread('local_other', 'Unrelated notes', 100)], files, store: { 'mm.links': links } })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual(links)
+    expect(recordReads(w).length).toBeLessThanOrEqual(40)
+    // the ones whose records were not opened this sync were asked for by id, at most 10 (LOOKUPS_PER_SYNC), and kept
+    expect(w.calls.filter(c => c.tool === 'get_session' && c.args.session_id !== 'self').length).toBeLessThanOrEqual(10)
+  })
+
+  test('Start missing threads, pressed in this profile: the client whose thread is in the other profile is one of them, as when its link was dropped; its new thread here takes the link', async ($, on) => {
+    const w = awayWorld(on, { feed: feed({ threads: [] }), store: { 'mm.pins': {}, 'mm.titles': {} } })
+    await mm($, '')
+    const band = await bandOf($)
+    expect((await buttons(band)).filter(b => b[0] === 'mm-start-missing')).toEqual([['mm-start-missing', 'Start missing threads (3)']])
+    const pressed = band.press({ key: 'mm-start-missing' })
+    await w.clock.advance(2_000)
+    await pressed
+    await band.unmount()
+    expect(starts(w).length).toBe(3)
+    expect((w.stored['mm.links'] as Record<string, string>)[ACME]).toMatch(/^local_started_\d$/)
+    expect(sends(w)).toEqual([])
+  })
+
+  test('the person\'s Start on that row: a fresh thread here, with no hand-over (the old thread cannot be read from this profile); the link moves to it', async ($, on) => {
+    const w = awayWorld(on)
+    await tickOnce($, w)
+    const ui = await pane($)
+    await ui.press({ key: `start:${ACME}` })
+    await ui.unmount()
+    expect(starts(w).length).toBe(1)
+    expect(starts(w)[0]?.args.prompt).toBe(ACME_KICKOFF)
+    expect(w.stored['mm.links']).toMatchObject({ [ACME]: 'local_started_1' })
+  })
+
+  // ---- fix 2: a client with no linked thread takes back its marked thread
+
+  test('a client with no linked thread takes back the newest open thread that opened with its marker; recent, so its update goes there by itself, and nothing is started', async ($, on) => {
+    const w = world(on, {
+      tools: 'start',
+      feed: acmeOnly(),
+      threads: [thread('local_m1', 'Roof quote', 120), thread('local_m2', 'Acme follow-up', 30)],
+      store: { 'mm.marked': { local_m1: ACME, local_m2: ACME }, 'mm.markedAt': { local_m1: NOW - 9 * 24 * HOUR, local_m2: NOW - 3 * 24 * HOUR } },
+    })
+    await tickOnce($, w)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_m2' })
+    // the bridge's own link, as R1 makes one
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: 'local_m2', miss: 0, made: expect.any(Number) } })
+    await after(w, 20)
+    await w.clock.advance(3_000)
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_m2'])
+    expect(records(w)[0]?.reason).toBe('something new for the client: drafts ready')
+    expect(starts(w)).toEqual([])
+    expect(proposals(w)).toEqual([])
+  })
+
+  test('its only marked thread is older than 7 business days: taken back all the same, and updated by itself as an older thread', async ($, on) => {
+    // (a marker 0.5.9 recorded, with no time on record, still counts here)
+    const w = world(on, { tools: 'start', feed: acmeOnly(), threads: [thread('local_m1', 'Roof quote', 14 * 24)], store: { 'mm.marked': { local_m1: ACME } } })
+    await tickOnce($, w)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_m1' })
+    await after(w, 20)
+    await w.clock.advance(3_000)
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_m1'])
+    expect(records(w)[0]?.reason).toBe('last thread is from Sep 28, so that thread was updated instead of starting a new one; something new for the client: drafts ready')
+    expect(starts(w)).toEqual([])
+  })
+
+  for (const [name, files] of [
+    ['archived (its record says so)', { ...mine, ...rec(HERE, 'local_m2', true) }],
+    ['deleted (no record of it)', { ...mine }],
+  ] as Array<[string, Record<string, { text: string; mtimeMs: number }>]>) {
+    test(`the newest marked thread is ${name}: the next newest that is open is taken back`, async ($, on) => {
+      const w = world(on, {
+        feed: acmeOnly(),
+        threads: [thread('local_m1', 'Roof quote', 120)],
+        files,
+        store: { 'mm.marked': { local_m1: ACME, local_m2: ACME }, 'mm.markedAt': { local_m1: NOW - 9 * 24 * HOUR, local_m2: NOW - 3 * 24 * HOUR } },
+      })
+      await mm($, '')
+      expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_m1' })
+    })
+  }
+
+  test('the newest marked thread is this profile\'s, older than the app\'s list: the app is asked for it by id, and it is taken back', async ($, on) => {
+    const w = world(on, {
+      feed: acmeOnly(),
+      threads: [thread('local_m1', 'Roof quote', 120), thread('local_m2', 'Acme follow-up', 30)],
+      unlisted: ['local_m2'],
+      files: { ...mine, ...rec(HERE, 'local_m2') },
+      store: { 'mm.marked': { local_m1: ACME, local_m2: ACME }, 'mm.markedAt': { local_m1: NOW - 9 * 24 * HOUR, local_m2: NOW - 3 * 24 * HOUR } },
+    })
+    await mm($, '')
+    expect(askedById(w, 'local_m2').length).toBe(1)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_m2' })
+  })
+
+  test('⛔ the newest marked thread cannot be found out about in this sync (the app does not answer for it): no older one is taken past it', async ($, on) => {
+    const w = world(on, {
+      feed: acmeOnly(),
+      threads: [thread('local_m1', 'Roof quote', 120)],
+      lookupFails: 'internal error',
+      files: { ...mine, ...rec(HERE, 'local_m2') },
+      store: { 'mm.marked': { local_m1: ACME, local_m2: ACME }, 'mm.markedAt': { local_m1: NOW - 9 * 24 * HOUR, local_m2: NOW - 3 * 24 * HOUR } },
+    })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({})
+  })
+
+  test('the newest marked thread is in the other profile: taken back, kept as that profile\'s (its row offers Start here), and nothing is started or sent by itself', async ($, on) => {
+    const w = world(on, {
+      tools: 'start',
+      feed: acmeOnly(),
+      threads: [thread('local_other', 'Unrelated notes', 100), thread('local_m1', 'Roof quote', 120)],
+      files: { ...mine, ...rec(OTHER, 'local_m2') },
+      store: { 'mm.marked': { local_m1: ACME, local_m2: ACME }, 'mm.markedAt': { local_m1: NOW - 9 * 24 * HOUR, local_m2: NOW - 3 * 24 * HOUR } },
+    })
+    await tickOnce($, w)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_m2' })
+    const ui = await pane($)
+    expect(await lines(ui)).toContain('drafts ready · Start thread: its thread is in another Claude profile')
+    await ui.unmount()
+    await after(w, 30)
+    expect(starts(w)).toEqual([])
+    expect(proposals(w)).toEqual([])
+    expect(sends(w)).toEqual([])
+  })
+
+  test('⛔ only the marker counts: a thread whose title looks like the client is never taken back (its row offers it, as before) and nothing is done by itself', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: acmeOnly(), threads: [thread('local_t', 'Acme Roofing: reply to the client', 20)] })
+    await tickOnce($, w)
+    await after(w, 30)
+    expect((w.stored['mm.links'] as Record<string, string>)[ACME]).toBeUndefined()
+    expect(starts(w)).toEqual([])
+    expect(sends(w)).toEqual([])
+  })
+
+  test('⛔ a thread the person unlinked, one marked for another client and one linked to another client are never taken back; the client is started by itself, as before', async ($, on) => {
+    const w = world(on, {
+      tools: 'start',
+      feed: acmeOnly(),
+      threads: [thread('local_u', 'Roof quote', 30), thread('local_o', 'Bolt intake', 40), thread('local_x', 'Notes', 50)],
+      store: {
+        'mm.marked': { local_u: ACME, local_o: BOLT, local_x: ACME },
+        'mm.markedAt': { local_u: NOW - HOUR, local_o: NOW - HOUR, local_x: NOW - HOUR },
+        'mm.unlinked': { local_u: NOW - 2 * HOUR },
+        'mm.links': { [CEDAR]: 'local_x' },
+      },
+    })
+    await tickOnce($, w)
+    await w.clock.advance(3_000)
+    expect(starts(w).length).toBe(1)
+    expect((w.stored['mm.links'] as Record<string, string>)[ACME]).toBe('local_started_1')
+    expect((w.stored['mm.links'] as Record<string, string>)[CEDAR]).toBe('local_x')
+    expect(sends(w)).toEqual([])
+  })
+
+  test('a client that already has a linked thread keeps it: an older or a newer marked thread does not take it here', async ($, on) => {
+    const w = world(on, {
+      feed: acmeOnly(),
+      threads: [thread('local_a', 'Roof quote', 10), thread('local_m2', 'Acme follow-up', 3)],
+      store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.marked': { local_m2: ACME }, 'mm.markedAt': { local_m2: NOW - HOUR } },
+    })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a' })
   })
 })

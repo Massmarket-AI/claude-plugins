@@ -62,7 +62,16 @@ export type Recommendation = {
   target?: Target
   /** True when the client has no thread of any kind: the rows to notice first. (Kept when the thread is merely not visible now.) */
   fresh?: true
+  /**
+   * (0.5.23) True when the client's linked thread is in the person's other Claude profile on this computer: the link
+   * is kept, and here the row offers Start (the person's press opens a thread here) while nothing is started or sent
+   * by itself. Start missing threads counts such a client as one with no thread here.
+   */
+  away?: true
 }
+
+/** (0.5.23) A client's row when its linked thread is in another Claude profile: Start, and why. */
+export const AWAY_REASON = 'its thread is in another Claude profile'
 
 /**
  * What Update last put into a client's thread: which thread, the signature of what it carried, and when.
@@ -191,19 +200,20 @@ export function declaredOther(projectId: string, sid: string, feedThreads: reado
  * Whether a thread is this client's alone: what the bridge may link by itself, keep linked by itself, and
  * offer on the client's row. Every feed row of its sessions names that client (`soleClient`), and nothing
  * makes it another's (`declaredOther`). A thread the feed lists for nobody is not; whether a link the
- * bridge made to such a thread is undone is the sync's count of misses.
+ * bridge made to such a thread is undone is not decided by the feed (0.5.23: only by its thread's archive or deletion, or B3).
  */
 export function onlyClients(projectId: string, sid: string, feedThreads: readonly FeedThread[], pairs: Pairs, marked: Readonly<Record<string, string>> = {}): boolean {
   return !declaredOther(projectId, sid, feedThreads, pairs, marked) && soleClient(sid, feedThreads, pairs) === projectId
 }
 
 /**
- * What becomes of a link the bridge made by itself, by this sync's feed:
+ * What becomes of a link the bridge made by itself, by this sync's feed (0.5.23: `unlisted` no longer undoes it; the
+ * sync sets its count of misses back to 0):
  *   stays     its thread's sessions declared this client alone (`onlyClients`), or (0.5.9) the feed lists
  *             none of them and the thread opened with this client's own [mm-link] marker
  *   goes      something makes the thread another client's too (`declaredOther`: a row for another project,
  *             a row OW marks `sole: false`, a marker for another client): let go on this sync (B3)
- *   unlisted  the feed lists none of its sessions: the sync counts a miss
+ *   unlisted  the feed lists none of its sessions: (until 0.5.22) the sync counted a miss; (0.5.23) it stays
  * (0.5.9) A thread that opened with this client's marker said so itself, and that does not age out of the
  * feed's window: a link R1b moved to such a thread is not undone by misses and then taken again (a loop).
  */
@@ -289,6 +299,45 @@ export function newerThreadFor(
     if (!best || start > best.start) best = { sid, start }
   }
   return best?.sid
+}
+
+/**
+ * (0.5.23) The threads that opened with this client's own [mm-link] marker, as the bridge recorded each one when its
+ * opening message came in (`mm.marked`, with when: `mm.markedAt`): the threads a client with no linked thread takes
+ * back, newest first (when its marker was recorded; for a marker with no time on record, when its thread started; else
+ * last). The app's records hold no thread's opening message, and the bridge reads no transcript, so this record of
+ * its own is the only place the marker can be read from.
+ * ⛔ Never a thread linked to any client, one the person unlinked, one a client was moved off (`released`), one reached
+ * by sessions of more than one client (`shared`), or one the feed or a marker gives to another client (`declaredOther`).
+ * ⛔ Only the marker counts: a title never does, and a session's declaration is R1's (`autoLinkFor`).
+ * Whether each is still open (not archived, not deleted) is the caller's to find out.
+ */
+export function markedThreads(
+  projectId: string,
+  links: Readonly<Record<string, string>>,
+  feedThreads: readonly FeedThread[],
+  pairs: Pairs,
+  skip: {
+    unlinked?: Readonly<Record<string, unknown>>
+    released?: readonly string[]
+    marked?: Readonly<Record<string, string>>
+    markedAt?: Readonly<Record<string, number>>
+    shared?: ReadonlySet<string>
+  } = {},
+): string[] {
+  const marked = skip.marked ?? {}
+  const unlinked = skip.unlinked ?? {}
+  const released = skip.released ?? []
+  const shared = skip.shared ?? sharedThreads(feedThreads, pairs)
+  const out: Array<{ sid: string; at: number }> = []
+  for (const [sid, pid] of Object.entries(marked)) {
+    if (pid !== projectId || !THREAD_ID.test(sid)) continue
+    if (ownerOf(sid, links) !== undefined || sid in unlinked || released.includes(sid) || shared.has(sid)) continue
+    if (declaredOther(projectId, sid, feedThreads, pairs, marked)) continue
+    const at = skip.markedAt?.[sid]
+    out.push({ sid, at: typeof at === 'number' && Number.isFinite(at) ? at : (threadStart(sid, pairs) ?? -Infinity) })
+  }
+  return out.sort((a, b) => (b.at === a.at ? (a.sid < b.sid ? -1 : 1) : b.at > a.at ? 1 : -1)).map(o => o.sid)
 }
 
 /**
@@ -431,6 +480,27 @@ export function autoUpdatable(it: QueueItem, now: number): boolean {
 }
 
 /**
+ * (0.5.23, Rob 2026-10-21: "change auto-starts to update the older thread") The thread an update sent by itself goes
+ * to, from the client's recommendation as the last sync stored it (`rec`) and the client's linked thread (`linked`):
+ *   update   the row says Update: its thread
+ *   older    the row says Start because the thread is older than RECENT_THREAD_MS (`last thread is from Oct 2`):
+ *            that same thread is updated, and no new one is started by itself. `older` is the row's reason, for the
+ *            notice log. (Auto-compaction keeps an old thread small, so updating it is safe.)
+ * ⛔ Only ever the client's LINKED thread, and never one its row only suggests by a title: every guard of an update
+ * sent by itself still applies (`autoUpdates`). A client with no thread gets none here (its thread is started by
+ * itself, as before), and so does a client whose old thread is not its linked one (the person unlinked it): that
+ * client's thread is still started by itself, with the hand-over from the old one. A person's Start, Start missing
+ * threads and /mm start are not decided here: they open a fresh thread as before.
+ */
+export function autoUpdateTarget(rec: Recommendation | undefined, linked: string | undefined): { sid: string; older?: string } | undefined {
+  const target = rec?.target
+  if (!rec || !target || target.suggested || !THREAD_ID.test(target.sid) || target.sid !== linked) return undefined
+  if (rec.state === 'update') return { sid: target.sid }
+  if (rec.state === 'start') return { sid: target.sid, older: rec.reason }
+  return undefined
+}
+
+/**
  * (0.5.11, Rob 10-15: "[A client]'s call ended a little while back... I don't understand why it
  * hasn't already handed the new context there so the draft is ready when I open the thread up") Whether it is time
  * to update a client's thread by itself, from what this bridge has seen of the client (`seen`, for what it has
@@ -463,6 +533,8 @@ export function ownPackage(given: Sent | undefined, sid: string, it: QueueItem):
  *
  *   start    Start thread  · no thread yet
  *            Start thread  · last thread is from Oct 2                the thread is older than 7 business days
+ *                                                                     ((0.5.23) by itself, a linked one is updated
+ *                                                                     instead: `autoUpdateTarget`)
  *   update   Update thread · thread from Mon, Oct 12 exists           a thread exists and has not been given this
  *            Update thread · new since this thread was updated        the bridge updated it before, with less
  *            Update thread · "<title>" looks like this client         no known thread, but a title matches
