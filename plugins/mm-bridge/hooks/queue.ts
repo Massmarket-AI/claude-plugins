@@ -2,7 +2,7 @@
 //
 // What is listed (Rob, 2026-10-20: "everything since last Thursday that wasn't closed should always show up
 // now, and we can keep it clean going forward"): everything still open whose due time is on or after
-// LIST_FLOOR_MS (Thu 2026-10-15 12:00 AM ET), however overdue, and everything not due yet, however far ahead.
+// LIST_FLOOR_MS (Wed 2026-10-14 12:00 AM ET), however overdue, and everything not due yet, however far ahead.
 // (Until 2026-10-20 the cut was 3 business days back; Rob replaced it with LIST_FLOOR_MS.) That is:
 //   - an unanswered client message (its reply is due 24 business hours after it arrived)
 //   - a prepared reply package (drafts ready)
@@ -238,9 +238,10 @@ const DAY = 24 * HOUR
  * The list's floor (Rob, 2026-10-20: "everything since last Thursday that wasn't closed should always show up
  * now, and we can keep it clean going forward"). Replaces the rolling 3-business-day cut of 2026-10-08. Anything
  * still open whose due time is on or after it stays on the Needs-you list however overdue; only what was due
- * before it goes under Older. Thu 2026-10-15 12:00 AM ET: the week the team installed the bridge.
+ * before it goes under Older. Wed 2026-10-14 12:00 AM ET: the week the team installed the bridge.
+ * (Until 2026-10-21 the floor was Thu 2026-10-15; Rob moved it to Wed 2026-10-14: "it should actually be last Wednesday".)
  */
-export const LIST_FLOOR_MS = Date.parse('2026-10-15T04:00:00Z')
+export const LIST_FLOOR_MS = Date.parse('2026-10-14T04:00:00Z')
 /**
  * The pin's window, in business time: 24 business hours ahead (`pinsNow`). A client's thread pins while
  * something of it must be acted on within them, or already should have been. (0.5.2, R1) The list itself holds
@@ -249,7 +250,7 @@ export const LIST_FLOOR_MS = Date.parse('2026-10-15T04:00:00Z')
 export const WINDOW_AHEAD_MS = DAY
 /**
  * The 2026-10-08 cut (3 business days back), kept only as the list's least reach: the floor widens the list
- * and never narrows it. From Tue 2026-10-20 12:00 AM ET on, everything due before the floor is more than 3
+ * and never narrows it. From Sat 2026-10-17 12:00 AM ET on, everything due before the floor is more than 3
  * business days overdue, so this decides nothing and the floor alone is the cut; it only keeps a clock before
  * that day (the tests' fixed early-October dates) reading as it did. (Until 2026-10-20 the cut was 3 business
  * days back; Rob replaced it with LIST_FLOOR_MS.)
@@ -270,11 +271,11 @@ export const MAIL_LOOKBACK_MAX_HOURS = 720
  * Business hours of mail to ask OW for: back to 24 business hours before the floor (mail due on the floor arrived then), at least 168, at most 720 (OW's cap from 2026-10-20).
  *
  * A reply is due 24 business hours after a message, so every message whose reply is due on or after the floor
- * arrived on or after `subtractBusinessMs(LIST_FLOOR_MS, DAY)` (Wed 2026-10-14 12:00 AM ET). Mail OW sends from
+ * arrived on or after `subtractBusinessMs(LIST_FLOOR_MS, DAY)` (Tue 2026-10-13 12:00 AM ET). Mail OW sends from
  * further back is read the same way, and goes under Older. The 168 (the look-back since 2026-10-13, review of
- * 79cbc596, F1) is the least: it is what this asks for until Fri 2026-10-23 12:00 AM ET, so it is safe to ship
+ * 79cbc596, F1) is the least: it is what this asks for until Thu 2026-10-22 12:00 AM ET, so it is safe to ship
  * before OW's 720 cap deploys; from then on it asks for more than 168, which an OW that still caps at 168
- * refuses (HTTP 400). Past 720 (from Wed 2026-11-25) mail due just after the floor starts to fall out of the
+ * refuses (HTTP 400). Past 720 (from Tue 2026-11-24) mail due just after the floor starts to fall out of the
  * look-back; "keep it clean going forward" is what keeps that list short.
  */
 export function mailLookbackHours(now: number): number {
@@ -536,7 +537,7 @@ export function feedClients(feed: Feed): KnownClient[] {
  * Rob replaced it with LIST_FLOOR_MS.)
  */
 function build(feed: Feed, now: number, older: boolean): QueueItem[] {
-  // Under Older: due before the floor, and more than 3 business days ago (WINDOW_BACK_MS: from Tue 2026-10-20
+  // Under Older: due before the floor, and more than 3 business days ago (WINDOW_BACK_MS: from Sat 2026-10-17
   // 12:00 AM ET on, everything due before the floor is, so the floor alone decides)
   const tooOld = (due: number): boolean => due < now && due < LIST_FLOOR_MS && !businessWithin(due, now, WINDOW_BACK_MS)
   // (0.5.2, R1) everything else with a due time is the current pass's: overdue since the floor, or not due yet
