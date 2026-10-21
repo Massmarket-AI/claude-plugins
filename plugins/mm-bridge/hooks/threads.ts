@@ -431,6 +431,27 @@ export function autoUpdatable(it: QueueItem, now: number): boolean {
 }
 
 /**
+ * (0.5.23, Rob 2026-10-21: "change auto-starts to update the older thread") The thread an update sent by itself goes
+ * to, from the client's recommendation as the last sync stored it (`rec`) and the client's linked thread (`linked`):
+ *   update   the row says Update: its thread
+ *   older    the row says Start because the thread is older than RECENT_THREAD_MS (`last thread is from Oct 2`):
+ *            that same thread is updated, and no new one is started by itself. `older` is the row's reason, for the
+ *            notice log. (Auto-compaction keeps an old thread small, so updating it is safe.)
+ * ⛔ Only ever the client's LINKED thread, and never one its row only suggests by a title: every guard of an update
+ * sent by itself still applies (`autoUpdates`). A client with no thread gets none here (its thread is started by
+ * itself, as before), and so does a client whose old thread is not its linked one (the person unlinked it): that
+ * client's thread is still started by itself, with the hand-over from the old one. A person's Start, Start missing
+ * threads and /mm start are not decided here: they open a fresh thread as before.
+ */
+export function autoUpdateTarget(rec: Recommendation | undefined, linked: string | undefined): { sid: string; older?: string } | undefined {
+  const target = rec?.target
+  if (!rec || !target || target.suggested || !THREAD_ID.test(target.sid) || target.sid !== linked) return undefined
+  if (rec.state === 'update') return { sid: target.sid }
+  if (rec.state === 'start') return { sid: target.sid, older: rec.reason }
+  return undefined
+}
+
+/**
  * (0.5.11, Rob 10-15: "[A client]'s call ended a little while back... I don't understand why it
  * hasn't already handed the new context there so the draft is ready when I open the thread up") Whether it is time
  * to update a client's thread by itself, from what this bridge has seen of the client (`seen`, for what it has
@@ -463,6 +484,8 @@ export function ownPackage(given: Sent | undefined, sid: string, it: QueueItem):
  *
  *   start    Start thread  · no thread yet
  *            Start thread  · last thread is from Oct 2                the thread is older than 7 business days
+ *                                                                     ((0.5.23) by itself, a linked one is updated
+ *                                                                     instead: `autoUpdateTarget`)
  *   update   Update thread · thread from Mon, Oct 12 exists           a thread exists and has not been given this
  *            Update thread · new since this thread was updated        the bridge updated it before, with less
  *            Update thread · "<title>" looks like this client         no known thread, but a title matches

@@ -4,7 +4,7 @@ import { buildLists, buildQueue, threadTitleShort } from './queue'
 import type { Feed, FeedThread, QueueItem } from './queue'
 import {
   AUTO_NO_DRAFTS_MS, AUTO_QUIET_MS, LABEL, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
-  asksForPrep, autoUpdatable, autoUpdateDue, ownPackage, seenNow,
+  asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, ownPackage, seenNow,
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLink, titleLooksLike, titleSuggestion, waitingText,
   newerThreadFor, threadStart,
@@ -714,6 +714,47 @@ describe('(0.5.11) a client\'s thread updated by itself: which clients, and when
     const HOUR = 60 * MIN
     expect(autoUpdatable({ ...item(ACME), lastOut: NOW - 5 * MIN, check: { sendAt: NOW - HOUR, stillOpen: [], covers: 0 } }, NOW)).toBe(false)
     expect(autoUpdatable({ ...item(ACME), lastOut: NOW - HOUR, check: { sendAt: NOW - HOUR, stillOpen: ['the quote'], covers: 0 } }, NOW)).toBe(false)
+  })
+})
+
+describe('(0.5.23, Rob 10-21: "change auto-starts to update the older thread") which thread an update sent by itself goes to', () => {
+  const linkedOld = known('local_old', 'Roof quote', '2026-09-22 10:00')
+  const linkedRecent = known('local_a', 'Roof quote', '2026-10-09 15:00')
+
+  test('a linked thread older than 7 business days: the row still says Start, and the update by itself goes into that thread, marked older with the row\'s reason', async () => {
+    const rec = recommend([linkedOld], undefined, NOW)
+    expect(rec).toMatchObject({ state: 'start', reason: 'last thread is from Sep 22', target: { sid: 'local_old', suggested: false } })
+    expect(autoUpdateTarget(rec, 'local_old')).toEqual({ sid: 'local_old', older: 'last thread is from Sep 22' })
+  })
+
+  test('a linked thread whose row says Update: that thread, as before, not marked older', async () => {
+    const rec = recommend([linkedRecent], undefined, NOW)
+    expect(rec.state).toBe('update')
+    expect(autoUpdateTarget(rec, 'local_a')).toEqual({ sid: 'local_a' })
+  })
+
+  test('no thread yet: none, so its thread is started by itself as before', async () => {
+    const rec = recommend([], undefined, NOW)
+    expect(rec).toEqual({ state: 'start', reason: 'no thread yet', fresh: true })
+    expect(autoUpdateTarget(rec, undefined)).toBeUndefined()
+  })
+
+  test('⛔ an old thread that is not the client\'s linked one (the person unlinked it, or another thread is linked): none', async () => {
+    const rec = recommend([{ ...linkedOld, source: 'matched' }], undefined, NOW)
+    expect(rec.state).toBe('start')
+    expect(autoUpdateTarget(rec, undefined)).toBeUndefined()
+    expect(autoUpdateTarget(rec, 'local_other')).toBeUndefined()
+  })
+
+  test('⛔ never a thread the row only suggests by its title, never one whose thread is already current, and never an id that is not an app thread\'s', async () => {
+    const suggested = recommend([], { sid: 'local_t', title: 'Acme Roofing: roof quote', suggested: true }, NOW)
+    expect(suggested.state).toBe('update')
+    expect(autoUpdateTarget(suggested, 'local_t')).toBeUndefined()
+    const current = recommend([linkedRecent], undefined, NOW, { sent: { sid: 'local_a', sig: 'x', at: NOW - 60_000 }, signature: 'x' })
+    expect(current.state).toBe('current')
+    expect(autoUpdateTarget(current, 'local_a')).toBeUndefined()
+    expect(autoUpdateTarget({ state: 'start', reason: 'last thread is from Sep 22', target: { sid: 'not-a-thread', title: 't', suggested: false } }, 'not-a-thread')).toBeUndefined()
+    expect(autoUpdateTarget(undefined, 'local_a')).toBeUndefined()
   })
 })
 

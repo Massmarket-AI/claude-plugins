@@ -10,7 +10,7 @@ import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
   LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, staleCopySentence, startKickoff, threadLink, titleSuggestion,
-  REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, bandText, chipTitle, ownPackage, seenNow, waitingText,
+  REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, bandText, chipTitle, ownPackage, seenNow, waitingText,
   START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary, startMissingLabel, cardReady, needsCard,
 } from './threads'
 import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
@@ -48,6 +48,10 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 //    on this computer, never into a thread the person used in the last AUTO_IDLE_MS, never from a thread into itself,
 //    and only where the time-tracking hook counts it as automatic (`autoUpdates`). It stamps nothing and claims
 //    nothing: an automatic send is nobody's act (R11).
+//    (0.5.23, Rob 2026-10-21: "change auto-starts to update the older thread") A linked thread older than 7 business
+//    days, whose row says Start, gets the same update by itself, under the same guards: by itself, an old thread is
+//    updated, never replaced. A client with no linked thread is still started by itself (where the app refuses that,
+//    a card for the person), and a person's Start still opens a fresh thread.
 // ⛔ CLAUDE CANNOT DO EITHER. The model can call the `mm` tool, and the tool runs the same `runCommand`:
 //    there, and for a /mm command that did not come from the person's own prompt (a message from another
 //    session, a scheduled task, a channel, another plugin), `update` and `start` are refused before
@@ -103,7 +107,7 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.5.22'
+const VERSION = '0.5.23'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -2870,7 +2874,8 @@ async function autoStart($: EngineInterface, n: Need, me: string, key: string): 
     if (tries.some(t => t.pid === pid && t.sig === sig)) return
     const started = tries.filter(t => t.ok !== false)
     if (started.filter(t => now - t.at < 3_600_000).length >= AUTO_STARTS_PER_HOUR || started.filter(t => now - t.at < DAY_MS).length >= AUTO_STARTS_PER_DAY) return
-    const entry: AutoStart = { at: now, pid, client: cleanName(n.it.client), sig, kind: n.kind, by: me, ok: null, reason: 'no thread' }
+    // (0.5.23) the row's reason, so the log tells `no thread yet` from `last thread is from Oct 2`
+    const entry: AutoStart = { at: now, pid, client: cleanName(n.it.client), sig, kind: n.kind, by: me, ok: null, reason: short(n.why || 'no thread yet', 60) }
     await patchStore<AutoStart[]>($, 'mm.autostarts', [], list => {
       list.push(entry)
       list.splice(0, list.length, ...list.filter(t => t && now - Number(t.at) <= DAY_MS).slice(-200))
@@ -3103,9 +3108,10 @@ async function ownWork($: EngineInterface, it: QueueItem, sid: string, signature
  * (0.5.11, Rob 10-15) Once for each sync on record, in every running thread, while auto is on (`/mm auto`, the switch
  * auto-start has): each client on the person's OWN list (the Needs-you list: never a client under With a teammate,
  * Older or Checking your reply) whose row says Update, on its linked thread (never a thread its row only suggests),
- * once it is time (`autoUpdateDue`, from what this bridge has seen, `mm.firstSeen`), and never one a teammate has, whose
- * package someone else holds, or that is still open after our reply (`autoUpdatable`). From what is stored only: no
- * feed call and no app call here.
+ * or (0.5.23) whose row says Start because its linked thread is older than 7 business days, on that same thread
+ * (`autoUpdateTarget`: the old thread is updated, not replaced), once it is time (`autoUpdateDue`, from what this
+ * bridge has seen, `mm.firstSeen`), and never one a teammate has, whose package someone else holds, or that is still
+ * open after our reply (`autoUpdatable`). From what is stored only: no feed call and no app call here.
  * ⛔ Never into the thread choosing (the app's send refuses it, and here the message would be a prompt the person
  * did not write): the thread that synced leaves its own client to the other running threads, which choose from the
  * same sync on their next tick. Never into a thread linked to another client, and never what the thread already
@@ -3133,10 +3139,10 @@ async function autoUpdates($: EngineInterface): Promise<void> {
   const sent = await storeGet<Record<string, Sent>>($, 'mm.sent', {})
   for (const it of last.items.slice().sort(byDue)) {
     const pid = it.projectId
-    const rec = storedRec(last, pid)
-    const target = rec?.target
-    if (rec?.state !== 'update' || !target || target.suggested || !THREAD_ID.test(target.sid) || !isUuid(pid)) continue
-    const sid = target.sid
+    // (0.5.23) the thread its row says Update for, or the linked thread its row says Start for because it is old
+    const pick = autoUpdateTarget(storedRec(last, pid), links[pid])
+    if (!pick || !isUuid(pid)) continue
+    const sid = pick.sid
     // ⛔ its linked thread, no other client's, and not this one
     if (links[pid] !== sid || ownerOf(sid, links) !== pid || sid === me) continue
     if (!autoUpdatable(it, now)) continue
@@ -3156,7 +3162,7 @@ async function autoUpdates($: EngineInterface): Promise<void> {
       }
       return
     }
-    const r = await autoUpdateClaim($, it, sid, signature, me, now, last.at)
+    const r = await autoUpdateClaim($, it, sid, signature, me, now, last.at, pick.older)
     // the rest of this sync's clients wait for the next sync
     if (r === 'sync') return
     if (r !== 'capped') continue
@@ -3174,10 +3180,11 @@ async function autoUpdates($: EngineInterface): Promise<void> {
  *            in the last day, counting the claims not on record yet (F1)
  *   sync     (F1) AUTO_UPDATES_PER_SYNC are claimed or sent from this sync already: the rest wait for the next sync
  *   claimed  claimed here, and sent once the claim has held (`autoUpdate`)
+ * (0.5.23) `older`: the row said Start because this linked thread is old (`autoUpdateTarget`); carried to the log.
  * ⛔ (Review of PR #15, F1) The caps are asked of the claims and the records as read, and again inside the write that
  * claims, over the store's fresh claims: a burst of due clients is never claimed past a cap.
  */
-async function autoUpdateClaim($: EngineInterface, it: QueueItem, sid: string, signature: string, me: string, now: number, from: number): Promise<'skip' | 'capped' | 'sync' | 'claimed'> {
+async function autoUpdateClaim($: EngineInterface, it: QueueItem, sid: string, signature: string, me: string, now: number, from: number, older?: string): Promise<'skip' | 'capped' | 'sync' | 'claimed'> {
   const pid = it.projectId
   const sig = sigHash(signature)
   const key = `${pid}\n${sig}`
@@ -3208,7 +3215,7 @@ async function autoUpdateClaim($: EngineInterface, it: QueueItem, sid: string, s
   if (!mine) return 'skip'
   autoUpdating.add(key)
   try {
-    $.clock.after(settleMs(`${me}#update#${key}`), () => void autoUpdate($, it, sid, signature, me, key, from).finally(() => autoUpdating.delete(key)))
+    $.clock.after(settleMs(`${me}#update#${key}`), () => void autoUpdate($, it, sid, signature, me, key, from, older).finally(() => autoUpdating.delete(key)))
   } catch {
     // no timer here: the claim runs out, and a later sync claims it again
     autoUpdating.delete(key)
@@ -3237,8 +3244,11 @@ async function autoUpdateClaim($: EngineInterface, it: QueueItem, sid: string, s
  * ⛔ Nothing else Update writes. No stamp and no acted: nobody acted. No claim: a send is never evidence (R11), so a
  * link the bridge made stays one it can let go. No link and no unlink record: the thread was the client's linked
  * thread before the send, and a move or an unlink made meanwhile is the person's and stands. No thread is opened.
+ * (0.5.23) `older`: the client's row said Start because this linked thread is older than 7 business days (its reason,
+ * `last thread is from Oct 2`): the update goes into it all the same, and the record and the notice log say so, so an
+ * audit can tell it from an update the row asked for and from a thread started by itself.
  */
-async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signature: string, me: string, key: string, from: number): Promise<void> {
+async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signature: string, me: string, key: string, from: number, older?: string): Promise<void> {
   const pid = it.projectId
   const sig = sigHash(signature)
   const client = cleanName(it.client)
@@ -3290,7 +3300,9 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
     if ((given && given.sid === sid && hasWaiting(given.sig, cur)) || sentHere.get(`${pid}\n${sid}`) === signature) return
     // one message to a client at a time: a press sending to it now has it
     if (sending.has(pid)) return
-    const made: AutoUpdate = { at: now, pid, client, sig, sid, by: me, ok: null, reason: `something new for the client: ${short(waitingText(cur), 120)}`, from }
+    // (0.5.23) an old linked thread updated instead of a new one: the reason says so first
+    const news = `something new for the client: ${short(waitingText(cur), 120)}`
+    const made: AutoUpdate = { at: now, pid, client, sig, sid, by: me, ok: null, reason: older ? `${short(older, 60)}, so that thread was updated instead of starting a new one; ${news}` : news, from }
     // ⛔ (F1) recorded over the store's fresh list, the caps asked again there: a list that is full refuses it
     let full: string | null = null
     /** (0.5.13) The hour's or the day's cap refused it: its line is written once per client per hour (`capNotice`). */
@@ -3796,6 +3808,11 @@ type Need = {
   place?: string | undefined
   /** (0.5.7) For whom: a client with no thread (C3), or its kickoff run in its own thread. (0.5.11: never a new thread for a thread's length.) */
   kind: 'nothread' | 'here'
+  /**
+   * (0.5.23) For a client with no linked thread: its row's reason, as the sync gave it (`no thread yet`, or `last thread
+   * is from Oct 2` for an old thread the person unlinked): what a thread started by itself logs as its reason.
+   */
+  why?: string
 }
 
 /** (0.5.4) What one thread knows, from the store, to decide which chips are its own to hold. */
@@ -3847,7 +3864,7 @@ function needsFor(last: Last, w: ChipWorld, now: number): Need[] {
       if (rec.state !== 'start' || noThreadHolder(it.projectId, w, now) !== w.me) continue
       const target = rec.target && !rec.target.suggested && THREAD_ID.test(rec.target.sid) ? rec.target : undefined
       const replaces = target ? { sid: target.sid, title: w.titles[target.sid] || target.title } : undefined
-      out.push({ it, signature, need: 'start', title: startTitle(it), tldr: startTldr(it, now), prompt: startKickoff(it, replaces, now), kind: 'nothread' })
+      out.push({ it, signature, need: 'start', title: startTitle(it), tldr: startTldr(it, now), prompt: startKickoff(it, replaces, now), kind: 'nothread', why: rec.reason })
       continue
     }
     // C1: only the client's own thread; C2: every other thread mints nothing for it
@@ -4822,12 +4839,13 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
     return verb === 'pause' ? 'Paused on this computer: no pins or renames until /mm resume.' : 'Resumed.'
   }
   // (0.5.7) whether threads start by themselves on this computer (on unless turned off); (0.5.11) and whether a
-  // client's thread is updated by itself: the same switch
+  // client's thread is updated by itself: the same switch. (0.5.23) A linked thread older than 7 business days is
+  // updated, not replaced: only a client with no thread gets one started by itself.
   if (verb === 'auto') {
     if (arg !== 'on' && arg !== 'off') return `Auto-start and auto-update are ${(await autoStartOn($)) ? 'on' : 'off'} on this computer. Type /mm auto off or /mm auto on.`
     await $.store.set('mm.autostart', { on: arg === 'on' })
     return arg === 'on'
-      ? 'Auto-start and auto-update are on: a client\'s new thread starts by itself, and its thread is updated by itself when something new arrives.'
+      ? 'Auto-start and auto-update are on: a client with no thread gets one started by itself, and its thread is updated by itself when something new arrives, an old thread too.'
       : 'Auto-start and auto-update are off: a client\'s new thread waits as a card for you to start, and its thread waits for you to press Update.'
   }
   // (0.5.19, Rob 10-20) whether Remote Control follows the pin on this computer (off unless turned on)
