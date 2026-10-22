@@ -50,8 +50,8 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 //    nothing: an automatic send is nobody's act (R11).
 //    (0.5.23, Rob 2026-10-21: "change auto-starts to update the older thread") A linked thread older than 7 business
 //    days, whose row says Start, gets the same update by itself, under the same guards: by itself, an old thread is
-//    updated, never replaced. A client with no linked thread is still started by itself (where the app refuses that,
-//    a card for the person), and a person's Start still opens a fresh thread.
+//    updated, never replaced. (0.5.24) A client with no linked thread gets its Start card by itself, and a
+//    person's Start puts that card up too: see below.
 //    (0.5.23, the cause of the refusals of 10-19 and 10-20) Those starts were for clients whose thread was there all
 //    along: the person works in two Claude profiles on this computer, the app answers "not found" for a thread of the
 //    other profile, and the sync dropped the link. A link now ends only when its thread is archived or deleted: a
@@ -59,6 +59,12 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 //    profile stays linked, and in this profile its client's row offers Start and nothing is started or sent by
 //    itself (`away`). And a client with no linked thread gets back the newest open thread that opened with its own
 //    [mm-link] marker (`markedThreads`), before anything is started for it.
+// ⛔ (0.5.24, Rob 2026-10-21: "build mm-bridge 0.5.24 so Start presses and automatic starts put up the Start card
+//    directly, with no approval prompt first") The bridge never asks the app to start a thread (start_session
+//    `user_asked`). The app starts one that way only on the person's own typed words to the model, and asked from
+//    the bridge it raised an approval prompt and then refused. A Start press, /mm start, Start missing threads and a
+//    client with no thread all put up the client's Start card (start_session `own_initiative`; spawn_task's chip
+//    where the app has that): it starts nothing until the person clicks Start on it.
 // ⛔ CLAUDE CANNOT DO EITHER. The model can call the `mm` tool, and the tool runs the same `runCommand`:
 //    there, and for a /mm command that did not come from the person's own prompt (a message from another
 //    session, a scheduled task, a channel, another plugin), `update` and `start` are refused before
@@ -117,7 +123,7 @@ import type { AppThread, Fold, Pairs, Recommendation, Replaced, Row, RowButton, 
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.5.23'
+const VERSION = '0.5.24'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -169,10 +175,7 @@ const ALIVE_MS = 5 * 60_000
 const HANDOVER_MS = 10 * 60_000
 /** (0.5.7) How long a session goes by its last look at which session tools the app gives it (`sessionTools`). */
 const TOOLS_EVERY_MS = 5 * 60_000
-/** (0.5.7, Rob 10-14: start threads by itself) The most threads this machine starts by itself in an hour, and in a day. */
-const AUTO_STARTS_PER_HOUR = 4
-const AUTO_STARTS_PER_DAY = 20
-/** (0.5.7) A thread a session is about to start by itself is that session's alone this long (`mm.starting`). */
+/** (0.5.12) A client a Start all is putting a card up for is that session's alone this long (`mm.starting`). */
 const STARTING_MS = 2 * 60_000
 /**
  * (0.5.11, Rob 10-15: update threads by itself) The most client threads this machine updates by itself in an hour, and in a day.
@@ -193,7 +196,7 @@ const AUTO_UPDATES_PER_SYNC = 3
 const AUTO_IDLE_MS = 10 * 60_000
 /** (0.5.11, review of PR #15, F4) A session reads what the time-tracking hook is no more often than this. */
 const HOOK_CHECK_MS = 10 * 60_000
-/** (0.5.7) A band note (a thread started by itself, the hourly cap) shows in every thread this long. */
+/** (0.5.7) A band note (what a Start all came to; 0.5.7 to 0.5.23 also a thread started by itself) shows in every thread this long. */
 const NOTE_SHOW_MS = 15 * 60_000
 /**
  * (0.5.7) What start_session's `background` carries, which a "fresh" session requires (at least 80 characters, the
@@ -311,8 +314,8 @@ const NO_THREAD_LIST = 'The app\'s thread list is not available here.'
 const alreadyHas = (client: string) => `${client} already has a thread. Only the person can move it: they type /mm link ${client} in the thread that should have it.`
 /** R10: what a press that makes a chip says before it asks the app for anything. */
 const MAKING_CHIP = (client: string) => `Making a chip for ${client}…`
-/** (0.5.7) The same, where Start opens the thread itself (start_session). */
-const STARTING_THREAD = (client: string) => `Starting ${client}'s thread…`
+/** (0.5.24) The same, where the app makes a Start card (start_session's proposal) rather than a chip. */
+const MAKING_CARD = (client: string) => `Making a Start card for ${client}…`
 /** R10: what it says when the app does not answer that in APP_WAIT_MS. */
 const NO_ANSWER = (client: string) => `The app did not answer in 15 seconds, so no chip was made. Type /mm start ${client} in any thread.`
 /** (fix round 1, L10) What a second message to a client says while the first is still going out. */
@@ -2836,7 +2839,7 @@ async function mintChip($: EngineInterface, m: MintSpec): Promise<Minted> {
       : $.mcp.call('ccd_session', 'spawn_task', { title: m.title, tldr: m.tldr, prompt: m.prompt })) as Promise<Mcp>
   try {
     const tools = await sessionTools($)
-    let proposal = !tools.spawn && tools.start
+    let proposal = cardsHere(tools)
     try {
       call = ask(proposal)
       answered = await within($, call)
@@ -2909,105 +2912,26 @@ async function sawTools($: EngineInterface, tools: { start: boolean; spawn: bool
 /** The engine's word for a call to a tool the app does not give this session. */
 const noTool = (err: unknown): boolean => /no connected MCP tool/i.test(errorText(err))
 
-/**
- * What start_session answered for a thread started now: the new thread's id when the answer gives it. (0.5.16)
- * `needs-card`: the app starts a thread only on the person's own words in this thread (`needsCard`), so the press
- * makes the client's Start card here instead, and the app's sentence is never shown.
- */
-type StartedNow = { ok: true; sid?: string | undefined } | { ok: false; why: 'refused' | 'no-answer' | 'no-tool' | 'needs-card'; text: string }
+// ---------------------------------------------------------------- (0.5.7) the automatic switch; (0.5.24) no thread starts by itself
 
 /**
- * (0.5.7) Starts the client's thread now: `start_session` with `initiation: "user_asked"`, for a person's Start (the
- * person pressing it is the user asking) and for a thread the bridge starts by itself on Rob's standing instruction
- * (Rob, 10-14 ~13:35 ET: "we can automatically start the new thread"). Never for anything else. Its answer, the app's
- * own (Claude.app, 10-14): `Started session "<title>" (session_id: local_…, name: …). …`.
+ * A line the band shows in every thread for NOTE_SHOW_MS (`bandNote`). (0.5.24) No thread is started by itself any
+ * more: a client with no thread gets its Start card (`chipsTick`), and `mm.autostarts`, the record of those starts,
+ * is no longer written.
  */
-async function startNow($: EngineInterface, title: string, prompt: string): Promise<StartedNow> {
-  let cwd = ''
-  try {
-    cwd = await $.session.cwd()
-  } catch {
-    // no word on this session's folder: the app's default, where this session runs
-  }
-  const args = { initiation: 'user_asked', title, prompt, context: 'fresh', background: START_BACKGROUND, use_worktree: false, wake_when_done: false, ...(cwd ? { cwd } : {}) }
-  let answered: { ok: true; value: Mcp } | { ok: false }
-  try {
-    answered = await within($, $.mcp.call('ccd_session', 'start_session', args) as Promise<Mcp>)
-  } catch (err) {
-    if (noTool(err)) {
-      await sawTools($, { start: false, spawn: true })
-      return { ok: false, why: 'no-tool', text: errorText(err) }
-    }
-    const said = errorText(err)
-    return { ok: false, why: needsCard(said) ? 'needs-card' : 'refused', text: said }
-  }
-  if (!answered.ok) return { ok: false, why: 'no-answer', text: `the app did not answer in ${APP_WAIT_MS / 1000} seconds` }
-  const text = textOf(answered.value)
-  if (answered.value.isError) return { ok: false, why: needsCard(text) ? 'needs-card' : 'refused', text }
-  const sid = /\bsession_id:\s*(local_[A-Za-z0-9_-]{1,100})/.exec(text)?.[1]
-  return { ok: true, sid }
-}
-
-/**
- * (0.5.7) A thread just started for a client, by the person's Start or by itself: every chip or proposal for the client
- * in any thread is superseded (each thread withdraws its own on its next pass; this one now), and, when the app gave
- * the new thread's id, it is linked, claimed and stamped at once (the person's act: pinned first), and a sync a second
- * on pins and names it. With no id, the kickoff's [mm-link] marker links it on its first turn, as a chip's does: a
- * record of what it was started with lets it take the client from the thread the client had (`linkFromMarker`).
- * (0.5.11) With an id, what the thread opened with is recorded at once too (`mm.sent`): the client's kickoff, whatever
- * hand-over it carried. Its own marker says so only once its first turn runs, and its kickoff with a hand-over never
- * does (it is not the bare kickoff): until then its row would read Update, and a thread just started would be sent
- * Update's message by itself (`autoUpdates`).
- */
-async function adoptStarted($: EngineInterface, it: QueueItem, sid: string | undefined, prompt: string, me: string, now: number): Promise<void> {
-  const pid = it.projectId
-  const had = (await storeGet<Record<string, string>>($, 'mm.links', {}))[pid]
-  await patchChips($, now, fresh => {
-    for (const c of fresh) if (c.projectId === pid) c.superseded = true
-    if (!sid) fresh.push({ projectId: pid, signature: signatureOf(it), taskId: '', threadId: me, at: now, prompt, ...(had ? { had } : {}) })
-    return fresh
-  }).catch(err => noteFailure($, 'start: the chips it replaces', err))
-  void chipsPass($)
-  if (!sid) return
-  const step = async (what: string, write: () => Promise<unknown>): Promise<void> => {
-    try {
-      await write()
-    } catch (err) {
-      await noteFailure($, `start: ${what}`, err)
-    }
-  }
-  await step('the link', () =>
-    patchStore<Record<string, string>>($, 'mm.links', {}, fresh => {
-      fresh[pid] = sid
-    }),
-  )
-  await step('what the thread now has', () => putSent($, pid, { sid, sig: signatureOf(it), at: now }))
-  await step('the unlink record', () => forgetUnlink($, sid))
-  await step('the claim', () => claim($, pid, sid))
-  await step('the stamp', () => stamp($, pid, sid))
-  await askSync($).catch(() => {})
-}
-
-// ---------------------------------------------------------------- (0.5.7) threads the bridge starts by itself
-
-/**
- * (0.5.7, Rob 10-14 ~13:35 ET: "If there's something from a client and there's no thread for it, or a thread needs to
- * be started fresh, we can automatically start the new thread, unpin the old one, and the team members see no
- * disruption") A thread started by itself, on record (`mm.autostarts`, every session's, the last day's): for which
- * client and what it carried (`sig`, a short hash of the signature), why, by which thread, and whether the app
- * started it (`ok`: null while it is being asked).
- */
-type AutoStart = { at: number; pid: string; client: string; sig: string; kind: string; by: string; ok: boolean | null; reason: string }
-/** A line the band shows in every thread for NOTE_SHOW_MS: a thread started by itself, the hourly cap reached. */
 type BandNote = { text: string; at: number; key: string }
 
-/** (0.5.7) Whether threads start by themselves on this computer: on unless the person typed /mm auto off. */
+/**
+ * (0.5.7) Whether the bridge acts by itself on this computer: on unless the person typed /mm auto off. (0.5.11) It
+ * updates a client's thread by itself (`autoUpdates`). (0.5.24) It starts no thread by itself either way: a client
+ * with no thread gets its Start card, on or off.
+ */
 async function autoStartOn($: EngineInterface): Promise<boolean> {
   const v = await storeGet<{ on?: unknown } | null>($, 'mm.autostart', null)
   return v?.on !== false
 }
 
-/** (0.5.7) A short, stable name for a signature (FNV-1a, 32 bits): what the record and the log say a start carried. */
+/** (0.5.7) A short, stable name for a signature (FNV-1a, 32 bits): what the log says a card or an update carried. */
 function sigHash(s: string): string {
   let h = 0x811c9dc5
   for (let i = 0; i < s.length; i++) {
@@ -3015,100 +2939,6 @@ function sigHash(s: string): string {
     h = Math.imul(h, 0x01000193) >>> 0
   }
   return h.toString(16).padStart(8, '0')
-}
-
-/** (0.5.7) The starts this session has claimed and not yet finished: a second tick does not claim one again. */
-const autoInFlight = new Set<string>()
-
-/**
- * (0.5.7) What becomes of a need for a new thread (C3; 0.5.11: no longer a thread 60% full) where the app gives
- * start_session and auto-start is on:
- *   skip    it is started, or being started (here or by another session: its claim in `mm.starting`), or a thread
- *           already has what it would carry
- *   card    the app refused to start it: the card instead
- *   capped  this machine started AUTO_STARTS_PER_HOUR in the last hour, or AUTO_STARTS_PER_DAY in the last day: the card
- *   start   claimed here (`mm.starting`, a lease per client and signature) and started once the claim has held
- *           (`autoStart`): two sessions that claim it together never both start it
- */
-async function autoVerdict($: EngineInterface, n: Need, me: string, now: number): Promise<'skip' | 'card' | 'capped' | 'start'> {
-  const pid = n.it.projectId
-  const sig = sigHash(n.signature)
-  const key = `${pid}\n${sig}`
-  if (autoInFlight.has(key)) return 'skip'
-  const tries = (await storeGet<AutoStart[]>($, 'mm.autostarts', [])).filter(t => t && typeof t === 'object')
-  const these = tries.filter(t => t.pid === pid && t.sig === sig)
-  if (these.some(t => t.ok !== false)) return 'skip'
-  if (these.length) return 'card'
-  const given = (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]
-  if (given && given.sig === n.signature) return 'skip'
-  const claimed = (await storeGet<Record<string, { owner?: string; until?: number }>>($, 'mm.starting', {}))[key]
-  if (claimed && claimed.owner !== me && Number(claimed.until) > now) return 'skip'
-  const started = tries.filter(t => t.ok !== false)
-  if (started.filter(t => now - t.at < 3_600_000).length >= AUTO_STARTS_PER_HOUR || started.filter(t => now - t.at < DAY_MS).length >= AUTO_STARTS_PER_DAY) return 'capped'
-  let mine = false
-  await patchStore<Record<string, { owner?: string; until?: number }>>($, 'mm.starting', {}, fresh => {
-    for (const [k, v] of Object.entries(fresh)) if (!v || !(Number(v.until) > now)) delete fresh[k]
-    const held = fresh[key]
-    if (held && held.owner !== me) return false
-    fresh[key] = { owner: me, until: now + STARTING_MS }
-    mine = true
-  })
-  if (!mine) return 'skip'
-  autoInFlight.add(key)
-  $.clock.after(settleMs(`${me}#${key}`), () => void autoStart($, n, me, key).finally(() => autoInFlight.delete(key)))
-  return 'start'
-}
-
-/**
- * (0.5.7) Starts the client's thread by itself, once this session's claim has held (another session's write since
- * means that session starts it): `start_session` user_asked, with the kickoff a chip would carry. Recorded before the
- * app is asked, so no other session starts it meanwhile, and logged either way (`logAuto`). Started: linked and pinned
- * as a person's Start does it (`adoptStarted`); the band says so once. Refused: the card instead, at once.
- * (0.5.11, Rob 10-15) Never for a thread's length: no thread is replaced, or unpinned and renamed ` · moved`, for it.
- */
-async function autoStart($: EngineInterface, n: Need, me: string, key: string): Promise<void> {
-  const pid = n.it.projectId
-  const sig = sigHash(n.signature)
-  try {
-    const now = await $.clock.now()
-    const claimed = (await storeGet<Record<string, { owner?: string }>>($, 'mm.starting', {}))[key]
-    if (claimed?.owner !== me) return
-    if (!(await autoStartOn($)) || !(await sessionTools($)).start) return
-    // checked again, now that the claim has held
-    const tries = (await storeGet<AutoStart[]>($, 'mm.autostarts', [])).filter(t => t && typeof t === 'object')
-    if (tries.some(t => t.pid === pid && t.sig === sig)) return
-    const started = tries.filter(t => t.ok !== false)
-    if (started.filter(t => now - t.at < 3_600_000).length >= AUTO_STARTS_PER_HOUR || started.filter(t => now - t.at < DAY_MS).length >= AUTO_STARTS_PER_DAY) return
-    // (0.5.23) the row's reason, so the log tells `no thread yet` from `last thread is from Oct 2`
-    const entry: AutoStart = { at: now, pid, client: cleanName(n.it.client), sig, kind: n.kind, by: me, ok: null, reason: short(n.why || 'no thread yet', 60) }
-    await patchStore<AutoStart[]>($, 'mm.autostarts', [], list => {
-      list.push(entry)
-      list.splice(0, list.length, ...list.filter(t => t && now - Number(t.at) <= DAY_MS).slice(-200))
-    })
-    const title = startTitle(n.it)
-    const answer = await startNow($, title, n.prompt)
-    await patchStore<AutoStart[]>($, 'mm.autostarts', [], list => {
-      const e = list.find(t => t && t.pid === pid && t.sig === sig && t.at === now && t.by === me)
-      if (!e) return false
-      e.ok = answer.ok
-      if (!answer.ok) e.reason = `${e.reason}; not started: ${short(answer.text, 160)}`
-    }).catch(() => {})
-    await logAuto($, `${answer.ok ? 'started' : 'not started'} ${entry.client} (${pid}) sig ${sig}: ${entry.reason}${answer.ok ? '' : `; ${short(answer.text, 160)}`}`)
-    if (!answer.ok) {
-      // the card instead (where start_session itself is gone, the next tick makes the app's chip)
-      if (answer.why !== 'no-tool') await mintChip($, { ...n, auto: true, me, now: await $.clock.now() })
-      return
-    }
-    await adoptStarted($, n.it, answer.sid, n.prompt, me, now)
-    await bandNote($, `Started ${entry.client}'s thread: it is under Pinned.`, `started\n${key}`)
-  } catch (err) {
-    await noteFailure($, 'auto start', err)
-  } finally {
-    await patchStore<Record<string, { owner?: string }>>($, 'mm.starting', {}, fresh => {
-      if (fresh[key]?.owner !== me) return false
-      delete fresh[key]
-    }).catch(() => {})
-  }
 }
 
 /** (0.5.7) A line for the band, in every thread, for NOTE_SHOW_MS, once for its `key`. */
@@ -3124,7 +2954,8 @@ async function bandNote($: EngineInterface, text: string, key: string): Promise<
 
 /**
  * (0.5.7) One line in the bridge's notice log (`~/.claude/mm-hooks/bridge-notices.log`, the last 500 lines) for every
- * thread started by itself, or not started: the client, what it carried and why, so it can be audited.
+ * thread updated by itself, or not updated, and (0.5.24) every Start card put up by itself or by Start missing threads,
+ * or not put up: the client, what it carried and why, so it can be audited.
  */
 async function logAuto($: EngineInterface, line: string): Promise<void> {
   try {
@@ -3342,11 +3173,15 @@ async function autoUpdates($: EngineInterface): Promise<void> {
   const seen = await recordSeen($, last)
   const links = await storeGet<Record<string, string>>($, 'mm.links', {})
   const sent = await storeGet<Record<string, Sent>>($, 'mm.sent', {})
+  const chips = await chipsOf($, now)
   for (const it of last.items.slice().sort(byDue)) {
     const pid = it.projectId
     // (0.5.23) the thread its row says Update for, or the linked thread its row says Start for because it is old
     const pick = autoUpdateTarget(storedRec(last, pid), links[pid])
     if (!pick || !isUuid(pid)) continue
+    // (0.5.24) an old thread whose client the person pressed Start for: its Start card is up (a fresh thread waits for
+    // the person's click), so the old thread is not updated by itself meanwhile (0.5.23: the person's Start replaced it)
+    if (pick.older && chips.some(c => c.projectId === pid && !c.auto && !c.superseded)) continue
     const sid = pick.sid
     // ⛔ its linked thread, no other client's, and not this one
     if (links[pid] !== sid || ownerOf(sid, links) !== pid || sid === me) continue
@@ -3674,68 +3509,28 @@ function scheduleOwnCheck($: EngineInterface, me: string, round = 0): void {
 }
 
 /**
- * Start thread. (0.5.7) Where the app gives this session `start_session` (the app since 10-14), the client's thread
- * is opened at once with the kickoff as its first message (`startNow`). Where it gives only `spawn_task` (before
- * that), this mints a chip whose prompt is the kickoff, and the person clicks Start on it.
+ * Start thread: the client's Start card in this thread (`startCard`), whose prompt is the kickoff, and the person
+ * clicks Start on it. Where the app gives this session only `spawn_task` (before 10-14), that is the app's chip.
  * `typed` is the person's own /mm start <client>: it always mints. The chip on record for this thread may
  * be one the person dismissed, which the bridge cannot see; the new one supersedes it.
- * R10: the press has already said it is making the chip (`press`); the app is given APP_WAIT_MS to answer.
- * (0.5.16, Rob 10-19) Where the app will not start it from this thread's turn (it starts one only on the person's own
- * words here: `needsCard`), the press makes the client's Start card here instead, as the chip below, and says so in
- * one short line (`cardReady`). The app's sentence is never shown.
+ * R10: the press has already said it is making the card (`press`); the app is given APP_WAIT_MS to answer.
+ * (0.5.24, Rob 10-21: "Start presses and automatic starts put up the Start card directly, with no approval prompt
+ * first") The app is never asked to start the thread itself (start_session `user_asked`, 0.5.7 to 0.5.23): it does
+ * that only on the person's own typed words to the model, and asked from here it put up an approval prompt and then
+ * refused, and the card came after a second prompt.
  */
 async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed: boolean): Promise<string> {
   const now = await $.clock.now()
   const me = await selfId($)
-  const signature = signatureOf(it)
-  /** (0.5.16) The app wanted the person's own words for the start: the card below is a Start card, and its line says so. */
-  let card = false
-  // (0.5.7, Rob 10-14: "can we just straight start sessions now?") Where the app gives this session start_session,
-  // Start opens the client's thread at once, with the kickoff a chip would carry. Where it does not, the chip below.
-  const openNow = async (): Promise<string | null> => {
-    const title = startTitle(it)
-    const prompt = startKickoff(it, await replaced($, it, pass), now)
-    // (0.5.12) a Start all in another thread, or a start by itself, is starting this client now: not twice
-    const key = `${it.projectId}\n${sigHash(signature)}`
-    if (!(await claimStart($, it.projectId, key, me, now))) return `${it.client}'s thread is being started from another thread. It will be under Pinned in a moment.`
-    let opened: StartedNow
-    try {
-      opened = await startNow($, title, prompt)
-    } finally {
-      await releaseStart($, key, me)
-    }
-    const started = opened
-    if (started.ok) {
-      await adoptStarted($, it, started.sid, prompt, me, now)
-      return `Started ${it.client}'s thread: "${title}". It is under Pinned.`
-    }
-    // (0.5.16) the app wants the person's own words here: the Start card below, and never its sentence
-    if (started.why === 'needs-card') {
-      card = true
-      return null
-    }
-    // (the app's own sentence, without its last full stop: the line has its own)
-    if (started.why !== 'no-tool') return `Could not start ${it.client}'s thread: ${short(started.text).replace(/\.+$/, '')}. Type /mm start ${it.client} to try again.`
-    return null
-  }
-  if ((await sessionTools($)).start) {
-    const said = await openNow()
-    if (said !== null) return said
-  }
   // A client that already has a thread: the new one is asked to look at how the old one ended (handoverText).
   const kickoff = async (): Promise<string> => startKickoff(it, await replaced($, it, pass), now)
   let made = await startCard($, it, me, now, kickoff, typed)
-  if (made.made === 'no' && made.why === 'no-tool' && !card) {
-    // (0.5.7) the app no longer gives this session spawn_task: Start opens the thread
-    const said = await openNow()
-    if (said !== null) return said
-    // (0.5.16) and where the app wants the person's own words for that, its card after all, now that the bridge
-    // knows which of its tools makes one (`sawTools`)
-    if (card) made = await startCard($, it, me, now, kickoff, typed)
-  }
+  // the tool the app no longer (or does not yet) gives this session: the other one, now that the bridge knows (`sawTools`)
+  if (made.made === 'no' && made.why === 'no-tool') made = await startCard($, it, me, now, kickoff, typed)
+  const card = cardsHere(await sessionTools($))
   const what = card ? `A Start card for ${it.client}` : `A chip for ${it.client}`
   if (made.made === 'here') return `${what} is already here: click Start on it.`
-  if (made.made === 'no') return made.why === 'no-answer' ? NO_ANSWER(it.client) : `Could not create the chip: ${short(made.text)}`
+  if (made.made === 'no') return made.why === 'no-answer' ? NO_ANSWER(it.client) : `Could not create the ${card ? 'Start card' : 'chip'}: ${short(made.text)}`
   const ready = card ? cardReady(it.client) : `A chip for ${it.client} is ready here: click Start on it.`
   if (!made.moved) return ready
   // its thread's name: as the pass saw it, as the chip was minted with, else as the app says it now
@@ -3749,6 +3544,15 @@ async function startThread($: EngineInterface, it: QueueItem, pass: Pass, typed:
 }
 
 /**
+ * (0.5.24) Whether what this session mints for a client is the app's Start card (start_session's proposal,
+ * `own_initiative`) rather than its chip (spawn_task): the app gives it start_session and not spawn_task, as `mintChip`
+ * decides it.
+ */
+function cardsHere(tools: { start: boolean; spawn: boolean }): boolean {
+  return !tools.spawn && tools.start
+}
+
+/**
  * What a person's Start made in this thread (`startCard`): nothing, as the client's chip or card carrying this is
  * here already (`here`); a new one (`new`), with the chip it moved here from another thread (`moved`, the last of
  * them); or none, and why (`no`).
@@ -3757,8 +3561,8 @@ type StartCard = { made: 'here' } | { made: 'new'; moved?: Chip | undefined } | 
 
 /**
  * The client's chip, or where the app has only start_session its Start card (`mintChip`), in this thread, for the
- * person's press: Start (`startThread`) and, (0.5.16) where the app wants the person's own words, Start all
- * (`startOneOfAll`). The kickoff is asked for only once the guard below lets the card be made.
+ * person's press: Start (`startThread`) and Start all (`startOneOfAll`; 0.5.16 where the app wanted the person's own
+ * words, 0.5.24 always). The kickoff is asked for only once the guard below lets the card be made.
  * ⛔ One chip per client in a thread. The button, with a chip for this client carrying this already in this
  *    thread (or one on its way): nothing is minted, unless `typed` (the person's own /mm start, which always mints).
  */
@@ -3841,8 +3645,8 @@ async function startAllOffer($: EngineInterface): Promise<number> {
 let startingAll = false
 
 /**
- * (0.5.12) A start claimed for a client (`mm.starting`, a lease per client and signature, as the thread started by itself
- * claims it): false when another press or thread holds an unexpired claim for the client, whatever it carries. Over the
+ * (0.5.12) A Start all's card claimed for a client (`mm.starting`, a lease per client and signature; 0.5.7 to 0.5.23 a
+ * thread started by itself claimed it too): false when another press or thread holds an unexpired claim for the client, whatever it carries. Over the
  * store's fresh copy.
  */
 async function claimStart($: EngineInterface, pid: string, key: string, me: string, now: number): Promise<boolean> {
@@ -3864,56 +3668,43 @@ async function releaseStart($: EngineInterface, key: string, me: string): Promis
 }
 
 /**
- * (0.5.12) What one client's turn in a Start all came to. (0.5.16) `card`: its Start card is here for the person to click.
- * `cardsOnly`: the app answered that it starts a thread only on the person's own words here, whatever became of the card.
+ * (0.5.12) What one client's turn in a Start all came to. (0.5.16) `card`: its Start card is here for the person to click
+ * (`here`: it was here already, and no card was made). (0.5.24) Never a thread started: the card is all a Start all makes.
  */
-type StartAllOne = { done: 'started' } | { done: 'card' } | { done: 'failed'; why: string; cardsOnly?: true } | { done: 'skipped'; why: string }
+type StartAllOne = { done: 'card'; here: boolean } | { done: 'failed'; why: string } | { done: 'skipped'; why: string }
 
 /**
- * (0.5.12) One client's thread, in a Start all: ⛔ checked again just before it runs, and skipped if the client has a
- * live linked thread now (a thread linked meanwhile, by a person, a marker or a sync; one the app says is gone does not
- * count), a press on its own row is in flight, or another press or thread is starting it (`mm.starting`). Then claimed
- * and held as a row's press holds it (its row's Start does nothing meanwhile), started as a single Start starts a
- * thread (`startNow`, user_asked, the person's press) with its kickoff in the words that never take the package
- * (`startAllKickoff`), and recorded and linked as a single Start does (`adoptStarted`: what the thread has, the link, the
- * claim and the stamp; the sync after it pins and names it). Logged either way.
- * (0.5.16, Rob 10-19) Where the app wants the person's own words for the start (`needsCard`), or once it has said so
- * earlier in this press (`cardsOnly`: start_session is not asked again), the client's Start card is made here instead,
- * with the same kickoff, under a single Start's guards (`startCard`: one per client in a thread, moved here from
- * another thread). The app's sentence goes nowhere the person reads.
+ * (0.5.12) One client's Start card, in a Start all: ⛔ checked again just before it is made, and skipped if the client
+ * has a live linked thread now (a thread linked meanwhile, by a person, a marker or a sync; one the app says is gone
+ * does not count), a press on its own row is in flight, or another press is making its card (`mm.starting`). Then
+ * claimed and held as a row's press holds it (its row's Start does nothing meanwhile), and made here under a single
+ * Start's guards (`startCard`: one per client in a thread, moved here from another thread), its kickoff in the words
+ * that never take the package (`startAllKickoff`). Logged either way. The app's sentence goes nowhere the person reads.
+ * (0.5.24, Rob 10-21) The app is never asked to start the thread itself (`user_asked`): see `startThread`.
  */
-async function startOneOfAll($: EngineInterface, it: QueueItem, pass: Pass, me: string, cardsOnly: boolean): Promise<StartAllOne> {
+async function startOneOfAll($: EngineInterface, it: QueueItem, pass: Pass, me: string): Promise<StartAllOne> {
   const pid = it.projectId
   if (pressing.has(pid)) return { done: 'skipped', why: 'its own Start is running' }
   const linked = (await storeGet<Record<string, string>>($, 'mm.links', {}))[pid]
   if (linked !== undefined && (await lookup($, linked)) !== 'gone') return { done: 'skipped', why: 'it has a thread now' }
   const now = await $.clock.now()
   const key = `${pid}\n${sigHash(signatureOf(it))}`
-  if (!(await claimStart($, pid, key, me, now))) return { done: 'skipped', why: 'another thread is starting it' }
+  if (!(await claimStart($, pid, key, me, now))) return { done: 'skipped', why: 'another thread is making its card' }
   const hold = ++pressCount
   pressing.set(pid, hold)
   try {
     const client = cleanName(it.client)
     let prompt: string | undefined
     const kickoff = async (): Promise<string> => (prompt ??= startAllKickoff(it, await replaced($, it, pass), now))
-    if (!cardsOnly) {
-      const title = startTitle(it)
-      const answer = await startNow($, title, await kickoff())
-      const card = !answer.ok && answer.why === 'needs-card'
-      await logAuto($, `${answer.ok ? 'started' : 'not started'} ${client} (${pid}) sig ${sigHash(signatureOf(it))}: Start all, pressed${answer.ok ? '' : card ? '; the app starts one only on the person\'s own words here: a Start card instead' : `; ${short(answer.text, 160)}`}`)
-      if (answer.ok) {
-        await adoptStarted($, it, answer.sid, await kickoff(), me, now)
-        return { done: 'started' }
-      }
-      if (!card) return { done: 'failed', why: short(answer.text).replace(/\.+$/, '') }
-    }
-    const made = await startCard($, it, me, now, kickoff, false)
+    let made = await startCard($, it, me, now, kickoff, false)
+    // the tool the app no longer (or does not yet) gives this session: the other one (`sawTools`)
+    if (made.made === 'no' && made.why === 'no-tool') made = await startCard($, it, me, now, kickoff, false)
     if (made.made === 'no') {
       await logAuto($, `no card for ${client} (${pid}) sig ${sigHash(signatureOf(it))}: Start all, pressed; ${short(made.text, 160)}`)
-      return { done: 'failed', why: needsCard(made.text) ? 'its card was not made' : short(made.text).replace(/\.+$/, ''), cardsOnly: true }
+      return { done: 'failed', why: needsCard(made.text) ? 'its card was not made' : short(made.text).replace(/\.+$/, '') }
     }
-    if (cardsOnly) await logAuto($, `card for ${client} (${pid}) sig ${sigHash(signatureOf(it))}: Start all, pressed${made.made === 'here' ? '; one was here already' : ''}`)
-    return { done: 'card' }
+    await logAuto($, `card for ${client} (${pid}) sig ${sigHash(signatureOf(it))}: Start all, pressed${made.made === 'here' ? '; one was here already' : ''}`)
+    return { done: 'card', here: made.made === 'here' }
   } finally {
     if (pressing.get(pid) === hold) pressing.delete(pid)
     await releaseStart($, key, me)
@@ -3922,15 +3713,14 @@ async function startOneOfAll($: EngineInterface, it: QueueItem, pass: Pass, me: 
 
 /**
  * (0.5.12, Rob 10-15: "no clicks at all") Start all: the person's one press (the band's Start missing threads, 0.5.14, or the pane's)
- * or their typed /mm start all opens a thread for each client that needs one (`needingThreads`), one after another,
- * never two at once, at most START_ALL_MAX for a press (the rest wait for a second press; the band says how many),
- * each one checked again just before it runs (`startOneOfAll`). One line says what it came to (`startAllSummary`), in
- * the band of every thread and above the list. ⛔ Only from the person's press or command: never from a timer, a sync,
- * the tool or another session. Nothing it does starts anything by itself later.
- * (0.5.16, Rob 10-19: "This message is getting really long.") The first time in a press the app answers that it starts
- * a thread only on the person's own words here, start_session is asked no more in that press: that client and every
- * one after it (up to START_ALL_MAX in all) get their Start card here, and the line counts them. A card starts nothing
- * until the person clicks Start on it.
+ * or their typed /mm start all puts up the Start card of each client that needs a thread (`needingThreads`), one after
+ * another, never two at once, at most START_ALL_MAX new cards for a press (the rest wait for a second press; the band
+ * says how many; a card already here is counted in the line and not against that), each one checked again just before
+ * it is made (`startOneOfAll`). One line says what it came to
+ * (`startAllSummary`), in the band of every thread and above the list. ⛔ Only from the person's press or command: never
+ * from a timer, a sync, the tool or another session. A card starts nothing until the person clicks Start on it.
+ * (0.5.24, Rob 10-21) Cards only: the app is never asked to start a thread itself (0.5.12 to 0.5.23 asked it first, and
+ * from 0.5.16 fell back to the cards when it refused).
  */
 async function startAll($: EngineInterface): Promise<string> {
   if (startingAll) return 'Start all is already running.'
@@ -3944,27 +3734,23 @@ async function startAll($: EngineInterface): Promise<string> {
     const want = needingThreads(last, await storeGet<Record<string, string>>($, 'mm.links', {}), at)
     if (!want.length) return startAllSummary([], [], [], 0)
     const pass: Pass = { last, live: new Map(), pairs: {}, listed: true, unseen: new Set(), stored: true }
-    const started: string[] = []
     const failed: Array<{ client: string; why: string }> = []
     const skipped: Array<{ client: string; why: string }> = []
     const cards: string[] = []
-    /** (0.5.16) The app has said, in this press, that it starts a thread only on the person's own words here. */
-    let cardsOnly = false
+    /** (0.5.24) The cards this press made (each one a prompt for the person to approve, Claude.app 3.1623): START_ALL_MAX at most. */
+    let made = 0
     let reached = 0
-    // one after another: each start is answered before the next is asked for
+    // one after another: each card is answered before the next is asked for
     for (const it of want) {
-      if (started.length + failed.length + cards.length >= START_ALL_MAX) break
+      if (failed.length + made >= START_ALL_MAX) break
       reached++
       const client = cleanName(it.client)
-      const one = await startOneOfAll($, it, pass, me, cardsOnly)
-      if (one.done === 'started') started.push(client)
-      else if (one.done === 'card') {
+      const one = await startOneOfAll($, it, pass, me)
+      if (one.done === 'card') {
         cards.push(client)
-        cardsOnly = true
-      } else if (one.done === 'failed') {
-        failed.push({ client, why: one.why })
-        if (one.cardsOnly) cardsOnly = true
-      } else skipped.push({ client, why: one.why })
+        if (!one.here) made++
+      } else if (one.done === 'failed') failed.push({ client, why: one.why })
+      else skipped.push({ client, why: one.why })
     }
     const left = want.length - reached
     await patchStore<{ at?: number }>($, 'mm.startAllLeft', {}, fresh => {
@@ -3972,7 +3758,7 @@ async function startAll($: EngineInterface): Promise<string> {
       else if (fresh.at === undefined) return false
       else delete fresh.at
     }).catch(() => {})
-    const line = startAllSummary(started, failed, skipped, left, cards.length)
+    const line = startAllSummary([], failed, skipped, left, cards.length)
     await bandNote($, line, `startall\n${me}\n${at}`)
     return line
   } finally {
@@ -3985,7 +3771,7 @@ async function pressStartAll($: EngineInterface): Promise<void> {
   if (startingAll) return
   let said: string
   try {
-    await say($, 'Starting the threads that are missing…', false).catch(() => {})
+    await say($, 'Making the Start cards for the missing threads…', false).catch(() => {})
     said = await startAll($)
   } catch (err) {
     said = errorText(err)
@@ -4016,7 +3802,7 @@ type Need = {
   kind: 'nothread' | 'here'
   /**
    * (0.5.23) For a client with no linked thread: its row's reason, as the sync gave it (`no thread yet`, or `last thread
-   * is from Oct 2` for an old thread the person unlinked): what a thread started by itself logs as its reason.
+   * is from Oct 2` for an old thread the person unlinked): what its card, put up by itself, logs as its reason (0.5.24).
    */
   why?: string
 }
@@ -4133,7 +3919,6 @@ async function chipsTick($: EngineInterface, atTurn = false): Promise<void> {
   if (!needs || (!atTurn && now < (mintPause.get(id)?.until ?? 0))) return
   const chips = await ownChipsWritten($, me, now)
   const tools = await sessionTools($)
-  const auto = await autoStartOn($)
   /** (C3) this thread's own name, as the band gives it, asked for once and only when a no-thread client's chip is to be minted here */
   let place: string | undefined
   for (const n of needs) {
@@ -4143,12 +3928,12 @@ async function chipsTick($: EngineInterface, atTurn = false): Promise<void> {
     // (0.5.7) where the app gives only start_session, a client's kickoff run in its own thread has no card: the pane's
     // Update does it there
     if (n.kind === 'here' && !tools.spawn) continue
-    // (0.5.7, Rob 10-14) a new thread, for a client with none: started by itself, within the hourly and daily caps;
-    // past them, or where the app refused it, the card below
-    if (n.kind !== 'here' && tools.start && auto) {
-      const verdict = await autoVerdict($, n, me, now)
-      if (verdict === 'start' || verdict === 'skip') continue
-      if (verdict === 'capped') await bandNote($, `${cleanName(n.it.client)}: started threads paused for this hour; its card is ready to start.`, `capped\n${n.it.projectId}\n${sigHash(n.signature)}`)
+    // (0.5.24, Rob 10-21: "automatic starts put up the Start card directly") a client with no thread, where the app
+    // makes Start cards: its card, claimed first and made once the claim has held (`claimCard`), and never a thread
+    // started by itself (0.5.7 to 0.5.23 asked the app to start one first, user_asked)
+    if (n.kind === 'nothread' && cardsHere(tools)) {
+      await claimCard($, n, me, now)
+      continue
     }
     if (n.place === undefined && place === undefined) place = await ownPlace($)
     const made = await mintChip($, { ...n, auto: true, me, now, place: n.place ?? place })
@@ -4156,6 +3941,65 @@ async function chipsTick($: EngineInterface, atTurn = false): Promise<void> {
     mintPause.set(id, { until: now + MINT_PAUSE_MS, atTurn: made.why === 'no-answer' })
     await noteFailure($, 'auto chip', made.why === 'no-answer' ? `the app did not answer in ${APP_WAIT_MS / 1000} s` : made.text)
     return
+  }
+}
+
+/** (0.5.24) The no-thread clients whose Start card this session has claimed and not yet made: a second tick does not claim one again. */
+const cardInFlight = new Set<string>()
+
+/**
+ * (0.5.24) A client with no thread, where the app makes Start cards (start_session's proposal): its card is claimed
+ * first (`mm.starting`, the lease per client and signature that 0.5.7's thread started by itself held, and that a Start
+ * all holds), and made once the claim has held (`autoCard`). Threads that tick together, each taking itself for the
+ * holder of the client's card (`noThreadHolder`), never put up two: Claude.app 3.1623 asks the person to approve every
+ * card the bridge makes, so a second card is a second prompt.
+ */
+async function claimCard($: EngineInterface, n: Need, me: string, now: number): Promise<void> {
+  const key = `${n.it.projectId}\n${sigHash(n.signature)}`
+  if (cardInFlight.has(key)) return
+  if (!(await claimStart($, n.it.projectId, key, me, now))) return
+  cardInFlight.add(key)
+  $.clock.after(settleMs(`${me}#${key}`), () => void autoCard($, n, me, key).finally(() => cardInFlight.delete(key)))
+}
+
+/**
+ * (0.5.24) The client's Start card, made by itself once this session's claim has held (another session's write since
+ * means that session makes it), and only while the client still needs it from this thread and no running thread has
+ * its card up already (a thread the person moved away from withdraws its own on its next pass, and this one makes it
+ * on the tick after). Logged either way (`logAuto`). The claim is let go once the app has answered; while the app has
+ * not (it is asking the person to approve the card) it runs out by itself (STARTING_MS), so that no other thread puts
+ * up a second card meanwhile.
+ */
+async function autoCard($: EngineInterface, n: Need, me: string, key: string): Promise<void> {
+  let release = true
+  try {
+    const claimed = (await storeGet<Record<string, { owner?: string }>>($, 'mm.starting', {}))[key]
+    if (claimed?.owner !== me) {
+      release = false
+      return
+    }
+    if (await $.store.get('mm.paused')) return
+    const now = await $.clock.now()
+    // checked again, now that the claim has held
+    const need = (await storedNeeds($, now))?.find(x => x.kind === 'nothread' && x.it.projectId === n.it.projectId && x.signature === n.signature)
+    if (!need) return
+    const mk = `${need.it.projectId}\n${me}\n${need.signature}`
+    if (minting.has(mk) || mintedHere.has(mk)) return
+    const seen = await storeGet<Seen>($, 'mm.seen', {})
+    const running = (sid: string): boolean => sid === me || now - (Number(seen[sid]?.tick) || -Infinity) <= ALIVE_MS
+    const chips = await ownChipsWritten($, me, now)
+    if (chips.some(c => c.projectId === need.it.projectId && !c.superseded && c.signature === need.signature && running(c.threadId))) return
+    const made = await mintChip($, { ...need, auto: true, me, now, place: need.place ?? (await ownPlace($)) })
+    const what = `${cleanName(need.it.client)} (${need.it.projectId}) sig ${sigHash(need.signature)}: ${short(need.why || 'no thread yet', 60)}, by itself`
+    await logAuto($, made.made ? `card for ${what}` : `no card for ${what}; ${made.why === 'no-answer' ? `the app did not answer in ${APP_WAIT_MS / 1000} seconds` : short(made.text, 160)}`)
+    if (made.made) return
+    if (made.why === 'no-answer') release = false
+    mintPause.set(await instanceId($), { until: now + MINT_PAUSE_MS, atTurn: made.why === 'no-answer' })
+    await noteFailure($, 'auto card', made.why === 'no-answer' ? `the app did not answer in ${APP_WAIT_MS / 1000} s` : made.text)
+  } catch (err) {
+    await noteFailure($, 'auto card', err)
+  } finally {
+    if (release) await releaseStart($, key, me)
   }
 }
 
@@ -4981,7 +4825,7 @@ async function press($: EngineInterface, verb: Verb, row: Row): Promise<void> {
   let answer: Answer
   try {
     // R10: a press that makes a chip says so before it asks the app for anything
-    if (verb === 'start') await say($, (await sessionTools($)).start ? STARTING_THREAD(row.client) : MAKING_CHIP(row.client), false).catch(() => {})
+    if (verb === 'start') await say($, cardsHere(await sessionTools($)) ? MAKING_CARD(row.client) : MAKING_CHIP(row.client), false).catch(() => {})
     answer = await act($, verb, row)
   } catch (err) {
     answer = { said: errorText(err) }
@@ -5046,13 +4890,13 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
   }
   // (0.5.7) whether threads start by themselves on this computer (on unless turned off); (0.5.11) and whether a
   // client's thread is updated by itself: the same switch. (0.5.23) A linked thread older than 7 business days is
-  // updated, not replaced: only a client with no thread gets one started by itself.
+  // updated, not replaced. (0.5.24) No thread starts by itself, on or off: a client with no thread gets its Start card.
   if (verb === 'auto') {
-    if (arg !== 'on' && arg !== 'off') return `Auto-start and auto-update are ${(await autoStartOn($)) ? 'on' : 'off'} on this computer. Type /mm auto off or /mm auto on.`
+    if (arg !== 'on' && arg !== 'off') return `Auto-update is ${(await autoStartOn($)) ? 'on' : 'off'} on this computer. Type /mm auto off or /mm auto on.`
     await $.store.set('mm.autostart', { on: arg === 'on' })
     return arg === 'on'
-      ? 'Auto-start and auto-update are on: a client with no thread gets one started by itself, and its thread is updated by itself when something new arrives, an old thread too.'
-      : 'Auto-start and auto-update are off: a client\'s new thread waits as a card for you to start, and its thread waits for you to press Update.'
+      ? 'Auto-update is on: a client\'s thread is updated by itself when something new arrives, an old thread too. A client with no thread gets its Start card for you to start.'
+      : 'Auto-update is off: a client\'s thread waits for you to press Update. A client with no thread still gets its Start card for you to start.'
   }
   // (0.5.19, Rob 10-20) whether Remote Control follows the pin on this computer (off unless turned on)
   if (verb === 'rc') {
@@ -5076,7 +4920,7 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       `pins you took off: ${off}`,
       `poller: ${lease?.owner === (await instanceId($)) ? 'this thread' : 'another thread'}`,
       `paused: ${Boolean(await $.store.get('mm.paused'))}`,
-      `auto-start and auto-update: ${(await autoStartOn($)) ? 'on' : 'off'}`,
+      `auto-update: ${(await autoStartOn($)) ? 'on' : 'off'}`,
       `remote control follows the pin: ${(await rcPinOn($)) ? 'on' : 'off'}`,
       `last error: ${last?.error ?? 'none'}`,
     ].join('\n')
