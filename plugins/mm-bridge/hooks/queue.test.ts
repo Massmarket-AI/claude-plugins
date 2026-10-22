@@ -4,7 +4,7 @@ import { businessMsBetween, subtractBusinessMs } from './business-time'
 import {
   LIST_FLOOR_MS, NOBODY, WINDOW_AHEAD_MS, buildLists, buildQueue, cleanName, cleanText, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockLead, clockText, draftsLine, dueLine, holdBanner,
   CHECK_WAIT_MS, checkingTitle, fastState, internalProjects, whenText, holdSentence, holderName, isClosingRoute, isDraftDone, isUuid, mailLookbackHours, needsLine, noteText, pinsNow, shortName, stillOpenTitle, threadTitle, titleFor, titleNames, withTeammate,
-  dateText, peopleRows, routeChoices, seesPeople, shownText, sourceLink, waitedText,
+  ROUTE_PAGE, dateText, peopleRows, routeChoices, routePage, routedText, seesPeople, shownText, sourceLink, waitedText,
 } from './queue'
 import type { Feed, QueueItem } from './queue'
 import { handoverText, kickoffText, waitingText } from './threads'
@@ -1667,7 +1667,7 @@ describe('New people: who wrote to us with no project matched (founder and PMs o
         known: 'We know them: no history found', link: 'https://mail.google.com/mail/u/support%40example.com/#all/18f0000000000001',
       })
       expect(rows[0]?.title).toBe('Marcus Lee · via HighLevel Directory')
-      // a Directory lead is marked (no Route for it); the others are not
+      // a Directory lead is marked (Mark handled and Not client mail only); the others are not
       expect(rows.map(r => r.directory)).toEqual([true, undefined, undefined])
       expect(rows[0]?.when).toBe('Received Wed Oct 21, 2:05 PM ET · under 1 business day waiting')
       expect(rows[1]?.known).toBe('We know them: 2 recorded calls (Feb 2026) · HighLevel contact · 3 past emails with this domain')
@@ -1717,6 +1717,43 @@ describe('New people: who wrote to us with no project matched (founder and PMs o
       { projectId: P2, name: 'Bolt Staffing (Sam)' },
     ])
     expect(routeChoices(feed({ role: 'builder', projects }))).toEqual([])
+  })
+
+  test('Route offers the feed\'s route_projects when it gives them (uncapped, in place of projects), projects only when the key is absent', async () => {
+    const route_projects = Array.from({ length: 150 }, (_, i) => ({ id: `${String(i + 1).padStart(8, '0')}-0000-4000-8000-${String(i + 1).padStart(12, '0')}`, name: `Client ${String(150 - i).padStart(3, '0')}` }))
+    const choices = routeChoices(feed({ role: 'pm', projects, route_projects: [...route_projects, { id: 'nope', name: 'Broken' }, { id: route_projects[0]!.id, name: 'Repeat' }] }))
+    expect(choices).toHaveLength(150)
+    expect(choices[0]).toEqual({ projectId: route_projects[149]!.id, name: 'Client 001' })
+    expect(choices[149]).toEqual({ projectId: route_projects[0]!.id, name: 'Client 150' })
+    expect(choices.some(c => c.projectId === P1 || c.projectId === P2)).toBe(false)
+    // present and empty: nothing to route to (never projects[])
+    expect(routeChoices(feed({ role: 'founder', projects, route_projects: [] }))).toEqual([])
+    expect(routeChoices(feed({ role: 'builder', route_projects }))).toEqual([])
+  })
+
+  test('the Route picker pages: at most ROUTE_PAGE projects a page, every project on exactly one, a page past the ends is the nearest', async () => {
+    expect(ROUTE_PAGE).toBe(50)
+    const list = Array.from({ length: 151 }, (_, i) => ({ projectId: `${String(i + 1).padStart(8, '0')}-0000-4000-8000-${String(i + 1).padStart(12, '0')}`, name: `Client ${String(i + 1).padStart(3, '0')}` }))
+    const all = [0, 1, 2, 3].map(n => routePage(list, n))
+    expect(all.map(p => [p.page, p.pages, p.from, p.items.length, p.prev?.length ?? null, p.next?.length ?? null])).toEqual([
+      [0, 4, 0, 50, null, 50],
+      [1, 4, 50, 50, 50, 50],
+      [2, 4, 100, 50, 50, 1],
+      [3, 4, 150, 1, 50, null],
+    ])
+    expect(all.flatMap(p => p.items)).toEqual(list)
+    expect(routePage(list, 9).page).toBe(3)
+    expect(routePage(list, -2).page).toBe(0)
+    expect(routePage(list, 1.5).page).toBe(0)
+    expect(routePage([], 0)).toEqual({ page: 0, pages: 1, from: 0, items: [], prev: null, next: null })
+  })
+
+  test('the notice after a Route says how many emails OW filed', async () => {
+    expect(routedText('Acme Roofing Pat', 0)).toBe('Routed to Acme Roofing Pat. No emails were filed, they may already be on it.')
+    expect(routedText('Acme Roofing Pat', 1)).toBe('Routed to Acme Roofing Pat. 1 email filed.')
+    expect(routedText('Acme Roofing Pat', 4)).toBe('Routed to Acme Roofing Pat. 4 emails filed.')
+    // an OW whose answer gives no count (or not a whole number): the project alone
+    for (const n of [undefined, null, '2', -1, 1.5]) expect(routedText('Acme Roofing Pat', n)).toBe('Routed to Acme Roofing Pat.')
   })
 
   test('waiting is whole business days completed: a weekend adds nothing', async () => {

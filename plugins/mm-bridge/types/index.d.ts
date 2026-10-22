@@ -102,8 +102,9 @@ export type MmPerson = {
   /** The Gmail or Directory link (https only), or ''. */
   link: string
   /**
-   * A HighLevel Directory lead (`source` `hl_directory`): it has no email to route, so OW refuses Route for it (409).
-   * Its row offers Start project and Not client mail only. Absent on any other row.
+   * A HighLevel Directory lead (`source` `hl_directory`): it has no email to route or start a project from, so OW
+   * refuses `route` and `bootstrap` for it. Its row offers Mark handled (`handled`) and Not client mail only. Absent on
+   * any other row.
    */
   directory?: true
 }
@@ -113,10 +114,10 @@ export type MmProject = { projectId: string; name: string }
 
 /**
  * (New people) What this thread's pane shows of the person's own presses on `New people`: whose project picker is
- * open and what is picked in it, which rows have a press in flight (since when), and what OW answered a press that
+ * open, which of its pages it shows and what is picked in it, which rows have a press in flight (since when), and what OW answered a press that
  * did not go through, by alert id.
  */
-export type MmPeople = { open?: string; pick?: string; busy?: Record<string, number>; errors?: Record<string, string> }
+export type MmPeople = { open?: string; pick?: string; page?: number; busy?: Record<string, number>; errors?: Record<string, string> }
 
 /** Which of the two groups under the list the person has opened. */
 export type MmFolds = { teammate?: boolean; older?: boolean; checking?: boolean }

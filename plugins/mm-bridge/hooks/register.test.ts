@@ -8074,8 +8074,15 @@ describe('New people: the founder and a PM route, start or dismiss someone no pr
     [`mm-person:not_client:${id}`, 'Not client mail'],
   ]
   const peopleButtons = async (ui: Drawing) => (await buttons(ui)).filter(([key]) => key.startsWith('mm-person:'))
-  /** A HighLevel Directory lead's row: no Route (OW answers 409 for it), Start project and Not client mail only. */
-  const directoryButtons = (id: string) => personButtons(id).slice(1)
+  /** A HighLevel Directory lead's row: Mark handled and Not client mail only (OW refuses route and bootstrap for one). */
+  const directoryButtons = (id: string) => [
+    [`mm-person:handled:${id}`, 'Mark handled'],
+    [`mm-person:not_client:${id}`, 'Not client mail'],
+  ]
+  /** OW's 200 to a Route, filing `n` of the person's emails. */
+  const routed = (n: number) => (body: Record<string, unknown>) => ({ status: 200, body: { id: body.alert_id, status: 'routed', requeued_count: n } })
+  /** `n` projects OW's resolve route accepts, as the feed's `route_projects` gives them: `Client 001` ... */
+  const routeProjects = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `${String(i + 1).padStart(8, '0')}-0000-4000-8000-${String(i + 1).padStart(12, '0')}`, name: `Client ${String(i + 1).padStart(3, '0')}` }))
 
   test('the founder sees New people above the list, newest first, each with Source and three buttons; the list under it is as before', async ($, on) => {
     const w = world(on, { feed: founderFeed() })
@@ -8179,9 +8186,9 @@ describe('New people: the founder and a PM route, start or dismiss someone no pr
     const w = world(on, { feed: founderFeed() })
     await mm($, '')
     let ui = await pane($)
-    await ui.press({ key: `mm-person:bootstrap:${MARCUS}` })
-    expect(w.resolves.map(r => r.body)).toEqual([{ alert_id: MARCUS, action: 'bootstrap' }])
-    expect(await lines(ui)).toContain('Project start requested for Marcus Lee.')
+    await ui.press({ key: `mm-person:handled:${MARCUS}` })
+    expect(w.resolves.map(r => r.body)).toEqual([{ alert_id: MARCUS, action: 'handled' }])
+    expect(await lines(ui)).toContain('Marcus Lee marked handled.')
     await ui.unmount()
     await w.clock.advance(29 * 60_000)
     await mm($, '')
@@ -8195,8 +8202,8 @@ describe('New people: the founder and a PM route, start or dismiss someone no pr
     await ui.unmount()
   })
 
-  test('Route to project: the picker, then Route to <project> sends that project; Cancel closes it with no call', async ($, on) => {
-    const w = world(on, { feed: founderFeed() })
+  test('Route to project: the picker (from projects[], the feed giving no route_projects), then Route to <project> sends that project; Cancel closes it with no call', async ($, on) => {
+    const w = world(on, { feed: founderFeed(), resolve: routed(2) })
     await mm($, '')
     const ui = await pane($)
     await ui.press({ key: `mm-person:route:${PRIYA}` })
@@ -8223,7 +8230,8 @@ describe('New people: the founder and a PM route, start or dismiss someone no pr
     expect(w.resolves).toEqual([])
     await ui.press({ key: `mm-person:send:${PRIYA}` })
     expect(w.resolves.map(r => r.body)).toEqual([{ alert_id: PRIYA, action: 'route', project_id: BOLT }])
-    expect(await lines(ui)).toContain('Priya Raman routed to Bolt Staffing (Sam).')
+    expect(await lines(ui)).toContain('Routed to Bolt Staffing (Sam). 2 emails filed.')
+    expect(w.toasts).toContain('Routed to Bolt Staffing (Sam). 2 emails filed.')
     expect((await lines(ui)).some(l => l.startsWith('• Priya Raman'))).toBe(false)
     expect(await ui.find({ type: 'Select' })).toBeUndefined()
     await ui.unmount()
@@ -8277,13 +8285,13 @@ describe('New people: the founder and a PM route, start or dismiss someone no pr
     await ui.unmount()
   })
 
-  test('a HighLevel Directory lead shows exactly Start project and Not client mail on every surface, and is never routed', async ($, on) => {
+  test('a HighLevel Directory lead shows exactly Mark handled and Not client mail on every surface: never routed or started', async ($, on) => {
     const w = world(on, { feed: founderFeed({ person_alerts: [ALERTS[1]!] }) })
     await mm($, '')
     for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
       const ui = await $.ui.mount({ plugin: 'mm-bridge', surface, component: 'Pane', requestId: 'mm-queue', props: PANE })
       expect(await peopleButtons(ui)).toEqual([
-        [`mm-person:bootstrap:${MARCUS}`, 'Start project'],
+        [`mm-person:handled:${MARCUS}`, 'Mark handled'],
         [`mm-person:not_client:${MARCUS}`, 'Not client mail'],
       ])
       expect(await ui.findAll({ type: 'Select' })).toEqual([])
@@ -8292,11 +8300,109 @@ describe('New people: the founder and a PM route, start or dismiss someone no pr
     }
     // the stored row says so
     expect(((w.stored['mm.last'] as { people?: Array<{ id: string; directory?: boolean }> }).people ?? []).map(p => [p.id, p.directory])).toEqual([[MARCUS, true]])
-    // its two buttons work
+    // Mark handled sends `handled`, and the row leaves
     const ui = await pane($)
-    await ui.press({ key: `mm-person:bootstrap:${MARCUS}` })
-    expect(w.resolves.map(r => r.body)).toEqual([{ alert_id: MARCUS, action: 'bootstrap' }])
+    await ui.press({ key: `mm-person:handled:${MARCUS}` })
+    expect(w.resolves.map(r => r.body)).toEqual([{ alert_id: MARCUS, action: 'handled' }])
+    expect(await lines(ui)).toContain('Marcus Lee marked handled.')
     expect((await lines(ui)).some(l => l.startsWith('New people'))).toBe(false)
+    await ui.unmount()
+  })
+
+  test('Mark handled is a Directory lead\'s alone: an email\'s row has Route, Start project and Not client mail, never Mark handled', async ($, on) => {
+    world(on, { feed: founderFeed() })
+    await mm($, '')
+    const ui = await pane($)
+    const keys = (await peopleButtons(ui)).map(([k]) => k)
+    expect(keys.filter(k => k.startsWith('mm-person:handled:'))).toEqual([`mm-person:handled:${MARCUS}`])
+    expect(keys.filter(k => k.startsWith('mm-person:bootstrap:'))).toEqual([`mm-person:bootstrap:${PRIYA}`, `mm-person:bootstrap:${DANA}`])
+    await ui.unmount()
+  })
+
+  test('Route\'s notice says how many emails OW filed: none (they may already be on it), one, or several', async ($, on) => {
+    let filed = 0
+    const w = world(on, { feed: founderFeed(), resolve: body => routed(filed)(body) })
+    await mm($, '')
+    const ui = await pane($)
+    const route = async (id: string, projectId: string) => {
+      await ui.press({ key: `mm-person:route:${id}` })
+      await ui.select({ key: `mm-person:pick:${id}`, value: projectId })
+      await ui.press({ key: `mm-person:send:${id}` })
+    }
+    await route(PRIYA, ACME)
+    expect(await lines(ui)).toContain('Routed to Acme Roofing Pat. No emails were filed, they may already be on it.')
+    filed = 1
+    await route(DANA, BOLT)
+    expect(await lines(ui)).toContain('Routed to Bolt Staffing (Sam). 1 email filed.')
+    expect(w.resolves.map(r => r.body)).toEqual([
+      { alert_id: PRIYA, action: 'route', project_id: ACME },
+      { alert_id: DANA, action: 'route', project_id: BOLT },
+    ])
+    await ui.unmount()
+  })
+
+  test('the picker is the feed\'s route_projects when it gives them, all 150 selectable, a page of 50 at a time (a Select holds 64 options at most)', async ($, on) => {
+    const many = routeProjects(150)
+    const w = world(on, { feed: founderFeed({ route_projects: [...many].reverse() }), resolve: routed(3) })
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: `mm-person:route:${PRIYA}` })
+    const picker = async () => (await ui.find({ type: 'Select' }))?.props as { label: string; options: Array<{ value: string; label: string }>; value: string }
+    const send = async () => (await peopleButtons(ui)).filter(([k]) => k === `mm-person:send:${PRIYA}`)
+    // three pages, each well under the engine's 64 options, every project on one of them, by name, and none of
+    // projects[] (Acme and Bolt are not route projects here)
+    const seen: string[] = []
+    const pages = [
+      { label: 'Project (1 to 50 of 150)', prev: null, next: 'More: Client 051 to Client 100 ▸', items: many.slice(0, 50) },
+      { label: 'Project (51 to 100 of 150)', prev: '◂ Earlier: Client 001 to Client 050', next: 'More: Client 101 to Client 150 ▸', items: many.slice(50, 100) },
+      { label: 'Project (101 to 150 of 150)', prev: '◂ Earlier: Client 051 to Client 100', next: null, items: many.slice(100) },
+    ]
+    for (const [i, page] of pages.entries()) {
+      const shown = await picker()
+      expect(shown.label).toBe(page.label)
+      expect(shown.options).toEqual([
+        { value: 'none', label: 'Choose a project' },
+        ...(page.prev ? [{ value: 'page-prev', label: page.prev }] : []),
+        ...page.items.map(p => ({ value: p.id, label: p.name })),
+        ...(page.next ? [{ value: 'page-next', label: page.next }] : []),
+      ])
+      expect(shown.options.length).toBeLessThanOrEqual(64)
+      expect(shown.options.some(o => o.value === ACME || o.value === BOLT)).toBe(false)
+      // each project on the page can be picked
+      for (const p of page.items) {
+        await ui.select({ key: `mm-person:pick:${PRIYA}`, value: p.id })
+        expect(await send()).toEqual([[`mm-person:send:${PRIYA}`, `Route to ${p.name}`]])
+        expect((await picker()).value).toBe(p.id)
+        seen.push(p.id)
+      }
+      // on to the next page: what was picked goes
+      if (i < pages.length - 1) {
+        await ui.select({ key: `mm-person:pick:${PRIYA}`, value: 'page-next' })
+        expect(await send()).toEqual([])
+      }
+    }
+    expect(seen).toEqual(many.map(p => p.id))
+    // and back
+    await ui.select({ key: `mm-person:pick:${PRIYA}`, value: 'page-prev' })
+    expect((await picker()).label).toBe('Project (51 to 100 of 150)')
+    await ui.select({ key: `mm-person:pick:${PRIYA}`, value: 'page-next' })
+    await ui.select({ key: `mm-person:pick:${PRIYA}`, value: many[149]!.id })
+    expect(w.resolves).toEqual([])
+    await ui.press({ key: `mm-person:send:${PRIYA}` })
+    expect(w.resolves.map(r => r.body)).toEqual([{ alert_id: PRIYA, action: 'route', project_id: many[149]!.id }])
+    expect(await lines(ui)).toContain('Routed to Client 150. 3 emails filed.')
+    await ui.unmount()
+  })
+
+  test('a feed whose route_projects is empty offers nothing to route to, never projects[]', async ($, on) => {
+    const w = world(on, { feed: founderFeed({ route_projects: [] }) })
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: `mm-person:route:${PRIYA}` })
+    expect(await ui.find({ type: 'Select' })).toBeUndefined()
+    expect(await lines(ui)).toContain('No project in your feed to route to.')
+    expect((await peopleButtons(ui)).filter(([k]) => k.endsWith(PRIYA))).toEqual([[`mm-person:cancel:${PRIYA}`, 'Cancel']])
+    expect(w.resolves).toEqual([])
     await ui.unmount()
   })
 

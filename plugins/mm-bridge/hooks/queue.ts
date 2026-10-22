@@ -135,6 +135,9 @@ export type FeedPersonAlert = {
 /** One of the feed's projects (OW's `projects`; for the founder and a PM, every active project they may see). */
 export type FeedProject = { project_id: string; name: string }
 
+/** (New people) One project OW's resolve route accepts for `route`: the feed's `route_projects` (founder and PMs, uncapped). */
+export type FeedRouteProject = { id: string; name: string }
+
 export type Feed = {
   member: string
   role: string
@@ -143,8 +146,10 @@ export type Feed = {
   /** `start_now` (0.5.2, R1): committed tickets due after the due-soon window whose start-by time has come or is within 24 business hours. */
   tickets?: { overdue?: FeedTicket[]; due_today?: FeedTicket[]; due_soon?: FeedTicket[]; start_now?: FeedTicket[] }
   threads?: FeedThread[]
-  /** (New people) What a person may route someone to. */
+  /** The feed's projects: what Route offers when the feed gives no `route_projects` (an OW before them). */
   projects?: FeedProject[]
+  /** (New people) Exactly the projects OW's resolve route accepts for `route`, uncapped: what Route offers when present. */
+  route_projects?: FeedRouteProject[]
   /** (New people) Open alerts, founder and PMs only. */
   person_alerts?: FeedPersonAlert[]
 }
@@ -564,7 +569,8 @@ export function feedClients(feed: Feed): KnownClient[] {
 // ---------------------------------------------------------------- New people (OW ticket 549944b0)
 // Someone wrote to us and no project matched (a real RFP sat unseen for four business days, 2026-10-16). OW lists
 // each open one in the feed's `person_alerts`, for the founder and the PMs; the pane shows them under `New
-// people`, newest first, each with Route to project, Start project and Not client mail (register.tsx).
+// people`, newest first, each with Route to project, Start project and Not client mail; a HighLevel Directory lead with
+// Mark handled and Not client mail (register.tsx).
 // ⛔ The pane alone shows them: nothing of theirs goes into a thread's name, a kickoff, a note, the band or an
 //    answer to the `mm` tool. Their text is a stranger's, so it is drawn as text and never handed to Claude.
 
@@ -658,7 +664,7 @@ export function peopleRows(feed: Feed, now: number): MmPerson[] {
     const when = Number.isFinite(at) ? `Received ${dateText(at)} ET · ${waitedText(at, now)}` : 'Received at a time the feed did not give'
     const row: MmPerson = {
       id: a.id, name, title, subject: subject ? `Subject: ${subject}` : '(no subject)', when, warnings, known: known ? `We know them: ${known}` : '', link: sourceLink(a.source_link),
-      // (a Directory lead has no email to route: OW answers Route with 409, so its row offers Start project and Not client mail only)
+      // (a Directory lead has no email: OW refuses route and bootstrap for it, so its row offers Mark handled and Not client mail only)
       ...(directory ? { directory: true as const } : {}),
     }
     rows.push({ at: Number.isFinite(at) ? at : -Infinity, row })
@@ -667,17 +673,51 @@ export function peopleRows(feed: Feed, now: number): MmPerson[] {
 }
 
 /**
- * (New people) The projects a person may route someone to: the feed's `projects` (for the founder and a PM, every
- * active project they may see), uuids and names with something left once cleaned, by name. None for anyone else.
+ * (New people) The projects a person may route someone to, by name: the feed's `route_projects` when it gives them
+ * (exactly the projects OW's resolve route accepts, uncapped), every one of them; else, from an OW before them, its
+ * `projects` (for the founder and a PM, every active project they may see). Uuids and names with something left once
+ * cleaned. None for anyone else.
  */
 export function routeChoices(feed: Feed): MmProject[] {
-  if (!seesPeople(feed) || !Array.isArray(feed.projects)) return []
+  if (!seesPeople(feed)) return []
+  const rows: Array<{ id: unknown; name: unknown }> = Array.isArray(feed.route_projects)
+    ? feed.route_projects.map(p => ({ id: p?.id, name: p?.name }))
+    : Array.isArray(feed.projects) ? feed.projects.map(p => ({ id: p?.project_id, name: p?.name })) : []
   const out = new Map<string, MmProject>()
-  for (const p of feed.projects) {
-    if (!p || !isUuid(p.project_id) || out.has(p.project_id) || cleanName(p.name) === '') continue
-    out.set(p.project_id, { projectId: p.project_id, name: cleanName(p.name) })
+  for (const p of rows) {
+    if (!isUuid(p.id) || out.has(p.id) || cleanName(p.name) === '') continue
+    out.set(p.id, { projectId: p.id, name: cleanName(p.name) })
   }
   return [...out.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/**
+ * (New people) The most projects one page of the Route picker lists. The engine (2.1.304) refuses a whole pane whose
+ * Select holds more than 64 options, and a founder's or PM's feed can offer more projects than that (150 and up), so
+ * the picker shows them a page at a time: `Choose a project`, at most this many projects, and an option to each
+ * neighbouring page. Every project is on some page.
+ */
+export const ROUTE_PAGE = 50
+
+/**
+ * (New people) One page of the Route picker, by name as `routeChoices` sorts them: its projects, where it starts, and
+ * the projects of the page before and after it (null when there is none). A page past the ends is the nearest one.
+ */
+export function routePage(projects: readonly MmProject[], page: number): { page: number; pages: number; from: number; items: MmProject[]; prev: MmProject[] | null; next: MmProject[] | null } {
+  const pages = Math.max(1, Math.ceil(projects.length / ROUTE_PAGE))
+  const at = Math.min(pages - 1, Math.max(0, Number.isInteger(page) ? page : 0))
+  const slice = (n: number): MmProject[] => projects.slice(n * ROUTE_PAGE, (n + 1) * ROUTE_PAGE)
+  return { page: at, pages, from: at * ROUTE_PAGE, items: slice(at), prev: at > 0 ? slice(at - 1) : null, next: at < pages - 1 ? slice(at + 1) : null }
+}
+
+/**
+ * (New people) The notice after a Route OW answered 200, by its `requeued_count` (how many of the person's emails it
+ * filed to the project). A count the answer does not give (an OW before it): the project alone.
+ */
+export function routedText(project: string, requeued: unknown): string {
+  const n = typeof requeued === 'number' && Number.isInteger(requeued) && requeued >= 0 ? requeued : null
+  if (n === null) return `Routed to ${project}.`
+  return n === 0 ? `Routed to ${project}. No emails were filed, they may already be on it.` : `Routed to ${project}. ${n} email${n === 1 ? '' : 's'} filed.`
 }
 
 /**
