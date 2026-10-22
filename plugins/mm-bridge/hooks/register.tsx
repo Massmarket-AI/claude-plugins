@@ -4918,6 +4918,7 @@ async function peopleShown($: EngineInterface, people: unknown, now: number): Pr
     .map(p => ({
       id: p.id, name: text(p.name) || p.title, title: p.title, subject: text(p.subject), when: text(p.when),
       warnings: Array.isArray(p.warnings) ? p.warnings.filter((w): w is string => typeof w === 'string') : [], known: text(p.known), link: sourceLink(p.link),
+      ...(p.directory === true ? { directory: true as const } : {}),
     }))
 }
 
@@ -4927,9 +4928,11 @@ async function peopleUi($: EngineInterface): Promise<MmPeople> {
   return value && typeof value === 'object' ? value : {}
 }
 
-/** Route to project: this row's project picker opens (any other row's closes), nothing picked yet. Nothing is fetched or sent. */
+/** Route to project: this row's project picker opens (any other row's closes), nothing picked yet. Nothing is fetched or sent. Never for a Directory lead. */
 async function openRoute($: EngineInterface, id: string): Promise<void> {
   try {
+    const { value: queue } = await $.state.get(QUEUE)
+    if ((queue?.people ?? []).find(p => p.id === id)?.directory) return
     const ui = await peopleUi($)
     await $.state.set(PEOPLE, { ...ui, open: id, pick: '' } satisfies MmPeople)
   } catch {
@@ -4974,7 +4977,8 @@ function refusalText(r: { status: number; text: string }): string {
 
 /**
  * A press on a `New people` row: `POST /api/ext/person-alert/resolve {alert_id, action, project_id?}`. Route sends
- * the project picked in that row's picker, and only one Route offers. On 200 the person leaves the list here at
+ * the project picked in that row's picker, and only one Route offers; never for a Directory lead (OW answers 409: it
+ * has no email to route). On 200 the person leaves the list here at
  * once and in every thread's next draw (`mm.peopleDone`), the pane says what was done, and the feed is read again.
  * Anything else: the row says what OW answered, and stays.
  */
@@ -4989,7 +4993,7 @@ async function resolvePerson($: EngineInterface, id: string, action: PersonActio
     const person = (queue?.people ?? []).find(p => p.id === id)
     const ui = await peopleUi($)
     const project = action === 'route' && ui.open === id ? (queue?.routeTo ?? []).find(p => p.projectId === ui.pick && isUuid(p.projectId)) : undefined
-    if (!person || (action === 'route' && !project)) return
+    if (!person || (action === 'route' && (!project || person.directory))) return
     const { [id]: _was, ...errors } = ui.errors ?? {}
     await $.state.set(PEOPLE, { ...ui, busy: { ...(ui.busy ?? {}), [id]: await $.clock.now() }, errors } satisfies MmPeople)
     try {
@@ -5615,7 +5619,8 @@ export const register: Register = on => {
   // `With a teammate (n)`, then `Older (n)`. Nobody in them is pinned or counted in the header.
   // (New people) For the founder and a PM, above the list: `New people (n)`, open, newest first. Each row is who
   // wrote, the subject, when and how long they have waited, what we know of them, what to check first, the Source
-  // link and three buttons. A surface with no Select (the mobile app) has no picker, so it offers no Route.
+  // link and three buttons. A surface with no Select (the mobile app) has no picker, so it offers no Route; nor does
+  // a HighLevel Directory lead's row anywhere (no email to route: OW answers 409).
   on('ui.render', { component: 'Pane', requestId: PANE_QUEUE }, async ($, e) => {
     const { Box, Button, Link, Markdown, Text } = $.ui.resolve(e)
     // (New people) a picker only where the surface draws one: the mobile app's table has no Select
@@ -5653,7 +5658,9 @@ export const register: Register = on => {
     )
     const drawPerson = (p: MmPerson) => {
       const busy = Boolean(ui.busy?.[p.id]) && resolving.has(p.id)
-      const picking = Boolean(Select) && ui.open === p.id
+      // a Directory lead has no email to route (OW answers 409): Start project and Not client mail only
+      const routable = Boolean(Select) && !p.directory
+      const picking = routable && ui.open === p.id
       const picked = picking ? routeTo.find(r => r.projectId === ui.pick) : undefined
       return (
         <Box flexDirection="column" marginTop={1}>
@@ -5693,9 +5700,9 @@ export const register: Register = on => {
             </Box>
           ) : (
             <Box flexDirection="column">
-              {Select ? null : <Text dimColor>Route to project is in the desktop app.</Text>}
+              {Select || p.directory ? null : <Text dimColor>Route to project is in the desktop app.</Text>}
               <Box flexDirection="row" gap={1}>
-                {Select ? <Button key={`mm-person:route:${p.id}`} label="Route to project" variant="primary" onPress={() => void openRoute($, p.id)} /> : null}
+                {routable ? <Button key={`mm-person:route:${p.id}`} label="Route to project" variant="primary" onPress={() => void openRoute($, p.id)} /> : null}
                 <Button key={`mm-person:bootstrap:${p.id}`} label="Start project" onPress={() => void resolvePerson($, p.id, 'bootstrap')} />
                 <Button key={`mm-person:not_client:${p.id}`} label="Not client mail" onPress={() => void resolvePerson($, p.id, 'not_client')} />
               </Box>

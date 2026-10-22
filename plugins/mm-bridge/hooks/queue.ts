@@ -656,7 +656,11 @@ export function peopleRows(feed: Feed, now: number): MmPerson[] {
     const warnings = (Array.isArray(a.warnings) ? a.warnings : []).map(w => (typeof w === 'string' ? WARNING_LABELS[w] : undefined)).filter((w, i, all): w is string => Boolean(w) && all.indexOf(w) === i)
     const known = shownText(a.relationship_summary, 160)
     const when = Number.isFinite(at) ? `Received ${dateText(at)} ET · ${waitedText(at, now)}` : 'Received at a time the feed did not give'
-    const row: MmPerson = { id: a.id, name, title, subject: subject ? `Subject: ${subject}` : '(no subject)', when, warnings, known: known ? `We know them: ${known}` : '', link: sourceLink(a.source_link) }
+    const row: MmPerson = {
+      id: a.id, name, title, subject: subject ? `Subject: ${subject}` : '(no subject)', when, warnings, known: known ? `We know them: ${known}` : '', link: sourceLink(a.source_link),
+      // (a Directory lead has no email to route: OW answers Route with 409, so its row offers Start project and Not client mail only)
+      ...(directory ? { directory: true as const } : {}),
+    }
     rows.push({ at: Number.isFinite(at) ? at : -Infinity, row })
   }
   return rows.sort((x, y) => y.at - x.at).map(r => r.row)

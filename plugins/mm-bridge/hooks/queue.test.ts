@@ -1667,6 +1667,8 @@ describe('New people: who wrote to us with no project matched (founder and PMs o
         known: 'We know them: no history found', link: 'https://mail.google.com/mail/u/support%40example.com/#all/18f0000000000001',
       })
       expect(rows[0]?.title).toBe('Marcus Lee · via HighLevel Directory')
+      // a Directory lead is marked (no Route for it); the others are not
+      expect(rows.map(r => r.directory)).toEqual([true, undefined, undefined])
       expect(rows[0]?.when).toBe('Received Wed Oct 21, 2:05 PM ET · under 1 business day waiting')
       expect(rows[1]?.known).toBe('We know them: 2 recorded calls (Feb 2026) · HighLevel contact · 3 past emails with this domain')
       expect(rows[1]?.when).toBe('Received Tue Oct 20, 10:15 AM ET · 2 business days waiting')

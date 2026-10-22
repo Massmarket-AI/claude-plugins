@@ -101,6 +101,11 @@ export type MmPerson = {
   known: string
   /** The Gmail or Directory link (https only), or ''. */
   link: string
+  /**
+   * A HighLevel Directory lead (`source` `hl_directory`): it has no email to route, so OW refuses Route for it (409).
+   * Its row offers Start project and Not client mail only. Absent on any other row.
+   */
+  directory?: true
 }
 
 /** (New people) A project Route to project can send someone to. */

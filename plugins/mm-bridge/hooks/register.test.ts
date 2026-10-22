@@ -8074,6 +8074,8 @@ describe('New people: the founder and a PM route, start or dismiss someone no pr
     [`mm-person:not_client:${id}`, 'Not client mail'],
   ]
   const peopleButtons = async (ui: Drawing) => (await buttons(ui)).filter(([key]) => key.startsWith('mm-person:'))
+  /** A HighLevel Directory lead's row: no Route (OW answers 409 for it), Start project and Not client mail only. */
+  const directoryButtons = (id: string) => personButtons(id).slice(1)
 
   test('the founder sees New people above the list, newest first, each with Source and three buttons; the list under it is as before', async ($, on) => {
     const w = world(on, { feed: founderFeed() })
@@ -8083,7 +8085,7 @@ describe('New people: the founder and a PM route, start or dismiss someone no pr
       const drawn = await lines(ui)
       expect(drawn[0]).toBe('Needs you now (3)')
       expect(drawn.slice(1, 1 + SECTION.length)).toEqual(SECTION)
-      expect(await peopleButtons(ui)).toEqual([...personButtons(MARCUS), ...personButtons(PRIYA), ...personButtons(DANA)])
+      expect(await peopleButtons(ui)).toEqual([...directoryButtons(MARCUS), ...personButtons(PRIYA), ...personButtons(DANA)])
       expect((await ui.findAll({ type: 'Link' })).map(l => [l.props.label, l.props.href])).toEqual([
         ['Source', 'https://app.example.com/v2/location/loc1/conversations/abc123'],
         ['Source', 'https://mail.google.com/mail/u/founder%40example.com/#all/18f0000000000003'],
@@ -8269,7 +8271,32 @@ describe('New people: the founder and a PM route, start or dismiss someone no pr
     await mm($, '')
     const ui = await $.ui.mount({ plugin: 'mm-bridge', surface: 'mobile', component: 'Pane', requestId: 'mm-queue', props: PANE })
     expect((await peopleButtons(ui)).filter(([k]) => k.endsWith(DANA))).toEqual(personButtons(DANA).slice(1))
-    expect((await lines(ui)).filter(l => l === 'Route to project is in the desktop app.')).toHaveLength(3)
+    // (not on Marcus's: a Directory lead is never routed, on any surface)
+    expect((await lines(ui)).filter(l => l === 'Route to project is in the desktop app.')).toHaveLength(2)
+    expect((await peopleButtons(ui)).filter(([k]) => k.endsWith(MARCUS))).toEqual(directoryButtons(MARCUS))
+    await ui.unmount()
+  })
+
+  test('a HighLevel Directory lead shows exactly Start project and Not client mail on every surface, and is never routed', async ($, on) => {
+    const w = world(on, { feed: founderFeed({ person_alerts: [ALERTS[1]!] }) })
+    await mm($, '')
+    for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+      const ui = await $.ui.mount({ plugin: 'mm-bridge', surface, component: 'Pane', requestId: 'mm-queue', props: PANE })
+      expect(await peopleButtons(ui)).toEqual([
+        [`mm-person:bootstrap:${MARCUS}`, 'Start project'],
+        [`mm-person:not_client:${MARCUS}`, 'Not client mail'],
+      ])
+      expect(await ui.findAll({ type: 'Select' })).toEqual([])
+      expect((await lines(ui)).some(l => l.startsWith('Route to project'))).toBe(false)
+      await ui.unmount()
+    }
+    // the stored row says so
+    expect(((w.stored['mm.last'] as { people?: Array<{ id: string; directory?: boolean }> }).people ?? []).map(p => [p.id, p.directory])).toEqual([[MARCUS, true]])
+    // its two buttons work
+    const ui = await pane($)
+    await ui.press({ key: `mm-person:bootstrap:${MARCUS}` })
+    expect(w.resolves.map(r => r.body)).toEqual([{ alert_id: MARCUS, action: 'bootstrap' }])
+    expect((await lines(ui)).some(l => l.startsWith('New people'))).toBe(false)
     await ui.unmount()
   })
 
