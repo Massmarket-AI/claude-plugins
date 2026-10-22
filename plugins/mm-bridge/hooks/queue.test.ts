@@ -4,6 +4,7 @@ import { businessMsBetween, subtractBusinessMs } from './business-time'
 import {
   LIST_FLOOR_MS, NOBODY, WINDOW_AHEAD_MS, buildLists, buildQueue, cleanName, cleanText, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockLead, clockText, draftsLine, dueLine, holdBanner,
   CHECK_WAIT_MS, checkingTitle, fastState, internalProjects, whenText, holdSentence, holderName, isClosingRoute, isDraftDone, isUuid, mailLookbackHours, needsLine, noteText, pinsNow, shortName, stillOpenTitle, threadTitle, titleFor, titleNames, withTeammate,
+  dateText, peopleRows, routeChoices, seesPeople, shownText, sourceLink, waitedText,
 } from './queue'
 import type { Feed, QueueItem } from './queue'
 import { handoverText, kickoffText, waitingText } from './threads'
@@ -1620,5 +1621,110 @@ describe('F3: never "checking" while something else of the client\'s still needs
     const l = buildLists(f, now)
     expect(l.queue.map(i => i.projectId)).toEqual([P1])
     expect(l.checking).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------- New people (OW ticket 549944b0)
+// Every person here is made up.
+
+describe('New people: who wrote to us with no project matched (founder and PMs only)', () => {
+  /** Thu 2026-10-22, 11 AM in New York. */
+  const thu = Date.parse('2026-10-22T15:00:00Z')
+  const A1 = 'a1a1a1a1-0000-4000-8000-000000000001'
+  const A2 = 'a2a2a2a2-0000-4000-8000-000000000002'
+  const A3 = 'a3a3a3a3-0000-4000-8000-000000000003'
+  const alerts: NonNullable<Feed['person_alerts']> = [
+    {
+      id: A1, source: 'gmail_unmatched', sender_name: 'Dana Whitfield', sender_email: 'dana@northwind.example', company: 'Northwind Interiors',
+      subject: 'RFP: office build-out, Plano?', received_at: '2026-10-16T13:40:00Z', due_at: '2026-10-19T13:40:00Z', mailboxes: ['support@example.com'],
+      warnings: ['blank_body', 'bcc_only', 'attachment_only', 'not_a_warning'], relationship_summary: 'no history found',
+      source_link: 'https://mail.google.com/mail/u/support@example.com/#all/18f0000000000001', shadow_bootstrap_candidate: false,
+    },
+    {
+      id: A2, source: 'hl_directory', sender_name: 'Marcus Lee', sender_email: null, company: null, subject: 'New message from Marcus Lee',
+      received_at: '2026-10-21T18:05:00Z', warnings: [], relationship_summary: 'no history found', source_link: 'https://app.example.com/conversations/abc123',
+    },
+    {
+      id: A3, source: 'gmail_unmatched', sender_name: 'Priya Raman', sender_email: 'priya@fabrikam.example', company: 'Fabrikam Health', subject: 'Following up on our call',
+      received_at: '2026-10-20T14:15:00Z', warnings: [], relationship_summary: '2 recorded calls (Feb 2026) · HighLevel contact · 3 past emails with this domain',
+      source_link: 'https://mail.google.com/mail/u/rob@example.com/#all/18f0000000000003', shadow_bootstrap_candidate: true,
+    },
+  ]
+  const projects = [
+    { project_id: P2, name: 'Bolt Staffing (Sam)' },
+    { project_id: P1, name: 'Acme Roofing — Pat' },
+    { project_id: 'not-a-uuid', name: 'Broken' },
+    { project_id: P3, name: '<<>>' },
+  ]
+
+  test('the founder and a PM get the rows, newest first, worded at the sync; anyone else gets none', async () => {
+    for (const role of ['founder', 'pm']) {
+      const rows = peopleRows(feed({ role, person_alerts: alerts }), thu)
+      expect(rows.map(r => r.id)).toEqual([A2, A3, A1])
+      expect(rows[2]).toEqual({
+        id: A1, name: 'Dana Whitfield', title: 'Dana Whitfield · Northwind Interiors', subject: 'Subject: RFP: office build-out, Plano?',
+        when: 'Received Fri Oct 16, 9:40 AM ET · 4 business days waiting', warnings: ['blank body', "Bcc'd", 'attachment only'],
+        known: 'We know them: no history found', link: 'https://mail.google.com/mail/u/support%40example.com/#all/18f0000000000001',
+      })
+      expect(rows[0]?.title).toBe('Marcus Lee · via HighLevel Directory')
+      expect(rows[0]?.when).toBe('Received Wed Oct 21, 2:05 PM ET · under 1 business day waiting')
+      expect(rows[1]?.known).toBe('We know them: 2 recorded calls (Feb 2026) · HighLevel contact · 3 past emails with this domain')
+      expect(rows[1]?.when).toBe('Received Tue Oct 20, 10:15 AM ET · 2 business days waiting')
+    }
+    for (const role of ['member', 'builder', '']) expect(peopleRows(feed({ role, person_alerts: alerts }), thu)).toEqual([])
+  })
+
+  test('a feed with no person_alerts key (an OW that does not send them yet) has nobody, and nothing else changes', async () => {
+    const f = feed({ role: 'founder', mail: [mail(P1, 'Acme Roofing — Pat', -1)] })
+    expect(peopleRows(f, NOW)).toEqual([])
+    expect(routeChoices(f)).toEqual([])
+    expect(buildLists(f, NOW)).toEqual(buildLists({ ...f, person_alerts: alerts, projects }, NOW))
+  })
+
+  test('an alert whose id is not a lower-case uuid is dropped, a repeat is shown once, and one with no readable time is kept last', async () => {
+    const rows = peopleRows(feed({ role: 'pm', person_alerts: [{ ...alerts[0]!, id: 'A1A1A1A1-0000-4000-8000-000000000001' }, alerts[1]!, alerts[1]!, { ...alerts[2]!, received_at: 'soon' }, null as never] }), thu)
+    expect(rows.map(r => r.id)).toEqual([A2, A3])
+    expect(rows[1]?.when).toBe('Received at a time the feed did not give')
+  })
+
+  test('a stranger\'s text is drawn on one line, cut, and a link is https or nothing', async () => {
+    const [row] = peopleRows(feed({ role: 'founder', person_alerts: [{ ...alerts[0]!, sender_name: 'Dana\nWhit‮field', company: null, subject: 'x'.repeat(400), source_link: 'javascript:alert(1)', relationship_summary: null }] }), thu)
+    expect(row?.title).toBe('Dana Whit field')
+    expect(row?.subject.length).toBe('Subject: '.length + 160)
+    expect(row?.subject.endsWith('…')).toBe(true)
+    expect(row?.link).toBe('')
+    expect(row?.known).toBe('')
+    expect(sourceLink('http://mail.google.com/x')).toBe('')
+    expect(sourceLink('https://mail.google.com/mail/u/0/#all/1 2')).toBe('')
+    expect(sourceLink(`https://example.com/${'a'.repeat(2048)}`)).toBe('')
+    expect(sourceLink('https://example.com/ok')).toBe('https://example.com/ok')
+    // a raw @ after the host is written %40 (a surface draws a link holding one as plain text); a user name before the host is no link
+    expect(sourceLink('https://mail.google.com/mail/u/rob@example.com/#all/18f0')).toBe('https://mail.google.com/mail/u/rob%40example.com/#all/18f0')
+    expect(sourceLink('https://Mail.Google.com/mail/u/a@b.example?x=c@d#e@f')).toBe('https://mail.google.com/mail/u/a%40b.example?x=c%40d#e%40f')
+    expect(sourceLink('https://mail.google.com@evil.example/x')).toBe('')
+    expect(sourceLink('https://user:pw@example.com/x')).toBe('')
+    expect(shownText('  a\tb​c  ', 10)).toBe('a b c')
+    // no name at all: the address, else words that say so
+    expect(peopleRows(feed({ role: 'founder', person_alerts: [{ ...alerts[0]!, sender_name: '' }] }), thu)[0]?.name).toBe('dana@northwind.example')
+    expect(peopleRows(feed({ role: 'founder', person_alerts: [{ ...alerts[1]!, sender_name: null }] }), thu)[0]?.title).toBe('Unknown sender · via HighLevel Directory')
+  })
+
+  test('Route offers the feed\'s projects by name, uuids and names with something left only, for the founder and a PM only', async () => {
+    expect(routeChoices(feed({ role: 'founder', projects }))).toEqual([
+      { projectId: P1, name: 'Acme Roofing Pat' },
+      { projectId: P2, name: 'Bolt Staffing (Sam)' },
+    ])
+    expect(routeChoices(feed({ role: 'builder', projects }))).toEqual([])
+  })
+
+  test('waiting is whole business days completed: a weekend adds nothing', async () => {
+    const fri3pm = Date.parse('2026-10-16T19:00:00Z')
+    expect(waitedText(fri3pm, Date.parse('2026-10-19T18:59:00Z'))).toBe('under 1 business day waiting')
+    expect(waitedText(fri3pm, Date.parse('2026-10-19T19:00:00Z'))).toBe('1 business day waiting')
+    expect(waitedText(NaN, thu)).toBe('')
+    expect(dateText(fri3pm)).toBe('Fri Oct 16, 3:00 PM')
+    expect(seesPeople({ role: 'founder' })).toBe(true)
+    expect(seesPeople({ role: 'pm' })).toBe(true)
+    expect(seesPeople({ role: 'member' })).toBe(false)
   })
 })

@@ -22,7 +22,9 @@
 // the 24-hour response time... We're only counting business days in our timelines for clients"): Saturday
 // and Sunday, America/New_York, contribute zero. See ./business-time.ts.
 
-import { businessDeadline, businessMsBetween, subtractBusinessMs } from './business-time'
+import type { MmPerson, MmProject } from '../types'
+
+import { businessDaysBetween, businessDeadline, businessMsBetween, subtractBusinessMs } from './business-time'
 
 export type FeedMail = {
   message_id_key: string
@@ -108,6 +110,31 @@ export type FeedTicket = {
  */
 export type FeedThread = { project_id: string; session_id: string; last_activity_at: string; rows?: number; sole?: boolean }
 
+/**
+ * (New people, OW ticket 549944b0, spec A7) Someone who wrote to us and whom no project matched: an open row of
+ * OW's `inbound_person_alerts`. OW sends these to the founder and the PMs only. `source` is `gmail_unmatched`
+ * (an email) or `hl_directory` (a HighLevel Directory lead: no address). Every field but `id` and `received_at`
+ * may be missing or null. Absent on a server that does not send them yet.
+ */
+export type FeedPersonAlert = {
+  id: string
+  source?: string | null
+  sender_name?: string | null
+  sender_email?: string | null
+  company?: string | null
+  subject?: string | null
+  received_at: string
+  due_at?: string | null
+  mailboxes?: string[] | null
+  warnings?: string[] | null
+  relationship_summary?: string | null
+  source_link?: string | null
+  shadow_bootstrap_candidate?: boolean | null
+}
+
+/** One of the feed's projects (OW's `projects`; for the founder and a PM, every active project they may see). */
+export type FeedProject = { project_id: string; name: string }
+
 export type Feed = {
   member: string
   role: string
@@ -116,6 +143,10 @@ export type Feed = {
   /** `start_now` (0.5.2, R1): committed tickets due after the due-soon window whose start-by time has come or is within 24 business hours. */
   tickets?: { overdue?: FeedTicket[]; due_today?: FeedTicket[]; due_soon?: FeedTicket[]; start_now?: FeedTicket[] }
   threads?: FeedThread[]
+  /** (New people) What a person may route someone to. */
+  projects?: FeedProject[]
+  /** (New people) Open alerts, founder and PMs only. */
+  person_alerts?: FeedPersonAlert[]
 }
 
 /**
@@ -528,6 +559,121 @@ export function feedClients(feed: Feed): KnownClient[] {
   // (fix round 1, F5) `start_now` too: a client listed only by a task that must start now is a client the feed names
   for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? [], t.start_now ?? []]) for (const tk of k) add(tk?.project_id, tk?.project_name)
   return [...out.values()]
+}
+
+// ---------------------------------------------------------------- New people (OW ticket 549944b0)
+// Someone wrote to us and no project matched (a real RFP sat unseen for four business days, 2026-10-16). OW lists
+// each open one in the feed's `person_alerts`, for the founder and the PMs; the pane shows them under `New
+// people`, newest first, each with Route to project, Start project and Not client mail (register.tsx).
+// ⛔ The pane alone shows them: nothing of theirs goes into a thread's name, a kickoff, a note, the band or an
+//    answer to the `mm` tool. Their text is a stranger's, so it is drawn as text and never handed to Claude.
+
+/** (New people) The roles OW sends `person_alerts` to: the founder (Rob) and the PMs. Nobody else is shown any. */
+export const seesPeople = (feed: Pick<Feed, 'role'>): boolean => feed.role === 'founder' || feed.role === 'pm'
+
+/** (New people) The words for each warning OW puts on an alert (spec A5's labels). A code not here is not shown. */
+export const WARNING_LABELS: Readonly<Record<string, string>> = {
+  blank_body: 'blank body',
+  bcc_only: "Bcc'd",
+  attachment_only: 'attachment only',
+  spam_label: 'Gmail marked a copy spam',
+  dmarc_fail: 'sender authentication failed',
+}
+
+/**
+ * Text of a stranger's as the pane draws it: control and format characters (line breaks, bidirectional
+ * overrides, zero-width marks) become spaces, runs of spaces collapse, and it is cut at `max` with an ellipsis.
+ * Lighter than `cleanText` because it is only ever drawn, never handed to Claude: a subject keeps its `:` and `?`.
+ */
+export function shownText(text: unknown, max: number): string {
+  const one = (typeof text === 'string' ? text : '').normalize('NFC').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ').replace(/\s+/g, ' ').trim()
+  return one.length > max ? `${one.slice(0, max - 1).trim()}…` : one
+}
+
+/**
+ * A link the pane may draw as `Source`: https only, no spaces, no user name or password before the host, at most
+ * 2,048 characters (what a Link may carry). An `@` after the host is written `%40`: a surface draws a link whose
+ * address holds a raw `@` as plain text (the engine, 2.1.304), and OW's Gmail links name the mailbox in the path
+ * (`/mail/u/<mailbox>/#all/<id>`).
+ */
+export function sourceLink(link: unknown): string {
+  if (typeof link !== 'string' || /\s/.test(link)) return ''
+  try {
+    const url = new URL(link)
+    if (url.protocol !== 'https:' || url.username || url.password) return ''
+    // (with no user name or password, the address as URL writes it starts with its origin)
+    const safe = url.origin + url.href.slice(url.origin.length).replace(/@/g, '%40')
+    return url.href.startsWith(url.origin) && safe.length <= 2048 ? safe : ''
+  } catch {
+    return ''
+  }
+}
+
+/** `Fri Oct 16, 9:12 AM` in New York. */
+export function dateText(t: number): string {
+  try {
+    const d = new Date(t)
+    const day = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric' }).format(d)
+    const time = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(d)
+    return `${day.replace(',', '')}, ${time}`
+  } catch {
+    // No Intl time zones: Eastern daylight time, as etParts
+    const d = new Date(t - 4 * HOUR)
+    const h = d.getUTCHours()
+    const mm = String(d.getUTCMinutes()).padStart(2, '0')
+    const day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getUTCDay()] ?? ''
+    const month = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()] ?? ''
+    return `${day} ${month} ${d.getUTCDate()}, ${h % 12 || 12}:${mm} ${h < 12 ? 'AM' : 'PM'}`
+  }
+}
+
+/** How long someone has waited, in whole business days completed (weekends do not count), as the row says it. */
+export function waitedText(receivedAt: number, now: number): string {
+  if (!Number.isFinite(receivedAt)) return ''
+  const n = businessDaysBetween(receivedAt, now)
+  return n < 1 ? 'under 1 business day waiting' : `${n} business day${n === 1 ? '' : 's'} waiting`
+}
+
+/**
+ * (New people) The feed's open alerts as the pane's rows, newest first: for the founder and a PM only, and none
+ * from a feed that has no `person_alerts` (an OW that does not send them yet). An alert whose id is not a
+ * lower-case uuid is dropped: the id is what a press sends back to OW. One whose time cannot be read is kept, last.
+ * The row is worded at `now`, the sync's own moment.
+ */
+export function peopleRows(feed: Feed, now: number): MmPerson[] {
+  if (!seesPeople(feed) || !Array.isArray(feed.person_alerts)) return []
+  const seen = new Set<string>()
+  const rows: Array<{ at: number; row: MmPerson }> = []
+  for (const a of feed.person_alerts) {
+    if (!a || typeof a !== 'object' || !isUuid(a.id) || seen.has(a.id)) continue
+    seen.add(a.id)
+    const at = ms(a.received_at)
+    const directory = a.source === 'hl_directory'
+    const name = shownText(a.sender_name, 80) || shownText(a.sender_email, 120) || 'Unknown sender'
+    const company = shownText(a.company, 80)
+    const title = [name, company, directory ? 'via HighLevel Directory' : ''].filter(Boolean).join(' · ')
+    const subject = shownText(a.subject, 160)
+    const warnings = (Array.isArray(a.warnings) ? a.warnings : []).map(w => (typeof w === 'string' ? WARNING_LABELS[w] : undefined)).filter((w, i, all): w is string => Boolean(w) && all.indexOf(w) === i)
+    const known = shownText(a.relationship_summary, 160)
+    const when = Number.isFinite(at) ? `Received ${dateText(at)} ET · ${waitedText(at, now)}` : 'Received at a time the feed did not give'
+    const row: MmPerson = { id: a.id, name, title, subject: subject ? `Subject: ${subject}` : '(no subject)', when, warnings, known: known ? `We know them: ${known}` : '', link: sourceLink(a.source_link) }
+    rows.push({ at: Number.isFinite(at) ? at : -Infinity, row })
+  }
+  return rows.sort((x, y) => y.at - x.at).map(r => r.row)
+}
+
+/**
+ * (New people) The projects a person may route someone to: the feed's `projects` (for the founder and a PM, every
+ * active project they may see), uuids and names with something left once cleaned, by name. None for anyone else.
+ */
+export function routeChoices(feed: Feed): MmProject[] {
+  if (!seesPeople(feed) || !Array.isArray(feed.projects)) return []
+  const out = new Map<string, MmProject>()
+  for (const p of feed.projects) {
+    if (!p || !isUuid(p.project_id) || out.has(p.project_id) || cleanName(p.name) === '') continue
+    out.set(p.project_id, { projectId: p.project_id, name: cleanName(p.name) })
+  }
+  return [...out.values()].sort((a, b) => a.name.localeCompare(b.name))
 }
 
 /**
