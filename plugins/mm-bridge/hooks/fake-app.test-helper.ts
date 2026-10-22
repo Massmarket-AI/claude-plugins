@@ -61,6 +61,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   const calls: Array<{ tool: string; args: Record<string, unknown> }> = []
   /** What the bridge added to each thread's transcript. */
   const appends: Array<{ thread: string; text: string }> = []
+  /** (0.5.25) What a Start press put in each thread's prompt box. */
+  const fills: Array<{ thread: string; text: string }> = []
   /** Every file the bridge wrote (its heartbeat: where its errors go). */
   const written: Array<{ path: string; text: string }> = []
   const fetched: string[] = []
@@ -201,7 +203,15 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
       process: { run: async () => ({ exitCode: 1, stdout: '', stderr: '' }) },
       command: { register: async () => ({ command: 'mm' }) },
       tool: { register: async () => ({ tool: 'mcp__mm-bridge__mm' }), list: async () => toolNames.map(name => ({ name, description: name, mcp: true })) },
-      prompt: { submit: async () => ({}) },
+      // (0.5.25) the person's prompt box, empty, as a Start press finds it; what it is given is kept
+      prompt: {
+        submit: async () => ({}),
+        read: async () => ({ text: '', cursor: 0 }),
+        fill: async (input: { text: string }) => {
+          fills.push({ thread: self, text: input.text })
+          return { isFilled: true, text: input.text, cursor: input.text.length }
+        },
+      },
     }
   }
 
@@ -209,6 +219,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
     app,
     calls,
     appends,
+    fills,
     written,
     fetched,
     opened,
