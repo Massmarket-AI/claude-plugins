@@ -988,8 +988,8 @@ describe('0.5.6: Start moves the chip to the thread it is pressed in (Rob, 10-14
 
 // ======================================================================== 0.5.7
 
-describe('0.5.7: a thread the bridge starts by itself is started once, whoever ticks', () => {
-  test('two sessions that both take themselves for the holder, at the same moment: one start, by the claim that held', async () => {
+describe('0.5.7: a thread the bridge starts by itself is started once, whoever ticks; (0.5.24) its Start card is put up once, and no thread is started', () => {
+  test('two sessions that both take themselves for the holder, at the same moment: one card, by the claim that held', async () => {
     const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(91, 'Client Nine One', 1)] }
     const ids = ['local_race_a', 'local_race_b']
     const w = fakeApp(feed, ids.map(sessionId => ({ sessionId })), [], { every: true, tools: 'start' })
@@ -1004,17 +1004,19 @@ describe('0.5.7: a thread the bridge starts by itself is started once, whoever t
     // the claims are checked 1 to 3 seconds on
     await w.advance(3_100)
     await settleAll()
-    const starts = w.calls.filter(c => c.tool === 'start_session' && c.args.initiation === 'user_asked')
-    expect(starts.length).toBe(1)
-    expect(String(starts[0]?.args.prompt).startsWith(`[mm-link ${pid(91)}] `)).toBe(true)
-    expect(linksOf(w)[pid(91)]).toBe('local_started_1')
-    // and the ticks after it start nothing more, in either thread
+    const cards = () => w.calls.filter(c => c.tool === 'start_session' && c.args.initiation === 'own_initiative')
+    expect(cards().length).toBe(1)
+    expect(String(cards()[0]?.args.prompt).startsWith(`[mm-link ${pid(91)}] `)).toBe(true)
+    expect(w.calls.filter(c => c.tool === 'start_session' && c.args.initiation === 'user_asked')).toEqual([])
+    expect(linksOf(w)[pid(91)]).toBeUndefined()
+    // and the ticks after it put up nothing more, in either thread
     for (let i = 0; i < 3; i++) {
       await w.advance(60_000)
       await settleAll()
     }
-    expect(w.calls.filter(c => c.tool === 'start_session' && c.args.initiation === 'user_asked').length).toBe(1)
-    expect(((w.stored('mm.autostarts') ?? []) as Array<{ ok: boolean | null }>).map(t => t.ok)).toEqual([true])
+    expect(cards().length).toBe(1)
+    expect(w.calls.filter(c => c.tool === 'start_session' && c.args.initiation === 'user_asked')).toEqual([])
+    expect(w.stored('mm.autostarts')).toBeUndefined()
   })
 })
 
@@ -1672,15 +1674,15 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(w.stored('mm.rcpin')).toBeUndefined()
   })
 
-  test('/mm rc, /mm rc on, /mm rc off say the switch and set it; /mm status says it after the auto-start line; Claude can set it through the tool', async () => {
+  test('/mm rc, /mm rc on, /mm rc off say the switch and set it; /mm status says it after the auto-update line; Claude can set it through the tool', async () => {
     const w = fakeApp(quiet(), [{ sessionId: HUB }])
     const hub = w.session(HUB)
     expect(await mm(hub, 'rc')).toBe(rcSays('off'))
-    expect(await mm(hub, 'status')).toContain('\nauto-start and auto-update: on\nremote control follows the pin: off\nlast error: ')
+    expect(await mm(hub, 'status')).toContain('\nauto-update: on\nremote control follows the pin: off\nlast error: ')
     expect(await mm(hub, 'rc on')).toBe(RC_ON)
     expect(w.stored('mm.rcpin')).toEqual({ on: true })
     expect(await mm(hub, 'rc')).toBe(rcSays('on'))
-    expect(await mm(hub, 'status')).toContain('\nauto-start and auto-update: on\nremote control follows the pin: on\nlast error: ')
+    expect(await mm(hub, 'status')).toContain('\nauto-update: on\nremote control follows the pin: on\nlast error: ')
     expect(await mm(hub, 'rc off')).toBe(RC_OFF)
     expect(w.stored('mm.rcpin')).toEqual({ on: false })
     expect(await mm(hub, 'rc maybe')).toBe(rcSays('off'))

@@ -102,6 +102,8 @@ function world(opts: WorldOptions) {
   const dismissed: string[] = []
   /** (0.5.7) The prompts of the threads start_session started now, in order. */
   const startedNow: string[] = []
+  /** (0.5.24) The prompts of the Start cards start_session put up, in order. */
+  const cards: string[] = []
 
   const session = (cli: string, self: string) => {
     const state = new Map<string, unknown>()
@@ -142,6 +144,7 @@ function world(opts: WorldOptions) {
           // (0.5.7) as the app answers start_session: a proposal card, or a session started now
           if (tool === 'start_session' && args.initiation === 'own_initiative') {
             spawned.push(self)
+            cards.push(String(args.prompt))
             return text(`Proposed "${String(args.title)}" (task_id: task_${String(spawned.length).padStart(8, '0')}).`)
           }
           if (tool === 'start_session') {
@@ -200,6 +203,7 @@ function world(opts: WorldOptions) {
     spawned,
     dismissed,
     startedNow,
+    cards,
     session,
     stored: (key: string) => (stored[key] === undefined ? undefined : JSON.parse(stored[key] as string)),
     put: (key: string, value: unknown) => void (stored[key] = JSON.stringify(value)),
@@ -369,17 +373,18 @@ describe('F4: chip records when a dozen threads tick at once', () => {
   }
 })
 
-// (0.5.7, Rob 10-14 ~13:35 ET) Where the app has start_session, a client with no thread gets its thread started by
-// itself. A dozen threads that tick at once, none knowing which thread polls, may each take itself for the one to start
-// it: the claim per client and signature (`mm.starting`), checked again once it has held, lets one start it.
-describe('0.5.7: a dozen threads that tick at once never start one client\'s thread twice', () => {
+// (0.5.7, Rob 10-14 ~13:35 ET) Where the app has start_session, a client with no thread got its thread started by
+// itself. (0.5.24) It gets its Start card instead, and no thread is started. A dozen threads that tick at once, none
+// knowing which thread polls, may each take itself for the one to put the card up: the claim per client and signature
+// (`mm.starting`), checked again once it has held, lets one put it up.
+describe('0.5.7: a dozen threads that tick at once never start one client\'s thread twice; (0.5.24) nor put up its Start card twice', () => {
   const tickAll = async (w: ReturnType<typeof world>, threads: unknown[]) => {
     await Promise.all(threads.map(t => hooks['session.start']?.(t, { cwd: '/work', surface: 'desktop', isInteractive: false }, next)))
     await w.advance(4_000)
     await w.advance(3_100)
   }
   for (const seed of [1, 7, 42, 99, 2026, 1013, 5, 11]) {
-    test(`twelve threads, no poller they know of: each client started once at most, within the hourly cap (seed ${seed})`, async () => {
+    test(`twelve threads, no poller they know of: each client gets one Start card at most, and no thread is started (seed ${seed})`, async () => {
       const ids = Array.from({ length: N }, (_, i) => `local_as_${seed}_${i + 1}`)
       const w = world({ seed, extra: ids, startOnly: true })
       await before(w)
@@ -391,12 +396,12 @@ describe('0.5.7: a dozen threads that tick at once never start one client\'s thr
         await w.advance(60_000)
       }
       const perClient = new Map<string, number>()
-      for (const p of w.startedNow) {
+      for (const p of w.cards) {
         const pid = /^\[mm-link ([0-9a-f-]{36})\] /.exec(p)?.[1] ?? 'no marker'
         perClient.set(pid, (perClient.get(pid) ?? 0) + 1)
       }
-      expect(w.startedNow.length).toBeGreaterThan(0)
-      expect(w.startedNow.length).toBeLessThanOrEqual(4)
+      expect(w.startedNow).toEqual([])
+      expect(w.cards.length).toBeGreaterThan(0)
       expect([...perClient.entries()].filter(([, n]) => n > 1)).toEqual([])
       expect(perClient.has('no marker')).toBe(false)
     })
