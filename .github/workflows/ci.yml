@@ -91,7 +91,10 @@ jobs:
   # bridge's tests (`claude plugin test`, offline; no login or API key needed).
   plugins:
     name: Validate plugins and run bridge tests
-    runs-on: ubuntu-latest
+    # arm64: the bridge's slowest tests take 2.6-3.5 s on an M-series Mac and
+    # timed out at the test runner's 5 s limit on the x64 runner. arm64 runners
+    # are free on public repositories.
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
     env:
       # Pinned so a run is reproducible. Bump it when the bridge needs a newer
