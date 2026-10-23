@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Massmarket Time Tracker</title>
+    <!-- ONE stylesheet, shared with the popped-out window and the popup's status
+         row. See panel.css — the pop-out loads the exact same file, so the two
+         surfaces cannot drift. -->
+    <link rel="stylesheet" href="panel.css" />
+    <!-- The health strip, drawn by panelui.js renderHealthDetail() on this
+         surface exactly as it is in the toolbar popup. One file, three
+         documents — see health.css. -->
+    <link rel="stylesheet" href="health.css" />
+    <!-- v0.11.3 — the Massmarket brand layer. LAST on purpose: it re-points the
+         variables the stylesheets above already use and wins their ties, so the
+         rules above keep working unchanged (see brand.css). The fonts are bundled
+         (fonts/, SIL OFL) and preloaded so they are in hand before first paint. -->
+    <link rel="preload" href="fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="fonts/space-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="fonts/jetbrains-mono-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="brand.css" />
+  </head>
+  <body class="mm">
+    <!-- Everything inside #mm-root is built by panelapp.js so the side panel and
+         the popped-out window render from ONE code path. -->
+    <div id="mm-root"></div>
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>

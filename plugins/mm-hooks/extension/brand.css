@@ -1,0 +1,591 @@
+/* brand.css — the Massmarket brand layer (v0.11.3), on every extension page.
+ *
+ * WHERE THE VALUES COME FROM. Every token below is read off the massmarket.ai
+ * rebrand (repo massmarket-ai-rebrand, src/app/globals.css and the live homepage,
+ * whose root is `.advisor-marketing.rebrand-home`): paper #f2efe8 under ink
+ * #0a0a0a, square corners, hairline cards, Inter for text, JetBrains Mono for the
+ * small uppercase labels, and the brain mark. Nothing here is a new colour except
+ * the three status families, which the homepage does not have (it is monochrome);
+ * those are derived from the brand accent (#ff3d00) and tuned to WCAG AA on paper.
+ *
+ * HOW IT IS WIRED — and why it is its own file, loaded LAST.
+ *   1. It is linked after panel.css, health.css and any page's own <style>, so at
+ *      equal specificity it wins. That lets the rebrand land without rewriting the
+ *      rules in those files, which other work is editing at the same time.
+ *   2. It RE-POINTS the variables those files already use (--bg, --fg, --brand,
+ *      --red, --amber, …) at the brand tokens. Any rule written against those
+ *      variables — including rules added after this file — is on-brand for free.
+ *   3. The corner reset (`:root body *`) squares every box on every surface, so a
+ *      new card someone adds later does not arrive with an 8px radius.
+ *   4. The remaining rules restyle what was hard-coded (a literal #344054, a
+ *      system-font stack, a blue link) and give the surfaces the homepage's
+ *      typography: mono uppercase labels, display-face titles, mono clocks.
+ * To change the brand, change the tokens; to change a surface's layout, keep
+ * editing panel.css / health.css / popup.html as before. This file sets
+ * appearance only — no display, position or size rule that moves a control.
+ *
+ * FONTS. Inter, Space Grotesk and JetBrains Mono are bundled from fonts/ (SIL OFL
+ * 1.1 — see fonts/OFL.txt): the same Google Fonts subsets massmarket.ai serves.
+ * The homepage's headline face, Array, and Clash Display are Indian Type Foundry
+ * fonts ("All rights reserved", Fontshare terms) and are NOT bundled; the display
+ * stack falls back to Space Grotesk exactly as the homepage's own stack does.
+ * No remote request: MV3 would block it and the extension must not make one. */
+
+/* ── fonts (bundled, OFL 1.1) ─────────────────────────────────────────────── */
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/inter-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/inter-latin-ext.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("fonts/space-grotesk-latin.woff2") format("woff2");
+  font-weight: 300 700;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/jetbrains-mono-latin.woff2") format("woff2");
+  font-weight: 400 800;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* ── brand tokens ─────────────────────────────────────────────────────────── */
+:root {
+  /* ink — globals.css @theme --color-ink-* */
+  --mm-ink: #0a0a0a;
+  --mm-ink-800: #1a1a1a;
+  --mm-ink-700: #2a2a2a;
+  --mm-ink-500: #555555;
+  --mm-ink-400: #7a7a7a;
+  --mm-ink-200: #bebab0;
+  --mm-ink-100: #d9d4c7;
+  /* paper — globals.css --color-paper*, .card, .fld */
+  --mm-paper: #f2efe8;
+  --mm-paper-warm: #ede9e0;
+  --mm-paper-soft: #f7f5ef;
+  --mm-field: #fafaf7;
+  --mm-white: #ffffff;
+  /* accent — globals.css --accent / --accent-soft */
+  --mm-accent: #ff3d00;
+  --mm-accent-soft: rgba(255, 61, 0, 0.08);
+  /* hairlines — .card / .fld / .btn-apply-light borders on the homepage */
+  --mm-line: rgba(10, 10, 10, 0.12);
+  --mm-line-field: rgba(10, 10, 10, 0.18);
+  --mm-line-strong: rgba(10, 10, 10, 0.32);
+  /* placeholder text: darker than the homepage's #7a7a7a so it clears 4.5:1 on a field */
+  --mm-placeholder: #6b6b6b;
+
+  /* status — derived (the homepage has none). Text colours clear 4.5:1 on paper,
+     white and their own tint; see the contrast table in the release notes. */
+  --mm-err: #b32b00;          /* the accent, darkened to AA */
+  --mm-err-press: #8f2200;
+  --mm-err-bg: #fbe9e2;
+  --mm-err-line: #efc0ad;
+  --mm-warn: #8a4b00;
+  --mm-warn-bg: #f9efd9;
+  --mm-warn-line: #e3c68c;
+  --mm-ok: #1f6b45;
+  --mm-ok-bg: #e8efe3;
+  --mm-ok-line: #b7d0bb;
+
+  /* type — globals.css --font-sans / --font-display / --font-mono */
+  --mm-font-sans: "Inter", "Switzer", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mm-font-display: "Array", "Clash Display", "Space Grotesk", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --mm-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --mm-label-tracking: 0.12em;  /* .section-label is 0.14em at 11px; a hair tighter at 10–11px in a 320px popup */
+
+  /* shape + motion */
+  --mm-radius: 0px;
+  --mm-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --mm-shadow-pop: 0 10px 40px rgba(10, 10, 10, 0.08), 0 2px 6px rgba(10, 10, 10, 0.06);
+  --mm-mark: url("icons/brand-mark.png");
+}
+
+/* ── the variables panel.css / health.css / popup.html / options.html already use ── */
+:root {
+  --bg: var(--mm-paper);
+  --fg: var(--mm-ink);
+  --muted: var(--mm-ink-500);
+  --line: var(--mm-line);
+  --brand: var(--mm-ink);
+  --brand-press: var(--mm-ink-700);
+  --chip: var(--mm-paper-warm);
+  --red: var(--mm-err);
+  --red-bg: var(--mm-err-bg);
+  --red-line: var(--mm-err-line);
+  --amber: var(--mm-warn);
+  --amber-bg: var(--mm-warn-bg);
+  --amber-line: var(--mm-warn-line);
+  --blue: var(--mm-ink);
+  --stop: var(--mm-err);
+  --stop-press: var(--mm-err-press);
+  --ok: var(--mm-ok);
+  --ok-bg: var(--mm-ok-bg);
+  --err: var(--mm-err);
+  --err-bg: var(--mm-err-bg);
+  --note-bg: var(--mm-paper-soft);
+}
+
+/* ── base: one type system, square corners, brand selection + focus ───────── */
+body,
+body.mm {
+  font-family: var(--mm-font-sans);
+  background: var(--mm-paper);
+  color: var(--mm-ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+button, input, select, textarea { font-family: inherit; }
+::selection { background: var(--mm-ink); color: var(--mm-paper); }
+/* native radios, checkboxes and selects take the ink, not Chrome's default blue */
+:root { accent-color: var(--mm-ink); }
+/* Every box on every surface is square — the homepage has no rounded card, field
+   or button. (0,1,2) beats the single-class radius rules in panel.css/popup.html. */
+:root body *,
+:root body *::before,
+:root body *::after { border-radius: 0; }
+:focus-visible { outline: 2px solid var(--mm-accent); outline-offset: 2px; }
+::placeholder { color: var(--mm-placeholder); opacity: 1; }
+.mm-muted, .muted { color: var(--mm-ink-500); }
+code, kbd, pre, samp { font-family: var(--mm-font-mono); }
+
+/* ── the header: the brain mark where the green dot was, the name in the display face ─
+   ⛔ The popup header is FULL at 320px: 14px padding, two header buttons (75 + 81px)
+   and four 8px gaps leave ~104px for the mark and the name together. The old 10px
+   dot was being squeezed to 6px to fit. So the mark is 22px and does not shrink,
+   and the name stays in its own case — "MASSMARKET" in capitals is wider than the
+   room left and pushed the Side panel button 2px out of the popup. */
+header .dot,
+.mm-title .dot {
+  width: calc(22px * var(--z, 1));
+  height: calc(18px * var(--z, 1));
+  flex: 0 0 auto;
+  background: var(--mm-mark) center / contain no-repeat;
+  border-radius: 0;
+}
+header h1,
+.mm-title h1 {
+  font-family: var(--mm-font-display);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  color: var(--mm-ink);
+}
+header { background: var(--mm-paper); border-bottom-color: var(--mm-line); }
+header .hdr-link,
+.mm-title .mm-hours-open {
+  background: transparent;
+  color: var(--mm-ink);
+  box-shadow: inset 0 0 0 1px var(--mm-line-strong);
+  font-weight: 600;
+}
+header .hdr-link:hover,
+.mm-title .mm-hours-open:hover { background: var(--mm-white); box-shadow: inset 0 0 0 1px var(--mm-ink); }
+
+/* A header chip that is ON (aria-pressed — "My hours" while its view is open) is
+   drawn inverted, like the feed's NEXT UP tag. */
+header .hdr-link[aria-pressed="true"],
+.mm-title .mm-hours-open[aria-pressed="true"] { background: var(--mm-ink); color: var(--mm-paper); box-shadow: none; }
+
+/* ── buttons: ink primary, hairline secondary — the homepage's two ────────── */
+button.start,
+.mm-btn.primary,
+.mm-capture-ack,
+.mm-capture-toggle,
+.mm-consent-copy {
+  background: var(--mm-ink);
+  color: var(--mm-paper);
+  font-weight: 600;
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  transition: background-color 180ms var(--mm-ease-out);
+}
+button.start:hover,
+.mm-btn.primary:hover,
+.mm-capture-ack:hover,
+.mm-capture-toggle:hover,
+.mm-consent-copy:hover { background: var(--mm-ink-700); }
+/* the homepage's .btn-apply sweep, on the ink buttons only */
+button.start::after,
+.mm-btn.primary::after,
+.mm-capture-ack::after,
+.mm-capture-toggle::after,
+.mm-consent-copy::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.18), transparent);
+  transform: translateX(-100%);
+  transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+  z-index: -1;
+}
+button.start:hover:not(:disabled)::after,
+.mm-btn.primary:hover:not(:disabled)::after,
+.mm-capture-ack:hover:not(:disabled)::after,
+.mm-capture-toggle:hover:not(:disabled)::after,
+.mm-consent-copy:hover:not(:disabled)::after { transform: translateX(100%); }
+button.start:disabled { background: var(--mm-ink-100); color: var(--mm-ink-500); opacity: 1; }
+
+button.secondary,
+.icon-btn,
+.mm-btn {
+  background: var(--mm-white);
+  color: var(--mm-ink);
+  box-shadow: inset 0 0 0 1px var(--mm-line-strong);
+  font-weight: 600;
+}
+button.secondary:hover,
+.icon-btn:hover,
+.mm-btn:hover { background: var(--mm-white); box-shadow: inset 0 0 0 1px var(--mm-ink); }
+.mm-btn.primary,
+.mm-btn.primary:hover { box-shadow: none; }
+
+button.stop { background: var(--mm-err); color: var(--mm-white); }
+button.stop:hover { background: var(--mm-err-press); }
+.mm-timer-actions .mm-timer-stop {
+  background: var(--mm-err-bg);
+  color: var(--mm-err);
+  box-shadow: inset 0 0 0 1px var(--mm-err-line);
+}
+.mm-timer-actions .mm-timer-stop:hover { background: #f7dccf; box-shadow: inset 0 0 0 1px var(--mm-err); }
+
+/* links read as ink, underlined — the homepage's quiet links */
+button.link,
+.mm-hours-back,
+.mm-hours-link,
+.health-link-wrap a,
+.banner a,
+.mm-packet a,
+.privacy a {
+  color: var(--mm-ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1px;
+}
+button.link:hover,
+.mm-hours-back:hover,
+.mm-hours-link:hover,
+.health-link-wrap a:hover,
+.mm-packet a:hover { color: var(--mm-err); }
+/* a link-shaped <button> beside the lane links reads the same way */
+.health-link-wrap button,
+.mm-consent-link { color: var(--mm-ink); text-decoration: underline; text-underline-offset: 2px; }
+/* …but "← Back" drawn AS a button (.mm-btn) is a button: the secondary style, no underline */
+.mm-btn.mm-hours-back { background: var(--mm-white); color: var(--mm-ink); text-decoration: none; box-shadow: inset 0 0 0 1px var(--mm-line-strong); }
+.mm-btn.mm-hours-back:hover { background: var(--mm-white); color: var(--mm-ink); box-shadow: inset 0 0 0 1px var(--mm-ink); }
+.nudge .nudge-x { color: var(--mm-ink-700); }
+.nudge .nudge-x:hover { color: var(--mm-ink); }
+
+/* ── fields: the homepage's .fld ──────────────────────────────────────────── */
+textarea,
+.cat-select,
+.extform input[type="number"],
+.newtask-form input[type="text"],
+.newtask-form input[type="number"],
+.newtask-form input[type="date"],
+.mm-search-input,
+.mm-hours-input,
+.mm-closeout-note,
+.mm-consent-input,
+.mm-hours-picklist {
+  background: var(--mm-field);
+  border-color: var(--mm-line-field);
+  color: var(--mm-ink);
+  border-radius: 0;
+}
+textarea:focus,
+.cat-select:focus,
+.extform input:focus,
+.newtask-form input:focus,
+.mm-search-input:focus,
+.mm-hours-input:focus,
+.mm-closeout-note:focus,
+.mm-consent-input:focus {
+  background: var(--mm-white);
+  border-color: var(--mm-ink);
+  outline: 2px solid var(--mm-ink);
+  outline-offset: -1px;
+}
+.cat-select { background-color: var(--mm-field); }
+
+/* ── labels: JetBrains Mono, uppercase, tracked — the homepage's .section-label ─ */
+.mm-head,
+.mm-band-head,
+.mm-hours-grouphead,
+.health-sessions-h,
+#run-cat-wrap .run-cat-label,
+.rec,
+.mm-nextup-label,
+.mm-consent-label {
+  font-family: var(--mm-font-mono);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: var(--mm-label-tracking);
+  font-size: calc(10.5px * var(--z, 1));
+}
+.mm-head { color: var(--mm-ink); }
+.mm-head.idle,
+.health-sessions-h { color: var(--mm-ink-500); }
+.rec { color: var(--mm-ink); }
+.mm-nextup-label { color: var(--mm-ink-500); }
+.mm-band[data-band="open"] .mm-band-head { color: var(--mm-ink-500); }
+.mm-band-sub { font-family: var(--mm-font-sans); text-transform: none; letter-spacing: 0; color: var(--mm-ink-500); }
+
+/* the live dot: ink, with the homepage's pulse ring instead of a blink */
+@keyframes mm-live-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(10, 10, 10, 0.35); }
+  70% { box-shadow: 0 0 0 6px rgba(10, 10, 10, 0); }
+}
+.mm-head .rec-dot,
+.rec .dot {
+  background: var(--mm-ink);
+  border-radius: 50%;
+  animation: mm-live-pulse 2.2s ease-out infinite;
+}
+.mm-head.idle .rec-dot { background: var(--mm-ink-400); animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  .mm-head .rec-dot, .rec .dot { animation: none; }
+  button.start::after, .mm-btn.primary::after, .mm-capture-ack::after, .mm-capture-toggle::after, .mm-consent-copy::after { transition: none; }
+}
+
+/* ── titles in the display face ───────────────────────────────────────────── */
+.qa-head,
+.mm-hours-title,
+.mm-client,
+.run-card-title,
+.mm-timer-title,
+.running .block-name,
+.mm-capture-h,
+.mm-consent-h,
+.mm-hours-refusal-head,
+.privacy h2 {
+  font-family: var(--mm-font-display);
+  font-weight: 700;
+  letter-spacing: -0.005em;
+}
+
+/* ── clocks and totals in the mono face ───────────────────────────────────── */
+.clock,
+.run-card-clock,
+.mm-timer-clock,
+.mm-hours-total,
+.mm-hours-amt {
+  font-family: var(--mm-font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.clock, .run-card-clock, .mm-timer-clock { font-weight: 600; }
+.mm-packet code,
+.mm-item-fp,
+.mm-copy-fallback,
+.mm-consent-cmd,
+.prompt-box { font-family: var(--mm-font-mono); }
+
+/* ── cards and panels: paper-soft, one hairline, ink on hover ─────────────── */
+label.block,
+.run-card,
+.mm-card,
+.mm-timer-card,
+label.qa-check,
+.mm-hours-form,
+.mm-hours-sum,
+.mm-hours-recorded,
+.deliv-card,
+.newtask-form {
+  background: var(--mm-paper-soft);
+  border-color: var(--mm-line);
+}
+label.block:hover,
+.mm-card:hover { border-color: var(--mm-ink); background: var(--mm-white); }
+label.block:has(input:checked) { border-color: var(--mm-ink); background: var(--mm-white); }
+.mm-card { border-left-color: var(--mm-line); }
+.mm-card:hover { border-left-color: var(--mm-ink); }
+.mm-card[data-state="reply_24h"],
+.mm-card[data-state="reply_24h"]:hover { border-left-color: var(--mm-err); background: var(--mm-err-bg); }
+.mm-card[data-state="overdue"],
+.mm-card[data-state="overdue"]:hover { border-left-color: var(--mm-warn); background: var(--mm-warn-bg); }
+.mm-card:focus-visible { outline: 2px solid var(--mm-accent); }
+.mm-detail { border-top-color: var(--mm-line); }
+.mm-packet strong,
+.mm-nextup-client,
+.mm-qa-card-block { color: var(--mm-ink); }
+.mm-packet-collapsed .mm-pk-line strong,
+.mm-packet-expanded .mm-pk-line,
+.prompt-box,
+.privacy p,
+.mm-hours-entry,
+.mm-hours-find { color: var(--mm-ink-700); }
+.mm-packet code { background: var(--mm-paper-warm); }
+
+.mm-status,
+.mm-status-detail,
+.mm-nextup,
+details.health.mm-health,
+.health-panel,
+.health-sessions-block,
+.mm-empty,
+.run-card-more > summary,
+.mm-hours-day,
+.mm-hours-rec,
+.extform,
+.nextup-compact { border-color: var(--mm-line); }
+.mm-status-detail strong { color: var(--mm-ink); }
+.mm-nextup { background: var(--mm-paper-warm); }
+.mm-empty { border-color: var(--mm-line-strong); color: var(--mm-ink-500); }
+.mm-empty.mm-feed-failed { border-color: var(--mm-err-line); background: var(--mm-err-bg); }
+
+/* the status line + health strip */
+.mm-ind { color: var(--mm-ink-700); }
+.mm-ind:hover,
+.mm-ind:focus-visible,
+.mm-ind[aria-expanded="true"] { background: var(--mm-paper-warm); }
+details.health,
+.health-panel,
+.health-sessions-block { background: var(--mm-paper-soft); }
+/* (0,2,1) in panel.css, so the corner reset above cannot reach it */
+details.health.mm-health { background: var(--mm-paper-soft); border-radius: 0; }
+details.health > summary,
+.health-name,
+.health-session-title { color: var(--mm-ink); }
+.health-msg,
+.health-foot,
+.health-sessions-roots { color: var(--mm-ink-500); }
+
+/* running cards' overflow menu */
+.run-card-more > summary { background: var(--mm-white); color: var(--mm-ink-700); }
+.run-card-more[open] > summary { background: var(--mm-paper-warm); }
+.run-card-more-menu { background: var(--mm-white); border-color: var(--mm-line); box-shadow: var(--mm-shadow-pop); }
+.mm-hours-picklist { box-shadow: var(--mm-shadow-pop); }
+.mm-hours-pickopt:hover,
+.mm-hours-pickopt:focus-visible,
+.mm-hours-pickopt[aria-selected="true"] { background: var(--mm-paper-warm); }
+
+/* the sticky Start bar */
+#view-idle .idle-actions {
+  background: var(--mm-paper);
+  border-top-color: var(--mm-line);
+  box-shadow: 0 -10px 14px -10px rgba(10, 10, 10, 0.16);
+}
+
+/* ── chips and tags: mono, square, one hairline ───────────────────────────── */
+.mm-tag,
+.mm-count,
+.mm-hours-tag,
+.block .est,
+.badge-pa,
+.badge-tracking {
+  font-family: var(--mm-font-mono);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  border-radius: 0;
+}
+.mm-tag { background: transparent; color: var(--mm-ink-700); border-color: var(--mm-line-strong); }
+.mm-tag.red { color: var(--mm-err); border-color: var(--mm-err-line); background: var(--mm-err-bg); }
+.mm-tag.amber { color: var(--mm-warn); border-color: var(--mm-warn-line); background: var(--mm-warn-bg); }
+.mm-tag.eta { color: var(--mm-ink); border-color: var(--mm-ink); background: transparent; }
+/* the feed's #1 item: an inverted chip, like the homepage's dark column */
+.mm-tag.next { color: var(--mm-paper); border-color: var(--mm-ink); background: var(--mm-ink); }
+.mm-count { color: var(--mm-ink-700); background: transparent; box-shadow: inset 0 0 0 1px var(--mm-line); }
+.mm-hours-tag { background: transparent; color: var(--mm-ink-500); border-color: var(--mm-line-strong); }
+.block .est { background: var(--mm-paper-warm); color: var(--mm-ink-700); }
+.badge-pa { background: var(--mm-warn-bg); color: var(--mm-warn); border-color: var(--mm-warn-line); }
+.badge-tracking { background: var(--mm-ok-bg); color: var(--mm-ok); border-color: var(--mm-ok-line); }
+
+/* ── status: the three derived families ───────────────────────────────────── */
+/* success */
+.ok,
+.mm-hours-saved { color: var(--mm-ok); }
+.saved-banner { color: var(--mm-ok); background: var(--mm-ok-bg); border-color: var(--mm-ok-line); }
+.mm-stop-notice { border-color: var(--mm-ok-line); background: var(--mm-ok-bg); color: var(--mm-ink); }
+.mm-stop-notice.is-qa { border-color: var(--mm-warn-line); background: var(--mm-warn-bg); color: var(--mm-warn); }
+.mm-stop-notice.is-error { border-color: var(--mm-err-line); background: var(--mm-err-bg); color: var(--mm-err); }
+.deliv-card { background: var(--mm-paper-soft); }
+details.deliv-panel { background: var(--mm-paper-warm); border-color: var(--mm-line); }
+/* warning */
+.banner.amber,
+.run-card-sched,
+.sched-banner,
+.qa-reminder { background: var(--mm-warn-bg); color: var(--mm-warn); border-color: var(--mm-warn-line); }
+.mm-hours-untracked { background: var(--mm-warn-bg); border-color: var(--mm-warn-line); }
+.mm-hours-why { color: var(--mm-warn); }
+/* error */
+.banner.red,
+.run-card-over,
+.over-banner { background: var(--mm-err-bg); color: var(--mm-err); border-color: var(--mm-err-line); }
+/* neutral note (was blue) */
+.nudge { background: var(--mm-paper-warm); color: var(--mm-ink-700); border-color: var(--mm-line-strong); }
+
+/* the capture notice + work-folder card stay amber (a question, not an error),
+   in the brand's amber, with ink body text */
+.mm-capture-body,
+.mm-capture-state,
+.mm-consent-body,
+.mm-consent-note,
+.mm-consent-verify,
+.mm-consent-copystatus { color: var(--mm-ink-700); }
+.mm-consent-winnote,
+.mm-consent-restart { color: var(--mm-warn); }
+.mm-consent-cmd { background: var(--mm-field); border-color: var(--mm-line-field); color: var(--mm-ink); }
+
+/* ── toast ────────────────────────────────────────────────────────────────── */
+.mm-toast { background: var(--mm-ink); color: var(--mm-paper); box-shadow: var(--mm-shadow-pop); }
+
+/* ── the pop-out bar ──────────────────────────────────────────────────────── */
+.mm-pip-bar { background: var(--mm-paper); border-bottom-color: var(--mm-line); }
+.mm-pip-zoom { font-family: var(--mm-font-mono); color: var(--mm-ink-500); }
+
+/* ── the Options page ─────────────────────────────────────────────────────── */
+body > h1:first-child {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--mm-font-display);
+  font-weight: 700;
+  font-size: 22px;
+  letter-spacing: -0.01em;
+}
+body > h1:first-child::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 36px;
+  height: 29px;
+  background: var(--mm-mark) center / contain no-repeat;
+}
+body > label {
+  font-family: var(--mm-font-mono);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--mm-ink-500);
+}
+body > input {
+  background: var(--mm-field);
+  border-color: var(--mm-line-field);
+  color: var(--mm-ink);
+}
+body > input:focus { background: var(--mm-white); border-color: var(--mm-ink); outline: 2px solid var(--mm-ink); outline-offset: -1px; }
+body > button { background: var(--mm-ink); color: var(--mm-paper); }
+body > button:hover { background: var(--mm-ink-700); }
+.status.ok { box-shadow: inset 0 0 0 1px var(--mm-ok-line); }
+.status.err { box-shadow: inset 0 0 0 1px var(--mm-err-line); }
+.status.info { box-shadow: inset 0 0 0 1px var(--mm-line); }
+.privacy { background: var(--mm-paper-soft); border-color: var(--mm-line); }

@@ -1,0 +1,244 @@
+/* health.css — the ONE stylesheet for the health strip, on every surface.
+ *
+ * Three documents load it: the toolbar popup (popup.html), the side panel
+ * (sidepanel.html) and the popped-out window (popout.html). It exists as its own
+ * file for the same reason panel.css does: until v0.10.0 the strip's markup was
+ * hand-written into popup.html and its CSS lived in that file's inline <style>,
+ * so mirroring the strip anywhere else meant a second copy of both. A second copy
+ * of a status surface is how one surface ends up telling you the hook is fine
+ * while the one beside it says it never reported.
+ *
+ * The rows are built by panelui.js renderHealthDetail(), which is where the class
+ * names below come from. `details.health` is popup-only chrome (the popup is
+ * 320px and collapses the strip when the measured lanes are green); `.health-panel`
+ * is the always-open frame the taller surfaces use. Everything between them —
+ * every row, dot, name, message and link — is shared, which is the point.
+ *
+ * --z is panel.css's zoom factor. The popup does not define it, so every size
+ * here reads it with a fallback of 1 rather than assuming it exists. */
+
+/* ── the popup's collapsible frame ─────────────────────────────────────────── */
+details.health {
+  border-bottom: 1px solid var(--line);
+  background: #fcfcfd;
+  font-size: 12px;
+}
+details.health > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  cursor: pointer;
+  outline: none;
+  font-weight: 600;
+  color: #344054;
+  list-style: none;
+}
+details.health > summary::-webkit-details-marker { display: none; }
+details.health > summary::after {
+  content: '▾';
+  margin-left: auto;
+  color: var(--muted);
+  font-weight: 400;
+}
+details.health[open] > summary::after { content: '▴'; }
+.health-sep { color: var(--line); }
+
+/* ── the taller surfaces' frame ────────────────────────────────────────────
+ * No <details> and no summary, on purpose. The side panel and the pop-out
+ * already carry the shared Chips · Hooks · Timer row above this, with its own
+ * click-to-expand explanation; wrapping the strip in a second collapsible
+ * would mean either a second status row in the summary (the duplication this
+ * file exists to delete) or a new summary label — new copy, which an executor
+ * does not get to write. Always-open costs three lines on a surface that is
+ * 600px+ tall and says the same thing in the same words. */
+.health-panel {
+  border: 1px solid var(--line);
+  border-radius: calc(8px * var(--z, 1));
+  background: #fcfcfd;
+  font-size: calc(12px * var(--z, 1));
+  margin-bottom: calc(10px * var(--z, 1));
+}
+.health-panel .health-body { padding: calc(8px * var(--z, 1)) calc(10px * var(--z, 1)) calc(2px * var(--z, 1)); }
+
+/* ── the rows themselves: identical on all three surfaces ──────────────────── */
+.health-body { padding: 2px 14px 10px; }
+.health-row { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 8px; }
+.health-row .health-dot { flex: 0 0 auto; line-height: 1.35; }
+.health-name { font-weight: 600; color: #344054; }
+.health-msg { color: var(--muted); margin-top: 1px; }
+.health-link-wrap { margin-top: 3px; }
+.health-link-wrap a { color: var(--blue, #175cd3); font-weight: 600; }
+.health-foot { color: var(--muted); font-size: 11px; margin: 0 0 6px; }
+.health-body .link { padding: 0; font-size: 11px; }
+
+/* 0.11.3 — "Change folders" on the Claude Code hook line: an in-page reveal, drawn
+ * as a <button> styled like the lane links above it (it has no destination). */
+.health-link-wrap button {
+  width: auto; padding: 0; border: 0; background: none; cursor: pointer;
+  color: var(--blue, #175cd3); font: inherit; font-weight: 600;
+}
+.health-reveal-body { margin-top: 4px; }
+.health-reveal-text { margin: 0 0 6px; color: var(--muted); }
+
+/* ── the Claude Code sessions block (0.11.3 · its own block since 0.11.4) ─────
+ * Drawn by panelui.js renderSessionsBlock() into a host OUTSIDE the status row's
+ * <details> — popup.html's #sessions-host, and the node panelapp.js builds for the
+ * side panel and the pop-out. Through 0.11.3 these were lines inside the Claude Code
+ * hook lane, i.e. inside a strip that stays shut on a healthy install.
+ *
+ * ⛔ FIX ROUND 1 (Opus, 2026-10-02): BELOW THE CONTROLS, AND COMPACT. The host sits
+ * after the next-up line and never above a running timer, a Stop, "Start another
+ * task" or an action card (popup.js placeSessions, panelapp.js) — nor, since fix
+ * round 2, above the extension-request form of the running view. And each session is
+ * exactly TWO lines in the popup and the pop-out — the thread's name, then its
+ * client, task and folder, each cut with an ellipsis and whole in its title
+ * attribute — so six sessions and the folders line fit in at most 300px of a 600px
+ * popup (they took 427px when line 2 wrapped). On the side panel, which is tall,
+ * line 2 may take two lines and the folders line is not clamped. No inner scrollbar:
+ * a clamp hides overflow, it never scrolls it.
+ *
+ * Written against the variables brand.css re-points (--fg, --muted, --line,
+ * --chip, --red, --ok) and the sizes the strip already uses, so it is on-brand on
+ * all three surfaces and adds no colour or font of its own. Square, like every box
+ * brand.css draws (the 8px corner of the first build is gone).
+ * ⛔ The popup styles EVERY bare <button> as a full-width, 12px-padded block in
+ * white text (popup.html), so each button here sets its own width, padding,
+ * background and colour; Save is the shared .mm-btn.primary.
+ * ⛔ 320px: a clamped line is cut, never wrapped wider; where a line may wrap (the
+ * side panel), it wraps anywhere, so a 120-character task with no space in it
+ * cannot widen anything. */
+
+/* The frame. In the popup, outside <main> (every view but the running one), it is a
+   band across the popup under the next-up line and the owed-QA card: the strip's
+   paper, the 14px gutters, a hairline above and below. */
+.health-sessions-block {
+  padding: calc(5px * var(--z, 1)) 14px calc(6px * var(--z, 1));
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: #fcfcfd;
+  font-size: calc(12px * var(--z, 1));
+  line-height: 1.2;
+  min-width: 0;
+}
+/* Inside <main> (the popup's running view, under the next-up line and the
+   extension-request form) and on the side panel and the pop-out (in the task
+   region, under the next-up line): a box inside the surface's own gutters, framed
+   like the next-up line above it. */
+main .health-sessions-block,
+.mm-task-region > .health-sessions-block {
+  border: 1px solid var(--line);
+  padding: calc(5px * var(--z, 1)) calc(8px * var(--z, 1)) calc(6px * var(--z, 1));
+  margin: 0 0 calc(8px * var(--z, 1));
+}
+/* Fix round 2 — the extension-request form is OPEN above it (popup.html .extform,
+   normally hidden): a gap under the form's buttons. Only while the form is open, so
+   nothing moves while it is shut. */
+.extform:not(.hidden) + .health-sessions-block { margin-top: calc(10px * var(--z, 1)); }
+/* A step the member must finish (ending early, QA, the capture view) is up: the
+   block steps aside, exactly as the next-up line and the owed-QA card do. Fix
+   round 2: the popup's My hours view puts it away the same way. */
+.health-sessions-block.is-suppressed { display: none !important; }
+/* The heading: the small label every other heading on these surfaces is — the
+   size, weight, case and tracking of .mm-head / .mm-band-head in panel.css, in the
+   muted ink of .mm-head.idle. brand.css sets the mono face on all of them at once. */
+.health-sessions-h {
+  display: block;
+  margin: 0 0 calc(2px * var(--z, 1));
+  font-size: calc(11px * var(--z, 1));
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+}
+.health-sessions { margin: 0; min-width: 0; }
+.health-session { min-width: 0; }
+.health-session + .health-session { margin-top: calc(2px * var(--z, 1)); }
+/* Line 1 — the thread's name: one line, never wider than the block. */
+.health-session-title {
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Line 2 — the client and task (and the folder), with "Change" beside it. In the
+   popup and the pop-out it is ONE line, cut with an ellipsis; its whole text is in
+   its title attribute (panelui.js sessionControl). */
+.health-session-line {
+  display: flex; align-items: baseline; gap: calc(8px * var(--z, 1)); min-width: 0;
+  /* The second line is the smaller one, as a card's summary is under its client. */
+  font-size: calc(11px * var(--z, 1));
+}
+.health-session-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The folders being recorded: one muted line under the sessions — or on its own,
+   when the hook is recording and no session is active. In the popup and the pop-out
+   it is clamped to two lines (whole in its title attribute). */
+.health-sessions-roots {
+  margin: calc(4px * var(--z, 1)) 0 0;
+  font-size: calc(11px * var(--z, 1));
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.health-sessions-roots:first-child { margin-top: 0; }
+/* The SIDE PANEL (body.mm, not the pop-out's body.mm.mm-pip): line 2 may take TWO
+   lines, and the folders line is not clamped. */
+body.mm:not(.mm-pip) .health-session-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+body.mm:not(.mm-pip) .health-sessions-roots {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+.health-session-change {
+  flex: 0 0 auto; width: auto; margin: 0; padding: 0; border: 0; background: none; cursor: pointer;
+  font: inherit; font-weight: 600; color: var(--fg);
+  text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px;
+}
+.health-session-change:hover { color: var(--red); }
+.health-task-picker {
+  margin-top: calc(6px * var(--z, 1));
+  padding: calc(8px * var(--z, 1));
+  border: 1px solid var(--line);
+  background: var(--mm-white, #ffffff);
+}
+.health-task-h { margin: 0 0 calc(6px * var(--z, 1)); font-weight: 600; color: var(--fg); }
+.health-task-list {
+  max-height: calc(168px * var(--z, 1));
+  overflow-y: auto;
+  margin: 0 0 calc(8px * var(--z, 1));
+  border: 1px solid var(--line);
+}
+.health-task-opt {
+  display: block; width: 100%; margin: 0; text-align: left;
+  border: 0; border-bottom: 1px solid var(--line); background: transparent;
+  padding: calc(5px * var(--z, 1)) calc(8px * var(--z, 1));
+  font: inherit; font-weight: 400; color: var(--fg); cursor: pointer;
+  white-space: normal; overflow-wrap: anywhere;
+}
+.health-task-opt:last-child { border-bottom: 0; }
+.health-task-opt:hover,
+.health-task-opt:focus-visible { background: var(--chip); }
+/* Picked: a bar and bold as well as the tint — never colour alone. */
+.health-task-opt[aria-selected="true"] { background: var(--chip); box-shadow: inset 3px 0 0 var(--fg); font-weight: 600; }
+.health-task-lab { display: block; margin: 0 0 calc(3px * var(--z, 1)); color: var(--muted); }
+.health-task-search { margin: 0 0 calc(8px * var(--z, 1)); }
+.health-task-msg { margin: calc(4px * var(--z, 1)) 0 0; }
+.health-task-msg.is-ok { color: var(--ok, #1f6b45); }
+.health-task-msg.is-err { color: var(--red, #b32b00); }

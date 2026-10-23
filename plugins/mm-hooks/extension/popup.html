@@ -1,0 +1,964 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Massmarket Time Tracker</title>
+    <!-- Shared with the side panel and the popped-out window. Loaded FIRST so
+         the popup's own rules below still win on anything they both set. Since
+         v0.8.3 this carries the WHOLE task packet in the idle view (.mm-tasks /
+         .mm-band / .mm-card / .mm-tag / .mm-btn), not just the .mm-status row.
+         Note .mm-btn (0,1,0) deliberately out-specifies this file's
+         `button { width: 100% }` (0,0,1), so the card actions size themselves. -->
+    <link rel="stylesheet" href="panel.css" />
+    <!-- The health strip, shared with the side panel and the pop-out. Its markup
+         is built by panelui.js renderHealthDetail() on all three surfaces, so its
+         CSS is one file too — see health.css. -->
+    <link rel="stylesheet" href="health.css" />
+    <style>
+      :root {
+        --bg: #ffffff;
+        --fg: #101828;
+        --muted: #667085;
+        --line: #e4e7ec;
+        --brand: #12b76a;
+        --brand-press: #0e9457;
+        --stop: #d92d20;
+        --stop-press: #b42318;
+        --chip: #f2f4f7;
+      }
+      * { box-sizing: border-box; }
+
+      /* ⛔ THE POPUP'S WIDTH IS THE ROOT BOX'S WIDTH, NOT BODY'S. Chrome sizes the
+         popup window to <html>'s preferred (min-content) width, clamped to <= 800
+         CSS px, and re-reads it as the document changes — in BOTH directions.
+         Measured in a real popup (chrome.action.openPopup(), driven over CDP)
+         2026-08-12: body 500px -> popup 500; body 900px -> popup 800 (the cap);
+         back to 320px -> popup 320; body{width:auto} -> popup 184, which is the
+         document's exact min-content width.
+         So `body { width: 320px }` on its own pins BODY. The root stays width:auto,
+         and anything that raises the ROOT's preferred width takes the popup with
+         it. Measured defeats of a body-only pin, same session:
+           body{min-width:900px}                            -> popup 800
+           html{min-width:900px}                            -> popup 800
+           an EMPTY 900x1px div appended as a SIBLING of <body> -> popup 800
+         320 -> 800 is 2.5x, which is Rob's 2026-08-12 report verbatim: "it's also
+         still expanding more than double wide slightly after opening".
+         Pinning the ROOT gives immunity to CONTENT-driven widening: an injected
+         node, a too-wide child, anything that raises the document's preferred width
+         from the inside. That is the class of bug Rob hit.
+         ⛔ IT IS NOT UNIVERSAL, and the first draft of this comment claimed it was.
+         Measured over CDP on this branch, both of these still win:
+           documentElement min-width:900px -> popup 800 (min-width beats max-width)
+           html{margin-left:200px}         -> popup 520 (root margins ADD to it)
+         So this closes the inbound-content path, which is the one that was open. It
+         is not a guarantee against a future rule touching the root. This commit
+         exists to retract a false load-bearing comment from v0.8.1 and must not
+         ship a second one.
+         `verify/popup-width.mjs` asserts this and FAILS (800 / 800 / 184) the
+         moment these two lines come out. Do not delete them to "tidy up".
+         Space-taking scrollbars are fine and need no companion rule: with a classic
+         15px scrollbar forced (Windows/Linux, or macOS "Show scroll bars: Always"),
+         the popup measures 335 while the root's CONTENT box stays 320, body stays
+         320 and there is no horizontal overflow — Chrome adds the gutter outside
+         the pinned width rather than eating into it, exactly as it did before this
+         pin. macOS overlay scrollbars reserve 0px, so Rob sees a flat 320. */
+      html {
+        width: 320px;
+        max-width: 320px;
+      }
+      body {
+        width: 320px;
+        margin: 0;
+        font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        color: var(--fg);
+        background: var(--bg);
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+      }
+      header .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--brand); }
+      header h1 { font-size: 13px; font-weight: 600; margin: 0; }
+      header .hdr-spacer { flex: 1; }
+      header .hdr-link {
+        width: auto;
+        flex: 0 0 auto;
+        background: var(--chip);
+        color: #344054;
+        border-radius: 6px;
+        padding: 4px 8px;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1.2;
+      }
+      header .hdr-link:hover { background: #e4e7ec; }
+      /* The Hours label is hours.js COPY. Capped so no wording can push the 320px
+         header wide — popup-width.mjs caught it overflowing under a classic scrollbar. */
+      header #open-hours { max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      main { padding: 14px; }
+      .muted { color: var(--muted); }
+      .hidden { display: none !important; }
+
+      button {
+        width: 100%;
+        border: 0;
+        border-radius: 8px;
+        padding: 12px;
+        font-size: 14px;
+        font-weight: 600;
+        color: #fff;
+        cursor: pointer;
+      }
+      button.start { background: var(--brand); }
+      button.start:hover { background: var(--brand-press); }
+      button.stop { background: var(--stop); }
+      button.stop:hover { background: var(--stop-press); }
+      button:disabled { opacity: 0.5; cursor: default; }
+      button.link {
+        background: transparent;
+        color: #175cd3;
+        font-weight: 500;
+        padding: 6px 0;
+        width: auto;
+        text-decoration: underline;
+      }
+      button.secondary { background: var(--chip); color: #344054; }
+      button.secondary:hover { background: #e4e7ec; }
+
+      /* ⛔ NO max-height / inner scroller here any more (v0.8.0).
+         Rob, 2026-08-11: "the Start button doesn't appear until a good while
+         after I select one of these options... I have to scroll all the way down
+         and then back up."
+         Diagnosis: #start was the LAST element of #view-idle and the idle
+         document is ~684px tall inside Chrome's 600px popup cap, so Start sat at
+         y≈630-670 — off-screen — and picking "Unscheduled work" un-hides
+         #note-wrap (+118px) and pushed it further away. A 260px inner scroller
+         made it worse, not better: the page still overflowed, and the list you
+         were reading scrolled independently of the button you needed.
+         Fix: ONE scroller (the popup document) plus a sticky action bar, below. */
+      /* min-width:0 is WRAPPING hygiene, not width control. A flex item defaults to
+         min-width:auto, which refuses to shrink below its longest UNBREAKABLE
+         token. popup.js renders b.deliverable_ref raw, and those have no spaces
+         (e.g. `internal:team-onboarding-2026-08-12:0`, 37 chars). min-width:0 lets
+         the row shrink, overflow-wrap:anywhere below does the actual wrap, and
+         together they keep the text inside the 320px column instead of running off
+         under the edge. Worth keeping for that reason alone.
+         ⛔ It does NOT widen or narrow the popup, and it never did. The previous
+         version of this comment claimed the unwrapped row "grows the whole popup
+         past body{width:320px}" — that was v0.8.1's theory of Rob's width bug, it
+         is measured FALSE, and shipping it did not move the width by one pixel.
+         In a real popup, a 120-char unbreakable token drove
+         documentElement.scrollWidth to 984 (.nextup-title), 860 (.idle-head p),
+         843 (#health-ext-link) and 789 (#health-ext-msg) while window.innerWidth
+         stayed 320 in every case; so did min-width:900px on an in-flow descendant,
+         a position:absolute width:900px, and a position:fixed left:50% width:600px.
+         body{width:320px} is a FIXED width, so Blink pins that box's min AND max
+         preferred width to 320 and descendant overflow is simply invisible to the
+         popup auto-resizer. The width is pinned at the ROOT — see html{} above. */
+      .blocks { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; min-width: 0; }
+      label.block {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 9px 10px;
+        cursor: pointer;
+        min-width: 0;
+      }
+      label.block > * { min-width: 0; }
+      label.block:hover { border-color: #cfd4dc; }
+      label.block input { margin-top: 2px; flex: 0 0 auto; }
+      .block .title { font-weight: 600; overflow-wrap: anywhere; }
+      .block .meta { color: var(--muted); font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
+      .block .est { display: inline-block; background: var(--chip); border-radius: 4px; padding: 0 5px; margin-left: 6px; font-size: 11px; color: #344054; }
+
+      textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 8px;
+        font: inherit;
+        resize: vertical;
+        min-height: 46px;
+        margin-bottom: 12px;
+      }
+
+      /* internal-work category select (unscheduled work has no client block, so it
+         REQUIRES a category — build / rework / client-meeting / planning / coordination). */
+      .cat-select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 8px;
+        font: inherit;
+        background: #fff;
+        margin-bottom: 12px;
+      }
+      .cat-select:invalid { color: var(--muted); } /* placeholder look until picked */
+      #run-cat-wrap { margin: 8px 0 4px; text-align: left; }
+      #run-cat-wrap .run-cat-label {
+        display: block;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--muted);
+        margin-bottom: 4px;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+      }
+      #run-cat-wrap .cat-select { margin-bottom: 0; }
+
+      .running .block-name { font-size: 15px; font-weight: 600; }
+      .running .note { color: var(--muted); margin-top: 2px; }
+      .clock { font-variant-numeric: tabular-nums; font-size: 34px; font-weight: 700; letter-spacing: 1px; text-align: center; margin: 14px 0; }
+
+      /* PARALLEL running list (v0.5.5) */
+      .run-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+      .run-count { color: var(--muted); font-weight: 600; margin-left: 2px; }
+      #runlist { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+      .run-card { border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; }
+      .run-card-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+      .run-card-title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; }
+      .run-card-clock { font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 700; letter-spacing: 0.5px; flex: 0 0 auto; }
+      .run-card-note { color: var(--muted); font-size: 12px; margin-top: 2px; }
+      .run-card-sched, .run-card-over {
+        border-radius: 6px; padding: 6px 8px; font-size: 11px; font-weight: 600; margin-top: 8px;
+      }
+      .run-card-sched { background: #fffaeb; color: #b54708; border: 1px solid #fedf89; }
+      .run-card-over { background: #fef3f2; color: #b42318; border: 1px solid #fecdca; }
+      .run-card-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; position: relative; }
+      .run-card-actions .run-card-stop { flex: 1; padding: 9px; font-size: 13px; }
+      .run-card-actions .link { flex: 0 0 auto; }
+      /* D3 — the small More menu: Request extension and copy-the-client-again live
+         behind it, so Stop is the one prominent control on the card. */
+      .run-card-more { flex: 0 0 auto; position: relative; }
+      .run-card-more > summary {
+        list-style: none; cursor: pointer; border: 1px solid var(--line); border-radius: 6px;
+        padding: 6px 10px; font-size: 14px; line-height: 1; color: var(--muted); background: #fff;
+      }
+      .run-card-more > summary::-webkit-details-marker { display: none; }
+      .run-card-more[open] > summary { background: var(--chip, #f2f4f7); }
+      .run-card-more-menu {
+        position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; min-width: 170px;
+        display: flex; flex-direction: column; gap: 2px; padding: 4px;
+        background: #fff; border: 1px solid var(--line); border-radius: 8px;
+        box-shadow: 0 6px 16px rgba(16, 24, 40, 0.14);
+      }
+      .run-card-more-menu .link { text-align: left; padding: 6px 8px; white-space: normal; }
+      #run-startanother { width: 100%; }
+      .run-card-cat { margin: 8px 0 0; }
+      /* "tracking now" badge on a picker row for a block already running */
+      .badge-tracking {
+        display: inline-block; background: #ecfdf3; color: var(--brand-press);
+        border: 1px solid #a6f4c5; border-radius: 4px; padding: 0 5px; margin-left: 6px;
+        font-size: 11px; font-weight: 600;
+      }
+      label.block.is-tracking { opacity: 0.75; }
+      /* back-to-active-blocks link on the modal QA/early views */
+      .backlist { margin-bottom: 10px; }
+      .rec { display: inline-flex; align-items: center; gap: 6px; color: var(--brand); font-weight: 600; font-size: 12px; }
+      .rec .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--brand); animation: blink 1.4s infinite; }
+      @keyframes blink { 50% { opacity: 0.25; } }
+
+      .err { color: var(--stop); margin: 8px 0; }
+      .center { text-align: center; }
+      .ok { color: var(--brand-press); font-weight: 600; margin: 8px 0 0; }
+
+      /* version banner (spans all views) */
+      .banner {
+        margin: 0;
+        padding: 9px 14px;
+        font-size: 12px;
+        font-weight: 500;
+        border-bottom: 1px solid transparent;
+      }
+      .banner.amber { background: #fffaeb; color: #b54708; border-bottom-color: #fedf89; }
+      .banner.red { background: #fef3f2; color: #b42318; border-bottom-color: #fecdca; }
+      .banner a { color: inherit; font-weight: 700; text-decoration: underline; }
+
+      /* The health strip's own rules moved to health.css in v0.10.0 — the side
+         panel and the pop-out draw the same strip and cannot have a second copy.
+         Only the popup-specific override of the embedded status row stays here. */
+
+      /* ⛔ STICKY ACTION BAR — scoped to the idle picker only (v0.8.0).
+         Start is now pinned to the bottom of the popup viewport no matter how
+         long the block list is, so it is visible the instant a block is selected
+         and never has to be scrolled to. Scoped to #view-idle deliberately: the
+         running / QA / early views are short and already end with their action.
+         `position: sticky` resolves against the popup document (the only
+         scroller — see .blocks above), and the negative side margins let the bar
+         span the full 320px width past main's 14px padding. */
+      #view-idle .idle-actions {
+        position: sticky;
+        bottom: 0;
+        z-index: 5;
+        background: var(--bg);
+        margin: 0 -14px -14px;
+        padding: 10px 14px 12px;
+        border-top: 1px solid var(--line);
+        box-shadow: 0 -10px 14px -10px rgba(16, 24, 40, 0.22);
+      }
+      #view-idle .idle-actions .err { margin-top: 0; }
+
+      /* three-indicator status row (Chips · Hooks · Timer) inside the health
+         strip's summary. Rendered by panelui.js — the SAME renderer the side
+         panel and the popped-out window use, so the three surfaces cannot
+         disagree about what is green. */
+      /* D3 — ONE status line: never wraps; a long word is cut, not pushed to a second row. */
+      #health-status.mm-status { border: 0; padding: 0; margin: 0; flex: 1; flex-wrap: nowrap; min-width: 0; overflow: hidden; white-space: nowrap; }
+      #health-status .mm-ind { font-size: 12px; flex: 0 1 auto; min-width: 0; overflow: hidden; }
+      #health-status .mm-ind .mm-muted { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+      #health-status .mm-sep { flex: 0 0 auto; }
+
+      /* request-extension form (running view) */
+      .extform {
+        margin-top: 10px;
+        padding-top: 12px;
+        border-top: 1px solid var(--line);
+      }
+      .extform textarea { min-height: 54px; margin-bottom: 8px; }
+      .extform input[type="number"] {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 8px;
+        font: inherit;
+        margin-bottom: 8px;
+      }
+
+      /* self-serve "New task" creation (idle picker) — same input styling as the
+         extension-request form above, scoped to its own wrapper. */
+      #newtask-toggle { margin-bottom: 12px; }
+      .newtask-form {
+        margin-bottom: 12px;
+        padding: 10px 10px 4px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--chip);
+      }
+      .newtask-form input[type="text"],
+      .newtask-form input[type="number"],
+      .newtask-form input[type="date"] {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 8px;
+        font: inherit;
+        margin-bottom: 8px;
+        background: #fff;
+      }
+      .newtask-form textarea { min-height: 46px; }
+      .newtask-form .cat-select { margin-bottom: 8px; }
+      #newtask-project-search { margin-bottom: 6px; }
+      .nt-count { margin: -4px 0 8px; font-size: 11px; color: var(--muted); }
+      .nt-count.none { color: var(--stop); }
+      .row { display: flex; gap: 8px; }
+      .row button { flex: 1; }
+      .row button.link { flex: 0 0 auto; }
+
+      /* end-of-block QA attestation */
+      .qa-head { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+      label.qa-check {
+        display: flex;
+        gap: 9px;
+        align-items: flex-start;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 11px 12px;
+        cursor: pointer;
+        margin: 10px 0;
+      }
+      label.qa-check input { margin-top: 2px; }
+      .qa-reminder { color: #b54708; background: #fffaeb; border-radius: 8px; padding: 8px 10px; margin: 0 0 10px; }
+
+      /* "scheduled time is up" banner (running view) + ending-early prompt */
+      .sched-banner {
+        background: #fffaeb;
+        color: #b54708;
+        border: 1px solid #fedf89;
+        border-radius: 8px;
+        padding: 9px 10px;
+        font-size: 12px;
+        font-weight: 500;
+        margin-bottom: 12px;
+      }
+      .stack > button + button { margin-top: 8px; }
+
+      /* Deliverables card (QA gate) + collapsible panel (recording) */
+      .deliv-card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin-bottom: 12px;
+        background: #f6fef9;
+      }
+      .deliv-head { font-weight: 600; margin-bottom: 6px; }
+      .deliv-list { margin: 0; padding-left: 18px; }
+      .deliv-list li { margin: 3px 0; }
+      .deliv-empty { margin: 2px 0 0; font-style: italic; }
+      /* collapsible always-visible panel pinned above the recording view */
+      details.deliv-panel {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 8px 12px;
+        margin-bottom: 12px;
+        background: var(--chip);
+      }
+      details.deliv-panel > summary {
+        font-weight: 600;
+        cursor: pointer;
+        list-style: revert;
+        outline: none;
+      }
+      details.deliv-panel[open] > summary { margin-bottom: 6px; }
+      details.deliv-panel .deliv-list { max-height: 120px; overflow-y: auto; }
+
+      /* QA-capture guidance card (shown after Stop) */
+      .prompt-box {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px;
+        font-size: 12px;
+        line-height: 1.45;
+        color: #344054;
+        background: var(--chip);
+        max-height: 128px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+      }
+
+      /* idle header (title + refresh) */
+      .idle-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+      .idle-head p { margin: 0; }
+      .icon-btn {
+        width: auto;
+        background: var(--chip);
+        color: #344054;
+        border-radius: 8px;
+        padding: 6px 10px;
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 1;
+      }
+      .icon-btn:hover { background: #e4e7ec; }
+      .icon-btn.spinning { animation: spin 0.8s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      /* "✓ time submitted" confirmation + "saved, QA still needed" banners */
+      .saved-banner {
+        color: var(--brand-press);
+        background: #f6fef9;
+        border: 1px solid #a6f4c5;
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 12px;
+        font-weight: 600;
+        margin-bottom: 12px;
+      }
+
+      /* over-block-estimate warning (running view) */
+      .over-banner {
+        background: #fef3f2;
+        color: #b42318;
+        border: 1px solid #fecdca;
+        border-radius: 8px;
+        padding: 9px 10px;
+        font-size: 12px;
+        font-weight: 600;
+        margin-bottom: 12px;
+      }
+
+      /* pending-PM-approval badge (idle picker rows) */
+      .badge-pa {
+        display: inline-block;
+        background: #fffaeb;
+        color: #b54708;
+        border: 1px solid #fedf89;
+        border-radius: 4px;
+        padding: 0 5px;
+        margin-left: 6px;
+        font-size: 11px;
+        font-weight: 600;
+      }
+
+      /* ⛔ THE TASK PACKET in the idle view (v0.8.3). Every rule that draws it
+         lives in panel.css — .mm-tasks / .mm-band / .mm-card / .mm-tag / .mm-btn —
+         because the side panel and the popped-out window draw it from the same
+         file. Nothing about the cards is restyled here; a popup-only card style is
+         the same drift in CSS that a popup-only renderer was in JS.
+
+         min-width:0 for the same load-bearing reason as .blocks above: a flex item
+         defaults to min-width:auto and refuses to shrink below its longest
+         unbreakable token, which is how the popup grew past body{width:320px}. */
+      #idle-tasks { min-width: 0; }
+      .nextup-rule { color: var(--muted); font-size: 11px; margin: 10px 0 12px; font-style: italic; }
+      /* compact one-liner shown in the running view (still a single queued item —
+         you are mid-block, this only previews what is next after it) */
+      .nextup-compact {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        border-top: 1px solid var(--line);
+        margin-top: 12px;
+        padding-top: 10px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      /* .nu-title is gone with the span it styled (v0.12.0): the item is named once,
+         by #nextup-pinned above, and this block is now just the action. */
+
+      /* dismissible "attach a work log" nudge after a long internal-block stop */
+      .nudge {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        background: #eff8ff;
+        color: #175cd3;
+        border: 1px solid #b2ddff;
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 12px;
+        margin-bottom: 12px;
+      }
+      .nudge .nudge-x {
+        width: auto;
+        background: transparent;
+        color: #175cd3;
+        padding: 0 2px;
+        font-size: 14px;
+        font-weight: 700;
+        line-height: 1;
+        flex: 0 0 auto;
+      }
+      .nudge .nudge-x:hover { color: #103a8f; }
+
+      /* collapsed "Past — needs QA" section at the bottom of the picker */
+      details.past-section { margin-top: 6px; }
+      details.past-section > summary {
+        font-weight: 600;
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 12px;
+        padding: 4px 0;
+        outline: none;
+      }
+      details.past-section[open] > summary { margin-bottom: 6px; }
+    </style>
+    <!-- v0.11.3 — the Massmarket brand layer. LAST on purpose: it re-points the
+         variables the stylesheets above already use and wins their ties, so the
+         rules above keep working unchanged (see brand.css). The fonts are bundled
+         (fonts/, SIL OFL) and preloaded so they are in hand before first paint. -->
+    <link rel="preload" href="fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="fonts/space-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="fonts/jetbrains-mono-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="brand.css" />
+  </head>
+  <body>
+    <header>
+      <span class="dot"></span>
+      <h1>Massmarket Time Tracker</h1>
+      <span class="hdr-spacer"></span>
+      <!-- Persistent surface: the popup closes on any click-away, the side panel doesn't. -->
+      <!-- v0.11.2 — the first way into a member's own hours from inside the
+           product. Before this, /api/ext/my-hours and /api/ext/worklog-time both
+           existed server-side and NOTHING in the extension called either, so the
+           only repair path was an operator typing rows in with the service-role
+           key. In the header because it has to be reachable from every view: the
+           moment somebody notices a number is wrong is not a moment they are
+           standing in the idle picker. -->
+      <!-- label and tooltip are hours.js COPY, set by popup.js -->
+      <button id="open-hours" class="hdr-link"></button>
+      <button id="open-sidepanel" class="hdr-link" title="Keep your running timers visible in Chrome's side panel">◨ Side panel</button>
+    </header>
+    <!-- version banner: shown above every view when the build is out of date -->
+    <div id="banner" class="banner hidden" role="alert"></div>
+    <!-- ⛔ THE WORK-FOLDER CARD (v0.10.1). Above every view because it is a
+         standing panel, not a step in a flow — the same reasoning as the panel's
+         .mm-qa-owed line. It does NOT trap focus and it does NOT cover the
+         surface: someone mid-timer must never be locked out of Stop by it.
+         ⛔ 0.11.3: it is now the one-step Claude Code SETUP card, shown only while
+         the SERVER's hook verdict says a step is due (duplicate / stale / dark /
+         not set up) and hidden otherwise — never on a local action. v0.10.0 hid a
+         card after writing a browser-local "grant" the hook never read, which is
+         why only the server's verdict may hide this one. See consentcard.js. -->
+    <!-- capture notice + pause control (v0.11.0). ABOVE the work-folder card on
+         purpose: until it is acknowledged nothing is captured in this browser at
+         all, so it is the first question, and after acknowledgement it collapses
+         to a one-line state plus Pause/Resume. Built by capturecard.js — the same
+         module the side panel mounts — so the notice a member reads is the same
+         paragraph on both surfaces. -->
+    <!-- health strip: THREE lanes — this extension's build and the Claude Code hook,
+         both from GET /api/ext/health, plus the feed, which as of v0.11.0 is a
+         READING of this profile's own capture gate and no longer a fixed statement.
+         It used to say capture was off for everyone pending a release, which was
+         true only while always-on capture stayed removed (v0.6.0); continuous
+         capture ships in v0.11.0, so the lane now derives its five states from
+         captureGate() in capture.js — the same gate the capture card above renders
+         from. Collapsed when the two SERVER-measured lanes are green; the feed lane
+         is excluded from auto-expand, because a member who has chosen to stay
+         paused would otherwise pin the strip open on every open.
+         A red hook NEVER blocks tracking — only the min_supported version floor
+         blocks Start, exactly as it did before this panel existed. -->
+    <details id="health" class="health hidden">
+      <summary>
+        <!-- v0.8.0: the summary is now the SHARED three-indicator status row
+             (Chips · Hooks · Timer) from panelui.js — one renderer, three
+             surfaces. The expanded body below keeps what only the popup has:
+             the version gate, the download link, the hook-install link and the
+             re-check button. That is not duplication, it is the detail behind
+             two of the three dots. -->
+        <span id="health-status" class="mm-status"></span>
+      </summary>
+      <div class="health-body">
+        <!-- v0.10.0: the lanes are BUILT, not hand-written. panelui.js
+             renderHealthDetail() fills this host on every surface, which is what
+             lets the side panel show the same three lanes in the same words
+             instead of carrying a second copy of the markup and the wording. -->
+        <div id="health-rows"></div>
+        <p class="health-foot" id="health-foot"></p>
+        <!-- D3 (2026-09-14): once the capture notice is acknowledged the capture
+             card leaves the top of the popup, and its pause / resume control lives
+             HERE, behind the one status line. capturecard.js captureCardAbove()
+             decides which host it goes in. -->
+        <div id="capture-inline-host" class="hidden"></div>
+        <button id="health-refresh" class="link">Re-check</button>
+      </div>
+    </details>
+    <!-- D3 — BELOW the one status line, and only while there is something to do:
+         the capture card stands here while the notice is unacknowledged or the
+         profile is signed out; the setup card stands here only while a step is
+         due (0.11.3) and is absent when the hook is recording. -->
+    <div id="capture-host" class="hidden"></div>
+    <div id="consent-host" class="hidden"></div>
+    <!-- M7 — the pinned "what is next" line. OUTSIDE <main> on purpose: it is the
+         one thing that must be on screen whichever view the popup happens to be
+         in, and a host inside a <section> would come and go with that section.
+         Filled by panelui.js renderNextUpLine() — the SAME renderer the side panel
+         and the pop-out mount, so the three surfaces cannot name a different next
+         client. showView() hides it for the QA / ending-early / capture views,
+         where a "next" line would compete with a step the member has to finish.
+         There is deliberately no count on the toolbar badge: it would be blank for
+         the people this targets until a fetch lands, up to four hours stale after
+         that, and it would dull the "!" and "?" the badge already carries. -->
+    <div id="nextup-pinned" class="mm-nextup hidden" role="status"></div>
+
+    <!-- M5 — the pinned, UNDISMISSABLE QA-owed card. Also outside <main>, and for
+         a second reason: this used to be a VIEW. An outstanding QA flag made
+         init() render the QA prompt and return, so the whole task list vanished
+         behind a question that never named the block it was waiting on. The
+         requirement is unchanged and still enforced; it is now stated above the
+         list instead of in place of it. Filled by panelui.js renderQaOwedCard()
+         straight from the per-block set in storage, so it cannot be dismissed into
+         looking resolved. -->
+    <div id="qa-owed-card" class="mm-qa-card hidden" role="status"></div>
+
+    <!-- 0.11.4 — the Claude Code sessions block. OUTSIDE the strip's <details>, so
+         it is on screen without opening anything (through 0.11.3 the session lines
+         sat inside the strip, which stays shut on a healthy install), and — fix
+         round 1, Opus 2026-10-02 — BELOW every control: after the next-up line and
+         the owed-QA card, never above a running timer, a Stop, "Start another task"
+         or an action card. In the running view popup.js placeSessions() moves it
+         under "Start another task", the next-up line and the extension-request form
+         (fix round 2: after the form, so the form opens where it did on 0.11.3); in
+         the step views (ending early, QA, capture) it steps aside like the two
+         pinned strips, and in My hours too. Filled by panelui.js
+         renderSessionsBlock() — the same renderer the side panel and the pop-out
+         use — with its heading, two lines per session (up to six) and the folders
+         being recorded. Hidden, and empty, when there is nothing to draw: no
+         heading, no empty block. -->
+    <div id="sessions-host" class="health-sessions-block hidden"></div>
+
+    <main>
+      <!-- Loading -->
+      <section id="view-loading" class="center muted">Loading…</section>
+
+      <!-- Not connected -->
+      <section id="view-notconnected" class="hidden">
+        <p class="muted">This extension isn't connected yet. Add your API URL and member token to get started.</p>
+        <button id="open-options" class="start">Open settings</button>
+      </section>
+
+      <!-- Error -->
+      <section id="view-error" class="hidden">
+        <p class="err" id="error-msg"></p>
+        <button id="retry" class="link">Retry</button>
+        <button id="open-options-2" class="link">Open settings</button>
+      </section>
+
+      <!-- Idle (pick a block, start) -->
+      <section id="view-idle" class="hidden">
+        <!-- Shown when the picker is opened as "Start another task" while blocks are
+             already running (v0.5.5) — lets the rep return without starting one. -->
+        <button id="idle-backlist" class="link backlist hidden">← Back to active blocks</button>
+        <!-- ⛔ THE SAME PACKET AS THE SIDE PANEL (v0.8.3).
+             Rob, 2026-08-12: "The view of the tasks I'm getting when I first open
+             the extension is very different from the view inside the side panel. I
+             think they should pretty much be the same thing… It should basically be
+             the same packet of information that they see on their task in the
+             extension, whether it's on the side panel, the main, or what pops up
+             when you first open it."
+
+             What was here until v0.8.3: a bespoke one-item "▶ Next up" chip built
+             by popup.js from the same cached /api/ext/next-task payload the panel
+             reads — one endpoint, one payload, one item, TWO renderers that
+             disagreed out loud (the chip called it "Next up"; the panel called the
+             identical row "Overdue"). It is now one card per client from
+             panelui.js renderTasks(), the same renderer the side panel and the
+             popped-out window use, and the #1 item carries a "▶ NEXT UP" tag
+             inside its own band instead of in a second box.
+
+             The heading markup is panel.css's own (.mm-head / .rec-dot) so the
+             three surfaces cannot drift on wording OR on styling. -->
+        <div class="mm-head idle" id="idle-tasks-head">
+          <span class="rec-dot"></span><span id="idle-tasks-count">Your tasks</span>
+        </div>
+        <div id="idle-tasks" class="mm-tasks"></div>
+        <p class="nextup-rule">Finished early? Always pull the next thing in line.</p>
+        <!-- Dismissible nudge after a long internal-block stop (build/rework/
+             planning/coordination, ≥1h): offer to attach a work log. -->
+        <div id="idle-worklog-nudge" class="nudge hidden" role="status">
+          <span id="idle-worklog-nudge-text"></span>
+          <button id="idle-worklog-nudge-x" class="nudge-x" title="Dismiss">✕</button>
+        </div>
+        <!-- Resume-Append: shown when a QA-capture bundle exists so the rep can add
+             more captures after Claude Code asks for a re-shoot, then re-export. -->
+        <div id="qa-resume-wrap" class="hidden" style="margin-bottom:12px;">
+          <button id="qa-resume" class="secondary">Resume QA capture (<span id="qa-resume-count">0</span> shots)</button>
+        </div>
+        <!-- "✓ time submitted" confirmation after a stop returns to the picker. -->
+        <div id="idle-confirm" class="saved-banner hidden" role="status"></div>
+        <div class="idle-head">
+          <p class="muted">What are you working on?</p>
+          <button id="refresh-blocks" class="icon-btn" title="Refresh blocks from your calendar">↻</button>
+        </div>
+        <div class="blocks" id="blocks"></div>
+        <!-- Self-serve task creation (Build 3, 2026-07-20): attach billable client work
+             that isn't on the calendar to a REAL, existing project via a constrained
+             dropdown (GET /api/ext/my-projects) — never free text. Created rows land in
+             time_calendar_blocks with self_created=true, status='scheduled',
+             approval_status='pending_pm_approval' (POST /api/ext/self-task) and then show
+             up in this same picker on refresh, same as any other block. -->
+        <button id="newtask-toggle" class="secondary">+ New task</button>
+        <div id="newtask-form" class="newtask-form hidden">
+          <!-- ⛔ SEARCH, not scrolling. 117 active projects in one <select>, named
+               after the CONTACT, so "Life's Operating System" sits under C (Creg).
+               2026-08-12: Shezan lost 2 untracked hours, Antu 6. Matching is
+               substring over BOTH fields and spelling-forgiving, because the team
+               searched "Kool Kalk" for a project recorded as "Cool Calc". -->
+          <input id="newtask-project-search" type="text" autocomplete="off"
+                 placeholder="Search projects — name or client…" />
+          <select id="newtask-project" class="cat-select" required>
+            <option value="" disabled selected>Pick a project (required)…</option>
+          </select>
+          <p id="newtask-project-count" class="nt-count hidden"></p>
+          <input id="newtask-title" type="text" placeholder="Task title (required)" />
+          <textarea id="newtask-desc" placeholder="Details (optional)"></textarea>
+          <input id="newtask-hours" type="number" min="0.25" step="0.25" inputmode="decimal" placeholder="Est. hours (optional, default 1)" />
+          <input id="newtask-due" type="date" title="Due date (optional)" />
+          <p class="err hidden" id="newtask-err"></p>
+          <div class="row" style="margin-bottom:8px;">
+            <button id="newtask-cancel" class="link">Cancel</button>
+            <button id="newtask-create" class="start">Create task</button>
+          </div>
+          <p id="newtask-ok" class="ok hidden">✓ Task created</p>
+        </div>
+        <div id="note-wrap" class="hidden">
+          <textarea id="note" placeholder="Describe the unscheduled work (required)"></textarea>
+          <!-- Internal (no-client-block) time REQUIRES a category — no free text,
+               no default. The placeholder <option> is disabled so nothing is
+               pre-selected and Start stays disabled until the rep picks one. -->
+          <select id="cat-select" class="cat-select" required>
+            <option value="" disabled selected>Pick a category (required)…</option>
+            <option value="build">Build</option>
+            <option value="rework">Rework</option>
+            <option value="client_meeting">Client meeting</option>
+            <option value="planning">Planning</option>
+            <option value="coordination">Coordination</option>
+          </select>
+        </div>
+        <!-- Sticky action bar: Start is always on screen, whatever the list
+             length or whether the unscheduled-work note is showing. -->
+        <div class="idle-actions">
+          <p class="err hidden" id="idle-err"></p>
+          <button id="start" class="start" disabled>Start</button>
+        </div>
+      </section>
+
+      <!-- Running — PARALLEL active-blocks list (v0.5.5). Each open block is its own
+           card with an independent elapsed clock + Stop; "Start another task" adds a
+           block in parallel instead of hiding the running one behind a single Stop. -->
+      <section id="view-running" class="hidden running">
+        <div class="run-head">
+          <div class="rec"><span class="dot"></span> Recording <span id="run-count" class="run-count"></span></div>
+          <!-- The runaway-timer fix: park the live clocks somewhere that doesn't
+               disappear the moment you click away from this popup. -->
+          <button id="run-sidepanel" class="link" style="padding:0;">◨ Keep visible</button>
+        </div>
+        <!-- One card per open block, injected by renderRunList(). -->
+        <div id="runlist"></div>
+
+        <!-- Start another block IN PARALLEL (opens the picker without stopping). -->
+        <button id="run-startanother" class="secondary" style="margin-top:4px;">▶ Start another task</button>
+
+        <!-- D4 (Rob, 2026-09-14): there is no "Start in parallel" control. Every
+             Start starts a new timer beside the ones already running, and never
+             stops one, so a separate parallel button was a second name for Start.
+             The pinned next-up line is moved under this button while this view is
+             up (popup.js placeNextUp), so the running timers are the top of it. -->
+
+        <!-- extension-request form (opened by a card's "Request extension" link; the
+             clicked card sets which block the request cites). -->
+        <div id="ext-form" class="extform hidden">
+          <div id="ext-for" class="muted" style="margin-bottom:6px;font-size:12px;"></div>
+          <textarea id="ext-reason" placeholder="Why do you need more time? (optional)"></textarea>
+          <input id="ext-overage" type="number" min="0" step="0.5" inputmode="decimal" placeholder="Projected hours over (optional)" />
+          <p class="err hidden" id="ext-err"></p>
+          <div class="row">
+            <button id="ext-cancel" class="link">Cancel</button>
+            <button id="ext-send" class="start">Send request</button>
+          </div>
+          <p id="ext-ok" class="ok hidden">✓ PM notified</p>
+        </div>
+      </section>
+
+      <!-- Ending early? (shown when a block-linked timer is stopped well before its scheduled end) -->
+      <section id="view-early" class="hidden stack">
+        <button id="early-backlist" class="link backlist hidden">← Back to active blocks</button>
+        <div id="early-saved" class="saved-banner hidden" role="status"></div>
+        <div class="qa-head">Ending early?</div>
+        <p class="muted" style="margin:0 0 12px">You're stopping before this block's scheduled time is up.</p>
+        <button id="early-continue" class="secondary">Not done yet — I'll continue later</button>
+        <button id="early-finished" class="start">Finished early → post QA</button>
+      </section>
+
+      <!-- End-of-block QA gate (shown after a block-linked timer stops). Just the
+           QA-walkthrough capture start — the legacy "I emailed the QA update" email
+           attestation was removed here; the qa-submit attestation still fires at the
+           very end, from the finalize-upload step below. -->
+      <section id="view-qa" class="hidden">
+        <button id="qa-backlist" class="link backlist hidden">← Back to active blocks</button>
+        <div id="qa-saved" class="saved-banner hidden" role="status"></div>
+        <div class="qa-head">Ready for QA</div>
+
+        <!-- DECISION STEP (v0.5.6): QA is the default/required path for a real client
+             deliverable. "No QA required" lets a member close a block that has no
+             deliverable (a team meeting, a quick client email) with a short recorded
+             note instead — one tap + one line, faster than QA. -->
+        <div id="qa-decision">
+          <p class="muted" style="margin:0 0 12px">Was this a client deliverable, or something with no QA — a meeting, a quick email?</p>
+          <button id="qa-start-qa" class="start">Start QA</button>
+          <button id="qa-noqa-toggle" class="secondary">No QA required</button>
+          <!-- No-QA note — revealed by "No QA required". Required one-liner; recorded,
+               not discarded (POST /api/ext/block-complete-note). -->
+          <div id="qa-noqa-form" class="hidden" style="margin-top:12px;">
+            <textarea id="qa-noqa-note" rows="2" placeholder="What was this? (e.g. morning team meeting, sent onboarding email to client)"></textarea>
+            <div id="qa-noqa-err" class="err hidden" role="alert"></div>
+            <button id="qa-noqa-submit" class="start">Submit</button>
+          </div>
+          <!-- Success confirmation — shown briefly before returning to active blocks. -->
+          <div id="qa-noqa-done" class="saved-banner hidden" role="status" style="margin-top:12px;"></div>
+        </div>
+
+        <!-- This silent capture records a screenshot on every click + the click/URL
+             sequence, bundled into a .zip for the qa-doc-generator skill. That ZIP
+             + a quick Q&A with Claude Code after is enough to finish QA on its own —
+             a Loom recording is OPTIONAL, not required. Shown only after "Start QA". -->
+        <div class="qacap-launch hidden">
+          <!-- Loom is optional: nice for narration, but screenshots + a quick Q&A
+               in Claude Code are sufficient on their own. -->
+          <div class="qa-reminder">
+            <strong>📸 Click Record QA walkthrough to start.</strong>
+            This captures your clicks + screenshots — that's enough to finish QA on its own. Recording a Loom alongside it is optional.
+          </div>
+          <!-- Deliverables for this block — read these before starting the walkthrough. -->
+          <div class="deliv-card">
+            <div class="deliv-head">Deliverables we're checking for</div>
+            <ul id="qa-deliv-list" class="deliv-list"></ul>
+            <p id="qa-deliv-empty" class="muted deliv-empty hidden"></p>
+          </div>
+          <button id="qa-capture-start" class="secondary">📸 Record QA walkthrough</button>
+          <p class="muted" style="font-size:11px; margin:8px 0 0;">Click through the finished deliverable the way a client would use it. Every click is captured here. A .zip downloads when you finish — Claude Code will ask a few quick questions to fill in anything a screenshot alone doesn't explain. Narrating a Loom alongside this is optional.</p>
+        </div>
+      </section>
+
+      <!-- ══ YOUR HOURS (v0.11.2) ═══════════════════════════════════════════
+           Two things a member could not do anywhere in this product before:
+           SEE what the tracker recorded for them, and ADD hours they worked and
+           did not clock. Both routes shipped server-side and had zero callers —
+           which is why /api/ext/worklog-time had 7 rows in its life, all from one
+           person on one day, and why a wrong number travelled through a morning
+           meeting instead of through the tool.
+
+           ⛔ Every string on this surface is built by hours.js from its frozen
+           COPY object and rendered by panelui.js, not written here. One file to review, and no chance of a
+           raw database word reaching a human: "manual" means "I started the task
+           myself" to the team and "hand-typed backfill" in the schema, and a post
+           that used the schema meaning told Shezan he had logged zero when he had
+           55.2 hours. The provenance labels beside each entry come from the
+           server, which owns that vocabulary in exactly one place. -->
+      <section id="view-hours" class="hidden">
+        <!-- Built by panelui.js mountHoursPanel() — the SAME renderer the side panel
+             and the pop-out mount (2026-09-14). Nothing is written here. -->
+        <div id="hours-host"></div>
+      </section>
+
+      <!-- QA-capture flow: (a) recording -> (b) guidance card -> (c) final card.
+           Stop moves recording -> guidance; "Keep going" loops back to recording
+           (resume-append), "Finish" runs the qa-submit attestation -> final card. -->
+      <section id="view-qacap" class="hidden">
+        <!-- (a) Recording (silent click-triggered screenshots). A Loom alongside this
+             is optional — the screenshots + the Q&A in Claude Code after are enough
+             on their own. -->
+        <div id="qacap-recording">
+          <!-- Deliverables stay pinned + collapsible so nothing gets missed while filming. -->
+          <details id="qacap-deliv" class="deliv-panel" open>
+            <summary>Deliverables we're checking for</summary>
+            <ul id="qacap-deliv-list" class="deliv-list"></ul>
+            <p id="qacap-deliv-empty" class="muted deliv-empty hidden"></p>
+          </details>
+          <div class="rec"><span class="dot"></span> Capturing clicks + screenshots</div>
+          <p class="muted" style="margin:8px 0;">Click through the deliverable the way a client would use it — every click saves a screenshot here. That's enough on its own; narrating alongside a Loom recording is optional.</p>
+          <div class="clock" id="qacap-count" style="font-size:26px; margin:10px 0;">0 shots</div>
+          <button id="qacap-finish" class="start">Stop capture</button>
+          <p id="qacap-err" class="err hidden"></p>
+        </div>
+
+        <!-- (b) Guidance card — how to turn the bundle into the client doc -->
+        <div id="qacap-guidance" class="hidden">
+          <div class="qa-head">Next: turn this into your client doc</div>
+          <p class="muted" style="margin:6px 0 6px;">In a Claude Code thread you've been working with this client on, attach this QA capture <strong>.zip</strong>, then paste the line below. Claude Code will ask a few quick questions to fill in anything a screenshot alone doesn't explain — no Loom required.</p>
+          <ul class="muted" style="margin:0 0 10px; padding-left:18px; font-size:12px; line-height:1.5;">
+            <li>this QA capture <strong>.zip</strong> <span style="opacity:.75;">(required)</span></li>
+            <li>your <strong>Loom video</strong> + share link <span style="opacity:.75;">(optional — only if you recorded one)</span></li>
+          </ul>
+          <div class="prompt-box" id="qacap-prompt"></div>
+          <button id="qacap-copy" class="secondary" style="margin-top:10px;">Copy prompt</button>
+          <p id="qacap-copy-status" class="ok hidden"></p>
+          <button id="qacap-download" class="secondary" style="margin-top:8px;">Download .zip again</button>
+          <p id="qacap-download-status" class="ok hidden"></p>
+          <p id="qacap-err2" class="err hidden"></p>
+          <div class="row" style="margin-top:14px;">
+            <button id="qacap-keepgoing" class="secondary">Keep going</button>
+            <button id="qacap-finishdone" class="start">Finish</button>
+          </div>
+          <p class="muted" style="font-size:11px; margin-top:10px;">Keep going to capture the screens Claude Code says are missing, then Stop to re-export the updated .zip. Claude Code will tell you when it's sufficient to finalize.</p>
+        </div>
+
+        <!-- (c) Final confirmation card — Finish shows this directly. Claude Code
+             saves the doc + work-log + Q&A to Supabase and calls /api/ext/qa-finalize
+             itself, so there is nothing for the rep to upload here. -->
+        <div id="qacap-final" class="hidden">
+          <div class="qa-head">✓ Done</div>
+          <p style="margin:8px 0 14px;">Claude Code saves your doc + work-log and notifies your PM — nothing to upload here.</p>
+          <button id="qacap-final-done" class="start">Back</button>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

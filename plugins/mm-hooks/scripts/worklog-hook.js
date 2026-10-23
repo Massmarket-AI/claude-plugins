@@ -147,7 +147,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.11.9";
+const HOOK_VERSION = "0.11.10";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -6048,7 +6048,9 @@ function sessionTitleFor(payload, state) {
 // pattern is the plugin's own (hooks/register.tsx MARKER): the very start of the
 // text, a lower-case uuid. Since 0.11.7 the start of the text includes the start
 // of the task inside the wrapper the desktop app puts around the first message
-// of a session `start_session` opened (TURN_ORIGIN_SIDE_FRESH_PREFIX).
+// of a session `start_session` opened (TURN_ORIGIN_SIDE_FRESH_PREFIX). Since
+// 0.11.10 it is read after any `<system-reminder>` notes the app puts in front
+// of that message (TURN_ORIGIN_NOTE_OPEN).
 //
 // ⛔ THE SCHEDULED-TASK WRAPPER (review R4). `human` does not always mean typed:
 // the app starts a scheduled task's session with the task's prompt wrapped in
@@ -6150,6 +6152,28 @@ const TURN_ORIGIN_MARKER_RE =
 const TURN_ORIGIN_SIDE_FRESH_PREFIX = "Background (from the session that started this one):\n";
 const TURN_ORIGIN_SIDE_FORK_PREFIX = "Task (from the session that started this one):\n";
 const TURN_ORIGIN_SIDE_TASK_SEPARATOR = "\n\nTask:\n";
+
+/**
+ * ⛔ THE APP'S NOTES IN FRONT OF THE PROMPT (0.11.10, 2026-10-23). The desktop
+ * app now puts one or more `<system-reminder>…</system-reminder>` notes IN FRONT
+ * of a session's first message, each followed by white space. Seen on Rob's
+ * transcripts that morning: a kickoff's text opens
+ * `<system-reminder>\nLinked sessions now…</system-reminder>\n\nBackground (from
+ * the session that started this one):\n…`, and in a worktree there are two
+ * notes, the second about the worktree, then "\n\n", then the wrapper. So the
+ * marker is no longer at the start, and those kickoffs read as "cannot tell",
+ * which counts as the person's work: 47 threads on one member's machine on
+ * 2026-10-22, and 9 of Rob's 13 on 2026-10-23 (the 4 marked "auto" had no note
+ * in front).
+ *
+ * The rule: only whole notes at the very start of the text are passed over, at
+ * most TURN_ORIGIN_LEADING_NOTES_MAX of them, with the white space after each.
+ * A note that never closes leaves the text as it was. A text that does not
+ * begin with a note is tested exactly as before. See turnEntryAfterLeadingNotes().
+ */
+const TURN_ORIGIN_NOTE_OPEN = "<system-reminder>";
+const TURN_ORIGIN_NOTE_CLOSE = "</system-reminder>";
+const TURN_ORIGIN_LEADING_NOTES_MAX = 8;
 
 /**
  * The wrapper the app puts around a scheduled task's prompt:
@@ -6544,13 +6568,30 @@ function turnEntryStartsWithMarker(text) {
 }
 
 /**
+ * The text with the app's notes at its very start passed over, and the white
+ * space after them (see TURN_ORIGIN_NOTE_OPEN). The text as it is when it does
+ * not begin with a note, or when a note never closes. Never throws.
+ */
+function turnEntryAfterLeadingNotes(text) {
+  if (typeof text !== "string" || !text.startsWith(TURN_ORIGIN_NOTE_OPEN)) return text;
+  let rest = text;
+  for (let i = 0; i < TURN_ORIGIN_LEADING_NOTES_MAX && rest.startsWith(TURN_ORIGIN_NOTE_OPEN); i++) {
+    const close = rest.indexOf(TURN_ORIGIN_NOTE_CLOSE, TURN_ORIGIN_NOTE_OPEN.length);
+    if (close === -1) return text;
+    rest = rest.slice(close + TURN_ORIGIN_NOTE_CLOSE.length).replace(/^\s+/, "");
+  }
+  return rest;
+}
+
+/**
  * True when a prompt's own words say the SYSTEM wrote it, whatever its stamp
  * says: the bridge's kickoff marker at the very start of the text (or of the
  * task the app's start_session wrapper carries), or a text that is, whole, the
- * app's scheduled-task wrapper.
+ * app's scheduled-task wrapper. Both tests are read after the app's notes in
+ * front of the text (turnEntryAfterLeadingNotes).
  */
 function turnEntryAutoByText(row) {
-  const text = turnEntryText(row);
+  const text = turnEntryAfterLeadingNotes(turnEntryText(row));
   return turnEntryStartsWithMarker(text) || isScheduledTaskPrompt(text);
 }
 

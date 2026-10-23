@@ -1,0 +1,914 @@
+/* panel.css — the ONE stylesheet for every surface.
+ *
+ * Used by three documents in full: the side panel, the popped-out (Document
+ * Picture-in-Picture) window, and the toolbar popup — which since v0.8.3 draws
+ * the same status row AND the same task packet (.mm-tasks / .mm-band / .mm-card /
+ * .mm-tag / .mm-btn) inside its idle view. There is exactly one copy so no surface
+ * can drift from the one beside it. A popup-only card style would be the same
+ * mistake in CSS that a popup-only renderer was in JS.
+ *
+ * --z is the zoom factor (the + / − controls in the popped-out window write it).
+ * Every size below is expressed against it, so one variable scales the whole
+ * surface without a second layout. */
+
+:root {
+  --z: 1;
+  --bg: #ffffff;
+  --fg: #101828;
+  --muted: #667085;
+  --line: #e4e7ec;
+  --brand: #12b76a;
+  --brand-press: #0e9457;
+  --chip: #f2f4f7;
+  --red: #d92d20;
+  --red-bg: #fef3f2;
+  --red-line: #fecdca;
+  --amber: #b54708;
+  --amber-bg: #fffaeb;
+  --amber-line: #fedf89;
+  --blue: #175cd3;
+}
+
+* { box-sizing: border-box; }
+
+body.mm {
+  margin: 0;
+  font: calc(13px * var(--z)) / 1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+.hidden { display: none !important; }
+.mm-muted { color: var(--muted); }
+
+.mm-wrap { padding: calc(12px * var(--z)); }
+
+.mm-title { display: flex; align-items: center; gap: calc(8px * var(--z)); margin-bottom: calc(10px * var(--z)); }
+.mm-title h1 { font-size: calc(13px * var(--z)); font-weight: 600; margin: 0; flex: 1; }
+.mm-title .dot { width: calc(10px * var(--z)); height: calc(10px * var(--z)); border-radius: 50%; background: var(--brand); flex: 0 0 auto; }
+
+/* ── status row: Chips · Hooks · Timer. ALWAYS visible, running or not. ───── */
+.mm-status {
+  display: flex;
+  align-items: center;
+  gap: calc(6px * var(--z));
+  flex-wrap: wrap;
+  border: 1px solid var(--line);
+  border-radius: calc(8px * var(--z));
+  padding: calc(6px * var(--z)) calc(8px * var(--z));
+  margin-bottom: calc(10px * var(--z));
+}
+.mm-ind {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(4px * var(--z));
+  border: 0;
+  background: transparent;
+  padding: calc(2px * var(--z)) calc(4px * var(--z));
+  border-radius: calc(5px * var(--z));
+  font: inherit;
+  font-weight: 600;
+  color: #344054;
+  cursor: pointer;
+  width: auto;
+}
+.mm-ind:hover, .mm-ind:focus-visible { background: var(--chip); }
+.mm-ind[aria-expanded="true"] { background: var(--chip); }
+.mm-ind .mm-dot { font-size: calc(11px * var(--z)); line-height: 1; }
+.mm-sep { color: var(--line); }
+.mm-status-detail {
+  border: 1px solid var(--line);
+  border-radius: calc(8px * var(--z));
+  padding: calc(8px * var(--z)) calc(10px * var(--z));
+  margin: calc(-6px * var(--z)) 0 calc(10px * var(--z));
+  color: var(--muted);
+  font-size: calc(12px * var(--z));
+}
+.mm-status-detail strong { color: var(--fg); }
+
+/* ── running timers ──────────────────────────────────────────────────────── */
+.mm-head {
+  display: flex;
+  align-items: center;
+  gap: calc(6px * var(--z));
+  font-size: calc(11px * var(--z));
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--brand-press);
+  margin-bottom: calc(8px * var(--z));
+}
+.mm-head .rec-dot {
+  width: calc(8px * var(--z)); height: calc(8px * var(--z)); border-radius: 50%;
+  background: var(--brand); animation: mmblink 1.4s infinite; flex: 0 0 auto;
+}
+.mm-head.idle { color: var(--muted); }
+.mm-head.idle .rec-dot { background: var(--muted); animation: none; }
+@keyframes mmblink { 50% { opacity: 0.25; } }
+
+#mm-cards { display: flex; flex-direction: column; gap: calc(8px * var(--z)); }
+.mm-timer-card { border: 1px solid var(--line); border-radius: calc(10px * var(--z)); padding: calc(10px * var(--z)) calc(11px * var(--z)); }
+.mm-timer-top { display: flex; align-items: baseline; justify-content: space-between; gap: calc(8px * var(--z)); }
+.mm-timer-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mm-timer-clock { font-variant-numeric: tabular-nums; font-size: calc(19px * var(--z)); font-weight: 700; letter-spacing: 0.5px; flex: 0 0 auto; }
+.mm-timer-note { color: var(--muted); font-size: calc(12px * var(--z)); margin-top: 2px; }
+.mm-timer-over {
+  margin-top: calc(7px * var(--z)); border-radius: calc(6px * var(--z));
+  padding: calc(5px * var(--z)) calc(7px * var(--z));
+  font-size: calc(11px * var(--z)); font-weight: 600;
+  background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber-line);
+}
+/* v0.8.6 — per-card Stop. Full width and clearly a button, because this is the
+   control that ends a paid clock; a subtle link-styled affordance here reads as
+   optional. It sits BELOW the over-run banner so the sequence is
+   "time is up → stop it". */
+.mm-timer-actions {
+  display: flex; gap: calc(6px * var(--z));
+  margin-top: calc(8px * var(--z));
+}
+/* ⛔ Two class selectors on purpose. `.mm-btn` is declared FURTHER DOWN this file
+   and sets its own background/border; at equal specificity the later rule wins, so
+   a lone `.mm-timer-stop` renders as a plain grey button no matter what it says
+   here. (0,2,0) beats (0,1,0) regardless of order. */
+.mm-timer-actions .mm-timer-stop {
+  flex: 1 1 auto; text-align: center;
+  background: var(--red-bg); color: var(--red); border-color: var(--red-line);
+  font-weight: 700;
+}
+.mm-timer-actions .mm-timer-stop:hover { background: #fee4e2; }
+.mm-timer-actions .mm-timer-stop:disabled { opacity: 0.55; cursor: default; }
+
+/* Post-Stop confirmation / QA hand-off. `is-qa` is the one that matters: the hours
+   are saved but the delivery QA is NOT done, and the popup is where it gets done. */
+.mm-stop-notice {
+  display: flex; align-items: flex-start; gap: calc(8px * var(--z));
+  margin-bottom: calc(8px * var(--z));
+  border: 1px solid var(--brand); border-radius: calc(8px * var(--z));
+  background: #ecfdf3; color: var(--fg);
+  padding: calc(8px * var(--z)) calc(10px * var(--z));
+  font-size: calc(12px * var(--z));
+}
+.mm-stop-notice.is-qa { border-color: var(--amber-line); background: var(--amber-bg); color: var(--amber); font-weight: 600; }
+.mm-stop-notice.is-error { border-color: var(--red-line); background: var(--red-bg); color: var(--red); font-weight: 600; }
+.mm-stop-notice-text { flex: 1 1 auto; }
+.mm-stop-notice-x {
+  flex: 0 0 auto; background: none; border: 0; cursor: pointer;
+  color: inherit; opacity: 0.6; font-size: calc(15px * var(--z)); line-height: 1;
+  padding: 0 calc(2px * var(--z));
+}
+.mm-stop-notice-x:hover { opacity: 1; }
+
+/* The STANDING QA-owed line (v0.8.7). Deliberately NOT dismissible and deliberately
+   not styled like the receipt above it: the receipt is about the click that just
+   happened, this is about what the member still owes. It is driven from storage on
+   every render, so it survives dismissing the receipt and disappears only when the
+   QA is actually finished in the popup. */
+.mm-qa-owed {
+  margin-bottom: calc(8px * var(--z));
+  border: 1px solid var(--amber-line); border-left-width: calc(3px * var(--z));
+  border-radius: calc(8px * var(--z));
+  background: var(--amber-bg); color: var(--amber); font-weight: 600;
+  padding: calc(8px * var(--z)) calc(10px * var(--z));
+  font-size: calc(12px * var(--z));
+}
+
+.mm-empty {
+  border: 1px dashed var(--line); border-radius: calc(10px * var(--z));
+  padding: calc(14px * var(--z)) calc(12px * var(--z));
+  text-align: center; color: var(--muted); font-size: calc(12px * var(--z));
+}
+
+/* A failed refresh must not wear the quiet, reassuring styling of an empty one —
+   the whole defect was that the two looked identical (see feedStatusNote). */
+.mm-empty.mm-feed-failed {
+  border-style: solid; border-color: var(--red-line);
+  background: var(--red-bg);
+  color: var(--fg); text-align: left;
+}
+.mm-empty.mm-feed-failed strong { color: var(--red); }
+
+/* A search that matched nothing is a NEUTRAL result, not a failure — it gets the
+   quiet empty styling, left-aligned because it carries a real sentence about why
+   a client can be legitimately missing from this feed. */
+.mm-empty.mm-empty-search { text-align: left; }
+.mm-empty.mm-empty-search strong { color: var(--fg); }
+
+/* ── search (Asif, 2026-08-14: "can you make a search option?") ───────────────
+   Full-width and directly under the head line it filters, so the count sentence
+   ("3 of 11 clients match") sits between the query and the list it produced. */
+.mm-search { margin: calc(-2px * var(--z)) 0 calc(2px * var(--z)); }
+.mm-search-input {
+  width: 100%;
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: calc(8px * var(--z));
+  padding: calc(6px * var(--z)) calc(9px * var(--z));
+  -webkit-appearance: none;
+  appearance: none;
+}
+/* Chrome hides the native ✕ on a search input unless it is explicitly kept. It is
+   the one-click way out of a filtered list, so keep it. */
+.mm-search-input::-webkit-search-cancel-button { -webkit-appearance: searchfield-cancel-button; appearance: auto; }
+.mm-search-input::placeholder { color: var(--muted); }
+.mm-search-input:focus { outline: 2px solid var(--brand); outline-offset: 1px; border-color: var(--brand); }
+
+/* The cached list IS shown; this labels it as stale, above the bands. */
+.mm-stale {
+  border-left: calc(3px * var(--z)) solid var(--red);
+  border-radius: calc(4px * var(--z));
+  padding: calc(6px * var(--z)) calc(8px * var(--z));
+  color: var(--fg); font-size: calc(11px * var(--z));
+  background: var(--red-bg);
+}
+
+/* ── the task inventory ──────────────────────────────────────────────────── */
+.mm-tasks { margin-top: calc(14px * var(--z)); display: flex; flex-direction: column; gap: calc(12px * var(--z)); }
+/* Stacked, not inline: at side-panel width an inline sub-heading wraps into the
+   title and the band name stops reading as a heading at a glance. */
+.mm-band-head {
+  display: block;
+  font-size: calc(11px * var(--z)); font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.4px;
+  margin: 0 0 calc(6px * var(--z));
+}
+.mm-band-sub {
+  display: block;
+  font-size: calc(11px * var(--z)); font-weight: 500;
+  text-transform: none; letter-spacing: 0; color: var(--muted);
+  margin-top: calc(1px * var(--z));
+}
+.mm-band-list { display: flex; flex-direction: column; gap: calc(8px * var(--z)); }
+
+/* Rob's top priority renders LOUDEST. Overdue is a different, quieter signal. */
+.mm-band[data-band="reply_24h"] .mm-band-head { color: var(--red); }
+.mm-band[data-band="overdue"] .mm-band-head { color: var(--amber); }
+.mm-band[data-band="open"] .mm-band-head { color: var(--muted); }
+
+.mm-card {
+  border: 1px solid var(--line);
+  border-left: calc(4px * var(--z)) solid var(--line);
+  border-radius: calc(10px * var(--z));
+  /* Tightened from 9px with v0.8.9's compact card. Vertical padding is paid twice
+     per card and there are twenty of them, so it is worth more here than the
+     breathing room it costs. */
+  padding: calc(6px * var(--z)) calc(10px * var(--z));
+  cursor: default;
+}
+.mm-card:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.mm-card[data-state="reply_24h"] { border-left-color: var(--red); background: var(--red-bg); }
+.mm-card[data-state="overdue"] { border-left-color: var(--amber); background: var(--amber-bg); }
+
+.mm-card-top { display: flex; align-items: baseline; gap: calc(8px * var(--z)); }
+.mm-client { font-weight: 700; font-size: calc(13px * var(--z)); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mm-count { flex: 0 0 auto; font-size: calc(11px * var(--z)); font-weight: 600; color: #344054; background: var(--chip); border-radius: calc(4px * var(--z)); padding: 0 calc(5px * var(--z)); }
+.mm-meta { color: var(--muted); font-size: calc(12px * var(--z)); margin-top: calc(2px * var(--z)); }
+
+/* ── the COMPACT summary line (v0.8.9) ────────────────────────────────────────
+   Rob, 2026-08-14: "a more narrow one for each client, pretty much with one line,
+   maybe two... so it's able to fit all their clients, or a lot more of them."
+
+   One line, ellipsised rather than wrapped. Wrapping is what quietly undid the
+   density: a two-line summary on a 300px side panel costs the same as the block it
+   replaced, and the whole point is that a card's height is PREDICTABLE so a person
+   can see how many clients they have without scrolling. */
+.mm-summary {
+  color: var(--muted);
+  font-size: calc(12px * var(--z));
+  margin-top: calc(1px * var(--z));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mm-tags { display: flex; flex-wrap: wrap; gap: calc(4px * var(--z)); margin-top: calc(4px * var(--z)); }
+/* The band already colours the card's left edge and background, so the tag repeating
+   it is redundant INSIDE its own band — but it is not redundant on a MIXED card,
+   which is why the counts stay. Only the padding shrinks. */
+.mm-card .mm-tag { padding: 0 calc(5px * var(--z)); }
+.mm-tag {
+  font-size: calc(10px * var(--z)); font-weight: 700; letter-spacing: 0.3px;
+  border-radius: calc(4px * var(--z)); padding: calc(1px * var(--z)) calc(5px * var(--z));
+  border: 1px solid var(--line); color: #344054; background: #fff;
+}
+.mm-tag.red { color: var(--red); border-color: var(--red-line); background: var(--red-bg); }
+.mm-tag.amber { color: var(--amber); border-color: var(--amber-line); background: var(--amber-bg); }
+.mm-tag.eta { color: var(--blue); border-color: #b2ddff; background: #eff8ff; }
+/* The feed's #1 ranked item, marked IN PLACE inside its own band — this replaced
+   the popup's separate "▶ Next up" chip, which classified the same item by rank
+   while the band beside it classified it by date. See renderTasks(). */
+.mm-tag.next { color: var(--brand-press); border-color: #a6f4c5; background: #f6fef9; }
+
+/* CLICK expands IN PLACE — v0.8.5. Nothing else in the list moves state.
+   ⛔ HOVER WAS REMOVED, deliberately. Rob, 2026-08-13: "the hover makes it hard to
+   scroll without having to expand every card you're scrolling over." Scrolling a
+   list should never mutate what the list shows, and with 3-5 client cards each
+   holding a 34-item enumeration, a mouse crossing the column re-laid-out the whole
+   panel under the cursor. `:focus-within` went with it: clicking Start focuses the
+   button, which would have re-opened the card on the exact interaction Rob said
+   must NOT expand it. Keyboard users still get the explicit "Details" button, which
+   toggles the same .mm-pinned class and carries aria-expanded. */
+.mm-detail { display: none; margin-top: calc(8px * var(--z)); border-top: 1px dashed var(--line); padding-top: calc(7px * var(--z)); }
+.mm-card.mm-pinned .mm-detail { display: block; }
+/* The card body is the hit target, so say so — but only where a click actually
+   toggles. Buttons and links keep their own cursor. */
+.mm-card { cursor: pointer; }
+.mm-card .mm-btn,
+.mm-card a { cursor: auto; }
+.mm-card a { cursor: pointer; }
+/* ── the SERVER's packet, rendered (v0.8.4) ───────────────────────────────────
+   ONE data shape, three renderings: `collapsed` sits on the card, `expanded`
+   fills the hover panel, and the CHIP goes to the clipboard and is never drawn.
+   Both rendered forms come through renderMarkdownish(), so the styling here is
+   for its four node kinds and nothing else. */
+.mm-packet { margin-top: calc(4px * var(--z)); }
+.mm-pk-line { font-size: calc(12px * var(--z)); line-height: 1.45; overflow-wrap: anywhere; }
+.mm-pk-indent { padding-left: calc(12px * var(--z)); color: var(--muted); }
+.mm-pk-gap { height: calc(6px * var(--z)); }
+.mm-packet strong { font-weight: 650; color: #101828; }
+.mm-packet code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: calc(11px * var(--z));
+  background: var(--chip); border-radius: calc(3px * var(--z)); padding: 0 calc(3px * var(--z));
+}
+.mm-packet a { color: var(--blue); overflow-wrap: anywhere; }
+.mm-packet-collapsed .mm-pk-line { color: var(--muted); }
+.mm-packet-collapsed .mm-pk-line strong { color: #344054; }
+.mm-packet-expanded .mm-pk-line { color: #344054; }
+
+.mm-detail ol { margin: 0; padding-left: calc(18px * var(--z)); }
+.mm-detail li { margin-bottom: calc(7px * var(--z)); }
+.mm-item-title { font-weight: 600; }
+.mm-item-meta { color: var(--muted); font-size: calc(11px * var(--z)); }
+.mm-item-fp { color: var(--muted); font-size: calc(10px * var(--z)); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+
+/* Summary text and the card's controls on ONE row — see buildCard. The text flexes
+   and ellipsises; the buttons never shrink, because a half-rendered "Sta…" button is
+   worse than a clipped sentence. */
+.mm-summary-row {
+  display: flex; align-items: center; gap: calc(8px * var(--z));
+  margin-top: calc(2px * var(--z));
+}
+.mm-summary-row .mm-summary { flex: 1 1 auto; min-width: 0; margin-top: 0; }
+/* ⛔ flex-wrap IS THE FIX, and the row not wrapping is why it was needed (M2).
+   The toolbar popup is pinned at 320px (verify/popup-width.mjs, and html/body are
+   hard-pinned in popup.html for exactly that reason), and this row sits to the
+   RIGHT of the card's summary text in the same line. With `flex: 0 0 auto` and no
+   wrap, a third and fourth control — the standalone Copy and the Close-out added in
+   v0.12.0 — are laid out past the right edge and clipped by the card's overflow.
+   Nothing failed: the width probe asserts the DOCUMENT stays 320px and it does,
+   because the buttons overflow rather than push. That probe now also measures
+   whether each control is inside its own row (see popup-width.mjs). */
+.mm-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: calc(5px * var(--z));
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.mm-card-actions .mm-btn {
+  padding: calc(3px * var(--z)) calc(8px * var(--z));
+  font-size: calc(11px * var(--z));
+  /* ⛔ A BUTTON MUST BE ABLE TO GET SMALLER THAN ITS LABEL. A flex item's default
+     min-width is `auto`, i.e. its content — so a long label does not wrap, it makes
+     the button wider than the 320px popup and pushes the whole row out of the card.
+     Wrapping the row (above) does not help when a single item is already too wide.
+     This is not a placeholder accommodation: any label a translator or a future
+     release makes longer would do the same thing. */
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.mm-btn {
+  border: 0; border-radius: calc(8px * var(--z));
+  padding: calc(7px * var(--z)) calc(10px * var(--z));
+  font: inherit; font-weight: 600; cursor: pointer;
+  background: var(--chip); color: #344054; width: auto;
+}
+.mm-btn:hover { background: #e4e7ec; }
+.mm-btn.primary { background: var(--brand); color: #fff; }
+.mm-btn.primary:hover { background: var(--brand-press); }
+.mm-btn:disabled { opacity: 0.55; cursor: default; }
+.mm-card-err { color: var(--red); font-size: calc(11px * var(--z)); margin-top: calc(5px * var(--z)); }
+
+/* Clipboard fallback: if the write is denied we SHOW the text, never fail quietly. */
+.mm-copy-fallback { width: 100%; margin-top: calc(6px * var(--z)); min-height: calc(70px * var(--z)); font: calc(11px * var(--z))/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* ── footer / actions ────────────────────────────────────────────────────── */
+.mm-actions { margin-top: calc(12px * var(--z)); display: flex; flex-direction: column; gap: calc(8px * var(--z)); }
+.mm-actions .mm-btn { width: 100%; text-align: center; }
+.mm-note { color: var(--muted); font-size: calc(11px * var(--z)); margin: calc(6px * var(--z)) 0 0; }
+
+/* ── toast ───────────────────────────────────────────────────────────────── */
+.mm-toast {
+  position: fixed; left: 50%; bottom: calc(14px * var(--z)); transform: translateX(-50%);
+  background: #101828; color: #fff; border-radius: calc(8px * var(--z));
+  padding: calc(8px * var(--z)) calc(12px * var(--z));
+  font-size: calc(12px * var(--z)); font-weight: 600;
+  box-shadow: 0 6px 18px rgba(16, 24, 40, 0.25);
+  z-index: 60; opacity: 0; pointer-events: none; transition: opacity 0.15s ease;
+}
+/* ⛔ The toast is position:fixed and was width-unbounded. In the 320px toolbar
+   popup a long line would have run off both edges with nothing to stop it. */
+.mm-toast.show { opacity: 1; }
+.mm-toast { max-width: calc(100% - 28px); box-sizing: border-box; }
+
+/* ── M7: the pinned "what is next" line ──────────────────────────────────────
+   One rule set, three surfaces — the popup mounts it above <main>, the side panel
+   and the pop-out above their task list. It is a STATEMENT, not a control: there is
+   no button in it, because the action that belongs to the next item already exists
+   on the item's own card (and, while timers run, on #nextup-run). */
+.mm-nextup {
+  display: flex; flex-wrap: wrap; align-items: baseline;
+  gap: calc(4px * var(--z));
+  margin-bottom: calc(8px * var(--z));
+  padding: calc(6px * var(--z)) calc(10px * var(--z));
+  border: 1px solid var(--line); border-radius: calc(8px * var(--z));
+  background: var(--chip);
+  font-size: calc(12px * var(--z));
+  min-width: 0;
+}
+/* Every part of this line must be able to wrap. Same rule as the action buttons:
+   a flex item's min-width defaults to its content, so any piece that refuses to
+   shrink makes the 320px popup scroll sideways. */
+.mm-nextup > * { min-width: 0; overflow-wrap: anywhere; }
+.mm-nextup-label { color: var(--muted); font-weight: 600; flex: 0 1 auto; }
+.mm-nextup-client { font-weight: 700; color: #101828; }
+.mm-nextup-sep { color: var(--muted); }
+.mm-nextup-urgency { color: var(--muted); }
+.mm-nextup-value { flex: 0 1 auto; }
+.mm-nextup.is-empty { color: var(--muted); }
+.mm-nextup.is-bad { border-color: var(--red-line); background: var(--red-bg); }
+.mm-nextup.is-bad .mm-nextup-value { color: var(--red); font-weight: 600; }
+
+/* ── M5: the pinned, undismissable QA-owed card ───────────────────────────────
+   Same amber language as the panel's standing .mm-qa-owed line above — this is the
+   same obligation, stated with the block names the line could not fit. No dismiss
+   control exists here by design. */
+.mm-qa-card {
+  margin-bottom: calc(8px * var(--z));
+  border: 1px solid var(--amber-line); border-left-width: calc(3px * var(--z));
+  border-radius: calc(8px * var(--z));
+  background: var(--amber-bg); color: var(--amber);
+  padding: calc(8px * var(--z)) calc(10px * var(--z));
+  font-size: calc(12px * var(--z));
+}
+.mm-qa-card-head { font-weight: 700; margin-bottom: calc(6px * var(--z)); overflow-wrap: anywhere; }
+.mm-qa-card-list li > * { min-width: 0; overflow-wrap: anywhere; }
+.mm-qa-card-list { list-style: none; margin: 0; padding: 0; }
+.mm-qa-card-list li {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: calc(6px * var(--z));
+  padding: calc(3px * var(--z)) 0;
+  min-width: 0;
+}
+.mm-qa-card-block { font-weight: 600; color: #101828; min-width: 0; overflow-wrap: anywhere; }
+.mm-qa-card-when { color: var(--muted); }
+.mm-qa-card-go { margin-left: auto; flex: 0 1 auto; padding: calc(3px * var(--z)) calc(8px * var(--z)); font-size: calc(11px * var(--z)); }
+
+/* Both pinned strips step aside for a view that is a step the member must finish. */
+.mm-nextup.is-suppressed, .mm-qa-card.is-suppressed { display: none !important; }
+
+/* ── M6: the close-out note form, opened inline on a card ─────────────────── */
+.mm-closeout-form { margin-top: calc(8px * var(--z)); display: flex; flex-direction: column; gap: calc(6px * var(--z)); }
+.mm-closeout-note {
+  width: 100%; box-sizing: border-box; resize: vertical;
+  border: 1px solid var(--line); border-radius: calc(8px * var(--z));
+  padding: calc(6px * var(--z)) calc(8px * var(--z));
+  font: inherit; font-size: calc(12px * var(--z));
+}
+.mm-closeout-row { display: flex; flex-wrap: wrap; gap: calc(6px * var(--z)); }
+.mm-closeout-err { color: var(--red); font-size: calc(11px * var(--z)); margin: 0; }
+
+/* ── popped-out (Document Picture-in-Picture) window ─────────────────────── */
+body.mm-pip .mm-wrap { padding: calc(10px * var(--z)); }
+.mm-pip-bar {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: calc(4px * var(--z));
+  background: var(--bg); border-bottom: 1px solid var(--line);
+  padding: calc(4px * var(--z)) calc(6px * var(--z));
+  margin: calc(-10px * var(--z)) calc(-10px * var(--z)) calc(8px * var(--z));
+}
+.mm-pip-bar .mm-pip-spacer { flex: 1; }
+.mm-pip-bar .mm-btn { padding: calc(3px * var(--z)) calc(7px * var(--z)); font-size: calc(12px * var(--z)); }
+.mm-pip-zoom { font-size: calc(10px * var(--z)); color: var(--muted); min-width: calc(30px * var(--z)); text-align: center; }
+
+/* ── the hook work-folder card (v0.10.0, reworked v0.10.1) ─────────────────
+ * Mounted by the toolbar popup (#consent-host) and by the side panel /
+ * pop-out (.mm-consent-host). The card itself is built by consentcard.js, so
+ * this is the only styling either surface needs and neither can quietly
+ * restyle it into looking like a dismissible notice.
+ *
+ * Amber, deliberately: this is a question waiting on an answer, not an error
+ * and not a success. It does not cover the surface and it does not trap
+ * focus — a running timer must always be stoppable.
+ *
+ * ⛔ THERE IS NO "DONE" STYLING, AND THERE MUST NOT BE. The card cannot know
+ * whether ~/.claude/mm-hooks/consent.json exists, so a green/complete state
+ * would be a guess — and the wrong guess is exactly what left members dark in
+ * v0.10.0. Amber is the honest colour for "still needs a terminal".
+ *
+ * ⛔ .mm-consent-copy out-specifies popup.html's `button { width: 100% }`
+ * the same way .mm-btn does, so the button sizes to its label instead of
+ * spanning the card. */
+.mm-consent {
+  border: 1px solid var(--amber-line);
+  background: var(--amber-bg);
+  border-radius: calc(8px * var(--z, 1));
+  padding: calc(10px * var(--z, 1)) calc(12px * var(--z, 1)) calc(12px * var(--z, 1));
+  margin-bottom: calc(10px * var(--z, 1));
+}
+.mm-consent-h {
+  margin: 0 0 calc(6px * var(--z, 1));
+  font-size: calc(13px * var(--z, 1));
+  font-weight: 700;
+  color: var(--amber);
+}
+/* ── the fold (v0.11.2), popup only ────────────────────────────────────────
+ * The toolbar popup is pinned at 320px and this card sits above every view on
+ * it, so an unfoldable standing panel costs a screenful on every open. The
+ * member can fold it to its own heading — and ONLY to its own heading: the
+ * summary IS the h2, moved, so a folded card still asks its question in the
+ * approved words. Nothing here is a dismiss and nothing is a "done" state; the
+ * amber frame and the heading are on screen either way.
+ *
+ * Mirrors details.health in health.css (the popup's other collapsible) rather
+ * than inventing a second idiom: no native marker, a caret on the right that
+ * flips, and the whole summary as the hit target.
+ *
+ * ⛔ THE LOCKED STATE IS NOT GREYED OUT. When the hook lane is not ok the card
+ * is forced open, and a summary that looked disabled would read as "this is
+ * broken" about the card rather than about the hook. It simply loses the caret
+ * and the pointer — there is nothing to toggle, so nothing invites a toggle. */
+.mm-consent-fold > summary {
+  display: flex;
+  align-items: center;
+  gap: calc(6px * var(--z, 1));
+  cursor: pointer;
+  outline: none;
+  list-style: none;
+}
+.mm-consent-fold > summary::-webkit-details-marker { display: none; }
+.mm-consent-fold > summary::after {
+  content: '▾';
+  margin-left: auto;
+  color: var(--amber);
+  font-weight: 400;
+}
+.mm-consent-fold[open] > summary::after { content: '▴'; }
+.mm-consent-fold > summary > .mm-consent-h { margin-bottom: 0; }
+.mm-consent-fold[open] > summary > .mm-consent-h { margin-bottom: calc(6px * var(--z, 1)); }
+.mm-consent-summary-locked { cursor: default; }
+.mm-consent-summary-locked::after { content: '' !important; }
+.mm-consent-body {
+  margin: 0 0 calc(10px * var(--z, 1));
+  font-size: calc(12px * var(--z, 1));
+  line-height: 1.45;
+  color: #7a2e0e;
+}
+.mm-consent-label {
+  display: block;
+  margin-bottom: calc(4px * var(--z, 1));
+  font-size: calc(11px * var(--z, 1));
+  font-weight: 600;
+  color: var(--amber);
+}
+.mm-consent-input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: calc(52px * var(--z, 1));
+  margin-bottom: calc(10px * var(--z, 1));
+  padding: calc(6px * var(--z, 1)) calc(8px * var(--z, 1));
+  border: 1px solid var(--amber-line);
+  border-radius: calc(6px * var(--z, 1));
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: calc(12px * var(--z, 1));
+  resize: vertical;
+}
+/* The second half of the card: the steps the extension cannot take for them.
+ * Two sections now — ADD and REMOVE — because `--consent-allow` is append-only
+ * in the hook, so a card that showed only the add command left a member who
+ * wanted to withdraw a folder with no command that withdraws one. They are
+ * styled identically on purpose: neither is the primary action, and making
+ * "stop recording from a folder" the quieter of the two would be a nudge in the
+ * one direction this surface must never nudge. */
+.mm-consent-apply-h,
+.mm-consent-remove-h {
+  margin: calc(12px * var(--z, 1)) 0 calc(6px * var(--z, 1));
+  font-size: calc(12px * var(--z, 1));
+  font-weight: 700;
+  color: var(--amber);
+}
+/* Windows only, and it sits between the add heading and the command it governs.
+ * The rendered path is a PowerShell expansion (`$env:USERPROFILE\...`), which
+ * is an inert literal in cmd.exe — so the member has to be told which terminal,
+ * next to the line it applies to rather than in a footnote. */
+.mm-consent-winnote {
+  margin: 0 0 calc(8px * var(--z, 1));
+  font-size: calc(11px * var(--z, 1));
+  line-height: 1.5;
+  font-weight: 600;
+  color: #7a2e0e;
+}
+/* ⛔ The command must be readable and selectable EVEN IF the copy button fails
+ * — clipboard access is denied outright in some profiles, and the fallback the
+ * card offers is "select the text above and copy manually". So it wraps rather
+ * than truncating, and it is never in an overflow-hidden box. */
+.mm-consent-cmd {
+  margin: 0 0 calc(8px * var(--z, 1));
+  padding: calc(7px * var(--z, 1)) calc(8px * var(--z, 1));
+  border: 1px solid var(--amber-line);
+  border-radius: calc(6px * var(--z, 1));
+  background: var(--bg);
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: calc(11px * var(--z, 1));
+  line-height: 1.5;
+  white-space: pre-wrap;
+  /* ⛔ `anywhere`, NOT `break-all`. Both stop a long path overflowing a 320px
+   * popup, but break-all splits at the first character that does not fit — it
+   * was cutting `--consent-allow` into `--con` / `sent-allow`. `anywhere` takes
+   * the spaces between arguments first and only splits inside a token when one
+   * genuinely cannot fit, so the flag and each quoted path stay readable for
+   * anyone retyping instead of copying. */
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.mm-consent-copy {
+  width: auto;
+  display: inline-block;
+  border: 0;
+  border-radius: calc(6px * var(--z, 1));
+  padding: calc(7px * var(--z, 1)) calc(14px * var(--z, 1));
+  background: var(--brand);
+  color: #fff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mm-consent-copy:hover { background: var(--brand-press); }
+.mm-consent-copy:disabled { opacity: 0.6; cursor: default; }
+.mm-consent-copystatus {
+  margin: calc(6px * var(--z, 1)) 0 0;
+  min-height: calc(14px * var(--z, 1));
+  font-size: calc(11px * var(--z, 1));
+  color: #7a2e0e;
+}
+/* ⛔ THE RESTART LINE, AND IT SITS UNDER THE COPY BUTTON RATHER THAN AT THE FOOT
+ * OF THE CARD. A session that was already open when the hook was installed never
+ * runs it, so it produces nothing all day and reads as a broken install — the
+ * commonest silent failure this card leads into, and the member has to meet it
+ * in the instant they take the command away. It is styled like the Windows note
+ * (weight and colour, no box of its own): loud enough not to be skimmed past,
+ * and quiet enough that it cannot be mistaken for a fourth command.
+ *
+ * ⛔ NOT `display: none`-able, not inside a `details`, no `.hidden` variant. A
+ * collapsed warning is a warning nobody reads, and this one only works at the
+ * moment of the copy. */
+.mm-consent-restart {
+  margin: calc(8px * var(--z, 1)) 0 0;
+  font-size: calc(11px * var(--z, 1));
+  line-height: 1.5;
+  font-weight: 600;
+  color: #7a2e0e;
+}
+/* ⛔ The verify command is a THIRD .mm-consent-cmd, and it is not copyable — it
+ * is short enough to retype and giving it a button would put three identically
+ * labelled controls on one card. It keeps the same monospace box so the member
+ * can see at a glance that all three lines name the same file, which is the
+ * property that broke when the verify command lived inside frozen prose. */
+.mm-consent-cmd-status {
+  margin-bottom: calc(6px * var(--z, 1));
+}
+.mm-consent-verify {
+  margin: calc(10px * var(--z, 1)) 0 calc(4px * var(--z, 1));
+  font-size: calc(11px * var(--z, 1));
+  line-height: 1.5;
+  color: #7a2e0e;
+  word-break: break-word;
+  user-select: text;
+}
+.mm-consent-note {
+  margin: 0;
+  font-size: calc(11px * var(--z, 1));
+  line-height: 1.5;
+  color: #7a2e0e;
+}
+
+/* ── the capture notice + pause control (v0.11.0) ──────────────────────────
+ * Mounted by the toolbar popup (#capture-host) and by the side panel /
+ * pop-out (.mm-capture-host). Built by capturecard.js, so this is the only
+ * styling either surface needs and neither can quietly restyle the notice
+ * into looking like a dismissible banner.
+ *
+ * ⛔ SAME AMBER AS THE WORK-FOLDER CARD, DELIBERATELY. Both are privacy
+ * surfaces asking for an answer, and giving this one its own colour would
+ * teach members that the two cards are different kinds of thing. They are
+ * not: one gates what the hook records from disk, this one gates what the
+ * browser records, and both are questions rather than errors.
+ *
+ * ⛔ NO "DISMISSED" STATE. The notice is present exactly while the
+ * acknowledgement is absent — the same fact captureGate() reads. There is no
+ * second flag it can hide behind, which is the property v0.10.0's card
+ * lacked and the reason nine members believed they were covered.
+ *
+ * ⛔ .mm-capture-ack / .mm-capture-toggle out-specify popup.html's
+ * `button { width: 100% }` the same way .mm-btn does, so each sizes to its
+ * label instead of spanning the card. */
+.mm-capture {
+  border: 1px solid var(--amber-line);
+  background: var(--amber-bg);
+  border-radius: calc(8px * var(--z, 1));
+  padding: calc(10px * var(--z, 1)) calc(12px * var(--z, 1)) calc(12px * var(--z, 1));
+  margin-bottom: calc(10px * var(--z, 1));
+}
+.mm-capture-h {
+  margin: 0 0 calc(6px * var(--z, 1));
+  font-size: calc(13px * var(--z, 1));
+  font-weight: 700;
+  color: var(--amber);
+}
+.mm-capture-body {
+  margin: 0 0 calc(10px * var(--z, 1));
+  font-size: calc(12px * var(--z, 1));
+  line-height: 1.45;
+  color: #7a2e0e;
+  /* The notice is ONE paragraph and is read before anything is recorded.
+   * Selectable so it can be quoted back to us verbatim. */
+  user-select: text;
+}
+.mm-capture-state {
+  margin: 0 0 calc(8px * var(--z, 1));
+  font-size: calc(12px * var(--z, 1));
+  line-height: 1.45;
+  color: #7a2e0e;
+}
+.mm-capture-ack,
+.mm-capture-toggle {
+  width: auto;
+  display: inline-block;
+  border: 0;
+  border-radius: calc(6px * var(--z, 1));
+  padding: calc(7px * var(--z, 1)) calc(14px * var(--z, 1));
+  background: var(--brand);
+  color: #fff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mm-capture-ack:hover,
+.mm-capture-toggle:hover { background: var(--brand-press); }
+.mm-capture-ack:disabled,
+.mm-capture-toggle:disabled { opacity: 0.6; cursor: default; }
+
+/* ── YOUR HOURS (v0.11.2) — one stylesheet for the popup, side panel and pop-out ─
+   Moved out of popup.html's own <style> (2026-09-14, lane L4b) with the renderer
+   (panelui.js mountHoursPanel). Everything scales with --z like the rest of this
+   file. */
+.mm-hours { display: flex; flex-direction: column; gap: calc(6px * var(--z, 1)); }
+.mm-hours-back { background: none; border: 0; padding: 0; color: var(--blue); font: inherit; cursor: pointer; text-align: left; align-self: flex-start; }
+.mm-hours-title { font-size: calc(15px * var(--z, 1)); font-weight: 600; }
+.mm-hours-intro { font-size: calc(11px * var(--z, 1)); color: var(--muted); margin: 0; }
+.mm-hours-controls { display: flex; gap: calc(6px * var(--z, 1)); align-items: center; }
+.mm-hours-controls select { flex: 1; }
+.mm-hours-refresh { flex: 0 0 auto; }
+.mm-hours-input {
+  width: 100%; box-sizing: border-box; font: inherit; color: var(--fg); background: var(--bg);
+  border: 1px solid var(--line); border-radius: calc(8px * var(--z, 1));
+  padding: calc(6px * var(--z, 1)) calc(8px * var(--z, 1));
+}
+.mm-hours-input:focus { outline: 2px solid var(--brand); outline-offset: 1px; border-color: var(--brand); }
+.mm-hours-what { min-height: calc(56px * var(--z, 1)); resize: vertical; }
+.mm-hours-lab { font-size: calc(11px * var(--z, 1)); color: var(--muted); display: block; margin-top: calc(4px * var(--z, 1)); }
+.mm-hours-loading { color: var(--muted); text-align: center; padding: calc(8px * var(--z, 1)) 0; }
+.mm-hours-err { color: var(--red); font-size: calc(12px * var(--z, 1)); margin: 0; }
+.mm-hours-saved { color: var(--brand-press); font-size: calc(12px * var(--z, 1)); margin: 0; }
+.mm-hours-sum { border: 1px solid var(--line); border-radius: calc(8px * var(--z, 1)); background: var(--chip); padding: calc(10px * var(--z, 1)); }
+.mm-hours-total { font-size: calc(22px * var(--z, 1)); font-weight: 700; line-height: 1.2; }
+.mm-hours-sub { font-size: calc(11px * var(--z, 1)); color: var(--muted); margin-top: 2px; }
+.mm-hours-line { display: flex; justify-content: space-between; gap: calc(8px * var(--z, 1)); font-size: calc(12px * var(--z, 1)); padding: 2px 0; }
+.mm-hours-amt { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.mm-hours-grouphead { font-size: calc(11px * var(--z, 1)); font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: calc(8px * var(--z, 1)) 0 calc(2px * var(--z, 1)); }
+.mm-hours-day { border-top: 1px solid var(--line); padding: calc(6px * var(--z, 1)) 0; }
+.mm-hours-dayhead { display: flex; justify-content: space-between; font-weight: 600; font-size: calc(12px * var(--z, 1)); }
+.mm-hours-entry { font-size: calc(11px * var(--z, 1)); color: #475467; padding: 3px 0 0 8px; overflow-wrap: anywhere; }
+.mm-hours-how { color: var(--muted); font-size: calc(11px * var(--z, 1)); }
+.mm-hours-hold { color: var(--red); font-size: calc(11px * var(--z, 1)); }
+.mm-hours-why { font-size: calc(11px * var(--z, 1)); color: #7a5b12; margin: 0; }
+.mm-hours-untracked { border: 1px solid #f0c36d; background: #fff8e8; border-radius: calc(8px * var(--z, 1)); padding: calc(10px * var(--z, 1)); }
+.mm-hours-uday { font-size: calc(12px * var(--z, 1)); font-weight: 600; margin-top: calc(6px * var(--z, 1)); }
+.mm-hours-link { background: none; border: 0; padding: 2px 0; color: var(--blue); font: inherit; font-size: calc(12px * var(--z, 1)); cursor: pointer; text-align: left; }
+.mm-hours-add { margin-top: calc(6px * var(--z, 1)); }
+.mm-hours-form { border: 1px solid var(--line); border-radius: calc(8px * var(--z, 1)); padding: calc(10px * var(--z, 1)); display: flex; flex-direction: column; gap: calc(4px * var(--z, 1)); }
+.mm-hours-count { font-size: calc(11px * var(--z, 1)); color: var(--muted); margin: 0; }
+.mm-hours-count.is-none { color: var(--amber); }
+.mm-hours-times { display: flex; gap: calc(8px * var(--z, 1)); }
+.mm-hours-times > div { flex: 1; min-width: 0; }
+.mm-hours-row { display: flex; flex-direction: row-reverse; flex-wrap: wrap; gap: calc(6px * var(--z, 1)); justify-content: flex-start; margin-top: calc(6px * var(--z, 1)); }
+/* ⛔ R4.2 — the day's record inside the form, and the one entry the times would cross. */
+.mm-hours-recorded { border: 1px solid var(--line); border-radius: calc(8px * var(--z, 1)); background: var(--chip); padding: calc(6px * var(--z, 1)) calc(8px * var(--z, 1)); margin-top: calc(4px * var(--z, 1)); }
+.mm-hours-recorded .mm-hours-grouphead { margin-top: 0; }
+.mm-hours-rec { font-size: calc(11px * var(--z, 1)); padding: calc(4px * var(--z, 1)) 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.mm-hours-rec:first-of-type { border-top: 0; }
+.mm-hours-rec-top { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px calc(6px * var(--z, 1)); }
+/* ⛔ The entry line never gives up its width to the marker: a long marker wraps
+   under it. Caught in hours-window-2-popup-clash.png, where the line collapsed to
+   one character per row at 320px. */
+.mm-hours-rec-top > span:first-child { flex: 1 1 12em; min-width: 0; }
+.mm-hours-rec.is-clash { background: var(--red-bg); border-left: 3px solid var(--red); padding-left: calc(6px * var(--z, 1)); }
+.mm-hours-flag { flex: 0 1 auto; min-width: 0; color: var(--red); font-weight: 700; }
+.mm-hours-clash { margin: 0; font-size: calc(12px * var(--z, 1)); color: var(--red); background: var(--red-bg); border: 1px solid var(--red-line); border-radius: calc(8px * var(--z, 1)); padding: calc(6px * var(--z, 1)) calc(8px * var(--z, 1)); }
+.mm-hours-clash.is-soft { color: var(--amber); background: var(--amber-bg); border-color: var(--amber-line); }
+.mm-hours-refusal { border: 1px solid var(--red); border-radius: calc(8px * var(--z, 1)); padding: calc(10px * var(--z, 1)); }
+.mm-hours-refusal-head { font-weight: 700; font-size: calc(13px * var(--z, 1)); margin-bottom: 4px; }
+.mm-hours-refusal-body { font-size: calc(12px * var(--z, 1)); }
+.mm-hours-find { font-size: calc(11px * var(--z, 1)); color: #475467; margin: calc(6px * var(--z, 1)) 0 0; }
+/* Stacked: at 320px the confirm label squeezed into a five-line column side by side. */
+.mm-hours-refusal-acts { display: flex; flex-direction: column; gap: calc(6px * var(--z, 1)); margin-top: calc(8px * var(--z, 1)); }
+.mm-hours-refusal-acts .mm-btn { width: 100%; }
+/* The side panel and pop-out swap the task region for the hours view. */
+.mm-hours-host { margin-bottom: calc(10px * var(--z, 1)); }
+.mm-hours-open { flex: 0 0 auto; padding: calc(4px * var(--z, 1)) calc(8px * var(--z, 1)); font-size: calc(12px * var(--z, 1)); }
+
+/* ── D3 (2026-09-14) — one status line on the taller surfaces ───────────────
+ * The side panel and pop-out now wrap the status row in the same <details> the
+ * popup uses (health.css details.health). These rules only fit that frame to a
+ * card on a surface with side padding. */
+details.health.mm-health {
+  border: 1px solid var(--line);
+  border-radius: calc(8px * var(--z, 1));
+  margin-bottom: calc(10px * var(--z, 1));
+}
+details.health.mm-health > summary { padding: calc(6px * var(--z, 1)) calc(8px * var(--z, 1)); }
+details.health > summary > .mm-status { border: 0; padding: 0; margin: 0; flex: 1; min-width: 0; }
+details.health > summary .mm-ind { cursor: inherit; }
+.mm-capture-inline .mm-capture,
+#capture-inline-host .mm-capture { margin: calc(4px * var(--z, 1)) 0 calc(6px * var(--z, 1)); box-shadow: none; }
+
+/* ── D3 — the work-folder card, collapsed, is ONE line ─────────────────────── */
+.mm-consent.is-folded { padding-top: calc(6px * var(--z, 1)); padding-bottom: calc(6px * var(--z, 1)); }
+.mm-consent.is-folded .mm-consent-fold > summary > .mm-consent-h {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+.mm-consent-fold > summary { min-width: 0; }
+
+/* ── D3 — the add form: one searchable client picker ───────────────────────── */
+.mm-hours-pick { position: relative; }
+.mm-hours-picklist {
+  max-height: calc(180px * var(--z, 1));
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: calc(6px * var(--z, 1));
+  background: #fff;
+  margin-top: calc(2px * var(--z, 1));
+  box-shadow: 0 6px 16px rgba(16, 24, 40, 0.12);
+}
+.mm-hours-pickopt {
+  display: block; width: 100%; text-align: left; border: 0; background: transparent;
+  padding: calc(6px * var(--z, 1)) calc(8px * var(--z, 1)); font: inherit; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mm-hours-pickopt:hover, .mm-hours-pickopt:focus-visible, .mm-hours-pickopt[aria-selected="true"] { background: var(--chip); }
+
+/* ── D3 — one line per existing entry, with a small tag ───────────────────── */
+.mm-hours-rec-top { display: flex; align-items: center; gap: calc(6px * var(--z, 1)); min-width: 0; }
+.mm-hours-rec-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mm-hours-tag {
+  flex: 0 0 auto; font-size: calc(10px * var(--z, 1)); font-weight: 600; line-height: 1.4;
+  border: 1px solid var(--line); border-radius: calc(4px * var(--z, 1));
+  padding: 0 calc(4px * var(--z, 1)); color: var(--muted); background: #fff;
+  max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mm-hours-rec.is-flagged .mm-hours-hold { margin-top: calc(1px * var(--z, 1)); }
+
+details.health > summary > .mm-status { flex-wrap: nowrap; overflow: hidden; white-space: nowrap; }
+details.health > summary .mm-ind { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+details.health > summary .mm-ind .mm-muted { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+details.health > summary .mm-sep { flex: 0 0 auto; }
+
+/* ── 0.11.3 — the one-step Claude Code setup card, and a way back from My hours ──
+ * Appended, not interleaved, and built from existing variables only: the card
+ * reuses .mm-consent / .mm-consent-h / .mm-consent-body / .mm-consent-cmd /
+ * .mm-consent-copy / .mm-consent-copystatus above, so all it adds is the small
+ * "Prefer the Terminal?" link and the spacing under it. */
+.mm-consent-link {
+  display: block; width: auto; margin: calc(8px * var(--z, 1)) 0 0; padding: 0;
+  border: 0; background: none; color: var(--blue); font: inherit;
+  font-size: calc(11px * var(--z, 1)); text-decoration: underline; cursor: pointer; text-align: left;
+}
+.mm-consent-terminal { margin-top: calc(8px * var(--z, 1)); }
+/* "← Back" at the top of My hours: a real button (.mm-btn supplies the chip look,
+ * restated here because the older .mm-hours-back rule above strips it), pinned to
+ * the top of the view while it scrolls. */
+.mm-btn.mm-hours-back {
+  position: sticky; top: 0; z-index: 3;
+  padding: calc(7px * var(--z, 1)) calc(12px * var(--z, 1));
+  background: var(--chip); color: #344054; box-shadow: 0 0 0 1px var(--line);
+}
+.mm-btn.mm-hours-back:hover { background: var(--line); }
+/* The header's "◷ My hours" while My hours is open: pressed, and a second press goes back. */
+.hdr-link[aria-pressed="true"],
+.mm-hours-open[aria-pressed="true"] { background: var(--line); box-shadow: inset 0 0 0 1px var(--muted); }

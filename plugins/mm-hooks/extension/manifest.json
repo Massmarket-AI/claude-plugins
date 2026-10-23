@@ -1,0 +1,71 @@
+{
+  "manifest_version": 3,
+  "name": "Massmarket Time Tracker",
+  "version": "0.11.5",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjST3RY9+5+HmZ+cszeP2CJM0k350CSXHEYrnGkOUASUbxSaJsjjdugOxPoVzUdyjYiX3MuqtCA8idD+l5Jx+DhnPMOCI8Zr7eKcA1YD7auBTIP9qgBTp144DBjIy3LLkfiz5iGOPc2z9+uZOOiOWR8Yu8gSl9EPzZNgiCrx8d/w5fX9tdykbLMYR8dc1Obbs5YiSw0Ls72oytHYFMf3UuUyUzf/NHB+oF6UUA7KxOx3/mq4Q7SOaHrDYLMUNVS+4o2Em13ehlWiLvd0JvqHJA1FCw5aR9fKYqMDN1W3ismPUfSwkNq3N8Ckcp4wVHBJav9qOuXac+2nHcUE/uGpiTQIDAQAB",
+  "description": "Tracks your work automatically while you are signed in on this browser profile: it records the web address and page title of the tab you are working in, how long it is active or idle, and how many times you clicked, typed, scrolled or pasted in each minute, so your hours land on the right client without you clicking anything. It never records which keys you pressed, what you typed, or what you copied. You can still start a timer or pick a client by hand, and you can pause capture at any time. It records nothing while you are signed out or paused. No screenshots, no other apps, and nothing outside this profile. A separate QA-capture walkthrough that you start yourself still takes a screenshot on each click and mints a short-lived upload token so an optional paired Loom recording and your QA doc can be linked back to the project.",
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "scripting",
+    "storage",
+    "alarms",
+    "offscreen",
+    "notifications",
+    "sidePanel",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "https://*/*",
+    "http://*/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_origin_as_fallback": true
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Massmarket Time Tracker",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "popout.html"
+      ],
+      "matches": [
+        "https://*/*",
+        "http://*/*"
+      ]
+    }
+  ],
+  "options_page": "options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

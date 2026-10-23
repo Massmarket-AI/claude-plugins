@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Massmarket timers</title>
+    <!-- The SAME stylesheet the side panel uses. One file, two surfaces. -->
+    <link rel="stylesheet" href="panel.css" />
+    <!-- The health strip, drawn by panelui.js renderHealthDetail() on this
+         surface exactly as it is in the toolbar popup. One file, three
+         documents — see health.css. -->
+    <link rel="stylesheet" href="health.css" />
+    <!-- v0.11.3 — the Massmarket brand layer. LAST on purpose: it re-points the
+         variables the stylesheets above already use and wins their ties, so the
+         rules above keep working unchanged (see brand.css). The fonts are bundled
+         (fonts/, SIL OFL) and preloaded so they are in hand before first paint. -->
+    <link rel="preload" href="fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="fonts/space-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="fonts/jetbrains-mono-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="brand.css" />
+  </head>
+  <body class="mm mm-pip">
+    <!-- This page is loaded as an iframe inside the Document Picture-in-Picture
+         window that content.js opens from the active tab. Running the surface as
+         a real extension page (rather than DOM injected into the page's PiP
+         document) means it gets the extension origin: chrome.* APIs, module
+         imports and the clipboard all behave exactly as they do in the side
+         panel, and a strict page CSP cannot touch it. Verified against a
+         `default-src 'none'; frame-src 'none'` page on 2026-08-11. -->
+    <div id="mm-root"></div>
+    <script type="module" src="popout.js"></script>
+  </body>
+</html>
