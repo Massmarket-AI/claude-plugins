@@ -1,10 +1,10 @@
-import type { EngineInterface, Register } from 'claude-code'
+import type { Elements, EngineInterface, Register } from 'claude-code'
 
-import type { MmBand, MmFolds, MmNotice, MmQueue, MmView } from '../types'
+import type { MmBand, MmFolds, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmView } from '../types'
 
 import {
   INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pinsNow,
-  threadTitle, threadTitleShort, titleFor, withHolder,
+  peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
@@ -141,6 +141,8 @@ const QUEUE = { plugin: 'mm-bridge', key: 'queue' } as const
 const NOTICE = { plugin: 'mm-bridge', key: 'notice' } as const
 const BAND = { plugin: 'mm-bridge', key: 'band' } as const
 const FOLDS = { plugin: 'mm-bridge', key: 'folds' } as const
+/** (New people) This thread's own presses on `New people`: the open picker, presses in flight, what OW refused. */
+const PEOPLE = { plugin: 'mm-bridge', key: 'people' } as const
 const PANE_VIEW = 'mm-view'
 const PANE_QUEUE = 'mm-queue'
 const SYNC_MS = 5 * 60_000
@@ -242,6 +244,27 @@ const PICKUP_REUSE_MS = 60_000
 const PICKUPS_MAX = 20
 /** What the pane says while it has nothing to draw yet: the list, or a client's pickup view. */
 const CHECKING = 'Checking…'
+/**
+ * (New people) Someone a press resolved stays off this computer's `New people` this long (`mm.peopleDone`), whatever
+ * a feed read before the press still says. Real time: it is not a client's clock. Past it, a person OW still lists
+ * as open is shown again.
+ */
+const PEOPLE_DONE_MS = 30 * 60_000
+/** (New people) The picker's first option: no project picked yet. */
+const PICK_NONE = 'none'
+/** (New people) The picker's options that turn to the page before or after this one (`routePage`): never a project's id. */
+const PICK_PREV = 'page-prev'
+const PICK_NEXT = 'page-next'
+/** (New people) The surfaces whose element table has a Select (the engine's `Elements`): the mobile app's has none yet. */
+const PICKER_SURFACES: ReadonlySet<string> = new Set(['terminal', 'desktop', 'vscode'])
+/**
+ * (New people) What a person can do with someone under `New people`, as OW's resolve route names it: `route`,
+ * `bootstrap` and `not_client` for an email; `handled` and `not_client` for a HighLevel Directory lead (OW refuses
+ * `route` and `bootstrap` for one).
+ */
+type PersonAction = 'route' | 'bootstrap' | 'handled' | 'not_client'
+/** (New people) The verb a refused press's line starts with: `Couldn't route: ...`. */
+const PERSON_VERB: Readonly<Record<PersonAction, string>> = { route: 'route', bootstrap: 'start a project', handled: 'mark it handled', not_client: 'mark it not client mail' }
 
 /**
  * `[mm-link <project id>]`, counted only at the very start of a prompt: the message itself, or (0.5.8) the task
@@ -360,6 +383,10 @@ type Last = {
   /** Every project id the last feed carried: the only ids an [mm-link] marker may name. */
   projects?: string[]
   error?: string
+  /** (New people) For the founder and a PM: who wrote to us with no project matched, newest first, worded at `at`. Absent: none. */
+  people?: MmPerson[]
+  /** (New people) What Route to project offers: kept only while somebody is under `New people`. */
+  routeTo?: MmProject[]
 }
 /** Every client the last sync listed, in any of its lists: what a button, a command or a thread's own pane may be about. */
 const listedIn = (last: Last | null | undefined): QueueItem[] => [
@@ -1299,6 +1326,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   }
   const member = memberText(feed.member)
   const projects = feedProjects(feed)
+  /** (New people) Who wrote to us and matched no project (the founder's and a PM's feed only), and where Route can send them: kept only while there is somebody. */
+  const people = peopleRows(feed, now)
+  const newPeople = people.length ? { people, routeTo: routeChoices(feed) } : {}
   const listed = await sessions($)
   const live = new Map((listed?.threads ?? []).map(s => [s.sessionId, s] as const))
   const feedThreads = feedThreadsOf(feed)
@@ -1322,10 +1352,10 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   if (listed === null) {
     const recs: Record<string, Recommendation> = {}
     for (const it of [...items, ...quiet, ...checking]) recs[it.projectId] = carried(it)
-    const last: Last = { at: now, member, items, ...also, pinned: before?.pinned ?? 0, recs, projects }
+    const last: Last = { at: now, member, items, ...also, pinned: before?.pinned ?? 0, recs, projects, ...newPeople }
     await storeLast($, feed, last)
     const rowsOf = (list: readonly QueueItem[], needsYou = false): Row[] => list.map(it => rowFor(it, recs[it.projectId] as Recommendation, now, { needsYou }))
-    await showQueue($, member, items, rowsOf(items, true), last.pinned, now, { teammate: rowsOf(lists.teammate), older: rowsOf(lists.older), checking: rowsOf(checking) })
+    await showQueue($, member, items, rowsOf(items, true), last.pinned, now, { teammate: rowsOf(lists.teammate), older: rowsOf(lists.older), checking: rowsOf(checking) }, now, last)
     return { last, live, pairs: known ?? {}, listed: false, unseen: new Set() }
   }
 
@@ -1853,7 +1883,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
 
   await patchStore<string[]>($, 'mm.released', [], fresh => applyListChanges(fresh, was.released, waiting))
 
-  const last: Last = { at: now, member, items, ...also, pinned: want.size, recs, projects }
+  const last: Last = { at: now, member, items, ...also, pinned: want.size, recs, projects, ...newPeople }
   // ⛔ What this pass changed, and nothing else: a link, a pin, a name or a record another session wrote
   // while it ran is the store's, and stays. (A map the store does not hold yet is written, empty or not, as
   // a sync always left these five.)
@@ -1921,7 +1951,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   await patchStore<Auto>($, 'mm.auto', {}, fresh => applyChanges(fresh, was.auto, auto, 'delete'))
   await patchStore<Record<string, string>>($, 'mm.titles', {}, (fresh, stored) => keepNewest(fresh, was.titles, titles) || !stored)
   await storeLast($, feed, last)
-  await showQueue($, member, items, rows, want.size, now, folds)
+  await showQueue($, member, items, rows, want.size, now, folds, now, last)
   return { last, live, pairs, listed: true, unseen }
 }
 
@@ -1935,9 +1965,22 @@ async function storeLast($: EngineInterface, feed: Feed, last: Last): Promise<vo
 /**
  * Puts the list in the Needs-you pane and on the status line. `folds` are the two closed groups under it:
  * neither is counted. `syncedAt` is when the list was worked out: the list drawn from a stored sync says that
- * sync's time, not the time it was drawn.
+ * sync's time, not the time it was drawn. `found` (New people): the sync record's people and where Route can send
+ * them; anyone a press here or in another thread resolved in the last PEOPLE_DONE_MS is left out. Never counted.
  */
-async function showQueue($: EngineInterface, member: string, items: QueueItem[], rows: Row[], pinned: number, now: number, folds: { teammate: Row[]; older: Row[]; checking?: Row[] }, syncedAt = now): Promise<void> {
+async function showQueue(
+  $: EngineInterface,
+  member: string,
+  items: QueueItem[],
+  rows: Row[],
+  pinned: number,
+  now: number,
+  folds: { teammate: Row[]; older: Row[]; checking?: Row[] },
+  syncedAt = now,
+  found: Pick<Last, 'people' | 'routeTo'> = {},
+): Promise<void> {
+  const people = await peopleShown($, found.people, now)
+  const routeTo = Array.isArray(found.routeTo) ? found.routeTo : []
   const queue: MmQueue = {
     // (R1: no cap on pins any more; the header counts the list)
     header: items.length ? `Needs you now (${items.length})` : 'Nothing needs you right now.',
@@ -1947,6 +1990,7 @@ async function showQueue($: EngineInterface, member: string, items: QueueItem[],
     ...(folds.teammate.length ? { teammate: folds.teammate } : {}),
     ...(folds.older.length ? { older: folds.older } : {}),
     ...(folds.checking?.length ? { checking: folds.checking } : {}),
+    ...(people.length ? { people, ...(routeTo.length ? { routeTo } : {}) } : {}),
   }
   await $.state.set(QUEUE, queue)
   const { value: notice } = await $.state.get(NOTICE)
@@ -2057,7 +2101,7 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
   const at = Number.isFinite(last.at) ? last.at : now
   const rowsOf = (items: readonly QueueItem[], needsYou = false): Row[] => items.map(it => rowFor(it, storedRec(last, it.projectId) ?? recommend([], undefined, at), at, { needsYou }))
   const items = list(last.items)
-  await showQueue($, memberText(last.member), items, rowsOf(items, true), Number(last.pinned) || 0, now, { teammate: rowsOf(list(last.teammate)), older: rowsOf(list(last.older)), checking: rowsOf(list(last.checking)) }, at)
+  await showQueue($, memberText(last.member), items, rowsOf(items, true), Number(last.pinned) || 0, now, { teammate: rowsOf(list(last.teammate)), older: rowsOf(list(last.older)), checking: rowsOf(list(last.checking)) }, at, last)
 }
 
 /** The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that waits for his OK. */
@@ -4798,6 +4842,183 @@ async function press($: EngineInterface, verb: Verb, row: Row): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------- New people (OW ticket 549944b0, spec Part B)
+// Someone wrote to us and no project matched. For the founder and a PM, the pane lists each one OW still has open
+// under `New people`, newest first, with three buttons: Route to project (a project picker of the feed's
+// `route_projects`, then the route), Start project (OW hands it to the bootstrap request), Not client mail; a
+// HighLevel Directory lead with two: Mark handled and Not client mail. Each press is ONE call to OW's
+// `/api/ext/person-alert/resolve`, the only thing it reaches; the row leaves the list when OW answers 200, and
+// otherwise the row says what OW answered. ⛔ A press here sends nothing to anybody and touches no thread: it
+// changes OW's record of the alert, then reads the feed again (askSync), as after a route that closes something.
+
+/**
+ * (New people) The presses on `New people` in flight in this session, by alert id. One at a time per person: a
+ * second press while the first is in flight does nothing (taken with no await in between, released when OW
+ * answers or the call fails).
+ */
+const resolving = new Map<string, number>()
+
+/** The people a list is drawn with: rows of the shape this version stores, less anyone resolved here or in another thread in the last PEOPLE_DONE_MS. */
+async function peopleShown($: EngineInterface, people: unknown, now: number): Promise<MmPerson[]> {
+  const list = (Array.isArray(people) ? (people as Array<Partial<MmPerson> | null>) : []).filter(
+    (p): p is Partial<MmPerson> & { id: string; title: string } => Boolean(p && typeof p === 'object' && isUuid(p.id) && typeof p.title === 'string'),
+  )
+  if (!list.length) return []
+  const done = await storeGet<Record<string, number>>($, 'mm.peopleDone', {}).catch(() => ({}) as Record<string, number>)
+  const text = (v: unknown): string => (typeof v === 'string' ? v : '')
+  return list
+    .filter(p => !(now - Number(done[p.id]) < PEOPLE_DONE_MS))
+    .map(p => ({
+      id: p.id, name: text(p.name) || p.title, title: p.title, subject: text(p.subject), when: text(p.when),
+      warnings: Array.isArray(p.warnings) ? p.warnings.filter((w): w is string => typeof w === 'string') : [], known: text(p.known), link: sourceLink(p.link),
+      ...(p.directory === true ? { directory: true as const } : {}),
+    }))
+}
+
+/** This thread's own `New people` presses as its pane holds them (a value of another shape is none). */
+async function peopleUi($: EngineInterface): Promise<MmPeople> {
+  const { value } = await $.state.get(PEOPLE)
+  return value && typeof value === 'object' ? value : {}
+}
+
+/** Route to project: this row's project picker opens (any other row's closes), nothing picked yet. Nothing is fetched or sent. Never for a Directory lead. */
+async function openRoute($: EngineInterface, id: string): Promise<void> {
+  try {
+    const { value: queue } = await $.state.get(QUEUE)
+    if ((queue?.people ?? []).find(p => p.id === id)?.directory) return
+    const ui = await peopleUi($)
+    await $.state.set(PEOPLE, { ...ui, open: id, pick: '', page: 0 } satisfies MmPeople)
+  } catch {
+    // a picker that does not open is not worth an error
+  }
+}
+
+/**
+ * A pick in the open picker: one of the projects Route offers, or none; or the page before or after (what was picked
+ * goes: the picker shows the page it is on). Nothing is fetched or sent until Route to <project> is pressed.
+ */
+async function pickProject($: EngineInterface, id: string, value: string): Promise<void> {
+  try {
+    const ui = await peopleUi($)
+    if (ui.open !== id) return
+    const { value: queue } = await $.state.get(QUEUE)
+    const routeTo = queue?.routeTo ?? []
+    if (value === PICK_PREV || value === PICK_NEXT) {
+      const at = routePage(routeTo, Number(ui.page) || 0).page
+      await $.state.set(PEOPLE, { ...ui, pick: '', page: routePage(routeTo, at + (value === PICK_NEXT ? 1 : -1)).page } satisfies MmPeople)
+      return
+    }
+    const offered = routeTo.some(p => p.projectId === value)
+    await $.state.set(PEOPLE, { ...ui, pick: value !== PICK_NONE && offered ? value : '' } satisfies MmPeople)
+  } catch {
+    // as above
+  }
+}
+
+/** Cancel: the picker closes. */
+async function closeRoute($: EngineInterface): Promise<void> {
+  try {
+    const { open: _open, pick: _pick, page: _page, ...rest } = await peopleUi($)
+    await $.state.set(PEOPLE, rest)
+  } catch {
+    // as above
+  }
+}
+
+/** `requeued_count` from OW's 200 to a Route, or undefined when the answer gives none (routedText then names the project alone). */
+function requeuedOf(text: string): unknown {
+  try {
+    const body = JSON.parse(text) as { requeued_count?: unknown } | null
+    return body && typeof body === 'object' ? body.requeued_count : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** What OW's answer to a resolve that did not go through says: its `error`, and the status. */
+function refusalText(r: { status: number; text: string }): string {
+  let said = ''
+  try {
+    const body = JSON.parse(r.text) as { error?: unknown } | null
+    if (body && typeof body.error === 'string') said = body.error
+  } catch {
+    // not JSON: the status says it
+  }
+  return said ? `${short(said, 200)} (HTTP ${r.status})` : `HTTP ${r.status}`
+}
+
+/**
+ * A press on a `New people` row: `POST /api/ext/person-alert/resolve {alert_id, action, project_id?}`. Route sends
+ * the project picked in that row's picker, and only one Route offers. A Directory lead takes `handled` and
+ * `not_client` only, and no other row takes `handled` (OW refuses route and bootstrap for one, and handled for any
+ * other). On 200 the person leaves the list here at
+ * once and in every thread's next draw (`mm.peopleDone`), the pane says what was done, and the feed is read again.
+ * Anything else: the row says what OW answered, and stays.
+ */
+async function resolvePerson($: EngineInterface, id: string, action: PersonAction): Promise<void> {
+  if (!isUuid(id) || resolving.has(id)) return
+  const mine = ++pressCount
+  resolving.set(id, mine)
+  let error = ''
+  let done = ''
+  try {
+    const { value: queue } = await $.state.get(QUEUE)
+    const person = (queue?.people ?? []).find(p => p.id === id)
+    const ui = await peopleUi($)
+    const project = action === 'route' && ui.open === id ? (queue?.routeTo ?? []).find(p => p.projectId === ui.pick && isUuid(p.projectId)) : undefined
+    const fits = person && (person.directory ? action === 'handled' || action === 'not_client' : action !== 'handled')
+    if (!person || !fits || (action === 'route' && !project)) return
+    const { [id]: _was, ...errors } = ui.errors ?? {}
+    await $.state.set(PEOPLE, { ...ui, busy: { ...(ui.busy ?? {}), [id]: await $.clock.now() }, errors } satisfies MmPeople)
+    try {
+      const body = JSON.stringify({ alert_id: id, action, ...(project ? { project_id: project.projectId } : {}) })
+      const r = await $.http.fetch(`${EXT}/person-alert/resolve`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${await token($)}`, 'Content-Type': 'application/json', ...CLIENT_HEADER },
+        body,
+      })
+      if (r.status !== 200) error = refusalText(r)
+      // (a Route's 200 says how many of the person's emails OW filed to the project)
+      else if (action === 'route') done = routedText(project?.name ?? 'the project', requeuedOf(r.text))
+    } catch (err) {
+      error = errorText(err)
+    }
+    if (!error) {
+      if (!done) done = action === 'bootstrap' ? `Project start requested for ${person.name}.` : action === 'handled' ? `${person.name} marked handled.` : `${person.name} marked not client mail.`
+      const now = await $.clock.now()
+      await patchStore<Record<string, number>>($, 'mm.peopleDone', {}, fresh => {
+        for (const k of Object.keys(fresh)) if (!(now - Number(fresh[k]) < PEOPLE_DONE_MS)) delete fresh[k]
+        fresh[id] = now
+      })
+      // this pane at once; every other thread's at its next draw
+      const { value: fresh } = await $.state.get(QUEUE)
+      if (fresh && Array.isArray(fresh.people)) {
+        const { people: _people, routeTo, ...rest } = fresh
+        const left = fresh.people.filter(p => p.id !== id)
+        await $.state.set(QUEUE, left.length ? { ...rest, people: left, ...(routeTo ? { routeTo } : {}) } : rest)
+      }
+    }
+  } catch (err) {
+    error = errorText(err)
+  } finally {
+    if (resolving.get(id) === mine) resolving.delete(id)
+  }
+  try {
+    const ui = await peopleUi($)
+    const { [id]: _busy, ...busy } = ui.busy ?? {}
+    const { [id]: _error, ...errors } = ui.errors ?? {}
+    const closes = !error && ui.open === id
+    const { open: _open, pick: _pick, page: _page, ...kept } = ui
+    await $.state.set(PEOPLE, { ...(closes ? kept : ui), busy, errors: error ? { ...errors, [id]: `Couldn't ${PERSON_VERB[action]}: ${error}` } : errors } satisfies MmPeople)
+    if (done) {
+      await say($, done)
+      await askSync($)
+    }
+  } catch {
+    // the thread went away while the press was in flight: there is nobody to tell
+  }
+}
+
 /** Opens or closes one of the two groups under the list, in this thread's pane. The person's press: nothing is fetched, called or changed. */
 async function toggleFold($: EngineInterface, key: Fold): Promise<void> {
   try {
@@ -5378,11 +5599,20 @@ export const register: Register = on => {
   // The list: the clients with no thread yet first, marked, then the ones in a thread; ONE action a row.
   // Under it, two groups that are closed until the person opens one (each heading is its own button):
   // `With a teammate (n)`, then `Older (n)`. Nobody in them is pinned or counted in the header.
+  // (New people) For the founder and a PM, above the list: `New people (n)`, open, newest first. Each row is who
+  // wrote, the subject, when and how long they have waited, what we know of them, what to check first, the Source
+  // link and three buttons. A surface with no Select (the mobile app) has no picker, so it offers no Route. A HighLevel
+  // Directory lead's row has two, anywhere: Mark handled and Not client mail (OW refuses route and bootstrap for it).
   on('ui.render', { component: 'Pane', requestId: PANE_QUEUE }, async ($, e) => {
-    const { Box, Button, Markdown, Text } = $.ui.resolve(e)
+    const { Box, Button, Link, Markdown, Text } = $.ui.resolve(e)
+    // (New people) a picker only where the surface draws one: the mobile app's table has no Select
+    const Select = PICKER_SURFACES.has(String(e.surface)) ? ($.ui.resolve(e) as Partial<Pick<Elements['desktop'], 'Select'>>).Select : undefined
     const { value: queue } = await $.state.get(QUEUE)
     const { value: notice } = await $.state.get(NOTICE)
     const { value: folds } = await $.state.get(FOLDS)
+    const people = queue && Array.isArray(queue.people) ? queue.people : []
+    const routeTo = queue && Array.isArray(queue.routeTo) ? queue.routeTo : []
+    const ui = people.length ? await peopleUi($) : {}
     const client = await clientPart($)
     // Nothing synced yet, or a value an older version of this plugin left in this session.
     const hasList = Boolean(queue && Array.isArray(queue.rows))
@@ -5408,6 +5638,73 @@ export const register: Register = on => {
         </Box>
       </Box>
     )
+    const drawPerson = (p: MmPerson) => {
+      const busy = Boolean(ui.busy?.[p.id]) && resolving.has(p.id)
+      // a Directory lead has no email (OW refuses route and bootstrap for it): Mark handled and Not client mail only
+      const routable = Boolean(Select) && !p.directory
+      const picking = routable && ui.open === p.id
+      const picked = picking ? routeTo.find(r => r.projectId === ui.pick) : undefined
+      // (a page of the picker at a time: the engine refuses a Select of more than 64 options, and a feed can offer more projects)
+      const pg = routePage(routeTo, Number(ui.page) || 0)
+      const span = (list: readonly MmProject[]) => `${list[0]?.name ?? ''} to ${list[list.length - 1]?.name ?? ''}`
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Text>{`• ${p.title}`}</Text>
+          <Text dimColor>{p.subject}</Text>
+          <Text dimColor>{p.when}</Text>
+          {p.known ? <Text dimColor>{p.known}</Text> : null}
+          {p.warnings.length ? (
+            <Box flexDirection="row" gap={1}>
+              <Text dimColor>Check first:</Text>
+              {p.warnings.map(w => (
+                <Text color="warning">{`[${w}]`}</Text>
+              ))}
+            </Box>
+          ) : null}
+          {p.link ? <Link href={p.link} label="Source" /> : null}
+          {ui.errors?.[p.id] ? <Text color="error">{ui.errors[p.id]}</Text> : null}
+          {busy ? (
+            <Text dimColor>Working…</Text>
+          ) : picking && Select ? (
+            <Box flexDirection="column">
+              {routeTo.length ? (
+                <Select
+                  key={`mm-person:pick:${p.id}`}
+                  label={pg.pages > 1 ? `Project (${pg.from + 1} to ${pg.from + pg.items.length} of ${routeTo.length})` : 'Project'}
+                  options={[
+                    { value: PICK_NONE, label: 'Choose a project' },
+                    ...(pg.prev ? [{ value: PICK_PREV, label: `◂ Earlier: ${span(pg.prev)}` }] : []),
+                    ...pg.items.map(r => ({ value: r.projectId, label: r.name })),
+                    ...(pg.next ? [{ value: PICK_NEXT, label: `More: ${span(pg.next)} ▸` }] : []),
+                  ]}
+                  value={picked && pg.items.some(r => r.projectId === picked.projectId) ? picked.projectId : PICK_NONE}
+                  onSelect={value => void pickProject($, p.id, value)}
+                />
+              ) : (
+                <Text dimColor>No project in your feed to route to.</Text>
+              )}
+              <Box flexDirection="row" gap={1}>
+                {picked ? <Button key={`mm-person:send:${p.id}`} label={`Route to ${picked.name}`} variant="primary" onPress={() => void resolvePerson($, p.id, 'route')} /> : null}
+                <Button key={`mm-person:cancel:${p.id}`} label="Cancel" onPress={() => void closeRoute($)} />
+              </Box>
+            </Box>
+          ) : (
+            <Box flexDirection="column">
+              {Select || p.directory ? null : <Text dimColor>Route to project is in the desktop app.</Text>}
+              <Box flexDirection="row" gap={1}>
+                {routable ? <Button key={`mm-person:route:${p.id}`} label="Route to project" variant="primary" onPress={() => void openRoute($, p.id)} /> : null}
+                {p.directory ? (
+                  <Button key={`mm-person:handled:${p.id}`} label="Mark handled" variant="primary" onPress={() => void resolvePerson($, p.id, 'handled')} />
+                ) : (
+                  <Button key={`mm-person:bootstrap:${p.id}`} label="Start project" onPress={() => void resolvePerson($, p.id, 'bootstrap')} />
+                )}
+                <Button key={`mm-person:not_client:${p.id}`} label="Not client mail" onPress={() => void resolvePerson($, p.id, 'not_client')} />
+              </Box>
+            </Box>
+          )}
+        </Box>
+      )
+    }
     return (
       <Box flexDirection="column">
         {client.text ? (
@@ -5420,6 +5717,13 @@ export const register: Register = on => {
         {offer > 0 ? <Button key="mm-start-all" label={startAllLabel(offer)} variant="primary" onPress={() => void pressStartAll($)} /> : null}
         {notice?.text ? <Text>{notice.text}</Text> : null}
         {hasList && queue?.warning ? <Text>{queue.warning}</Text> : null}
+        {hasList && people.length ? (
+          <Box key="mm-people" flexDirection="column" marginTop={1}>
+            <Text bold dimColor>{`New people (${people.length})`}</Text>
+            <Text dimColor>Wrote to us, and no project matched.</Text>
+            {people.map(drawPerson)}
+          </Box>
+        ) : null}
         {hasList && queue
           ? rowGroups(queue.rows).map(group => (
               <Box flexDirection="column" marginTop={1}>

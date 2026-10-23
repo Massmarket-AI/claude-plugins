@@ -71,7 +71,53 @@ export type MmQueue = {
   warnedAt?: number
   /** (0.5.4) The sync the list was drawn from: a thread drawn from an older one than the store holds draws it again. */
   syncedAt?: number
+  /**
+   * (New people, OW ticket 549944b0) For the founder and a PM: people who wrote to us and whom no project matched,
+   * newest first, drawn above the list under `New people (n)`. Absent when there are none (or the feed has none).
+   */
+  people?: MmPerson[]
+  /** (New people) The projects Route to project offers, by name. */
+  routeTo?: MmProject[]
 }
+
+/**
+ * (New people) One person under `New people`: who, what they wrote about, when, what to check first, what we
+ * already know of them, and the link to where they wrote. Every text is drawn as given; none goes to Claude.
+ */
+export type MmPerson = {
+  /** OW's alert id (a uuid): what a press sends back. */
+  id: string
+  /** Who it is, as the notice after a press names them. */
+  name: string
+  /** `Isaac Gonzalez · True North Interiors`, and ` · via HighLevel Directory` for a Directory lead. */
+  title: string
+  /** `Subject: RFP for the Plano office`, or `(no subject)`. */
+  subject: string
+  /** `Received Fri Oct 16, 9:12 AM ET · 4 business days waiting`. */
+  when: string
+  /** The warnings, in words (`blank body`, `Bcc'd`, ...): drawn as small labels. */
+  warnings: string[]
+  /** `We know them: 1 recorded call (Feb 2026) · HighLevel contact`, or '' when the feed gives no summary. */
+  known: string
+  /** The Gmail or Directory link (https only), or ''. */
+  link: string
+  /**
+   * A HighLevel Directory lead (`source` `hl_directory`): it has no email to route or start a project from, so OW
+   * refuses `route` and `bootstrap` for it. Its row offers Mark handled (`handled`) and Not client mail only. Absent on
+   * any other row.
+   */
+  directory?: true
+}
+
+/** (New people) A project Route to project can send someone to. */
+export type MmProject = { projectId: string; name: string }
+
+/**
+ * (New people) What this thread's pane shows of the person's own presses on `New people`: whose project picker is
+ * open, which of its pages it shows and what is picked in it, which rows have a press in flight (since when), and what OW answered a press that
+ * did not go through, by alert id.
+ */
+export type MmPeople = { open?: string; pick?: string; page?: number; busy?: Record<string, number>; errors?: Record<string, string> }
 
 /** Which of the two groups under the list the person has opened. */
 export type MmFolds = { teammate?: boolean; older?: boolean; checking?: boolean }
@@ -93,6 +139,6 @@ export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: nu
 
 declare module 'claude-code' {
   interface PluginState {
-    'mm-bridge': { view: MmView; queue: MmQueue; notice: MmNotice; band: MmBand; folds: MmFolds }
+    'mm-bridge': { view: MmView; queue: MmQueue; notice: MmNotice; band: MmBand; folds: MmFolds; people: MmPeople }
   }
 }
