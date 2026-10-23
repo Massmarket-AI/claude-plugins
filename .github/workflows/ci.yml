@@ -129,3 +129,8 @@ jobs:
       - name: Bridge tests
         working-directory: plugins/mm-bridge
         run: claude plugin test .
+
+      # mm-hooks' SessionStart steps and the release's extension carry: node's own test runner, no
+      # install. Every Chrome folder and server they use is fabricated in a temporary directory.
+      - name: mm-hooks tests
+        run: node --test plugins/mm-hooks/scripts/sync-extension.test.js scripts/carry-extension.test.mjs

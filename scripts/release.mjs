@@ -4,20 +4,25 @@
 //   node scripts/release.mjs            copy the hook, bump changed plugins, validate, scan, commit, push
 //   node scripts/release.mjs --dry-run  everything except commit and push
 //   CLAUDE_BIN=/path/to/claude          the CLI to validate and test with, when that file exists; otherwise the newest desktop build, then claude on PATH
+//   MM_EXT_TOKEN=<your tracker token>   carry the PUBLISHED time tracker release (step 1b); without it the carried build is kept
 //
 // 1. Copies .claude/scripts/worklog-hook.js from the onboarding-wizard origin/main (OW_REPO, default
 //    ~/Projects/onboarding-wizard) into plugins/mm-hooks/scripts/. That is the same file GET
 //    /api/ext/hook-install?file=hook serves, so the plugin never carries a hook OW has not shipped.
+// 1b. Fills plugins/mm-hooks/extension/ and extension.json from the PUBLISHED time tracker release
+//    (GET /api/ext/version, then its download_url; scripts/carry-extension.mjs), for sync-extension.js to
+//    write into each person's Chrome. The plugin never carries an extension the server has not published.
 // 2. Bumps the patch version of every plugin whose files changed since its version was last set
 //    (uncommitted edits, or commits such as a merged pull request) and whose version was not bumped by hand. An unbumped plugin reaches nobody: auto-update keys on version.
 //    mm-bridge's VERSION constant is kept equal to its plugin.json.
-// 3. Validates with `claude plugin validate`, runs the bridge's tests, scans with gitleaks.
+// 3. Validates with `claude plugin validate`, runs the bridge's tests and mm-hooks' tests, scans with gitleaks.
 // 4. Commits and pushes main.
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { carryPublishedExtension } from './carry-extension.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const OW = process.env.OW_REPO || join(homedir(), 'Projects', 'onboarding-wizard')
@@ -59,6 +64,8 @@ run('git', ['-C', OW, 'fetch', '-q', 'origin', 'main'])
 const hook = run('git', ['-C', OW, 'show', 'origin/main:.claude/scripts/worklog-hook.js'], { maxBuffer: 64 << 20 })
 writeFileSync(join(ROOT, 'plugins/mm-hooks/scripts/worklog-hook.js'), hook)
 
+await carryPublishedExtension({ pluginDir: join(ROOT, 'plugins/mm-hooks'), token: process.env.MM_EXT_TOKEN })
+
 const released = []
 for (const p of PLUGINS) {
   const dir = `plugins/${p}`
@@ -99,6 +106,7 @@ for (const target of ['.', ...PLUGINS.map(p => `plugins/${p}`)]) {
   if (!/Validation passed/.test(out)) throw new Error(`validate ${target} failed:\n${out}`)
 }
 run(claude, ['plugin', 'test', '.'], { cwd: join(ROOT, 'plugins/mm-bridge') })
+run(process.execPath, ['--test', 'plugins/mm-hooks/scripts/sync-extension.test.js', 'scripts/carry-extension.test.mjs'])
 run('gitleaks', ['dir', ROOT, '--redact', '--no-banner'])
 
 console.log(`Releasing: ${released.join(', ')}`)
