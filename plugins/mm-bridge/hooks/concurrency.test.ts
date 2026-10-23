@@ -191,6 +191,7 @@ function world(opts: WorldOptions) {
       ui: { status: () => undefined, toast: () => undefined, open: async () => ({ isPlaced: true }), scroll: async () => undefined },
       process: { run: async () => ({ exitCode: 1, stdout: '', stderr: '' }) },
       command: { register: async () => ({ command: 'mm' }) },
+      prompt: { read: async () => ({ text: '', cursor: 0 }), fill: async (input: { text: string }) => ({ isFilled: true, text: input.text, cursor: input.text.length }) },
       tool: {
         register: async () => ({ tool: 'mcp__mm-bridge__mm' }),
         // (0.5.7) the tools the model can call now
@@ -374,17 +375,17 @@ describe('F4: chip records when a dozen threads tick at once', () => {
 })
 
 // (0.5.7, Rob 10-14 ~13:35 ET) Where the app has start_session, a client with no thread got its thread started by
-// itself. (0.5.24) It gets its Start card instead, and no thread is started. A dozen threads that tick at once, none
-// knowing which thread polls, may each take itself for the one to put the card up: the claim per client and signature
-// (`mm.starting`), checked again once it has held, lets one put it up.
-describe('0.5.7: a dozen threads that tick at once never start one client\'s thread twice; (0.5.24) nor put up its Start card twice', () => {
+// itself. (0.5.24) It got its Start card instead. (0.5.25, Rob 10-22: "it's kind of confusing having a button and chips
+// appear that don't work") Now nothing at all by itself: a dozen threads that tick at once, none knowing which thread
+// polls, start no thread and put up no card; the client's row waits for the person's Start.
+describe('0.5.7: a dozen threads that tick at once never start one client\'s thread twice; (0.5.25) nor start it or put up its card at all', () => {
   const tickAll = async (w: ReturnType<typeof world>, threads: unknown[]) => {
     await Promise.all(threads.map(t => hooks['session.start']?.(t, { cwd: '/work', surface: 'desktop', isInteractive: false }, next)))
     await w.advance(4_000)
     await w.advance(3_100)
   }
   for (const seed of [1, 7, 42, 99, 2026, 1013, 5, 11]) {
-    test(`twelve threads, no poller they know of: each client gets one Start card at most, and no thread is started (seed ${seed})`, async () => {
+    test(`twelve threads, no poller they know of: no thread is started and no card is put up (seed ${seed})`, async () => {
       const ids = Array.from({ length: N }, (_, i) => `local_as_${seed}_${i + 1}`)
       const w = world({ seed, extra: ids, startOnly: true })
       await before(w)
@@ -395,15 +396,8 @@ describe('0.5.7: a dozen threads that tick at once never start one client\'s thr
         await tickAll(w, threads)
         await w.advance(60_000)
       }
-      const perClient = new Map<string, number>()
-      for (const p of w.cards) {
-        const pid = /^\[mm-link ([0-9a-f-]{36})\] /.exec(p)?.[1] ?? 'no marker'
-        perClient.set(pid, (perClient.get(pid) ?? 0) + 1)
-      }
       expect(w.startedNow).toEqual([])
-      expect(w.cards.length).toBeGreaterThan(0)
-      expect([...perClient.entries()].filter(([, n]) => n > 1)).toEqual([])
-      expect(perClient.has('no marker')).toBe(false)
+      expect(w.cards).toEqual([])
     })
   }
 })
