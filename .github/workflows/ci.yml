@@ -1,0 +1,131 @@
+name: CI
+
+# One run per pull request commit, and one after merge. push is scoped to main
+# so a commit on a PR branch is not run twice (once for push, once for the PR).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same pull request cancels the older run. main always finishes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Same scan as onboarding-wizard's CI: its own job, so a failing test can never
+  # skip it, and the gitleaks binary rather than gitleaks-action (the action
+  # refuses to run in an organization repo without a paid license key).
+  # Never add continue-on-error: a scanner that cannot fail the build is decoration.
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # gitleaks scans commit history, not just the working tree.
+          fetch-depth: 0
+
+      # Pinned to one release and checked against its published SHA-256.
+      # Bump the version and the hash together.
+      - name: Install gitleaks (pinned release, checksum verified)
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+
+      # Scans every commit the event adds: base..head on a pull request,
+      # before..after on a push to the default branch. If either end is missing
+      # from the clone or the range is empty, it scans all history from HEAD
+      # instead of nothing.
+      - name: Secret scan (gitleaks)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          zero="0000000000000000000000000000000000000000"
+          have() { [ -n "${1:-}" ] && [ "$1" != "$zero" ] && git cat-file -e "${1}^{commit}" 2>/dev/null; }
+          if [ "$EVENT_NAME" = "pull_request" ] && have "${PR_BASE_SHA:-}" && have "${PR_HEAD_SHA:-}"; then
+            range="${PR_BASE_SHA}..${PR_HEAD_SHA}"
+          elif [ "$EVENT_NAME" != "pull_request" ] && have "${PUSH_BEFORE:-}" && have "${PUSH_AFTER:-}"; then
+            range="${PUSH_BEFORE}..${PUSH_AFTER}"
+          else
+            range="HEAD"
+          fi
+          count=$(git rev-list --count "${range}")
+          if [ "$count" -eq 0 ]; then
+            range="HEAD"
+            count=$(git rev-list --count "${range}")
+          fi
+          echo "Scanning commits: ${range} (${count} commit(s))"
+          # gitleaks exits 0 when `git log` itself fails, so an ERR line in its
+          # output fails the step too. --redact keeps a finding's value out of
+          # the log; --verbose prints rule, file, line, commit and fingerprint.
+          log="$RUNNER_TEMP/gitleaks.log"
+          "$RUNNER_TEMP/gitleaks" git . --log-opts="${range}" --redact --verbose \
+            --no-banner --no-color --exit-code 2 2>&1 | tee "$log"
+          if grep -q -E '(^|[[:space:]])ERR([[:space:]]|$)' "$log"; then
+            echo "::error::gitleaks reported an error, so this scan cannot be trusted"
+            exit 1
+          fi
+
+  # What scripts/release.mjs checks before a release, run on every pull request:
+  # `claude plugin validate` on the marketplace and both plugins, then the
+  # bridge's tests (`claude plugin test`, offline; no login or API key needed).
+  plugins:
+    name: Validate plugins and run bridge tests
+    # macOS, where teammates run these plugins. The bridge's slowest tests take
+    # 2.6-3.5 s on an M-series Mac and hit the test runner's 5 s limit on the
+    # Linux runners (x64 and arm64). macOS runners are free on public repositories.
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      # Pinned so a run is reproducible. Bump it when the bridge needs a newer
+      # Claude Code (npm view @anthropic-ai/claude-code dist-tags).
+      CLAUDE_CODE_VERSION: "2.1.308"
+      DISABLE_AUTOUPDATER: "1"
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Claude Code (pinned)
+        run: |
+          npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+          claude --version
+
+      - name: Validate marketplace and plugins
+        run: |
+          set -euo pipefail
+          for target in . plugins/mm-hooks plugins/mm-bridge; do
+            out=$(claude plugin validate "$target" 2>&1) || { echo "$out"; exit 1; }
+            echo "$out"
+            if ! grep -q 'Validation passed' <<<"$out"; then
+              echo "::error::claude plugin validate $target did not pass"
+              exit 1
+            fi
+          done
+
+      - name: Bridge tests
+        working-directory: plugins/mm-bridge
+        run: claude plugin test .
