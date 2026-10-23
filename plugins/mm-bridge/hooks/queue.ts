@@ -11,6 +11,9 @@
 //     and do not list)
 //   - for the founder alone: a reply package flagged for his OK, whoever owns the client (kind `ok`); one a
 //     teammate sends only once its reply is due (0.5.1, R2: until then it is theirs to decide)
+//   - (0.5.28, internal asks) an internal ask of the viewer's: a teammate's Discord message that asks them for
+//     something, on the item of the client it is about (or of the internal-ops project), due 24 business hours after
+//     it was asked, internal or not (kind `ask` when nothing else lists the client)
 // A listed client pins while what it must act by is past or within the next 24 business hours (`pinsNow`).
 // Work that must start now at 1.5 h a day waits for real hour estimates (quote line items).
 //
@@ -132,6 +135,42 @@ export type FeedPersonAlert = {
   shadow_bootstrap_candidate?: boolean | null
 }
 
+/**
+ * (0.5.28, internal asks; Rob, 2026-10-23: "i think that should also trigger a 24 hr reply not just for me but for anyone
+ * asked to do something internally. it should show up in my brige thread for creg with my draft reply to him") One of
+ * the caller's open internal asks: a teammate's Discord message that asks this person for something (OW's `team_asks`,
+ * one row per message and person asked; the feed's `asks`, oldest due first). `project_id` is the client the message is
+ * about, or the internal-ops project (INTERNAL_OPS) when it is about Massmarket itself. Its reply is due `due_at`, 24
+ * business hours after it was asked, internal or not. `snippet` is the first 240 characters of the message, mentions
+ * shown as @Name. Every field but the ids, the asked address and the times may be missing or null. Absent on a server
+ * that does not send them yet: nothing changes.
+ */
+export type FeedAsk = {
+  ask_id: string
+  project_id: string
+  project_name: string
+  internal?: boolean
+  asker_name?: string | null
+  asker_email?: string | null
+  asked_email: string
+  asked_at: string
+  due_at: string | null
+  channel_name?: string | null
+  message_link?: string | null
+  snippet?: string | null
+  has_draft?: boolean
+  draft_sha256?: string | null
+  updated_at?: string | null
+}
+
+/**
+ * (0.5.28, internal asks) An open ask as a client's item keeps it: its id (a lower-case uuid: it goes into the kickoff
+ * and the page request), who asked (cleaned: it goes into the kickoff), when it was asked and when its reply is due (ms),
+ * its snippet (drawn, never handed to Claude), whether a reply is drafted and that draft's hash, and the link to the
+ * message (https only, or '').
+ */
+export type AskRef = { id: string; asker: string; askedAt: number; dueAt: number; snippet: string; hasDraft: boolean; link: string; draftSha: string | null }
+
 /** One of the feed's projects (OW's `projects`; for the founder and a PM, every active project they may see). */
 export type FeedProject = { project_id: string; name: string }
 
@@ -152,6 +191,8 @@ export type Feed = {
   route_projects?: FeedRouteProject[]
   /** (New people) Open alerts, founder and PMs only. */
   person_alerts?: FeedPersonAlert[]
+  /** (0.5.28, internal asks) The caller's open internal asks. Absent on a server that does not send them yet. */
+  asks?: FeedAsk[]
 }
 
 /**
@@ -193,8 +234,12 @@ export type QueueItem = {
   projectName: string
   client: string
   dueAt: number
-  /** `ok`: for the founder alone, a package flagged for his OK that somebody else sends. */
-  kind: 'ready' | 'reply' | 'task' | 'ok'
+  /**
+   * `ok`: for the founder alone, a package flagged for his OK that somebody else sends. (0.5.28, internal asks) `ask`:
+   * listed by the viewer's internal asks alone (no client message, no package of theirs, no task): its title says
+   * `internal ask` where a task's says `task`. A client with any of those as well keeps that kind, and its asks beside it.
+   */
+  kind: 'ready' | 'reply' | 'task' | 'ok' | 'ask'
   messages: number
   tasks: number
   packageId: string | null
@@ -235,13 +280,43 @@ export type QueueItem = {
   noDue?: true
   /** (0.5.2, R18) An internal project (Massmarket's own, a test or a template): its thread is never unpinned by the bridge. */
   internal?: true
+  /**
+   * (0.5.28, internal asks) The viewer's open internal asks about this client, oldest due first: each one's reply is due,
+   * and it pins, like a client message's, and the kickoff and the pane carry one paragraph each. Absent when there are
+   * none, and on an item an older version stored: every read is `openAsks(it)`.
+   */
+  asks?: AskRef[]
 }
+
+/**
+ * (0.5.28, internal asks; Rob, 2026-10-23: "there should be massmarket internal thread in bridge as well") Massmarket's
+ * internal-ops project, "Massmarket AI": where an internal ask about Massmarket itself is listed, and the client of the
+ * Massmarket internal thread.
+ */
+export const INTERNAL_OPS = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
 
 /**
  * (0.5.2, R18) The projects that are internal by id, while the feed carries no internal flag: Massmarket's
  * internal-ops project and the Massmarket Core Snapshot. A feed row with `internal: true` makes any project so.
  */
-export const INTERNAL_PROJECTS: ReadonlySet<string> = new Set(['e6deffc3-2713-4def-a11d-b75a1efba9c1', '3e439f40-a17f-48e2-bcfe-723af5b741fc'])
+export const INTERNAL_PROJECTS: ReadonlySet<string> = new Set([INTERNAL_OPS, '3e439f40-a17f-48e2-bcfe-723af5b741fc'])
+
+/** (0.5.28, internal asks) A client's open asks as its item holds them: none on an item an older version stored. */
+export const openAsks = (it: Pick<QueueItem, 'asks'>): AskRef[] => (Array.isArray(it.asks) ? it.asks : [])
+
+/**
+ * (0.5.28, internal asks; spec 2026-10-23: "When it has an open ask it can be kicked off and chipped like a client (it
+ * still is never auto-unpinned)") The Massmarket internal thread's item while it has an open ask: chipped, kicked off
+ * and updated by itself as a client's is. Its pins follow R18 as before: the bridge takes off only a pin it put there.
+ */
+export const internalAskThread = (it: Pick<QueueItem, 'projectId' | 'asks'>): boolean => it.projectId === INTERNAL_OPS && openAsks(it).length > 0
+
+/**
+ * (fix round 1, L8) An internal project's item, which gets no chip and no update by itself and no thread started by
+ * itself: every internal one but (0.5.28, internal asks) the Massmarket internal thread's while it has an open ask
+ * (`internalAskThread`).
+ */
+export const heldInternal = (it: Pick<QueueItem, 'projectId' | 'asks' | 'internal'>): boolean => it.internal === true && !internalAskThread(it)
 
 /** (R17) Whether a client has a due time at all (an item stored by the bridge keeps Infinity as null). */
 export const hasDue = (it: Pick<QueueItem, 'dueAt'>): boolean => typeof it.dueAt === 'number' && Number.isFinite(it.dueAt)
@@ -400,9 +475,11 @@ export type Lists = { queue: QueueItem[]; teammate: QueueItem[]; older: QueueIte
  * A teammate holds this client's reply drafts and nothing else keeps it in the viewer's list: no committed
  * task of the viewer's own due there, and (for the founder) no package waiting for his OK. For the founder
  * too: a client whose package a teammate sends and that is theirs to see through (`theirs`, R1 and R2).
+ * (0.5.28, internal asks) An open ask of the viewer's keeps the client in their list as a task of theirs does: it was
+ * asked of them, whoever holds the client's drafts.
  */
 export const withTeammate = (it: QueueItem): boolean =>
-  it.tasks === 0 && (Boolean(it.theirs) || ((it.open ?? null)?.state === 'held_by_other' && it.kind !== 'ok'))
+  it.tasks === 0 && openAsks(it).length === 0 && (Boolean(it.theirs) || ((it.open ?? null)?.state === 'held_by_other' && it.kind !== 'ok'))
 
 export function buildLists(feed: Feed, now: number): Lists {
   const current = build(feed, now, false)
@@ -450,7 +527,11 @@ export function internalProjects(feed: Feed): Set<string> {
   for (const d of feed.drafts ?? []) add(d)
   const t = feed.tickets ?? {}
   for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? [], t.start_now ?? []]) for (const tk of k) add(tk)
-  return carries ? flagged : new Set(INTERNAL_PROJECTS)
+  const out = carries ? flagged : new Set(INTERNAL_PROJECTS)
+  // (0.5.28, internal asks) an ask row the feed marks internal adds its project; ask rows alone never decide whether the
+  // feed carries the flag (L9), so the other internal projects are read exactly as they were
+  for (const a of Array.isArray(feed.asks) ? feed.asks : []) if (a && a.internal === true && isUuid(a.project_id)) out.add(a.project_id)
+  return out
 }
 
 /** Every client's newest `last_outbound_at`, from every row of it the feed gives one on, in ms. */
@@ -505,7 +586,7 @@ export function fastOf(c: PackageCheck | null | undefined, lastOut: number, now:
  * fastOf for a client as the lists hold it. (The founder's package that waits for his OK is somebody else's
  * send: never.) Fix round 1, F3: never `checking` while something else of the client's still needs the person
  * whatever our send answered: a client message that arrived after it, a committed task, or a package they hold
- * with a draft not sent.
+ * with a draft not sent. (0.5.28, internal asks) Or an open internal ask of theirs, as a task.
  */
 export function fastState(it: QueueItem, now: number): Fast | null {
   if (it.kind === 'ok') return null
@@ -513,7 +594,7 @@ export function fastState(it: QueueItem, now: number): Fast | null {
   if (fast?.state !== 'checking') return fast
   const o = it.open ?? null
   const newerMail = (Number(it.newest?.mail) || 0) > fast.at
-  if (newerMail || it.tasks > 0 || (o?.state === 'held_by_me' && o.unsent > 0)) return null
+  if (newerMail || it.tasks > 0 || openAsks(it).length > 0 || (o?.state === 'held_by_me' && o.unsent > 0)) return null
   return fast
 }
 
@@ -563,6 +644,8 @@ export function feedClients(feed: Feed): KnownClient[] {
   const t = feed.tickets ?? {}
   // (fix round 1, F5) `start_now` too: a client listed only by a task that must start now is a client the feed names
   for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? [], t.start_now ?? []]) for (const tk of k) add(tk?.project_id, tk?.project_name)
+  // (0.5.28, internal asks) and the project of each of the caller's asks: the Massmarket internal thread's among them
+  for (const a of Array.isArray(feed.asks) ? feed.asks : []) add(a?.project_id, a?.project_name)
   return [...out.values()]
 }
 
@@ -718,6 +801,57 @@ export function routedText(project: string, requeued: unknown): string {
   const n = typeof requeued === 'number' && Number.isInteger(requeued) && requeued >= 0 ? requeued : null
   if (n === null) return `Routed to ${project}.`
   return n === 0 ? `Routed to ${project}. No emails were filed, they may already be on it.` : `Routed to ${project}. ${n} email${n === 1 ? '' : 's'} filed.`
+}
+
+// ---------------------------------------------------------------- (0.5.28) internal asks
+
+/** (0.5.28, internal asks) The most characters of an ask's snippet the pane draws: the feed's own cut (240). */
+const ASK_SNIPPET_MAX = 240
+/** (0.5.28, internal asks) The most characters of an asker's name, as it goes into the kickoff and the pane. */
+const ASKER_MAX = 40
+/** A draft's sha256, as OW gives it: 64 lower-case hex characters. */
+const SHA256 = /^[0-9a-f]{64}$/
+
+/**
+ * (0.5.28, internal asks) Who asked, as the kickoff and the pane name them: the feed's name for them, cleaned (it goes
+ * into a message Claude reads), else the part of their address before the @ (`holderName`, 'a teammate' with none).
+ */
+export const askerName = (name: unknown, email: unknown): string => cleanText(name, ASKER_MAX) || holderName(email)
+
+/** (0.5.28, internal asks) An ask of the feed's as its client's item keeps it (AskRef): every text cleaned or checked. */
+function askRefOf(a: FeedAsk, askedAt: number, dueAt: number): AskRef {
+  return {
+    id: a.ask_id,
+    asker: askerName(a.asker_name, a.asker_email),
+    askedAt: Number.isFinite(askedAt) ? askedAt : 0,
+    dueAt,
+    snippet: shownText(a.snippet, ASK_SNIPPET_MAX),
+    hasDraft: a.has_draft === true,
+    link: sourceLink(a.message_link),
+    draftSha: typeof a.draft_sha256 === 'string' && SHA256.test(a.draft_sha256) ? a.draft_sha256 : null,
+  }
+}
+
+/** (0.5.28, internal asks) An open ask's line in the pane (spec, 2026-10-23): `Ask from Shezan · due Mon 3:11 PM`. */
+export const askLine = (a: Pick<AskRef, 'asker' | 'dueAt'>, now: number): string => `Ask from ${a.asker} · due ${clockText(a.dueAt, now)}`
+
+/**
+ * (0.5.28, internal asks) A client's open asks in its part of the pane: each one's line and snippet, and under them the
+ * ask's page (`/team-ask?id=<id>&format=pickup`) when it was read (`pages`, by ask id). '' for a client with none. A
+ * page that could not be read leaves the line and the snippet alone: never an error in its place.
+ */
+export function asksMarkdown(it: Pick<QueueItem, 'asks'>, now: number, pages: Readonly<Record<string, string>> = {}): string {
+  const asks = openAsks(it).filter(a => isUuid(a?.id) && Number.isFinite(a?.dueAt))
+  if (!asks.length) return ''
+  const out = [`### Internal asks (${asks.length})`]
+  for (const a of asks) {
+    out.push('', `- ${askLine({ asker: cleanText(a.asker, ASKER_MAX) || 'a teammate', dueAt: a.dueAt }, now)}`)
+    const snippet = shownText(a.snippet, ASK_SNIPPET_MAX)
+    if (snippet) out.push(`  > ${snippet}`)
+    const page = typeof pages[a.id] === 'string' ? (pages[a.id] as string).trim() : ''
+    if (page) out.push('', page)
+  }
+  return out.join('\n')
 }
 
 /**
@@ -955,6 +1089,33 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     }
   }
 
+  // (0.5.28, internal asks; Rob, 2026-10-23: "it should route to whatever client bridge thread the question relates to,
+  // if internal, ... there should be massmarket internal thread in bridge as well") Each of the viewer's open asks lists
+  // on its project's item: a client's, or the internal-ops project's (INTERNAL_OPS). Its reply is due at its `due_at`
+  // (24 business hours after it was asked, OW's clock; with none given, the same counted here), and that is what the
+  // client acts by, so it pins on R1's rule. ⛔ An internal project's ask KEEPS its clock (R17's no-clock rule is for
+  // mail, packages and tickets). ⛔ Only an ask of the viewer's own (`asked_email`, any case): one a teammate was asked
+  // is theirs. ⛔ The ask id goes into the kickoff and the page request: a lower-case uuid, or the row is dropped, as a
+  // package's is; the project, as any row's (`usable`). An ask alone makes no package. Its time counts as a task's for
+  // "something new arrived" (`newest.task`): it is work the person was asked for.
+  const askIds = new Set<string>()
+  for (const a of Array.isArray(feed.asks) ? feed.asks : []) {
+    if (!a || typeof a !== 'object' || !isUuid(a.ask_id) || askIds.has(a.ask_id)) continue
+    if (!usable(a.project_id, a.project_name)) continue
+    if (me === '' || typeof a.asked_email !== 'string' || a.asked_email.toLowerCase() !== me) continue
+    const asked = ms(a.asked_at)
+    const due = Number.isFinite(ms(a.due_at)) ? ms(a.due_at as string) : Number.isFinite(asked) ? businessDeadline(asked, DAY) : NaN
+    if (!inWindow(due)) continue
+    askIds.add(a.ask_id)
+    const it = item(a.project_id, a.project_name)
+    it.dueAt = Math.min(it.dueAt, due)
+    act(it, due)
+    // listed by its asks alone: what its title and chip call it (a client message, a package or a task keeps its own)
+    if (it.kind === 'task' && it.tasks === 0) it.kind = 'ask'
+    it.asks = [...openAsks(it), askRefOf(a, asked, due)].sort((x, y) => x.dueAt - y.dueAt)
+    seen(it, 'task', Number.isFinite(asked) ? asked : due)
+  }
+
   // How many client messages arrived after the drafts of a package the viewer holds were written.
   for (const it of byProject.values()) {
     const through = ms(it.coversThrough)
@@ -975,10 +1136,11 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
   //       place the client under With a teammate and nothing more: where anything of his own lists the client
   //       (a task of his, his own mail, a package of his or one that waits for his OK), his row is for that, and
   //       they are not added to it (Opus, 10-13, B1: his task row was turned into a reply and pinned as one).
+  //       (0.5.28, internal asks) An ask of his is his own too: its kind `ask` is not `task`, and an ask is never counted as a message.
   if (founder) {
     for (const [pid, waiting] of staleMail) {
       const it = byProject.get(pid)
-      if (!it || it.tasks > 0 || it.messages > 0 || it.kind !== 'task' || it.packageId) continue
+      if (!it || it.tasks > 0 || it.messages > 0 || it.kind !== 'task' || openAsks(it).length > 0 || it.packageId) continue
       for (const { m, due } of waiting.mail) if (!counted.has(m)) countMail(it, m, due)
       if (it.messages > 0) staleTheirs.set(pid, waiting.name)
     }
@@ -1048,12 +1210,12 @@ export function clockText(t: number, now: number): string {
 /**
  * What is due, in a word or two: a package the viewer picked up is `your draft`, one that waits for the
  * founder's OK `needs your OK`; one a teammate decides on before its reply is due `may need your OK ·
- * <teammate> decides` (R2).
+ * <teammate> decides` (R2). (0.5.28) A client listed by the viewer's internal asks alone: `internal ask`.
  */
 const whatOf = (it: QueueItem): string =>
   it.open?.state === 'held_by_me'
     ? 'your draft'
-    : it.kind === 'ok' ? (it.theirs ? decidesText(it.theirs) : 'needs your OK') : it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : 'task'
+    : it.kind === 'ok' ? (it.theirs ? decidesText(it.theirs) : 'needs your OK') : it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : it.kind === 'ask' ? 'internal ask' : 'task'
 
 /** What is due for a client and when, in words: `reply ready due tomorrow 8 AM`. */
 export function dueLine(it: QueueItem, now: number): string {
@@ -1202,8 +1364,18 @@ export function holdBanner(it: QueueItem): string {
   return `> **You picked this up**${pickedAt(o.at)}. ${draftCount(o.unsent)} not sent yet.${newer}`
 }
 
-/** What the bridge's note tells Claude about a client's reply drafts and what is waiting. `member` is the viewer's address. */
+/**
+ * What the bridge's note tells Claude about a client's reply drafts and what is waiting. `member` is the viewer's address.
+ * (0.5.28, internal asks) With an open ask of the viewer's, one sentence more: how many, their short ids, and that the
+ * pane lists them (the kickoff and Update carry what to do with each).
+ */
 export function noteText(it: QueueItem, member: string): string {
+  const asks = openAsks(it).filter(a => isUuid(a?.id))
+  const more = asks.length ? ` ${asks.length} internal ask${asks.length === 1 ? '' : 's'} from the team wait${asks.length === 1 ? 's' : ''} on ${holderName(member)}'s reply (ask ${asks.map(a => a.id.slice(0, 8)).join(', ')}); the side pane lists ${asks.length === 1 ? 'it' : 'them'}.` : ''
+  return `${noteBody(it, member)}${more}`
+}
+
+function noteBody(it: QueueItem, member: string): string {
   const waiting = `${it.messages} client message${it.messages === 1 ? '' : 's'} waiting on our reply and ${it.tasks} committed task${it.tasks === 1 ? '' : 's'} due`
   const o = it.open ?? null
   if (o?.state === 'held_by_me' && it.packageId) {
@@ -1222,8 +1394,13 @@ export function noteText(it: QueueItem, member: string): string {
   return `${waiting}; no reply drafts are prepared yet.`
 }
 
-/** What a client's thread shows when the pickup view is not shown: the messages waiting, the tasks due, and what is true of its reply drafts. */
-export function clientMarkdown(it: QueueItem, now: number): string {
+/**
+ * What a client's thread shows when the pickup view is not shown: the messages waiting, the tasks due, and what is true of its reply drafts.
+ * (0.5.28, internal asks) Then the viewer's open asks (`asksMarkdown`, with each page in `pages` that was read). A client
+ * listed by its asks alone, with nothing of a reply's in play, says nothing of reply drafts: there are none to pick up.
+ */
+export function clientMarkdown(it: QueueItem, now: number, pages: Readonly<Record<string, string>> = {}): string {
+  const asks = asksMarkdown(it, now, pages)
   const out = [`## ${it.projectName}`, `${titleFor(it, now)}`]
   if (it.mail.length) {
     out.push('', '### Waiting on our reply')
@@ -1236,7 +1413,9 @@ export function clientMarkdown(it: QueueItem, now: number): string {
     out.push('', '### Due (dates we committed to)')
     for (const t of it.taskTitles) out.push(`- ${t}`)
   }
-  out.push('', draftsLine(it))
+  const asksAlone = asks !== '' && !it.mail.length && !it.taskTitles.length && !it.packageId && !(it.open ?? null)
+  if (asks) out.push('', asks)
+  if (!asksAlone) out.push('', draftsLine(it))
   return out.join('\n')
 }
 
@@ -1249,8 +1428,12 @@ export function clientMarkdown(it: QueueItem, now: number): string {
  * call, client-reply-prep §9.5), and ANY write to a reply package (`/reply-package`, `/reply-package/no-reply`,
  * `/reply-package/<anything>`). Each can change what the feed lists for the client. Judged by the route and the
  * method, never by a fixed list of commands.
+ * (0.5.28, internal asks; spec 2026-10-23: "Resync after a Bash call to /team-ask/(draft|post|close), as for the
+ * reply-draft routes") And the three writes to an internal ask: `/team-ask/draft` (its reply stored: the pane's page
+ * changes), `/team-ask/post` (posted after the person's go: the ask is answered) and `/team-ask/close`. A read of an
+ * ask's page (`GET /team-ask?id=...`) is not one.
  */
-const CLOSING_ROUTE = String.raw`\/(?:reply-draft\/(?:sent|discard|post-team)|reply-package(?:\/[\w-]+)*)(?![\w\/-])`
+const CLOSING_ROUTE = String.raw`\/(?:reply-draft\/(?:sent|discard|post-team)|reply-package(?:\/[\w-]+)*|team-ask\/(?:draft|post|close))(?![\w\/-])`
 /** A write: what a read (GET) never is. */
 const WRITE = String.raw`(?:POST|PATCH|PUT|DELETE)`
 /** As the gateway helper is called: `mm-api.mjs ext POST /reply-draft/sent ...`, the path quoted or not. */

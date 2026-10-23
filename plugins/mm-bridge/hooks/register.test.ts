@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine, FoundElement } from 'claude-code/testing'
 
-import type { Feed } from './queue'
+import type { Feed, FeedAsk } from './queue'
 import { isNewerVersion } from './queue'
 import { PANE_SENTENCE, REFRESH_FAILED, recommend } from './threads'
 
@@ -126,6 +126,8 @@ type WorldOptions = {
   hook?: 'old' | 'missing'
   /** (New people) How OW answers `POST /person-alert/resolve`: a status and a body, or no answer at all. Left out, 200 and the alert. */
   resolve?: (body: Record<string, unknown>) => { status: number; body?: unknown } | 'network'
+  /** (0.5.28, internal asks) How OW answers `GET /team-ask?id=<id>&format=pickup`: a status and a body, or no answer at all. Left out, 404. */
+  teamAsk?: (url: string) => { status: number; body?: unknown } | 'network'
 }
 
 /** (0.5.11, review of PR #15, F4) The parts of the time-tracking hook's text the bridge reads: 0.11.7's, and 0.11.4's. */
@@ -239,6 +241,12 @@ function world(on: On, opts: WorldOptions = {}) {
       const body = JSON.parse(String(e.init?.body ?? '{}')) as Record<string, unknown>
       resolves.push({ method: String(e.init?.method ?? 'GET'), headers: { ...(e.init?.headers ?? {}) }, body })
       const answer = opts.resolve ? opts.resolve(body) : { status: 200, body: { id: body.alert_id, status: 'routed' } }
+      if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
+      return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: typeof answer.body === 'string' ? answer.body : JSON.stringify(answer.body ?? {}) } }
+    }
+    // (0.5.28, internal asks) an ask's page, as OW's team-ask route answers it
+    if (e.url.includes('/api/ext/team-ask')) {
+      const answer = opts.teamAsk ? opts.teamAsk(e.url) : { status: 404, body: { ok: false, error: 'not_found' } }
       if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
       return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: typeof answer.body === 'string' ? answer.body : JSON.stringify(answer.body ?? {}) } }
     }
@@ -8298,5 +8306,157 @@ describe('New people: the founder and a PM route, start or dismiss someone no pr
     expect(said).not.toMatch(/Dana|Marcus|Priya|Northwind|Fabrikam/)
     expect(await tool($, '')).not.toMatch(/Dana|Marcus|Priya|Northwind|Fabrikam/)
     expect(await tool($, 'status')).not.toMatch(/Dana|Marcus|Priya|Northwind|Fabrikam/)
+  })
+})
+
+// (0.5.28, internal asks) Rob, 2026-10-23: an internal ask "should show up in my brige thread for creg with my draft
+// reply to him", and "there should be massmarket internal thread in bridge as well". OW's feed lists the caller's open
+// asks (`asks`); the bridge lists each on its client's item, pins its thread on the ask's clock, shows the ask's page in
+// the pane, and reads the feed again after a write to it. It sends and posts nothing.
+describe('(0.5.28, internal asks) the bridge lists, pins and shows an internal ask, and a write to it resyncs', () => {
+  const ASK = '5c1e2f3a-8b4d-4e6f-9a0b-1c2d3e4f5a6b'
+  const OPS = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
+  const DUNE = '44444444-4444-4444-4444-444444444444'
+  const PAGE_URL = `https://onboarding-wizard.massmarket.ai/api/ext/team-ask?id=${ASK}&format=pickup`
+  const PAGE = '## Internal ask from Shezan: Dune Labs · Ask `none`\n\n**Due:** Tue 10/13 10:00 AM ET (24 business hours after the ask)\n\n### Your reply\nNo reply drafted yet.\n\nNothing to post yet: draft the reply, store it, then print this page again.'
+  const askFor = (projectId: string, projectName: string, over: Partial<FeedAsk> = {}): FeedAsk => ({
+    ask_id: ASK, project_id: projectId, project_name: projectName, internal: false, asker_name: 'Shezan', asker_email: 'shezan@example.com', asked_email: ME,
+    asked_at: ago(1), due_at: new Date(NOW + 23 * HOUR).toISOString(), channel_name: 'mmai-it-support', message_link: 'https://discord.com/channels/1/2/3',
+    snippet: 'Hey @Builder, which one should we use?', has_draft: false, draft_sha256: null, ...over,
+  })
+  const ASKS_PART = '### Internal asks (1)\n\n- Ask from Shezan · due Tue 10 AM\n  > Hey @Builder, which one should we use?'
+  const page = () => ({ status: 200, body: { ok: true, markdown: PAGE, draft_sha256: null } })
+  const notThePoller = { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR } }
+  const bash = ($: Engine, command: string) => $.tool.call({ tool: 'Bash', command } as never) as Promise<{ result?: unknown; deny?: string; isError?: boolean }>
+
+  test('an ask for me on a client with a package: under This thread, the pickup view, then the ask\'s line, snippet and page', async ($, on) => {
+    const w = world(on, { feed: feed({ asks: [askFor(ACME, 'Acme Roofing — Pat')] }), store: { 'mm.links': { [ACME]: SELF } }, teamAsk: page })
+    await mm($, '')
+    const ui = await pane($)
+    expect((await lines(ui)).slice(0, 2)).toEqual(['This thread: Acme Roofing', 'Needs you now (3)'])
+    expect((await ui.find({ type: 'Markdown' }))?.text).toBe(`## Acme Roofing\n\n1. What the client sent\n\n${ASKS_PART}\n\n${PAGE}`)
+    // the page is read in this thread's own session, after the package's
+    expect(w.fetched.filter(u => u.includes('/team-ask'))).toEqual([PAGE_URL])
+    // its row counts the ask; nothing is sent, posted or started
+    expect((await lines(ui)).filter(l => l.includes('internal ask'))).toEqual(['drafts ready, 1 internal ask · Update thread: thread from Mon, Oct 12 exists'])
+    expect(sends(w)).toEqual([])
+    expect(w.prompts).toEqual([])
+    await ui.unmount()
+  })
+
+  for (const [name, answer] of [
+    ['OW answers 500', { status: 500, body: { error: 'boom' } }],
+    ['no answer at all', 'network'],
+    ['an answer with no markdown', { status: 200, body: { ok: true } }],
+    ['an answer that is not JSON', { status: 200, body: 'not json' }],
+  ] as Array<[string, { status: number; body?: unknown } | 'network']>) {
+    test(`a page that cannot be read (${name}) leaves the ask's line and snippet alone: never an error in their place`, async ($, on) => {
+      const w = world(on, { feed: feed({ asks: [askFor(ACME, 'Acme Roofing — Pat')] }), store: { 'mm.links': { [ACME]: SELF } }, teamAsk: () => answer })
+      await mm($, '')
+      const ui = await pane($)
+      expect((await ui.find({ type: 'Markdown' }))?.text).toBe(`## Acme Roofing\n\n1. What the client sent\n\n${ASKS_PART}`)
+      expect(JSON.stringify(await lines(ui))).not.toMatch(/boom|500|socket|not json/)
+      expect(w.fetched.filter(u => u.includes('/team-ask'))).toEqual([PAGE_URL])
+      await ui.unmount()
+    })
+  }
+
+  test('an ask alone lists its client, pins its linked thread on the ask\'s clock, and shows its page with no word of reply drafts', async ($, on) => {
+    const w = world(on, { feed: feed({ asks: [askFor(DUNE, 'Dune Labs')] }), store: { 'mm.links': { [DUNE]: SELF } }, teamAsk: page })
+    expect(await mm($, '')).toBe('4 clients need you; 1 thread pinned. The list is in the side pane.')
+    expect(w.threads.get(SELF)).toMatchObject({ title: '🟡 23h left · Dune Labs · internal ask', pinned: true })
+    const ui = await pane($)
+    expect((await ui.find({ type: 'Markdown' }))?.text).toBe(`## Dune Labs\n🟡 23h left · Dune Labs · internal ask\n\n${ASKS_PART}\n\n${PAGE}`)
+    expect((await ui.find({ type: 'Markdown' }))?.text).not.toContain('reply drafts')
+    await ui.unmount()
+  })
+
+  test('an older feed without asks: the same list and the same client part as before, and no ask page is read', async ($, on) => {
+    const w = world(on, { feed: feed(), store: { 'mm.links': { [ACME]: SELF } }, teamAsk: page })
+    expect(await mm($, '')).toBe('3 clients need you; 1 thread pinned. The list is in the side pane.')
+    const ui = await pane($)
+    expect((await ui.find({ type: 'Markdown' }))?.text).toBe('## Acme Roofing\n\n1. What the client sent')
+    expect(JSON.stringify(await lines(ui))).not.toContain('internal ask')
+    expect(w.fetched.filter(u => u.includes('/team-ask'))).toEqual([])
+    await ui.unmount()
+  })
+
+  test('the Massmarket internal thread pins on an internal ask\'s clock; the person\'s own pin on it is never taken off, the bridge\'s own comes off once the ask is answered (R18)', async ($, on) => {
+    const onOps = feed({ asks: [askFor(OPS, 'Massmarket AI', { internal: true })] })
+    // the person pinned it themselves
+    const w = world(on, { feed: onOps, threads: [thread('local_ops', 'Massmarket ops', 1, { pinned: true })], store: { 'mm.links': { [OPS]: 'local_ops' } } })
+    await mm($, '')
+    expect(w.threads.get('local_ops')).toMatchObject({ title: '🟡 23h left · Massmarket AI · internal ask', pinned: true })
+    expect((w.stored['mm.pins'] as Record<string, unknown>)['local_ops']).toEqual({ projectId: OPS, client: 'Massmarket AI', byUs: false, internal: true })
+    // answered: its pin stays, and it gets its own name back (R18)
+    w.setFeed(feed())
+    await mm($, '')
+    expect(w.threads.get('local_ops')).toMatchObject({ title: 'Massmarket ops', pinned: true })
+    expect(sends(w)).toEqual([])
+  })
+
+  test('the Massmarket internal thread, pinned by the bridge for an ask: its own pin comes off once the ask is answered', async ($, on) => {
+    const w = world(on, { feed: feed({ asks: [askFor(OPS, 'Massmarket AI', { internal: true })] }), threads: [thread('local_ops', 'Massmarket ops', 1)], store: { 'mm.links': { [OPS]: 'local_ops' } } })
+    await mm($, '')
+    expect(w.threads.get('local_ops')).toMatchObject({ title: '🟡 23h left · Massmarket AI · internal ask', pinned: true })
+    w.setFeed(feed())
+    await mm($, '')
+    expect(w.threads.get('local_ops')).toMatchObject({ title: 'Massmarket ops', pinned: false })
+  })
+
+  test('the Massmarket internal thread is a normal link key: its kickoff\'s marker links the thread that opens with it', async ($, on) => {
+    const w = world(on, { feed: feed({ asks: [askFor(OPS, 'Massmarket AI', { internal: true })] }) })
+    await mm($, '')
+    const kickoff = `[mm-link ${OPS}] Massmarket AI (OW project ${OPS}) has 1 internal ask(s) waiting on my reply. Load the client's project skill first.`
+    await $.prompt.submit({ text: kickoff, wait: false, origin: { kind: 'composer' } })
+    expect(w.stored['mm.links']).toEqual({ [OPS]: SELF })
+  })
+
+  test('the Massmarket internal thread with an open ask gets its chip like a client', async ($, on) => {
+    const w = world(on, { feed: { member: ME, role: 'builder', mail: [], drafts: [], tickets: {}, asks: [askFor(OPS, 'Massmarket AI', { internal: true })] }, threads: [] })
+    await tickOnce($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(chipTitles(w)).toEqual(['Massmarket AI: reply to the internal ask'])
+  })
+
+  test('⛔ with no open ask it gets none, as before (L8): an internal ticket due soon mints no chip', async ($, on) => {
+    const opsTask = { ticket_id: 'ops-t1', project_id: OPS, project_name: 'Massmarket AI', title: 'Rotate the key', due_at: new Date(NOW + 5 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME, internal: true }
+    const w = world(on, { feed: { member: ME, role: 'builder', mail: [], drafts: [], tickets: { due_today: [opsTask] } }, threads: [] })
+    await tickOnce($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(chipTitles(w)).toEqual([])
+  })
+
+  const helper = 'node ~/.claude/skills/team-api-gateway/scripts/mm-api.mjs'
+  for (const [name, command] of [
+    ['its reply stored', `${helper} ext POST /team-ask/draft --body-file BODY-DO-NOT-KEEP.json`],
+    ['its reply posted after the go', `${helper} ext POST /team-ask/post --body '{"id":"${ASK}","draft_sha256":"${'a'.repeat(64)}"}'`],
+    ['the ask closed', `${helper} ext POST /team-ask/close --body '{"id":"${ASK}","reason":"answered on the call"}'`],
+  ] as Array<[string, string]>) {
+    test(`a write to an ask (${name}) is followed by one sync, a second after; nothing of the command is kept`, async ($, on) => {
+      const w = world(on, { store: notThePoller })
+      await tickOnce($, w)
+      expect(closeouts(w)).toBe(0)
+      const answer = await bash($, command)
+      expect(w.shell).toEqual([command])
+      expect(answer).toMatchObject({ result: { stdout: SHELL_OUT } })
+      await w.clock.advance(999)
+      expect(closeouts(w)).toBe(0)
+      await w.clock.advance(1)
+      expect(closeouts(w)).toBe(1)
+      const kept = JSON.stringify([w.stored, w.written, w.appended, w.toasts, w.fetched, w.calls, w.prompts])
+      for (const mark of ['BODY-DO-NOT-KEEP', SHELL_OUT, 'team-ask', 'answered on the call']) expect(kept.includes(mark), mark).toBe(false)
+      expect(sends(w)).toEqual([])
+      expect(w.prompts).toEqual([])
+    })
+  }
+
+  test('a read of an ask\'s page is not a write: no request and no sync', async ($, on) => {
+    const w = world(on, { store: notThePoller })
+    await tickOnce($, w)
+    await bash($, `${helper} ext GET "/team-ask?id=${ASK}&format=pickup"`)
+    await w.clock.advance(30_000)
+    expect(closeouts(w)).toBe(0)
+    expect(w.stored['mm.ask']).toBeUndefined()
   })
 })

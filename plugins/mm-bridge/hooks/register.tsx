@@ -5,6 +5,7 @@ import type { MmBand, MmFolds, MmNotice, MmPeople, MmPerson, MmProject, MmQueue,
 import {
   INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pinsNow,
   peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
+  asksMarkdown, heldInternal, openAsks,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
@@ -549,6 +550,8 @@ const sending = new Set<string>()
 let recent: { at: number; feed: Feed; wrote: string } | null = null
 /** The pickup views this session read, by package: drawn at once for a press while they are read again. */
 const pickups = new Map<string, { at: number; text: string }>()
+/** (0.5.28, internal asks) The ask pages this session read, by ask: drawn at once for a press while they are read again, as `pickups`. */
+const askViews = new Map<string, { at: number; text: string }>()
 /** Each session's newest draw of its client part: an older one still reading its view draws nothing over it. */
 const viewDraws = new Map<string, number>()
 
@@ -804,6 +807,8 @@ function feedProjects(feed: Feed): string[] {
   // (fix round 1, F5) `start_now` too
   for (const k of [feed.tickets?.overdue, feed.tickets?.due_today, feed.tickets?.due_soon, feed.tickets?.start_now]) for (const t of k ?? []) add(t.project_id)
   for (const t of Array.isArray(feed.threads) ? feed.threads : []) add(t?.project_id)
+  // (0.5.28, internal asks) the project of each of the caller's asks: a thread that opens with its kickoff links to it
+  for (const a of Array.isArray(feed.asks) ? feed.asks : []) add(a?.project_id)
   return [...ids]
 }
 
@@ -2137,6 +2142,48 @@ async function renderPickup($: EngineInterface, it: QueueItem): Promise<string |
   return null
 }
 
+/** (0.5.28, internal asks) The most ask pages one draw of a client part reads. */
+const ASK_PAGES_MAX = 5
+
+/**
+ * (0.5.28, internal asks; spec 2026-10-23: "Pane: ... each open ask: `Ask from <asker> · due <clock>` and its snippet,
+ * with the page from `/team-ask?id=&format=pickup` when the pane renders the package page") The page of each of a
+ * client's open asks, by ask id: OW's `{ok, markdown}`, read in this thread's own session, at most ASK_PAGES_MAX. ⛔ An
+ * ask whose page cannot be read (an error, no answer, an answer with no markdown, an OW before the route) is left out:
+ * the pane then draws its line and its snippet alone, never an error in its place. The id is a lower-case uuid or the
+ * page is not asked for. Each page read is kept for the next draw at once (`askViews`, as `pickups`).
+ */
+async function askPages($: EngineInterface, it: QueueItem): Promise<Record<string, string>> {
+  const pages: Record<string, string> = {}
+  for (const a of openAsks(it).filter(x => isUuid(x?.id)).slice(0, ASK_PAGES_MAX)) {
+    try {
+      const r = await $.http.fetch(`${EXT}/team-ask?id=${a.id}&format=pickup`, {
+        headers: { Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER },
+      })
+      if (!r.ok) continue
+      const j = JSON.parse(r.text) as { ok?: unknown; markdown?: unknown } | null
+      if (!j || typeof j !== 'object' || j.ok === false || typeof j.markdown !== 'string' || !j.markdown.trim()) continue
+      pages[a.id] = j.markdown
+      askViews.delete(a.id)
+      askViews.set(a.id, { at: await $.clock.now(), text: j.markdown })
+      for (const old of [...askViews.keys()].slice(0, Math.max(0, askViews.size - PICKUPS_MAX))) askViews.delete(old)
+    } catch {
+      // its line and snippet stand alone
+    }
+  }
+  return pages
+}
+
+/** (0.5.28, internal asks) The ask pages this session read less than PICKUP_REUSE_MS ago, for a draw at once. */
+function recentAskPages(it: QueueItem, now: number): Record<string, string> {
+  const pages: Record<string, string> = {}
+  for (const a of openAsks(it)) {
+    const seen = isUuid(a?.id) ? askViews.get(a.id) : undefined
+    if (seen && now - seen.at < PICKUP_REUSE_MS) pages[a.id] = seen.text
+  }
+  return pages
+}
+
 /** This draw of the client part is now this session's newest: an older one still reading its view draws nothing over it. */
 async function newDraw($: EngineInterface): Promise<() => Promise<boolean>> {
   const id = await instanceId($)
@@ -2154,6 +2201,9 @@ async function newDraw($: EngineInterface): Promise<() => Promise<boolean>> {
  * package; for one with a package and `atOnce` (a press), the pickup view this session read less than a
  * minute ago, else the client's heading and `Checking…`. The step it answers reads the pickup view and draws
  * it. Only this session's newest draw lands: a press on another row meanwhile is not drawn over.
+ * (0.5.28, internal asks) Under it, each of the viewer's open asks about the client (`asksMarkdown`): its line and
+ * snippet at once, with any page this session read less than a minute ago, and each page read in the step it answers,
+ * with the pickup view (`askPages`). A page that could not be read leaves its line and snippet alone.
  */
 async function beginClient($: EngineInterface, it: QueueItem, own: boolean, atOnce: boolean): Promise<() => Promise<void>> {
   const heading = own ? `This thread: ${it.client}` : ''
@@ -2162,15 +2212,23 @@ async function beginClient($: EngineInterface, it: QueueItem, own: boolean, atOn
     if (await newest()) await $.state.set(VIEW, { text, heading } satisfies MmView)
   }
   const withBanner = (view: string): string => [holdBanner(it), view].filter(Boolean).join('\n\n')
+  /** (0.5.28, internal asks) The client's open asks under a pickup view: '' adds nothing, for a client with none. */
+  const withAsks = (view: string, pages: Record<string, string>, at: number): string => [view, asksMarkdown(it, at, pages)].filter(Boolean).join('\n\n')
   const now = await $.clock.now()
+  const asking = openAsks(it).length > 0
   const packageId = pickupOf(it)
   if (!packageId) {
-    await draw(clientMarkdown(it, now))
-    return async () => {}
+    await draw(clientMarkdown(it, now, recentAskPages(it, now)))
+    // (0.5.28, internal asks) a client with open asks: their pages are read in the step this answers
+    if (!asking) return async () => {}
+    return async () => {
+      const pages = await askPages($, it)
+      if (Object.keys(pages).length) await draw(clientMarkdown(it, await $.clock.now(), pages))
+    }
   }
   if (atOnce) {
     const seen = pickups.get(packageId)
-    await draw(seen && now - seen.at < PICKUP_REUSE_MS ? withBanner(seen.text) : [`## ${it.projectName}`, titleFor(it, now), CHECKING].join('\n\n'))
+    await draw(seen && now - seen.at < PICKUP_REUSE_MS ? withAsks(withBanner(seen.text), recentAskPages(it, now), now) : [`## ${it.projectName}`, titleFor(it, now), CHECKING].join('\n\n'))
   }
   return async () => {
     const view = await renderPickup($, it)
@@ -2179,7 +2237,9 @@ async function beginClient($: EngineInterface, it: QueueItem, own: boolean, atOn
       pickups.set(packageId, { at: await $.clock.now(), text: view })
       for (const old of [...pickups.keys()].slice(0, Math.max(0, pickups.size - PICKUPS_MAX))) pickups.delete(old)
     }
-    await draw(view ? withBanner(view) : clientMarkdown(it, await $.clock.now()))
+    const pages = asking ? await askPages($, it) : {}
+    const at = await $.clock.now()
+    await draw(view ? withAsks(withBanner(view), pages, at) : clientMarkdown(it, at, pages))
   }
 }
 
@@ -2195,12 +2255,18 @@ async function showClient($: EngineInterface, it: QueueItem, own: boolean): Prom
   await (await beginClient($, it, own, false))()
 }
 
-/** What a client's part shows, in a word: the thread's note and its part are drawn again only when this changes. */
+/**
+ * What a client's part shows, in a word: the thread's note and its part are drawn again only when this changes.
+ * (0.5.28, internal asks) With the viewer's open asks: which, and whether each has a reply drafted (its page shows the
+ * draft). A client with none has the word it always had.
+ */
 function partSig(it: QueueItem): string {
   const o = it.open ?? null
-  return o
+  const base = o
     ? `open:${o.id}:${o.state}:${it.coversThrough ?? ''}:${o.unsent}:${o.newer}:${it.messages}:${it.tasks}`
     : it.packageId ? `pkg:${it.packageId}:${it.coversThrough}` : `q:${it.messages}:${it.tasks}:${it.dueAt}`
+  const asks = openAsks(it)
+  return asks.length ? `${base}:asks:${asks.map(a => `${a.id}/${a.hasDraft ? 1 : 0}`).join(',')}` : base
 }
 
 /** The client part as the state holds it; a session an older version left its view in held plain text there. */
@@ -2828,9 +2894,12 @@ function startTitle(it: QueueItem): string {
   return chipTitle(startWhat(it))
 }
 
-/** 0.5.1's words for what a client's chip is for, uncut: `<client>: review the reply drafts` and the like. */
+/**
+ * 0.5.1's words for what a client's chip is for, uncut: `<client>: review the reply drafts` and the like. (0.5.28,
+ * internal asks) A client listed by the viewer's internal asks alone: `<client>: reply to the internal ask`.
+ */
 function startWhat(it: QueueItem): string {
-  return `${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : 'reply to the client'}`
+  return `${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : it.kind === 'ask' ? 'reply to the internal ask' : 'reply to the client'}`
 }
 
 /** 0.5.1's line under that title. */
@@ -3882,14 +3951,15 @@ type ChipWorld = {
  *            more (R3's and R8's `start` and `long`): Claude Code compacts a long thread instead.
  *   a client with no linked thread (C3)  ONE chip, 0.5.1's start chip, in the thread the person is working in now
  *            (`noThreadHolder`).
- * Never for an internal project (fix round 1, L8), nor a client further out than the pin's window.
+ * Never for an internal project (fix round 1, L8), nor a client further out than the pin's window. (0.5.28, internal
+ * asks) Except the Massmarket internal thread's while it has an open ask (`heldInternal`): chipped like a client's.
  */
 function needsFor(last: Last, w: ChipWorld, now: number): Need[] {
   const out: Need[] = []
   const items = (Array.isArray(last.items) ? last.items : []).slice().sort(byDue)
   for (const it of items) {
     if (out.length >= AUTO_CHIPS_MAX) break
-    if (!isUuid(it.projectId) || !pinsNow(it, now) || it.internal) continue
+    if (!isUuid(it.projectId) || !pinsNow(it, now) || heldInternal(it)) continue
     const rec = storedRec(last, it.projectId)
     if (!rec) continue
     const signature = signatureOf(it)
@@ -5534,7 +5604,8 @@ export const register: Register = on => {
   })
 
   // A route that can close something was called from this thread and worked (R6: a reply draft sent or
-  // discarded, a team draft posted, any write to a reply package): the list is brought up to date now
+  // discarded, a team draft posted, any write to a reply package; (0.5.28, internal asks) an ask's reply stored,
+  // posted after the person's go, or the ask closed): the list is brought up to date now
   // (askSync), and (R11) a link this thread has by itself becomes the person's.
   // ⛔ The command runs first, exactly as it would have, and its answer is handed back untouched.
   // ⛔ All that is looked at: whether the call was refused or failed, and whether the command names one of
