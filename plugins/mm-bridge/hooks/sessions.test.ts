@@ -988,8 +988,8 @@ describe('0.5.6: Start moves the chip to the thread it is pressed in (Rob, 10-14
 
 // ======================================================================== 0.5.7
 
-describe('0.5.7: a thread the bridge starts by itself is started once, whoever ticks; (0.5.24) its Start card is put up once, and no thread is started', () => {
-  test('two sessions that both take themselves for the holder, at the same moment: one card, by the claim that held', async () => {
+describe('0.5.7: a thread the bridge starts by itself is started once, whoever ticks; (0.5.25) and now nothing is started or put up by itself: no thread and no card', () => {
+  test('two sessions that both take themselves for the holder, at the same moment: no call to start_session in either, and nothing linked', async () => {
     const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(91, 'Client Nine One', 1)] }
     const ids = ['local_race_a', 'local_race_b']
     const w = fakeApp(feed, ids.map(sessionId => ({ sessionId })), [], { every: true, tools: 'start' })
@@ -1001,21 +1001,17 @@ describe('0.5.7: a thread the bridge starts by itself is started once, whoever t
     await startIn(b)
     await w.advance(4_000)
     await settleAll()
-    // the claims are checked 1 to 3 seconds on
     await w.advance(3_100)
     await settleAll()
-    const cards = () => w.calls.filter(c => c.tool === 'start_session' && c.args.initiation === 'own_initiative')
-    expect(cards().length).toBe(1)
-    expect(String(cards()[0]?.args.prompt).startsWith(`[mm-link ${pid(91)}] `)).toBe(true)
-    expect(w.calls.filter(c => c.tool === 'start_session' && c.args.initiation === 'user_asked')).toEqual([])
+    const calls = () => w.calls.filter(c => c.tool === 'start_session')
+    expect(calls()).toEqual([])
     expect(linksOf(w)[pid(91)]).toBeUndefined()
-    // and the ticks after it put up nothing more, in either thread
+    // and the ticks after it start and put up nothing, in either thread
     for (let i = 0; i < 3; i++) {
       await w.advance(60_000)
       await settleAll()
     }
-    expect(cards().length).toBe(1)
-    expect(w.calls.filter(c => c.tool === 'start_session' && c.args.initiation === 'user_asked')).toEqual([])
+    expect(calls()).toEqual([])
     expect(w.stored('mm.autostarts')).toBeUndefined()
   })
 })

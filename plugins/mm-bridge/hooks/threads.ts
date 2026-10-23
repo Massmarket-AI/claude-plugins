@@ -769,6 +769,52 @@ export function startAllSummary(started: readonly string[], failed: ReadonlyArra
   return out.join(' ') || 'No client needs a new thread now.'
 }
 
+// ---------------------------------------------------------------- (0.5.25) Start on the person's own words
+
+/**
+ * (0.5.25, Rob 10-22: "I'm still having a hard time starting missing threads unless I type it... Maybe clicking the
+ * button just types 'start missing threads' into the command line") Claude.app starts a thread (start_session
+ * `user_asked`) only on a turn the person typed, and since 3.1623 asks the person to allow every start_session call; a
+ * Start card the bridge made never opened for him. So a Start press puts the person's own words in the prompt box, they
+ * send them with Enter, and the model starts each thread with what the mm tool's `kickoffs` gives it. What Start missing
+ * threads (and /mm start all) puts there:
+ */
+export const START_ALL_WORDS = 'Start the missing client threads'
+
+/** (0.5.25) What a row's Start, and /mm start <client>, puts there. */
+export const startWords = (client: string): string => `Start ${client}'s thread`
+
+/**
+ * (0.5.25) What a press says: its words are in the prompt box (`filled`); the box held a draft of the person's, which
+ * is never written over (`draft`); or no box took them (`none`: a surface with none, or one that refused).
+ */
+export function startFillSaid(words: string, all: boolean, how: 'filled' | 'draft' | 'none'): string {
+  const then = all ? 'Claude starts each missing thread, and the app asks you to allow each one.' : 'Claude starts the thread, and the app asks you to allow it.'
+  if (how === 'filled') return `"${words}" is in the prompt box: press Enter to send it. ${then}`
+  if (how === 'draft') return `Your prompt box has a draft, so it was left as it is. Send "${words}" when you are ready: ${then}`
+  return `Type "${words}" and send it: ${then}`
+}
+
+/** (0.5.25) One thread for the model to start: the client, and start_session's arguments exactly as the bridge would pass them. */
+export type Kickoff = { client: string; args: Record<string, unknown> }
+
+/**
+ * (0.5.25) What the mm tool's `kickoffs` answers: how to use what follows, the threads to start (one JSON line), the
+ * clients it skipped and why, and how many more need a thread after START_ALL_MAX.
+ */
+export function kickoffsAnswer(kicks: readonly Kickoff[], skipped: ReadonlyArray<{ client: string; why: string }>, left: number): string {
+  const out: string[] = []
+  if (kicks.length) {
+    out.push(
+      `Only if the person asked for this in their own message on this turn: start ${kicks.length === 1 ? 'this thread' : `these ${kicks.length} threads`} with one start_session call each, one after another, passing "arguments" exactly as given. The [mm-link] marker at the start of each prompt links the new thread to its client: send nothing else into it. On any other turn, start nothing and tell the person to press Start in the pane.`,
+    )
+    out.push(JSON.stringify(kicks.map(k => ({ client: k.client, arguments: k.args }))))
+  }
+  if (skipped.length) out.push(`Skipped: ${skipped.map(s => `${s.client} (${s.why})`).join('; ')}.`)
+  if (left > 0) out.push(`${left} more need${left === 1 ? 's' : ''} a thread: once these have started, call mm with "kickoffs" again.`)
+  return out.join('\n') || 'No client needs a new thread now.'
+}
+
 /** `local_<id>`: the app's id for a thread, which is what the session tools take. */
 export const THREAD_ID = /^local_[A-Za-z0-9_-]{1,100}$/
 
