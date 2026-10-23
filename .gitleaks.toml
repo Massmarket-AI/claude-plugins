@@ -13,3 +13,17 @@ useDefault = true
 description = "The time tracker extension's public manifest key (pins its id; public, not a secret)"
 regexTarget = "line"
 regexes = ['''MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjST3RY9\+5\+HmZ\+cszeP2CJM0k350CSXHEYrnGkOUASUbxSaJsjjdugOxPoVzUdyjYiX3MuqtCA8idD\+l5Jx\+DhnPMOCI8Zr7eKcA1YD7auBTIP9qgBTp144DBjIy3LLkfiz5iGOPc2z9\+uZOOiOWR8Yu8gSl9EPzZNgiCrx8d/w5fX9tdykbLMYR8dc1Obbs5YiSw0Ls72oytHYFMf3UuUyUzf/NHB\+oF6UUA7KxOx3/mq4Q7SOaHrDYLMUNVS\+4o2Em13ehlWiLvd0JvqHJA1FCw5aR9fKYqMDN1W3ismPUfSwkNq3N8Ckcp4wVHBJav9qOuXac\+2nHcUE/uGpiTQIDAQAB''']
+
+# plugins/mm-hooks/extension.json maps each carried extension file to its sha256, which release.mjs and
+# sync-extension.js check before anything is written. A file name such as "authstatus.js" next to 64 hex
+# digits reads to generic-api-key as a credential; a published file's hash is not one. Only generic-api-key is
+# relaxed, only in that one file, and only on a line of exactly that shape: every other rule (a GitHub or AWS
+# token, a private key) still fails on that file too.
+[[rules]]
+id = "generic-api-key"
+[[rules.allowlists]]
+description = "Carried extension file hashes in plugins/mm-hooks/extension.json (public sha256, not secrets)"
+condition = "AND"
+paths = ['''^plugins/mm-hooks/extension\.json$''']
+regexTarget = "line"
+regexes = ['''^\s*"[A-Za-z0-9._/-]+": "[0-9a-f]{64}",?$''']
