@@ -5,6 +5,11 @@
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/sync-hook.js\"", "timeout": 10 }
         ]
+      },
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/sync-extension.js\"", "timeout": 10 }
+        ]
       }
     ]
   }

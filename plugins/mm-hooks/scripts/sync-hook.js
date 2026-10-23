@@ -19,10 +19,10 @@ const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { updateStatus } = require("./plugin-status");
 
 const HOOK_DIR = path.join(process.env.MM_HOOK_HOME || os.homedir(), ".claude", "mm-hooks");
 const TARGET = path.join(HOOK_DIR, "worklog-hook.js");
-const STATUS = path.join(HOOK_DIR, "plugin-sync.json");
 const BUNDLED = path.join(__dirname, "worklog-hook.js");
 // The first line of the stub the installer's --uninstall writes (UNINSTALLED_HOOK_STUB in OW's
 // src/lib/ext/hook-setup-source.ts).
@@ -71,9 +71,7 @@ try {
 } catch (err) {
   result = { plugin: "mm-hooks", version: version(), at: new Date().toISOString(), action: "error", error: String((err && err.message) || err).slice(0, 300) };
 }
-try {
-  if (fs.existsSync(HOOK_DIR)) fs.writeFileSync(STATUS, JSON.stringify(result, null, 1) + "\n");
-} catch (_) {
-  // the status file is a convenience; never fail the session over it
-}
+// The status file is a convenience; never fail the session over it. sync-extension.js keeps its own record
+// in the same file, under `extension`, which this step carries over.
+updateStatus(HOOK_DIR, (current) => (current.extension ? Object.assign({}, result, { extension: current.extension }) : result));
 process.exit(0);
