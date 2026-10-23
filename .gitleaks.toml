@@ -24,6 +24,7 @@ id = "generic-api-key"
 [[rules.allowlists]]
 description = "Carried extension file hashes in plugins/mm-hooks/extension.json (public sha256, not secrets)"
 condition = "AND"
-paths = ['''^plugins/mm-hooks/extension\.json$''']
+# (^|/): release.mjs scans the absolute path, CI the repo-relative one.
+paths = ['''(^|/)plugins/mm-hooks/extension\.json$''']
 regexTarget = "line"
 regexes = ['''^\s*"[A-Za-z0-9._/-]+": "[0-9a-f]{64}",?$''']
