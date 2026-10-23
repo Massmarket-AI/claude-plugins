@@ -126,9 +126,27 @@ jobs:
             fi
           done
 
+      # The output goes to a file first and is printed after. Printed straight to
+      # the job log, it stopped after 548 of the 905 results on every run from
+      # 2026-10-23, with no summary line, though the exit code still counted every
+      # test. The step fails on a failing test (the command's own exit code) and
+      # when the summary line is missing, since then the output is incomplete.
       - name: Bridge tests
         working-directory: plugins/mm-bridge
-        run: claude plugin test .
+        run: |
+          log="$RUNNER_TEMP/bridge-tests.log"
+          set +e
+          claude plugin test . > "$log" 2>&1
+          status=$?
+          set -e
+          cat "$log"
+          summary=$(grep -E '^Ran [0-9]+ tests' "$log" || true)
+          if [ -z "$summary" ]; then
+            echo "::error::the bridge test output has no summary line, so it is incomplete"
+            exit 1
+          fi
+          echo "::notice::$summary"
+          exit "$status"
 
       # mm-hooks' SessionStart steps and the release's extension carry: node's own test runner, no
       # install. Every Chrome folder and server they use is fabricated in a temporary directory.
