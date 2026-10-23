@@ -377,7 +377,7 @@ test("several work profiles: one sentence naming each address once", () => {
     "Profile 2": { devMode: true, accounts: work("ana@massmarket.ai") },
   });
   const { notice } = runIn(home, carriedBuild("0.11.5"));
-  assert.equal(notice, "The Massmarket time tracker is not installed in the Chrome profiles signed in as ana@massmarket.ai, bo@massmarket.ai, which were used recently. Ask the member to load the tracker in that profile so the work done there is tracked.");
+  assert.equal(notice, "The Massmarket time tracker is not installed in the Chrome profiles signed in as ana@massmarket.ai, bo@massmarket.ai, which were used recently. Ask the member to load the tracker in those profiles so the work done there is tracked.");
   assert.equal(sx.noticeSentence([]), null);
   assert.equal(sx.noticeSentence(["ana.personal@gmail.com", "x\n@massmarket.ai"]), null);
 });

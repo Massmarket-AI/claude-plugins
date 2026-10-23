@@ -277,7 +277,7 @@ function noticeSentence(emails) {
   const shown = list.slice(0, 5).join(", ");
   return list.length === 1
     ? `The Massmarket time tracker is not installed in the Chrome profile signed in as ${shown}, which was used recently. Ask the member to load the tracker in that profile so the work done there is tracked.`
-    : `The Massmarket time tracker is not installed in the Chrome profiles signed in as ${shown}, which were used recently. Ask the member to load the tracker in that profile so the work done there is tracked.`;
+    : `The Massmarket time tracker is not installed in the Chrome profiles signed in as ${shown}, which were used recently. Ask the member to load the tracker in those profiles so the work done there is tracked.`;
 }
 
 /** Everything the step does, as data: `status` for plugin-sync.json and `notice` for additionalContext. */
