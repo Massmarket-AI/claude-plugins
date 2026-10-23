@@ -19,8 +19,8 @@
 import { businessMsBetween } from './business-time'
 import type { MmRow } from '../types'
 
-import { MAY_NEED_OK, NOBODY, checkingTitle, cleanTitle, clockText, decidesText, fastState, hasDue, holdSentence, noThreadTitle, pinsNow, stillOpenTitle, titleFor, titleNames, withHolder, withTeammate } from './queue'
-import type { FeedThread, QueueItem } from './queue'
+import { MAY_NEED_OK, NOBODY, checkingTitle, cleanText, cleanTitle, clockText, decidesText, fastState, hasDue, heldInternal, holdSentence, isUuid, noThreadTitle, openAsks, pinsNow, stillOpenTitle, titleFor, titleNames, withHolder, withTeammate } from './queue'
+import type { AskRef, FeedThread, QueueItem } from './queue'
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
@@ -472,11 +472,12 @@ export const asksForPrep = (it: QueueItem): boolean => it.messages > 0 && !it.pa
  * own list is one whose thread may be updated by itself: never one a teammate has (`withTeammate`; the founder's
  * `theirs`), never one whose package someone else holds (`withHolder`), never one whose reply the server is
  * checking or found still open (R8: Claim is the person's press), and never an internal project's (as no thread
- * is started by itself for one).
+ * is started by itself for one). (0.5.28, internal asks) Except the Massmarket internal thread's while it has an open
+ * ask (`heldInternal`): it is updated like a client's.
  */
 export function autoUpdatable(it: QueueItem, now: number): boolean {
   const o = it.open ?? null
-  return it.internal !== true && !it.theirs && !withTeammate(it) && !(o && withHolder(o)) && fastState(it, now) === null
+  return !heldInternal(it) && !it.theirs && !withTeammate(it) && !(o && withHolder(o)) && fastState(it, now) === null
 }
 
 /**
@@ -574,7 +575,33 @@ export function waitingText(it: QueueItem): string {
   // teammate decides on, before its reply is due, says so instead (R2)
   const ok = it.kind === 'ok' ? (it.theirs ? decidesText(it.theirs) : `needs your OK · ${(it.ok ?? null)?.sends ?? NOBODY} sends`) : ''
   const parts = [ok, it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', it.tasks ? `${it.tasks} task${it.tasks > 1 ? 's' : ''} due` : '', drafts]
-  return parts.filter(Boolean).join(', ') || 'drafts ready'
+  const base = parts.filter(Boolean).join(', ')
+  // (0.5.28, internal asks) and then the viewer's open asks, `1 internal ask`: after what the client has otherwise (a
+  // package of theirs with nothing else waiting is still `drafts ready`), or alone for a client listed by its asks alone
+  const n = openAsks(it).length
+  if (!n) return base || 'drafts ready'
+  const asked = `${n} internal ask${n > 1 ? 's' : ''}`
+  return base ? `${base}, ${asked}` : it.packageId ? `drafts ready, ${asked}` : asked
+}
+
+/**
+ * (0.5.28, internal asks) The asks a kickoff carries: each one's id a lower-case uuid and its due time a time, and who
+ * asked cleaned again (an item an older version stored, or a store edited by hand, is read like the feed: as data).
+ */
+function kickoffAsks(it: QueueItem): AskRef[] {
+  return openAsks(it)
+    .filter(a => a && typeof a === 'object' && isUuid(a.id) && typeof a.dueAt === 'number' && Number.isFinite(a.dueAt))
+    .map(a => ({ ...a, asker: cleanText(a.asker, 40) || 'a teammate' }))
+}
+
+/**
+ * (0.5.28, internal asks; spec 2026-10-23, verbatim, values substituted) The paragraph a kickoff and an Update carry
+ * for each open ask: who asked, its short id and due time (as the kickoff writes due times, `dueText`), how to print its
+ * page, to draft the reply first when none is stored, and to wait for the person's go. ⛔ It never posts: the post goes
+ * from the thread, after the go, through `/team-ask/post`.
+ */
+export function askParagraph(a: Pick<AskRef, 'id' | 'asker' | 'dueAt'>): string {
+  return `Internal ask from ${a.asker} (ask ${a.id.slice(0, 8)}, due ${dueText(a.dueAt)}): print it with node ~/.claude/skills/team-api-gateway/scripts/mm-api.mjs ext GET "/team-ask?id=${a.id}&format=pickup". If it has no reply drafted, draft my reply first (client-reply-prep §9.1c, discord-posting) and store it with /team-ask/draft. Then show me the whole page and wait for my go. Post nothing without my go.`
 }
 
 /**
@@ -597,6 +624,10 @@ export function waitingText(it: QueueItem): string {
  *    show it held by the person, teammates would be refused it (409 held_by_another), and the 24-hour "nobody
  *    picked this up" warning would stop counting it. Cases 2, 4, 5 and 6 then have words of their own (Opus's,
  *    10-15, verbatim); 1, 3, 7 and the founder's OK are as pressed. A pressed Update's text is unchanged.
+ * (0.5.28, internal asks) A client listed by the viewer's internal asks alone (no package, no client message, no task)
+ *    has a case of its own in 7's place: a first line that names the client, as 7's does. In every case the body is
+ *    followed by one paragraph per open ask (`askParagraph`, the spec's words verbatim), before any hand-over. An ask
+ *    is not a package and its paragraph takes nothing, so a send by itself carries the same words.
  */
 export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: Replaced | undefined; auto?: boolean } = {}): string {
   const id = it.projectId
@@ -606,10 +637,12 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
   const replyDue = due ? `, reply due ${due}` : ''
   const tasksDue = due ? ` due ${due}` : ''
   const o = it.open ?? null
+  /** (0.5.28, internal asks) The viewer's open asks, each checked again before its paragraph goes in. */
+  const asks = kickoffAsks(it)
   // (0.5.11, Opus 10-15, verbatim) cases 2 and 5 sent by itself: the pickup view, and no pickup call
   const notTaken = (pkg: string): string =>
     `[mm-link ${id}] The reply drafts for ${who} are ready in package ${pkg}. Load the client's project skill first, then follow client-reply-prep §9 to show the five-part pickup view for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. Send nothing without my go.`
-  const body =
+  const lead =
     o?.state === 'held_by_me' && it.packageId
       ? `[mm-link ${id}] Carry on with the reply drafts for ${who}. I already picked up package ${it.packageId.slice(0, 8)}: ${o.unsent} draft(s) not sent yet${o.newer > 0 ? `, and ${o.newer} client message(s) arrived since` : ''}. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the five-part pickup view and wait for me. Send nothing without my go.`
       : it.packageId
@@ -637,7 +670,12 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
                   ? // (0.5.11, Opus 10-15, verbatim) case 6 sent by itself
                     `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep: no package exists yet, so run prep (§2) to build one, then show the five-part pickup view without taking the package: no pickup call until I answer here. Then wait for me. Send nothing without my go.`
                   : `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
-                : `[mm-link ${id}] ${who} has ${it.tasks} committed task(s)${tasksDue}. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`
+                : it.tasks === 0 && asks.length
+                  ? // (0.5.28, internal asks) listed by its asks alone: a first line that names the client, then each ask's paragraph
+                    `[mm-link ${id}] ${who} has ${asks.length} internal ask(s) waiting on my reply. Load the client's project skill first.`
+                  : `[mm-link ${id}] ${who} has ${it.tasks} committed task(s)${tasksDue}. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`
+  // (0.5.28, internal asks) once per open ask, after the body and before any hand-over: `askParagraph`, verbatim
+  const body = asks.length ? [lead, ...asks.map(askParagraph)].join('\n\n') : lead
   const news = `New since this thread last worked on this client: ${waitingText(it)}.`
   // ⛔ (0.5.11, review of PR #15, F4) sent by itself: the marker first, at the very start of the text, as every hook
   // that tells the person's time from the bridge's reads it (a time-tracking hook too old to read the app's own
@@ -689,12 +727,13 @@ export function staleCopySentence(client: string): string {
 /**
  * The kickoff of a new thread for a client (Start, a chip): 0.5.1's start kickoff, with the hand-over from the
  * client's old thread. One case 0.5.1 never listed (R8): a stale package of the viewer's whose check left items
- * open, with no client message and no task; its kickoff is the Claim message behind the client's marker.
+ * open, with no client message and no task (and, 0.5.28, no internal ask); its kickoff is the Claim message behind the
+ * client's marker.
  */
 export function startKickoff(it: QueueItem, replaces: Replaced | undefined, now: number): string {
   const fast = fastState(it, now)
   const o = it.open ?? null
-  if (fast?.state === 'still_open' && !it.packageId && it.messages === 0 && it.tasks === 0 && !(o && withHolder(o))) {
+  if (fast?.state === 'still_open' && !it.packageId && it.messages === 0 && it.tasks === 0 && openAsks(it).length === 0 && !(o && withHolder(o))) {
     const body = `[mm-link ${it.projectId}] ${claimText(it.client, fast.at, fast.items, now)}`
     const handover = replaces ? handoverText(it, replaces) : ''
     return handover ? `${body}\n\n${handover}` : body
@@ -736,7 +775,7 @@ export const startMissingLabel = (n: number): string => (n > 0 ? startAllLabel(n
 export function startAllKickoff(it: QueueItem, replaces: Replaced | undefined, now: number): string {
   const fast = fastState(it, now)
   const o = it.open ?? null
-  if (fast?.state === 'still_open' && !it.packageId && it.messages === 0 && it.tasks === 0 && !(o && withHolder(o))) return startKickoff(it, replaces, now)
+  if (fast?.state === 'still_open' && !it.packageId && it.messages === 0 && it.tasks === 0 && openAsks(it).length === 0 && !(o && withHolder(o))) return startKickoff(it, replaces, now)
   return kickoffText(it, { replaces, auto: true })
 }
 
