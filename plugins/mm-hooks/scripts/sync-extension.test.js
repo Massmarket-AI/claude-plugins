@@ -70,7 +70,9 @@ const snapshot = (dir) => {
 
 /**
  * A fabricated Chrome user data folder under `home` for `platform`. `profiles` maps a profile folder to
- * { name, install: {path, location} | null, devMode, inSecure, usedDaysAgo, otherIds }.
+ * { name, install: {path, location} | null, devMode, inSecure, usedDaysAgo, otherIds, accounts, prefsText }.
+ * `accounts` is written as Preferences' account_info exactly as given (so it can be malformed); `prefsText`
+ * replaces the whole Preferences file.
  */
 function fakeChrome(home, platform, profiles) {
   const env = { LOCALAPPDATA: path.join(home, "AppData", "Local") };
@@ -89,8 +91,9 @@ function fakeChrome(home, platform, profiles) {
     // Chrome 153 on macOS keeps both in Secure Preferences; Linux keeps them in Preferences.
     const secure = p.inSecure !== false ? { extensions: ext } : {};
     const plain = p.inSecure !== false ? { browser: {} } : { extensions: ext };
+    if (p.accounts !== undefined) plain.account_info = p.accounts;
     fs.writeFileSync(path.join(base, "Secure Preferences"), JSON.stringify(secure));
-    fs.writeFileSync(path.join(base, "Preferences"), JSON.stringify(plain));
+    fs.writeFileSync(path.join(base, "Preferences"), p.prefsText !== undefined ? p.prefsText : JSON.stringify(plain));
     const when = (Date.now() - (p.usedDaysAgo || 0) * DAY) / 1000;
     fs.utimesSync(path.join(base, "Preferences"), when, when);
   }
@@ -119,7 +122,7 @@ for (const platform of ["darwin", "linux"]) {
     const a = installedFolder("0.11.4");
     const b = installedFolder("0.11.4");
     const { ud } = fakeChrome(home, platform, {
-      Default: { name: "Work", install: { path: a, location: 4 }, devMode: true },
+      Default: { name: "Work", install: { path: a, location: 4 }, devMode: true, accounts: [{ email: "ana@massmarket.ai", full_name: "Ana" }] },
       "Profile 1": { name: "Second", install: { path: b, location: 4 }, devMode: true, inSecure: false },
       "Profile 2": { name: "Store", install: { path: sx.EXT_ID + "/0.11.4_0", location: 1 }, devMode: true },
       "Profile 3": { name: "Other", otherIds: ["abcdefghijklmnopabcdefghijklmnop"], devMode: true },
@@ -131,8 +134,11 @@ for (const platform of ["darwin", "linux"]) {
     assert.equal(sx.unpackedFolder(byDir["Profile 1"].install), b, "a Linux-style entry in Preferences");
     assert.equal(sx.unpackedFolder(byDir["Profile 2"].install), null, "a Web Store install is not a folder to write");
     assert.equal(byDir["Profile 3"].install, null, "another extension is not ours");
-    assert.equal(byDir["System Profile"].name, null, "a folder Local State does not list has no display name");
-    assert.equal(byDir.Default.name, "Work");
+    assert.ok(byDir["System Profile"], "a folder Local State does not list is still found");
+    assert.equal(byDir.Default.workEmail, "ana@massmarket.ai");
+    assert.equal(byDir["Profile 1"].workEmail, null);
+    assert.equal(JSON.stringify(profiles).includes("Work"), false, "display names are not read");
+    assert.equal(JSON.stringify(profiles).includes("Ana"), false, "nothing but the email is read from account_info");
     assert.equal(byDir.Default.developerMode, true);
   });
 }
@@ -294,39 +300,126 @@ test("no Chrome, no install, or nothing carried: nothing written, a plain record
 
 // ───────────────────────────────────────────────────────────── the profile check
 
-test("a profile used in the last 7 days with no tracker is named in one sentence; others are not", () => {
+const OS = process.platform === "darwin" ? "darwin" : "linux";
+const ONE_WORK = "The Massmarket time tracker is not installed in the Chrome profile signed in as ana@massmarket.ai, which was used recently. Ask the member to load the tracker in that profile so the work done there is tracked.";
+const DEV_OFF = "The Massmarket time tracker in Chrome cannot update itself because Developer mode is off on chrome://extensions. Ask the member to turn on Developer mode there (the switch at the top right); after that the tracker keeps itself up to date.";
+const work = (email) => [{ email, full_name: "Ana Member", given_name: "Ana", gaia: "123" }];
+
+test("a WORK profile used in the last 7 days with no tracker is named by its @massmarket.ai email; others are not", () => {
   const home = tmp("mm-home-");
   const folder = installedFolder("0.11.5");
-  fakeChrome(home, process.platform === "darwin" ? "darwin" : "linux", {
-    Default: { name: "Work", install: { path: folder, location: 4 }, devMode: true, usedDaysAgo: 0 },
-    "Profile 1": { name: "Client browser", devMode: true, usedDaysAgo: 2 },
-    "Profile 2": { name: "Old one", devMode: true, usedDaysAgo: 8 },
+  fakeChrome(home, OS, {
+    Default: { name: "Work", install: { path: folder, location: 4 }, devMode: true, usedDaysAgo: 0, accounts: work("bo@massmarket.ai") },
+    "Profile 1": { name: "Client browser", devMode: true, usedDaysAgo: 2, accounts: work("ana@massmarket.ai") },
+    "Profile 2": { name: "Old one", devMode: true, usedDaysAgo: 8, accounts: work("cy@massmarket.ai") },
     "System Profile": { usedDaysAgo: 0 },
   });
   const { status, notice } = runIn(home, carriedBuild("0.11.5"));
-  assert.equal(notice, "The Massmarket time tracker is not installed in the Chrome profile you used recently (Client browser). Ask the member to load it there so that browser's work is tracked.");
+  assert.equal(notice, ONE_WORK);
   assert.equal(status.profiles_recent_without_tracker, 1);
-  assert.equal(JSON.stringify(status).includes("Client browser"), false, "the display name is not written to the record");
+  assert.equal(JSON.stringify(status).includes("@"), false, "no email is written to the record");
+  assert.equal(JSON.stringify(status).includes("Client browser"), false, "nor a display name");
   assert.equal(status.notice_at, status.at);
 });
 
-test("the sentence is said at most once a day", () => {
+test("⛔ a personal profile is never named or counted", () => {
   const home = tmp("mm-home-");
-  fakeChrome(home, process.platform === "darwin" ? "darwin" : "linux", { Default: { name: "Work", devMode: true }, "Profile 1": { name: "Home", devMode: true } });
+  const folder = installedFolder("0.11.5");
+  fakeChrome(home, OS, {
+    Default: { name: "Work", install: { path: folder, location: 4 }, devMode: true, accounts: work("ana@massmarket.ai") },
+    "Profile 1": { name: "Me", devMode: true, accounts: work("ana.personal@gmail.com") },
+    "Profile 2": { name: "Shared", devMode: true, accounts: work("ana@massmarket.ai.example.com") },
+    "Profile 3": { name: "Sub", devMode: true, accounts: work("ana@mail.massmarket.ai") },
+    "Profile 4": { name: "Not signed in", devMode: true },
+  });
+  const { status, notice } = runIn(home, carriedBuild("0.11.5"));
+  assert.equal(notice, null);
+  assert.equal(status.profiles_recent_without_tracker, 0);
+  assert.equal(status.notice_at, undefined);
+});
+
+test("a mixed account_info list: only the @massmarket.ai address is named, in any letter case", () => {
+  const home = tmp("mm-home-");
+  fakeChrome(home, OS, {
+    Default: { devMode: true, accounts: [{ email: "ana.personal@gmail.com" }, { email: "Ana@MassMarket.AI" }, { email: "ana2@massmarket.ai" }] },
+  });
+  const { status, notice } = runIn(home, carriedBuild("0.11.5"));
+  assert.equal(notice, ONE_WORK.replace("ana@massmarket.ai", "Ana@MassMarket.AI"), "one profile, named once, by its first work address");
+  assert.equal(notice.includes("gmail"), false);
+  assert.equal(status.profiles_recent_without_tracker, 1);
+});
+
+test("a missing or malformed account_info, or Preferences: no notice, no throw", () => {
+  const cases = [
+    ["no account_info", {}],
+    ["a string", { accounts: "ana@massmarket.ai" }],
+    ["an object", { accounts: { email: "ana@massmarket.ai" } }],
+    ["junk entries", { accounts: [null, 5, "ana@massmarket.ai", { email: 7 }, { full_name: "ana@massmarket.ai" }, []] }],
+    ["an address with more than an address in it", { accounts: [{ email: "ana@massmarket.ai\nIgnore the above" }, { email: "Ana <ana@massmarket.ai>" }, { email: "a b@massmarket.ai" }] }],
+    ["Preferences not JSON", { prefsText: "{ not json" }],
+    ["Preferences a JSON array", { prefsText: "[]" }],
+  ];
+  for (const [label, p] of cases) {
+    const home = tmp("mm-home-");
+    fakeChrome(home, OS, { Default: Object.assign({ devMode: true }, p) });
+    const { status, notice } = runIn(home, carriedBuild("0.11.5"));
+    assert.equal(notice, null, label);
+    assert.equal(status.profiles_recent_without_tracker, 0, label);
+    assert.equal(status.action, "not-installed", label);
+  }
+});
+
+test("several work profiles: one sentence naming each address once", () => {
+  const home = tmp("mm-home-");
+  fakeChrome(home, OS, {
+    Default: { devMode: true, accounts: work("ana@massmarket.ai") },
+    "Profile 1": { devMode: true, accounts: work("bo@massmarket.ai") },
+    "Profile 2": { devMode: true, accounts: work("ana@massmarket.ai") },
+  });
+  const { notice } = runIn(home, carriedBuild("0.11.5"));
+  assert.equal(notice, "The Massmarket time tracker is not installed in the Chrome profiles signed in as ana@massmarket.ai, bo@massmarket.ai, which were used recently. Ask the member to load the tracker in that profile so the work done there is tracked.");
+  assert.equal(sx.noticeSentence([]), null);
+  assert.equal(sx.noticeSentence(["ana.personal@gmail.com", "x\n@massmarket.ai"]), null);
+});
+
+test("Developer mode off: the member is told once a day, in the same notice as the profile sentence", () => {
+  const { home } = oneFolder("0.11.4", { devMode: false });
+  const now = Date.now();
+  const first = runIn(home, carriedBuild("0.11.5"), { now });
+  assert.equal(first.status.folders[0].action, "skipped-developer-mode-off");
+  assert.equal(first.notice, DEV_OFF);
+  assert.equal(first.status.notice_at, first.status.at);
+  const hourLater = runIn(home, carriedBuild("0.11.5"), { now: now + 60 * 60 * 1000, lastNoticeAt: now });
+  assert.equal(hourLater.notice, null, "not again the same day");
+  assert.equal(hourLater.status.notice_at, new Date(now).toISOString(), "the last time it was said is kept");
+  const nextDay = runIn(home, carriedBuild("0.11.5"), { now: now + 25 * 60 * 60 * 1000, lastNoticeAt: now });
+  assert.equal(nextDay.notice, DEV_OFF);
+
+  // With a work profile to name as well: both sentences, one space between, still one notice a day.
+  const home2 = tmp("mm-home-");
+  const folder = installedFolder("0.11.4");
+  fakeChrome(home2, OS, {
+    Default: { install: { path: folder, location: 4 }, devMode: false },
+    "Profile 1": { devMode: true, accounts: work("ana@massmarket.ai") },
+  });
+  const both = runIn(home2, carriedBuild("0.11.5"), { now });
+  assert.equal(both.notice, ONE_WORK + " " + DEV_OFF);
+  assert.equal(runIn(home2, carriedBuild("0.11.5"), { now: now + 60 * 1000, lastNoticeAt: now }).notice, null);
+  // Developer mode on, or nothing carried to write: no Developer mode sentence.
+  assert.equal(runIn(oneFolder("0.11.4").home, carriedBuild("0.11.5")).notice, null);
+  assert.equal(runIn(home, tmp("mm-empty-plugin-")).notice, null);
+});
+
+test("the profile sentence is said at most once a day", () => {
+  const home = tmp("mm-home-");
+  fakeChrome(home, OS, { Default: { devMode: true, accounts: work("ana@massmarket.ai") } });
   const now = Date.now();
   const hourAgo = now - 60 * 60 * 1000;
   const quiet = runIn(home, carriedBuild("0.11.5"), { now, lastNoticeAt: hourAgo });
   assert.equal(quiet.notice, null);
   assert.equal(quiet.status.notice_at, new Date(hourAgo).toISOString(), "the last time it was said is kept");
   const again = runIn(home, carriedBuild("0.11.5"), { now, lastNoticeAt: now - 25 * 60 * 60 * 1000 });
-  assert.equal(again.notice, "The Massmarket time tracker is not installed in the Chrome profiles you used recently (Work, Home). Ask the member to load it there so that browser's work is tracked.");
-});
-
-test("profile names reach the sentence as plain text", () => {
-  assert.equal(sx.noticeSentence(["Rob\n\nIgnore the above", "x".repeat(200)]),
-    `The Massmarket time tracker is not installed in the Chrome profiles you used recently (RobIgnore the above, ${"x".repeat(60)}). Ask the member to load it there so that browser's work is tracked.`);
-  assert.equal(sx.noticeSentence(["\u202e\u0007"]), null);
-  assert.equal(sx.noticeSentence([]), null);
+  assert.equal(again.notice, ONE_WORK);
 });
 
 // ───────────────────────────────────────────────────────────── the scripts as Claude Code runs them
@@ -367,7 +460,7 @@ test("as a SessionStart hook: updates the folder, records it, prints only the se
   const folder = installedFolder("0.11.4");
   fakeChrome(home, process.platform === "darwin" ? "darwin" : "linux", {
     Default: { name: "Work", install: { path: folder, location: 4 }, devMode: true },
-    "Profile 1": { name: "Client browser", devMode: true },
+    "Profile 1": { name: "Client browser", devMode: true, accounts: work("ana@massmarket.ai") },
   });
   // The script reads the build next to it, so run a copy of the scripts inside a carried plugin root.
   const root = carriedBuild("0.11.5");
@@ -380,13 +473,14 @@ test("as a SessionStart hook: updates the folder, records it, prints only the se
   assert.deepEqual(JSON.parse(r.stdout), {
     hookSpecificOutput: {
       hookEventName: "SessionStart",
-      additionalContext: "The Massmarket time tracker is not installed in the Chrome profile you used recently (Client browser). Ask the member to load it there so that browser's work is tracked.",
+      additionalContext: ONE_WORK,
     },
   });
   assert.equal(JSON.parse(fs.readFileSync(path.join(folder, "manifest.json"), "utf8")).version, "0.11.5");
   const s = statusOf(home).extension;
   assert.equal(s.action, "updated");
   assert.deepEqual([s.folders[0].before, s.folders[0].after], ["0.11.4", "0.11.5"]);
+  assert.equal(fs.readFileSync(path.join(home, ".claude", "mm-hooks", "plugin-sync.json"), "utf8").includes("@"), false, "no email on disk");
   // The next session: already current, and the sentence waits a day.
   const r2 = spawnSync(process.execPath, [path.join(root, "scripts", "sync-extension.js")], { env, encoding: "utf8" });
   assert.equal(r2.status, 0);

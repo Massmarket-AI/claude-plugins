@@ -19,11 +19,15 @@
 //   - new files first, manifest.json LAST, so the extension only sees the new version once every other file is
 //     in place. A file that is not in the carried list is never deleted.
 // What it never does: touch the token, the consent or any setting (they live in Chrome's storage, not in the
-// folder), write any of Chrome's own files, send anything anywhere, or print anything but the sentence below.
+// folder), write any of Chrome's own files, send anything anywhere, or print anything but the notice below.
 //
-// Profile check, on this computer only: a profile in Chrome's Local State whose Preferences changed in the last
-// 7 days and that has no install of the tracker is named in one sentence of SessionStart additionalContext,
-// at most once a day, for Claude to pass on. Profile names go nowhere else.
+// What it tells Claude, in SessionStart additionalContext, for Claude to pass on. At most ONE notice a day, shared
+// by both sentences:
+//   - a WORK profile used in the last 7 days with no install of the tracker, named by its @massmarket.ai email.
+//     ⛔ A work profile is one whose Preferences `account_info` holds an @massmarket.ai account. Any other
+//     profile is never named or counted: personal browsing stays out (Rob's rule, 2026-10-23). Only each
+//     account's `email` is read, and no email is written anywhere; plugin-sync.json keeps the count only.
+//   - a tracker folder skipped because Developer mode is off, so the member turns it on.
 //
 // What it did is recorded under `extension` in ~/.claude/mm-hooks/plugin-sync.json, beside sync-hook.js's
 // record (a folder is a short hash of its path, never the path). Any error: silent, and the session goes on.
@@ -46,6 +50,11 @@ const VERSION_RE = /^\d{1,9}(\.\d{1,9}){0,3}$/;
 // Writing stops this long after the step starts, well inside its 10-second hook timeout. A folder cut short
 // keeps its old manifest.json, so the extension stays on the old build until the next session finishes it.
 const WRITE_BUDGET_MS = 6000;
+// A Massmarket Google account, as Chrome lists it in a profile's account_info. Plain address characters only, so
+// nothing but an address can reach the sentence.
+const WORK_EMAIL_RE = /^[a-z0-9._%+-]{1,64}@massmarket\.ai$/i;
+const DEV_MODE_SENTENCE =
+  "The Massmarket time tracker in Chrome cannot update itself because Developer mode is off on chrome://extensions. Ask the member to turn on Developer mode there (the switch at the top right); after that the tracker keeps itself up to date.";
 
 function sha256(buf) {
   return crypto.createHash("sha256").update(buf).digest("hex");
@@ -93,14 +102,30 @@ function dig(obj, keys) {
   return keys.reduce((v, k) => (v && typeof v === "object" ? v[k] : undefined), obj);
 }
 
-/** One profile folder: its tracker install (the settings entry for our id), Developer mode, when it was last used. */
+/** The first @massmarket.ai address in a profile's account_info, or null. Reads each entry's `email` and nothing else. */
+function workEmail(prefs) {
+  const accounts = prefs && prefs.account_info;
+  if (!Array.isArray(accounts)) return null;
+  for (const a of accounts) {
+    const email = a && typeof a === "object" && typeof a.email === "string" ? a.email.trim() : "";
+    if (WORK_EMAIL_RE.test(email)) return email;
+  }
+  return null;
+}
+
+/**
+ * One profile folder: its tracker install (the settings entry for our id), Developer mode, when it was last used,
+ * and its @massmarket.ai account (null for any other profile).
+ */
 function readProfile(userDataDir, dir) {
   const base = path.join(userDataDir, dir);
   let install = null;
   let developerMode = null;
+  let email = null;
   for (const name of ["Secure Preferences", "Preferences"]) {
     const prefs = readJson(path.join(base, name));
     if (!prefs) continue;
+    if (name === "Preferences") email = workEmail(prefs);
     const entry = dig(prefs, ["extensions", "settings", EXT_ID]);
     if (!install && entry && typeof entry === "object") install = entry;
     const dev = dig(prefs, ["extensions", "ui", "developer_mode"]);
@@ -112,30 +137,30 @@ function readProfile(userDataDir, dir) {
   } catch (_) {
     // never used, as far as we can tell
   }
-  return { dir, install, developerMode, usedAt };
+  return { dir, install, developerMode, usedAt, workEmail: email };
 }
 
-/** Every profile: the ones Local State lists (with their display names), and any other folder with Preferences. */
+/** Every profile: the ones Local State lists, and any other folder with Preferences. Display names are not read. */
 function listProfiles(userDataDir) {
-  const names = new Map();
+  const listed = new Set();
   const cache = dig(readJson(path.join(userDataDir, "Local State")), ["profile", "info_cache"]);
   if (cache && typeof cache === "object") {
-    for (const [dir, info] of Object.entries(cache)) {
+    for (const dir of Object.keys(cache)) {
       if (!dir || /[\\/]/.test(dir) || dir === "." || dir === "..") continue;
-      names.set(dir, info && typeof info.name === "string" && info.name.trim() ? info.name : dir);
+      listed.add(dir);
     }
   }
-  const dirs = Array.from(names.keys());
+  const dirs = Array.from(listed);
   try {
     for (const d of fs.readdirSync(userDataDir, { withFileTypes: true })) {
-      if (!d.isDirectory() || names.has(d.name)) continue;
+      if (!d.isDirectory() || listed.has(d.name)) continue;
       const base = path.join(userDataDir, d.name);
       if (fs.existsSync(path.join(base, "Preferences")) || fs.existsSync(path.join(base, "Secure Preferences"))) dirs.push(d.name);
     }
   } catch (_) {
     // an unreadable user data folder lists only what Local State named
   }
-  return dirs.map((dir) => Object.assign(readProfile(userDataDir, dir), { name: names.has(dir) ? names.get(dir) : null }));
+  return dirs.map((dir) => readProfile(userDataDir, dir));
 }
 
 /** The folder an install entry loads from, when it is an unpacked install; otherwise null. */
@@ -244,12 +269,15 @@ function syncFolder(folder, carried, deadline = Infinity) {
   return Object.assign(out, { action: "updated" });
 }
 
-/** The one sentence for Claude, or null. Names are cut to plain text: no control characters, 60 characters each. */
-function noticeSentence(names) {
-  const clean = names.map((n) => String(n).replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g, "").trim().slice(0, 60)).filter(Boolean).slice(0, 5);
-  if (!clean.length) return null;
-  const which = clean.length === 1 ? "the Chrome profile" : "the Chrome profiles";
-  return `The Massmarket time tracker is not installed in ${which} you used recently (${clean.join(", ")}). Ask the member to load it there so that browser's work is tracked.`;
+/** The work-profile sentence for Claude, or null. Only @massmarket.ai addresses, each once, at most five. */
+function noticeSentence(emails) {
+  const list = [];
+  for (const e of emails) if (typeof e === "string" && WORK_EMAIL_RE.test(e) && list.indexOf(e) === -1) list.push(e);
+  if (!list.length) return null;
+  const shown = list.slice(0, 5).join(", ");
+  return list.length === 1
+    ? `The Massmarket time tracker is not installed in the Chrome profile signed in as ${shown}, which was used recently. Ask the member to load the tracker in that profile so the work done there is tracked.`
+    : `The Massmarket time tracker is not installed in the Chrome profiles signed in as ${shown}, which were used recently. Ask the member to load the tracker in that profile so the work done there is tracked.`;
 }
 
 /** Everything the step does, as data: `status` for plugin-sync.json and `notice` for additionalContext. */
@@ -259,15 +287,22 @@ function run({ platform = process.platform, env = process.env, home = os.homedir
   if (!userDataDir || !fs.existsSync(userDataDir)) return { status: Object.assign(status, { action: "no-chrome" }), notice: null };
   const profiles = listProfiles(userDataDir);
 
-  const recentWithout = profiles.filter((p) => p.name !== null && !p.install && p.usedAt > 0 && now - p.usedAt <= RECENT_MS);
+  // Work profiles only: a profile with no @massmarket.ai account is never named or counted.
+  const recentWithout = profiles.filter((p) => p.workEmail && !p.install && p.usedAt > 0 && now - p.usedAt <= RECENT_MS);
   status.profiles_recent_without_tracker = recentWithout.length;
-  let notice = null;
-  if (recentWithout.length && !(now - lastNoticeAt < NOTICE_EVERY_MS)) {
-    notice = noticeSentence(recentWithout.map((p) => p.name));
-    if (notice) status.notice_at = status.at;
-  } else if (lastNoticeAt) {
-    status.notice_at = new Date(lastNoticeAt).toISOString();
-  }
+  const profileSentence = noticeSentence(recentWithout.map((p) => p.workEmail));
+  // One notice a day at most, both sentences in it.
+  const done = (developerModeOff = false) => {
+    const sentences = [profileSentence, developerModeOff ? DEV_MODE_SENTENCE : null].filter(Boolean);
+    let notice = null;
+    if (sentences.length && !(now - lastNoticeAt < NOTICE_EVERY_MS)) {
+      notice = sentences.join(" ");
+      status.notice_at = status.at;
+    } else if (lastNoticeAt) {
+      status.notice_at = new Date(lastNoticeAt).toISOString();
+    }
+    return { status, notice };
+  };
 
   // Each folder once, however many profiles load it; Developer mode must be on in every one of them.
   const folders = new Map();
@@ -278,14 +313,21 @@ function run({ platform = process.platform, env = process.env, home = os.homedir
     if (p.developerMode !== true) seen.developerModeOff = true;
     folders.set(folder, seen);
   }
-  if (!folders.size) return { status: Object.assign(status, { action: "not-installed" }), notice };
+  if (!folders.size) {
+    status.action = "not-installed";
+    return done();
+  }
 
-  if (!fs.existsSync(path.join(pluginRoot, "extension.json"))) return { status: Object.assign(status, { action: "nothing-carried" }), notice };
+  if (!fs.existsSync(path.join(pluginRoot, "extension.json"))) {
+    status.action = "nothing-carried";
+    return done();
+  }
   let carried;
   try {
     carried = loadCarried(pluginRoot);
   } catch (err) {
-    return { status: Object.assign(status, { action: "carried-invalid", error: String((err && err.message) || err).slice(0, 200) }), notice };
+    Object.assign(status, { action: "carried-invalid", error: String((err && err.message) || err).slice(0, 200) });
+    return done();
   }
   status.carried = carried.version;
   status.folders = Array.from(folders, ([folder, seen]) => {
@@ -297,7 +339,7 @@ function run({ platform = process.platform, env = process.env, home = os.homedir
     }
   });
   status.action = status.folders.some((f) => f.action === "updated") ? "updated" : "checked";
-  return { status, notice };
+  return done(status.folders.some((f) => f.action === "skipped-developer-mode-off"));
 }
 
 function main() {
