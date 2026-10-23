@@ -14,6 +14,15 @@ const NOW = Date.parse('2026-10-12T15:00:00Z')
 const HOUR = 3_600_000
 const ago = (hours: number) => new Date(NOW - hours * HOUR).toISOString()
 
+/**
+ * The tests that run the bridge's own timers through an hour or more of the test's clock (the update that goes
+ * 120 minutes after a message was first seen, the 12-an-hour cap, pins held off sync after sync). The time goes
+ * on the bridge's own work for each simulated minute, not on the test: about 1-3 s on an M-series Mac, and up to
+ * about 2.6 times that on GitHub's runners, past the kit's 5 s default (CI, 2026-10-23). These tests alone get
+ * 30 s; every other test keeps the default.
+ */
+const LONG = { timeoutMs: 30_000 }
+
 const ACME = '11111111-1111-1111-1111-111111111111'
 const BOLT = '22222222-2222-2222-2222-222222222222'
 const CEDAR = '33333333-3333-3333-3333-333333333333'
@@ -508,7 +517,7 @@ describe('R1: existing threads link themselves', () => {
     expect(w.stored['mm.threads']).toEqual({ [SELF_CLI]: { app: SELF, at: NOW + 4_000, since: NOW + 4_000 } })
   })
 
-  test('the timer links this thread to the client its own session declared; its one message is (0.5.11) the update of Bolt\'s own thread', async ($, on) => {
+  test('the timer links this thread to the client its own session declared; its one message is (0.5.11) the update of Bolt\'s own thread', LONG, async ($, on) => {
     const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1), declared(BOLT, 'cli-bolt', 20)] }), threads: [thread('local_b', 'Staffing plan', 20)], store: { 'mm.threads': PAIRS } })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
@@ -2945,7 +2954,7 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
     ])
   })
 
-  test('the minting session withdraws its own chips: one superseded, one whose client has since a thread, one whose client no longer needs the person', async ($, on) => {
+  test('the minting session withdraws its own chips: one superseded, one whose client has since a thread, one whose client no longer needs the person', LONG, async ($, on) => {
     const GONE_CLIENT = '99999999-9999-4999-8999-999999999999'
     const w = world(on, {
       threads: [thread('local_b', 'Staffing plan', 20)],
@@ -3293,7 +3302,7 @@ describe('one pane: this thread\'s client on top, the list under it', () => {
     expect(w.fetched.slice(then).filter(u => !u.includes('/reply-package')).length).toBe(1)
   })
 
-  test('no pane is opened from a timer or at session start, in any thread', async ($, on) => {
+  test('no pane is opened from a timer or at session start, in any thread', LONG, async ($, on) => {
     const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.links': { [BOLT]: 'local_other' } } })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
@@ -3934,7 +3943,7 @@ describe('(t) a pin the person took off by hand stays off', () => {
     expect(await mm($, 'status')).toContain('pins you took off: 1')
   })
 
-  test('its name keeps updating while it is off', async ($, on) => {
+  test('its name keeps updating while it is off', LONG, async ($, on) => {
     const w = pinned(on)
     await tickOnce($, w)
     takeOff(w)
@@ -4087,7 +4096,7 @@ describe('(t2) 0.5.14: a pin taken off by hand stays off only while the item is 
   const off = (w: { stored: Record<string, unknown> }) => Object.keys((w.stored['mm.unpinned'] ?? {}) as Record<string, unknown>)
   const ours = (w: { stored: Record<string, unknown> }) => (w.stored['mm.pins'] as Record<string, { byUs: boolean }>).local_b?.byUs
 
-  test('taken off while the reply is ahead: off until it is late, then pinned again once; taken off again once late, it stays off', async ($, on) => {
+  test('taken off while the reply is ahead: off until it is late, then pinned again once; taken off again once late, it stays off', LONG, async ($, on) => {
     const w = pinned(on)
     await tickOnce($, w)
     expect(w.threads.get('local_b')?.pinned).toBe(true)
@@ -4122,7 +4131,7 @@ describe('(t2) 0.5.14: a pin taken off by hand stays off only while the item is 
     expect(off(w)).toEqual([])
   })
 
-  test('taken off when it is already late: it stays off, sync after sync', async ($, on) => {
+  test('taken off when it is already late: it stays off, sync after sync', LONG, async ($, on) => {
     const w = pinned(on, NOW - 30 * 60_000)
     await tickOnce($, w)
     expect(w.threads.get('local_b')?.pinned).toBe(true)
@@ -6628,7 +6637,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
   })
 
-  test('(review of PR #15, F3) messages and no drafts ready: it goes 120 minutes after this bridge first saw the oldest waiting message, however old the mail itself', async ($, on) => {
+  test('(review of PR #15, F3) messages and no drafts ready: it goes 120 minutes after this bridge first saw the oldest waiting message, however old the mail itself', LONG, async ($, on) => {
     const w = world(on, { feed: feed({ drafts: [], tickets: {}, mail: [boltMail(5)] }), threads: [thread('local_b', 'Staffing plan', 20)], store: { 'mm.links': { [BOLT]: 'local_b' } } })
     await tickOnce($, w)
     // the syncs up to 116 minutes after the first: nothing, though the mail is five hours old
@@ -6694,7 +6703,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     ['[P4b] no time on it, as the live feed has it', {}],
     ['[P4] its own `updated_at`', { updated_at: 'now' }],
   ] as const) {
-    test(`⛔ (review of PR #15, F3) ${name}: the package its prep built is recorded as what the thread has, and nothing more is sent`, async ($, on) => {
+    test(`⛔ (review of PR #15, F3) ${name}: the package its prep built is recorded as what the thread has, and nothing more is sent`, LONG, async ($, on) => {
       const { w, mail } = await boltPrepSent($, on)
       const had = (w.stored['mm.sent'] as Record<string, { sig: string; prep?: boolean }>)[BOLT]
       expect(had?.prep).toBe(true)
@@ -6717,7 +6726,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     })
   }
 
-  test('(review of PR #15, F3) a client message after the send: the package is not only the thread\'s own work; it goes, 10 minutes after it was first seen', async ($, on) => {
+  test('(review of PR #15, F3) a client message after the send: the package is not only the thread\'s own work; it goes, 10 minutes after it was first seen', LONG, async ($, on) => {
     const { w, mail } = await boltPrepSent($, on)
     const newer = mailFor(BOLT, 'Bolt Staffing (Sam)', 0, { message_id_key: 'bolt-newer', received_at: new Date(w.clock.now() + 60_000).toISOString() })
     await after(w, 2)
@@ -6911,7 +6920,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     ['[P2b] the feed taking 0.4 s per read after the first', (n: number) => (n === 1 ? 0 : 400)],
     ['[P2] the feed taking 1.5 s per read after the first', (n: number) => (n === 1 ? 0 : 1_500)],
   ] as const) {
-    test(`⛔ (review of PR #15, F1; 0.5.13, Rob 10-15: "12 updates an hour") ${name}: fifteen clients due at the same sync are never more than 3 sends from one sync, nor 12 in the hour; the rest go after the hour`, async ($, on) => {
+    test(`⛔ (review of PR #15, F1; 0.5.13, Rob 10-15: "12 updates an hour") ${name}: fifteen clients due at the same sync are never more than 3 sends from one sync, nor 12 in the hour; the rest go after the hour`, LONG, async ($, on) => {
       /** The most claims held at once for any one sync, as seen at every call to the app. */
       let claimed = 0
       const w = world(on, {
@@ -6997,7 +7006,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
   // (0.5.13) 10-15: fifteen identical "not updated … this computer updated 6 threads in the last hour" lines for one
   // client within 40 seconds, one per running thread. Each desktop thread is a process of its own, so the line is
   // kept to one per client per hour by the store (`mm.capLogged`), never by a thread's own memory.
-  test('(0.5.13) the cap\'s line is written once per client per hour across every running thread: another thread wrote it 10 minutes ago, so this one does not; once that is an hour old it is written once, and again only after another hour; nothing else changes', async ($, on) => {
+  test('(0.5.13) the cap\'s line is written once per client per hour across every running thread: another thread wrote it 10 minutes ago, so this one does not; once that is an hour old it is written once, and again only after another hour; nothing else changes', LONG, async ($, on) => {
     // the day's cap holds for hours: forty in the last day, none of them in the last hour
     const dayFull: Rec[] = Array.from({ length: 40 }, (_, i) => ({ at: NOW - (2 * 60 + i * 10) * 60_000, pid: `99999999-9999-4999-8999-${String(i).padStart(12, '0')}`, client: `Client ${i}`, sig: '00000000', sid: `local_x${i}`, by: 'local_y', ok: true, reason: 'x' }))
     // another running thread (a process of its own: nothing of this one's memory) wrote Acme's line 10 minutes ago;

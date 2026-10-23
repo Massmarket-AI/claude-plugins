@@ -5,6 +5,15 @@ import type { FakeThread } from './fake-app.test-helper'
 import type { Feed } from './queue'
 import { staleCopySentence } from './threads'
 
+/**
+ * The tests that run the bridge's own timers through an hour or more of the test's clock (the update that goes
+ * 120 minutes after a message was first seen, the 12-an-hour cap, pins held off sync after sync). The time goes
+ * on the bridge's own work for each simulated minute, not on the test: about 1-3 s on an M-series Mac, and up to
+ * about 2.6 times that on GitHub's runners, past the kit's 5 s default (CI, 2026-10-23). These tests alone get
+ * 30 s; every other test keeps the default.
+ */
+const LONG = { timeoutMs: 30_000 }
+
 // The bridge's own hooks in a pretend desktop app (fake-app.test-helper.ts): one store and one app shared by the threads
 // that run them, as each desktop thread is a process of its own. Round 3's review (79cbc596) found these.
 
@@ -873,7 +882,7 @@ describe('0.5.3 claim in place, as 0.5.4 has it: the long thread\'s own fresh-th
 
   // (0.5.11, Rob 10-15: "Can you just automatically compress context at 60% instead of 100% to save tokens?") A long
   // thread no longer needs a fresh one, so there is no chip to claim in place; the update goes into it by itself.
-  test('(0.5.11) sixteen running threads and a long linked thread that polls: no chip for a fresh thread, nothing started, no claim; another thread updates it by itself, once', async () => {
+  test('(0.5.11) sixteen running threads and a long linked thread that polls: no chip for a fresh thread, nothing started, no claim; another thread updates it by itself, once', LONG, async () => {
     const { w, threads, LINKED, linked } = crucialShape('a')
     // the long thread is the one that polls: it never sends into itself, and another running thread sends it
     w.put('mm.lease', { owner: `cli:${LINKED}`, until: NOW + 24 * 3_600_000 })
@@ -1581,7 +1590,7 @@ describe('0.5.11: a client\'s thread updated by itself is sent once, whoever cho
 // ======================================================================== 0.5.13
 
 describe('0.5.13: the cap\'s line in the notice log, once per client per hour in fifteen running threads (10-15: fifteen identical lines for one client within 40 seconds)', () => {
-  test('fifteen running threads choose from the same capped syncs: one line for the client in the hour, the next after the hour; nothing is sent, recorded or claimed', async () => {
+  test('fifteen running threads choose from the same capped syncs: one line for the client in the hour, the next after the hour; nothing is sent, recorded or claimed', LONG, async () => {
     const drafts = [{
       package_id: 'aaaaaaaa-bbbb-4ccc-8ddd-000000000094', project_id: pid(94), project_name: 'Client Nine Four', status: 'prepared', covers_through: ago(3), drafts_ready: 1, drafts_unsent: 1,
       flagged_for_rob: false, picked_up_by: null, picked_up_at: null, project_owner_email: ME,
