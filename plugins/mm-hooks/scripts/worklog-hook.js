@@ -59,6 +59,12 @@
  * mm-bridge mod made by itself (`toolu_plugin_` on its `tool_use_id`) writes no
  * worklog row and is not counted in the Stop line; see PLUGIN TOOL CALLS.
  *
+ * An undeclared session is reminded (0.11.11, 2026-10-25): a session a person
+ * is at that has made 5 tool calls with no client declared is told, once, in
+ * that call's additionalContext, to load the client's skill; once more 40
+ * counted calls later; never a third time. Nothing is sent for it. See
+ * UNDECLARED-SESSION REMINDER.
+ *
  * Identity: reuses the SAME per-member `team_auth_tokens` UUID already handed
  * out for the Chrome extension (rollout/slips/), via env var MM_TRACKER_TOKEN.
  * No new credential to mint or distribute.
@@ -147,7 +153,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.11.10";
+const HOOK_VERSION = "0.11.11";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -584,6 +590,13 @@ function loadSessionStateFromFile(sessionId) {
       turn_origin: turnOriginKept(parsed.turn_origin),
       turn_origin_prompt_id: stateString(parsed.turn_origin_prompt_id),
       turn_chain_origin: turnOriginKept(parsed.turn_chain_origin),
+      // ⛔ Undeclared-session reminder (0.11.11) — the tool calls counted while
+      // the session had no client, and how many reminders it has had. The same
+      // round-trip rule applies: a key missing here is erased by the next save,
+      // and the count would start again from nothing. See UNDECLARED-SESSION
+      // REMINDER.
+      undeclared_tool_calls: reminderCount(parsed.undeclared_tool_calls),
+      undeclared_reminders: reminderCount(parsed.undeclared_reminders),
     };
     // A state file 0.11.5 wrote still holds its tasks in a `turn_task_origins`
     // key. They are moved to their own files, once; the key is not carried on.
@@ -605,6 +618,8 @@ function loadSessionStateFromFile(sessionId) {
       turn_origin: null,
       turn_origin_prompt_id: null,
       turn_chain_origin: null,
+      undeclared_tool_calls: 0,
+      undeclared_reminders: 0,
     };
   }
 }
@@ -777,7 +792,9 @@ function pruneOldState(event) {
  * hours whose transcript is gone or was never named, and any unused for
  * DECLARATION_KEEP_MAX_MS. Only this hook's own files go — a record, or a
  * temporary file a refused rename left — never anything else in the folder.
- * Never throws.
+ * A reminder marker (`<session id>.reminder-<n>.json`, 0.11.11: see
+ * UNDECLARED-SESSION REMINDER) is a `.json` file naming its transcript too, so
+ * it goes by the same rule as its session's record. Never throws.
  */
 function pruneDeclarationRecords() {
   const dir = DECLARATION_STATE_DIR;
@@ -4592,11 +4609,21 @@ function renderChipContext(payload) {
  * written for a list that may not have reached the session.
  */
 function emitSessionContext(text) {
+  return emitHookContext("SessionStart", text);
+}
+
+/**
+ * The same write for any event that takes additionalContext: SessionStart above,
+ * and PostToolUse for the undeclared-session reminder (0.11.11). One JSON line,
+ * resolved on the write callback with the same unref'd 1s guard, for the same
+ * win32 reason. Never throws.
+ */
+function emitHookContext(hookEventName, text) {
   return new Promise((resolve) => {
     try {
       const payload = `${JSON.stringify({
         hookSpecificOutput: {
-          hookEventName: "SessionStart",
+          hookEventName,
           additionalContext: text,
         },
       })}\n`;
@@ -4613,7 +4640,7 @@ function emitSessionContext(text) {
         finish(!err);
       });
     } catch (err) {
-      debugLog(`emitSessionContext failed: ${err && err.message}`);
+      debugLog(`emitHookContext(${hookEventName}) failed: ${err && err.message}`);
       resolve(false);
     }
   });
@@ -7076,6 +7103,13 @@ async function handlePostToolUse(payload) {
   // carries it — and is the one row marked with `declaration_event`.
   const declarationEvent = captureDeclaration(toolName, toolInput, payload.tool_response, state);
 
+  // ⛔ UNDECLARED-SESSION REMINDER (0.11.11). Decided after the declaration
+  // capture, so the call that loads a client skill is never counted. The write
+  // starts now, before the network phase, and is awaited with the POSTs: a slow
+  // server cannot hold it back, and the hard exit cannot cut it off.
+  const reminder = undeclaredReminderFor(payload, state, TURN_ORIGIN, process.env, process.platform);
+  const reminderWrite = reminder ? emitHookContext("PostToolUse", reminder) : null;
+
   // ⛔ The chip ack goes FIRST. It is the time-sensitive record and must not
   // queue behind the generic worklog POST. See the `delivered_chip` block above
   // for why this lives in code rather than in the session prompt.
@@ -7118,8 +7152,185 @@ async function handlePostToolUse(payload) {
     state.seenTodos = Array.from(seen);
   }
 
+  if (reminderWrite) posts.push(reminderWrite);
   await Promise.allSettled(posts);
   saveSessionState(sessionId, state);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// UNDECLARED-SESSION REMINDER (0.11.11, 2026-10-25).
+//
+// A session's time is counted to a client only once it loads that client's
+// skill (captureDeclaration), and the SessionStart instruction already says so.
+// Short utility threads (access resets, setup checks, cross-client reviews)
+// still never did: 614 team minutes in two business days went to nobody. So a
+// session that keeps working with no client declared is told again, mid-session,
+// in the additionalContext of the tool call that crosses the line.
+//
+// ⛔ WHAT IS COUNTED. A PostToolUse of the MAIN session (no `agent_id`: an
+// agent's own calls are not counted) in a turn that is not "auto" ("person" and
+// "cannot tell" both count), while the session has no declared client
+// (`declared_skill`; a task alone is not a client). A mod's call never gets here
+// (PLUGIN TOOL CALLS), and a call that loads a client skill has declared before
+// it could be counted.
+//
+// ⛔ WHEN. On the 5th counted call, once. If the session is still undeclared 40
+// counted calls later (the 45th), once more. Never a third time. A declaration
+// at any point ends it for good: nothing is counted once `declared_skill` is
+// set, and nothing ever clears it.
+//
+// ⛔ NEVER IN: a machine with no tracker token (a declaration records nothing
+// there); a run with MM_UNATTENDED=1 (the launchd runners); a session no
+// person is at (isInteractiveSession, the untracked-folder nudge's own test:
+// CLAUDE_CODE_ENTRYPOINT starting "sdk"); a Codex run (isCodexHookPayload).
+//
+// ⛔ AT MOST TWO, EVEN SIDE BY SIDE. Claude Code runs the hooks of parallel tool
+// calls at the same time, each loading and saving the whole state, so two can
+// reach the 5th call together. Each reminder is therefore claimed by creating a
+// marker file exclusively (`wx`), and only the process that creates it prints.
+// The marker sits beside the session's declarations record, names its
+// transcript, and is pruned by that record's rule (pruneDeclarationRecords): it
+// outlives the 48-hour state prune for as long as Claude Code could resume the
+// session, so a resumed session whose count starts again from nothing is still
+// never told a third time.
+//
+// ⛔ FAIL-OPEN. Any error is no reminder: nothing thrown, nothing on stderr. No
+// request is made for it and nothing about it is sent to OW; the count lives in
+// the session's state file.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * VERBATIM — Opus, 2026-10-25 (the 0.11.11 dispatch). Placed byte for byte: do
+ * not reflow, re-punctuate or improve it. One paragraph. On Windows the task
+ * command is followed by the PowerShell form in brackets, as the SessionStart
+ * instruction prints both (undeclaredReminderText): the Bash tool there is Git
+ * Bash, where the first form works and `$env:` does not, while a PowerShell tool
+ * needs the second. Nothing else changes.
+ */
+const UNDECLARED_SESSION_REMINDER = `Massmarket time tracking: this session has done work with no client declared, so its time is not counted to anyone. If the work is for a client, load that client's <client>-project skill now with the Skill tool. For Massmarket's own systems load massmarket-internal-ops; for our own marketing and sales, massmarket-self-funnel. Personal work: ignore this. Then declare the task with node ~/.claude/mm-hooks/worklog-hook.js --task "<task>". Decide from the work; do not ask the person.`;
+
+/** The task command as the reminder prints it: TRACKING_INSTRUCTION_FALLBACK's own. */
+const UNDECLARED_REMINDER_TASK_COMMAND = 'node ~/.claude/mm-hooks/worklog-hook.js --task "<task>"';
+
+/** The same command as TRACKING_INSTRUCTION_FALLBACK prints it for Windows PowerShell. */
+const UNDECLARED_REMINDER_TASK_COMMAND_WINDOWS =
+  'node "$env:USERPROFILE\\.claude\\mm-hooks\\worklog-hook.js" --task "<task>"';
+
+/** The counted call that brings the first reminder. */
+const UNDECLARED_REMINDER_FIRST_AT = 5;
+/** Counted calls after the first reminder that bring the second. */
+const UNDECLARED_REMINDER_AGAIN_AFTER = 40;
+/** Reminders a session gets, at most. */
+const UNDECLARED_REMINDER_MAX = 2;
+
+/** A count kept in the state: a positive integer, or 0 for anything else. */
+function reminderCount(value) {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value < 1e9 ? value : 0;
+}
+
+/** The reminder for this platform: on win32 both task commands, as SessionStart prints them; otherwise the text as written. */
+function undeclaredReminderText(platform) {
+  if (platform !== "win32") return UNDECLARED_SESSION_REMINDER;
+  return UNDECLARED_SESSION_REMINDER.replace(
+    UNDECLARED_REMINDER_TASK_COMMAND,
+    () => `${UNDECLARED_REMINDER_TASK_COMMAND} (Windows PowerShell: ${UNDECLARED_REMINDER_TASK_COMMAND_WINDOWS})`,
+  );
+}
+
+/**
+ * Is this hook run Codex's, not Claude Code's? From the payload, as measured in
+ * the control tower's docs/codex-hooks-probe-2026-09-17.md: Codex's tool events
+ * carry a `turn_id`, which Claude Code's do not, and Codex's `tool_use_id` is
+ * `call_…` where Claude Code's is `toolu_…`. Never throws.
+ */
+function isCodexHookPayload(payload) {
+  const p = payload && typeof payload === "object" ? payload : {};
+  if (typeof p.turn_id === "string" && p.turn_id) return true;
+  return typeof p.tool_use_id === "string" && p.tool_use_id.indexOf("call_") === 0;
+}
+
+/**
+ * May this run count toward, or print, the reminder? Not unattended, a person
+ * at the session, not Codex, and the main session's own call (an agent's call
+ * carries `agent_id`; Claude Code: "Absent for the main thread").
+ */
+function undeclaredReminderApplies(payload, env) {
+  const e = env || process.env;
+  // No token, nothing a declaration could record: no reminder.
+  if (!TOKEN) return false;
+  if (e.MM_UNATTENDED === "1") return false;
+  if (!isInteractiveSession(e)) return false;
+  if (isCodexHookPayload(payload)) return false;
+  return !(typeof payload.agent_id === "string" && payload.agent_id);
+}
+
+/** `declarations/<session id>.reminder-<slot>.json`, or null for a payload that names no session. */
+function undeclaredReminderMarkerFile(sessionId, slot) {
+  if (!DECLARATION_STATE_DIR || !isSessionKey(sessionId)) return null;
+  const base = sessionStateFileName(sessionId).replace(/\.json$/, "");
+  return path.join(DECLARATION_STATE_DIR, `${base}.reminder-${slot}.json`);
+}
+
+/**
+ * Claim reminder `slot` for this session: "claimed" when this process created
+ * its marker, "taken" when the marker was already there (a parallel hook, or
+ * this session before its state was pruned), "error" otherwise. The body names
+ * the transcript so the prune keeps the marker as long as the session's record.
+ * Never throws.
+ */
+function claimUndeclaredReminder(sessionId, slot) {
+  const file = undeclaredReminderMarkerFile(sessionId, slot);
+  if (!file) return "error";
+  let fd;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+  } catch {
+    return "error";
+  }
+  try {
+    fd = fs.openSync(file, "wx");
+  } catch (err) {
+    return err && err.code === "EEXIST" ? "taken" : "error";
+  }
+  try {
+    fs.writeSync(fd, JSON.stringify({ reminder: slot, transcript_path: HOOK_TRANSCRIPT_PATH }));
+  } catch {
+    /* the file is the claim; its body only keeps it from an early prune */
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      /* already closed */
+    }
+  }
+  return "claimed";
+}
+
+/**
+ * The reminder this tool call prints, or null. Counts the call in `state` when
+ * it counts (the caller saves the state). `turnOrigin` is this row's origin:
+ * "person", "auto" or null. Never throws: any failure is null.
+ */
+function undeclaredReminderFor(payload, state, turnOrigin, env, platform) {
+  try {
+    const p = payload && typeof payload === "object" ? payload : {};
+    if (!isSessionKey(p.session_id)) return null;
+    if (stateString(state.declared_skill)) return null;
+    if (!undeclaredReminderApplies(p, env)) return null;
+    if (turnOrigin === "auto") return null;
+    const given = reminderCount(state.undeclared_reminders);
+    if (given >= UNDECLARED_REMINDER_MAX) return null;
+    const count = reminderCount(state.undeclared_tool_calls) + 1;
+    state.undeclared_tool_calls = count;
+    if (count < UNDECLARED_REMINDER_FIRST_AT + given * UNDECLARED_REMINDER_AGAIN_AFTER) return null;
+    const slot = given + 1;
+    state.undeclared_reminders = slot;
+    return claimUndeclaredReminder(p.session_id, slot) === "claimed"
+      ? undeclaredReminderText(platform)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
