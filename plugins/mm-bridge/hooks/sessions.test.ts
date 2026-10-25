@@ -3,7 +3,8 @@ import { describe, expect, test } from 'claude-code/testing'
 import { ME, NOW, ago, bandButtons, fakeApp, hooks, mm, next, paneButtons, pid, press, tool } from './fake-app.test-helper'
 import type { FakeThread } from './fake-app.test-helper'
 import type { Feed } from './queue'
-import { staleCopySentence } from './threads'
+import { cleanTitle } from './queue'
+import { secondThreadSentence } from './threads'
 
 /**
  * The tests that run the bridge's own timers through an hour or more of the test's clock (the update that goes
@@ -1324,11 +1325,13 @@ describe('0.5.9: a marker takes a client from a link the bridge made by itself; 
     expect(await take(185, r => r.w.put('mm.links', { [pid(185)]: r.old }))).toBe('old')
   })
 
-  test('a client the person linked keeps its thread: the marker records the thread and answers with the stale copy\'s sentence, exactly as before', async () => {
+  test('a client the person linked keeps its thread: the marker records the thread and answers with (0.6.0) the second thread\'s sentence', async () => {
     const r = await replay(182, { auto: false })
     await mm(r.hubSession, '')
     const kickoff = `[mm-link ${pid(182)}] Resume Client R182's thread. One client only.`
-    expect(await submit(r.w.session(r.fresh), kickoff)).toBe(`${kickoff}\n\n${staleCopySentence('Client R182')}`)
+    // (0.6.0) the sentence is the second thread's now, naming the thread that keeps the client
+    const holder = cleanTitle(r.w.app.get(r.old)?.title)
+    expect(await submit(r.w.session(r.fresh), kickoff)).toBe(`${kickoff}\n\n${secondThreadSentence('Client R182', holder)}`)
     expect(linksOf(r.w)).toEqual({ [pid(182)]: r.old })
     expect(r.w.stored('mm.marked')).toEqual({ [r.fresh]: pid(182) })
     expect(r.w.stored('mm.released')).toBeUndefined()

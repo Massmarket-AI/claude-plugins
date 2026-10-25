@@ -3,8 +3,9 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine, FoundElement } from 'claude-code/testing'
 
 import type { Feed, FeedAsk } from './queue'
-import { isNewerVersion } from './queue'
+import { cleanTitle, isNewerVersion } from './queue'
 import { PANE_SENTENCE, REFRESH_FAILED, recommend } from './threads'
+import { localClock } from './track'
 
 // The bridge against a pretend desktop app, a pretend feed and a pretend store. Nothing here reaches the
 // live feed or a real thread, and every client is made up.
@@ -128,6 +129,10 @@ type WorldOptions = {
   resolve?: (body: Record<string, unknown>) => { status: number; body?: unknown } | 'network'
   /** (0.5.28, internal asks) How OW answers `GET /team-ask?id=<id>&format=pickup`: a status and a body, or no answer at all. Left out, 404. */
   teamAsk?: (url: string) => { status: number; body?: unknown } | 'network'
+  /** (0.6.0) How OW answers `GET /skill-map`. Left out, 404: an OW without the route yet. */
+  skillMap?: (url: string) => { status: number; body?: unknown } | 'network'
+  /** (0.6.0) How OW answers `GET /client-time?project_ids=...`. Left out, 404. */
+  clientTime?: (url: string) => { status: number; body?: unknown } | 'network'
 }
 
 /** (0.5.11, review of PR #15, F4) The parts of the time-tracking hook's text the bridge reads: 0.11.7's, and 0.11.4's. */
@@ -250,6 +255,13 @@ function world(on: On, opts: WorldOptions = {}) {
       if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
       return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: typeof answer.body === 'string' ? answer.body : JSON.stringify(answer.body ?? {}) } }
     }
+    // (0.6.0) the skill map and the client's time, as OW answers them (404 until it has the routes)
+    if (e.url.includes('/api/ext/skill-map') || e.url.includes('/api/ext/client-time')) {
+      const route = e.url.includes('/skill-map') ? opts.skillMap : opts.clientTime
+      const answer = route ? route(e.url) : { status: 404, body: { error: 'not_found' } }
+      if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
+      return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: typeof answer.body === 'string' ? answer.body : JSON.stringify(answer.body ?? {}) } }
+    }
     if (e.url.includes('/closeout') && opts.fetchTakesMs) {
       const ms = opts.fetchTakesMs(++feedReads)
       if (ms > 0) await clock.sleep(ms)
@@ -313,7 +325,18 @@ function world(on: On, opts: WorldOptions = {}) {
     return { result: { stdout: SHELL_OUT, stderr: '', interrupted: false }, ...(opts.bash === 'error' ? { isError: true as const } : {}) } as never
   })
   on('session.id', () => ({ value: SELF_CLI }))
+  // (0.6.0) the Skill tool, as it answers a skill that loaded
+  on('tool.call', { tool: 'Skill' }, (_$, e) => ({ result: { success: true, commandName: String((e as { skill?: unknown }).skill ?? '') } }) as never)
+  /** (0.6.0) Every pane close that reached the engine: which pane, and whose. */
+  const closes: Array<{ id: string; origin: string }> = []
+  on('ui.close', (_$, e, next) => {
+    closes.push({ id: e.id, origin: e.origin.kind })
+    return next(e)
+  })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  // (0.6.0) a surface attaching, and a turn ending, as the engine answers them
+  on('session.attach', (_$, e) => ({ clientId: e.clientId }))
+  on('turn.complete', () => ({ text: '' }))
   on('command.register', (_$, e) => {
     registered.push(String(e.description ?? ''))
     return { value: { command: e.name } }
@@ -326,7 +349,12 @@ function world(on: On, opts: WorldOptions = {}) {
     opened.push({ id: e.id, title: e.title })
     return { value: { isPlaced: true as const } }
   })
-  on('ui.status', () => ({ value: undefined }))
+  /** (0.6.0) Every status line the bridge set, in order (undefined: cleared). */
+  const statuses: Array<string | undefined> = []
+  on('ui.status', (_$, e) => {
+    statuses.push((e as { text?: string }).text)
+    return { value: undefined }
+  })
   on('ui.toast', (_$, e) => {
     toasts.push(e.text)
     return { value: undefined }
@@ -361,7 +389,7 @@ function world(on: On, opts: WorldOptions = {}) {
   /** The chips this session asked the app for. */
   const minted = () => calls.filter(c => c.tool === 'spawn_task')
   return {
-    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, ran, shell, box, fills, resolves,
+    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, ran, shell, box, fills, resolves, statuses, closes,
     /** The app calls that change a thread: a rename, a pin, a message, a chip. (Reading this session's own usage, and withdrawing a chip, change none.) */
     writes: () => calls.filter(c => !['get_session', 'list_sessions', 'get_usage', 'dismiss_task'].includes(c.tool)).map(c => [c.tool, c.args.session_id ?? '', c.args.title ?? c.args.pinned ?? ''].join(' | ')),
     /** The chips this session asked the app to withdraw, by their ids. */
@@ -1121,7 +1149,8 @@ const NO_LIST = 'The app\'s thread list is not available here.'
 const GONE = 'That thread is no longer available. The list has been refreshed.'
 /** Everything the store holds, as one string: for "nothing was written". */
 /** The store as it stands, but for (0.5.4, C3) the record of which threads run and where the person last wrote: every prompt of theirs writes it. */
-const snapshot = (w: { stored: Record<string, unknown> }) => JSON.stringify({ ...w.stored, 'mm.seen': undefined })
+/** What the store holds, less what any running thread writes for itself: its tick (`mm.seen`), and (0.6.0) OW's skill map as it read it. */
+const snapshot = (w: { stored: Record<string, unknown> }) => JSON.stringify({ ...w.stored, 'mm.seen': undefined, 'mm.skills': undefined })
 
 describe('B1: Claude cannot start or update a thread (the mm tool, and a /mm that is not the person\'s)', () => {
   const acmeThread = (on: On) => world(on, { feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.threads': PAIRS } })
@@ -2128,8 +2157,11 @@ describe('F8: the record reader opens only what it needs', () => {
   })
 })
 
-describe('F9: a thread that linked itself gets the pin and the name, and nothing more until the person acts', () => {
-  test('[P1] the timer in a thread that linked itself opens no pane and adds nothing to its transcript', async ($, on) => {
+describe('F9: a thread that linked itself gets the pin and the name, and no note until the person acts', () => {
+  // (0.6.0, Rob 2026-10-25: "there's always a side panel if there's any work being done for a client") The pane now
+  // opens by itself in every thread of a client, this one too, with its client part read from the pickup VIEW (a read
+  // OW records nothing for). What still waits for the person's act: the note for Claude.
+  test('[P1] the timer in a thread that linked itself opens its client\'s pane once, by itself, and adds nothing to its transcript', async ($, on) => {
     const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }) })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
@@ -2137,10 +2169,10 @@ describe('F9: a thread that linked itself gets the pin and the name, and nothing
     // linked, pinned and named
     expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
     expect(w.threads.get(SELF)).toMatchObject({ title: ACME_TITLE, pinned: true })
-    // and nothing else: no pane, no note, no pickup fetched, no message, no prompt
+    // the pane, once, for its client; no note, no message, no prompt; the pickup VIEW read, and no pickup
     expect(w.appended).toEqual([])
-    expect(w.opened).toEqual([])
-    expect(w.fetched.filter(u => u.includes('/reply-package'))).toEqual([])
+    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Acme Roofing' }])
+    expect(w.fetched.filter(u => u.includes('/reply-package'))).toEqual([`https://onboarding-wizard.massmarket.ai/api/ext/reply-package?package_id=${PKG}&format=pickup`])
     // no message; the timer's own chips: (0.5.2, R4) for the two clients with no thread, and (0.5.4, C1) this
     // thread's client's, the one chip a client's own thread shows
     expect(w.acted()).toEqual([CEDAR_AUTO_CHIP, ACME_HERE_CHIP, BOLT_AUTO_CHIP])
@@ -2148,16 +2180,16 @@ describe('F9: a thread that linked itself gets the pin and the name, and nothing
 
     // the person asks for it here: the one pane opens, with this client's part on top, and the note is added, once
     expect(await mm($, 'view')).toBe('Showing Acme Roofing in the side pane.')
-    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Needs you' }])
+    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Acme Roofing' }, { id: 'mm-queue', title: 'Acme Roofing' }])
     expect(w.appended.length).toBe(1)
     expect(w.appended[0]).toContain('[Massmarket bridge, no reply needed] Acme Roofing Pat: ')
     for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
     expect(w.appended.length).toBe(1)
     // and the timer never opened anything more
-    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Needs you' }])
+    expect(w.opened.length).toBe(2)
   })
 
-  test('Update on its row is the person acting on it too: from then on the thread gets its note, and the timer still opens no pane', async ($, on) => {
+  test('Update on its row is the person acting on it too: from then on the thread gets its note, and the timer opens nothing more', async ($, on) => {
     const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }) })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
@@ -2168,17 +2200,18 @@ describe('F9: a thread that linked itself gets the pin and the name, and nothing
     await ui.unmount()
     expect(w.prompts.length).toBe(1)
     await w.clock.advance(60_000)
-    expect(w.opened).toEqual([])
+    // (0.6.0) the one pane the timer opened by itself, for the thread's client, when it linked itself
+    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Acme Roofing' }])
     expect(w.appended.length).toBe(1)
   })
 
-  test('a thread the person linked, or one an older version linked: the timer adds its note and keeps its client part current, and opens no pane', async ($, on) => {
+  test('a thread the person linked, or one an older version linked: the timer adds its note, keeps its client part current, and opens its pane by itself once', async ($, on) => {
     const w = world(on, { store: { 'mm.links': { [ACME]: SELF } } })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
     for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
-    // ⛔ nothing opens a pane from a timer
-    expect(w.opened).toEqual([])
+    // (0.6.0) the pane opened at session start for the thread's client, by its id until the first sync named it
+    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'client 11111111' }, { id: 'mm-queue', title: 'Acme Roofing' }])
     expect(w.appended.length).toBe(1)
     // one read of the package, in this thread's own session, for the whole of it
     expect(w.fetched.filter(u => u.includes('/reply-package')).length).toBe(1)
@@ -2188,11 +2221,12 @@ describe('F9: a thread that linked itself gets the pin and the name, and nothing
     const band = await $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'AbovePrompt', props: BAND_PROPS })
     expect(await buttons(band)).toEqual([['mm-start-missing', 'Start missing threads (2)'], ['mm-open-drafts', 'Drafts']])
     await band.press({ key: 'mm-open-drafts' })
-    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Needs you' }])
+    expect(w.opened.at(-1)).toEqual({ id: 'mm-queue', title: 'Acme Roofing' })
+    expect(w.opened.length).toBe(3)
     await band.unmount()
-    // the pane it opened: this thread's client on top, the list under it
+    // the pane it opened: (0.6.0) what this thread is tracked to, then this thread's client, then the list
     const ui = await pane($)
-    expect((await lines(ui)).slice(0, 2)).toEqual(['This thread: Acme Roofing', 'Needs you now (3)'])
+    expect((await lines(ui)).slice(0, 4)).toEqual(['Tracking to Acme Roofing · no task declared yet', 'Time numbers are not available yet.', 'This thread: Acme Roofing', 'Needs you now (3)'])
     expect((await ui.find({ type: 'Markdown' }))?.text).toBe('## Acme Roofing\n\n1. What the client sent')
     await ui.unmount()
   })
@@ -2844,8 +2878,11 @@ describe('a new thread takes over from an old one', () => {
     expect(after['mm.marked']).toEqual({ [SELF]: ACME })
     expect(after['mm.markedAt']).toEqual({ [SELF]: NOW })
     expect(after['mm.threads']?.[SELF_CLI]).toEqual({ app: SELF, at: NOW, since: NOW })
+    // (0.6.0) and the thread's current project: Acme, as a second thread (Acme's link stays with its primary)
+    expect(after['mm.current']).toEqual({ [SELF]: { pid: ACME, how: 'marker', at: NOW, declared: [ACME] } })
     delete after['mm.marked']
     delete after['mm.markedAt']
+    delete after['mm.current']
     delete after['mm.threads']?.[SELF_CLI]
     expect(JSON.stringify(after)).toBe(before)
     // and with no chip on record for the client at all
@@ -3287,7 +3324,8 @@ describe('one pane: this thread\'s client on top, the list under it', () => {
   test('/mm view opens the same pane, and is the person acting on the link', async ($, on) => {
     const w = acmeHere(on)
     expect(await mm($, 'view')).toBe('Showing Acme Roofing in the side pane.')
-    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Needs you' }])
+    // (0.6.0) titled with the thread's client: its current project
+    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Acme Roofing' }])
     const ui = await pane($)
     expect((await lines(ui)).slice(0, 2)).toEqual(['This thread: Acme Roofing', 'Needs you now (3)'])
     expect(w.appended.length).toBe(1)
@@ -3310,12 +3348,12 @@ describe('one pane: this thread\'s client on top, the list under it', () => {
     expect(w.fetched.slice(then).filter(u => !u.includes('/reply-package')).length).toBe(1)
   })
 
-  test('no pane is opened from a timer or at session start, in any thread', LONG, async ($, on) => {
+  test('(0.6.0) the pane opens by itself once, for the thread\'s client, and two hours of the timer open nothing more', LONG, async ($, on) => {
     const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.links': { [BOLT]: 'local_other' } } })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
     for (let i = 0; i < 125; i++) await w.clock.advance(60_000)
-    expect(w.opened).toEqual([])
+    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Acme Roofing' }])
     // the timer's own chips: (0.5.2, R4) Cedar's, the one client with no thread, and (0.5.4, C1) Acme's, in
     // Acme's own thread, this one; (0.5.11) and Bolt's thread updated by itself, once (review of PR #15, F3: two
     // hours after its mail was first seen, no drafts being ready), which opens no pane
@@ -3346,8 +3384,8 @@ describe('F10: a reply package someone picked up stays in the panel, with who ho
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
     expect(w.threads.get(SELF)).toMatchObject({ title: HELD_TITLE, pinned: true })
-    // (the timer opens no pane any more: the client's part is kept current for the pane the person opens)
-    expect(w.opened).toEqual([])
+    // (0.6.0) the pane opened by itself for the thread's client, retitled once the first sync named the client
+    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'client 11111111' }, { id: 'mm-queue', title: 'Acme Roofing' }])
     expect(w.fetched.at(-1)).toBe(`https://onboarding-wizard.massmarket.ai/api/ext/reply-package?package_id=${PKG}&format=pickup`)
     expect(w.appended.length).toBe(1)
     expect(w.appended[0]).toContain('already picked up by')
@@ -8458,5 +8496,731 @@ describe('(0.5.28, internal asks) the bridge lists, pins and shows an internal a
     await w.clock.advance(30_000)
     expect(closeouts(w)).toBe(0)
     expect(w.stored['mm.ask']).toBeUndefined()
+  })
+})
+
+// ======================================================================== 0.6.0: every client thread linked, the pane always open
+// Rob, 2026-10-25: "I think we need the side panel to be open on all bridge-connected threads... anytime a team member
+// is talking about a client, the bridge connects, even if there's more than one thread per client... It also gives them
+// confirmation that their current work is being tracked."
+
+const INTERNAL = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
+const FUNNEL = 'd9fe5433-0000-4000-8000-000000000000'
+const SKILL_MAP = {
+  as_of: new Date(NOW).toISOString(),
+  skills: [
+    { skill_key: 'acme-roofing-project', project_id: ACME, name: 'Acme Roofing — Pat', kind: 'client' },
+    { skill_key: 'bolt-staffing-project', project_id: BOLT, name: 'Bolt Staffing (Sam)', kind: 'client' },
+    { skill_key: 'cedar-dental-project', project_id: CEDAR, name: 'Cedar Dental', kind: 'client' },
+    { skill_key: 'massmarket-internal-ops', project_id: INTERNAL, name: 'Massmarket internal ops', kind: 'internal_ops' },
+    { skill_key: 'massmarket-self-funnel', project_id: FUNNEL, name: 'Massmarket self-funnel', kind: 'self_funnel' },
+  ],
+}
+const skillsOk = () => ({ status: 200, body: SKILL_MAP })
+const PAT = 'pat-morgan@example.com'
+const TASK = 'Phase 1 nurture sequence copy'
+/** OW's client-time answer for Acme: two threads (this one and Pat's), three tasks today. */
+const clientTimeBody = (canSeeLeverage: boolean, over: Record<string, unknown> = {}) => {
+  const people = [{ email: ME, name: 'Builder A', minutes: 95 }, { email: PAT, name: 'Pat Morgan', minutes: 30 }]
+  return {
+    as_of: new Date(NOW).toISOString(), day: '2026-10-12', week_start: '2026-10-12',
+    viewer: { email: ME, can_see_leverage: canSeeLeverage },
+    skipped: [],
+    projects: [{
+      project_id: ACME, name: 'Acme Roofing — Pat',
+      today: {
+        client_minutes: 125, by_source: { claude_code: 100, timer: 25, browser: 0, meeting: 0 }, thread_minutes: 162, parallel: 1.296, jarvis_minutes: 18, people,
+        tasks: [
+          { task: TASK, ticket_id: null, minutes: 64, thread_count: 1, people: [ME], last_activity_at: ago(0.1), active_now: true },
+          { task: 'f779a7a0 Fix inbound router', ticket_id: 'f779a7a0', minutes: 42, thread_count: 1, people: [PAT], last_activity_at: ago(1), active_now: false },
+          { task: null, ticket_id: null, minutes: 19, thread_count: 2, people: [ME, PAT], last_activity_at: ago(2), active_now: false },
+        ],
+      },
+      week: { client_minutes: 610, by_source: { claude_code: 500, timer: 110, browser: 0, meeting: 0 }, thread_minutes: 790, parallel: 1.295, jarvis_minutes: 95, people, tasks: [] },
+      threads: [
+        { session_id: SELF_CLI, title: 'Acme nurture build', member_email: ME, member_name: 'Builder A', task: TASK, ticket_id: null, minutes_today: 83, last_activity_at: ago(0.1), active_now: true },
+        { session_id: 'cli-pat', title: null, member_email: PAT, member_name: 'Pat Morgan', task: 'f779a7a0 Fix inbound router', ticket_id: 'f779a7a0', minutes_today: 42, last_activity_at: ago(1), active_now: false },
+      ],
+      leverage: { ratio: 3.4, build_hours: 41, actual_hours: 12.1, window: 'last 20 business days', note: '' },
+      ...over,
+    }],
+  }
+}
+/** (OW contract 2026-10-25) An answer shaped by the call's `periods`: a period not asked for is null, threads come with today, leverage with the week. */
+/** A query parameter of a URL the bridge fetched (the test runtime may have no URL class). */
+const param = (url: string | undefined, name: string): string | null => {
+  const m = new RegExp(`[?&]${name}=([^&]*)`).exec(url ?? '')
+  return m ? decodeURIComponent(m[1] ?? '') : null
+}
+const byPeriods = (body: ReturnType<typeof clientTimeBody>, url: string) => {
+  const periods = (param(url, 'periods') ?? 'today,week').split(',')
+  const today = periods.includes('today')
+  const week = periods.includes('week')
+  return {
+    ...body,
+    projects: body.projects.map(p => ({ ...p, today: today ? p.today : null, threads: today ? p.threads : [], week: week ? p.week : null, leverage: week ? p.leverage : null })),
+  }
+}
+const timeOk = (canSeeLeverage = true) => (url: string) => ({ status: 200, body: byPeriods(clientTimeBody(canSeeLeverage), url) })
+/** The periods each client-time call asked for, in order. */
+const periodsAsked = (w: { fetched: string[] }) => w.fetched.filter(u => u.includes('/client-time')).map(u => param(u, 'periods'))
+/** The projects one client-time call asked for. */
+const idsAsked = (u: string | undefined) => new Set((param(u, 'project_ids') ?? '').split(','))
+/** The Tracking part as the fixture draws it (the clock in the footer is the computer's own). */
+const TRACKED = (task: string | undefined) => [
+  `Tracking to Acme Roofing · ${task ?? 'no task declared yet'}`,
+  'This thread: 1h 23m today · Acme Roofing today: 2h 05m tracked across 2 threads',
+  'Tasks today',
+  `● ${TASK} · 1h 04m · Builder`,
+  '  f779a7a0 Fix inbound router · 42m · Pat',
+  '  No task declared · 19m · Builder, Pat',
+  'Threads today',
+  `● Acme nurture build  Builder A · ${TASK} · 1h 23m (this thread)`,
+]
+const NUMBERS = [
+  'Numbers',
+  'Today: 2.1 h tracked · 2.7 h in threads · parallel 1.3× · Jarvis 0.3 h',
+  'This week: 10.2 h tracked · 13.2 h in threads · parallel 1.3× · Jarvis 1.6 h',
+]
+const LEVERAGE = 'Leverage: 3.4× (41.0 quoted hours done in 12.1 h, last 20 business days)'
+const NOTE_LINE = 'Tracked counts each minute once per person. In threads counts every thread in full. Parallel is the second divided by the first. Jarvis is work done for Acme Roofing with nobody in the thread.'
+const PAT_ROW = '  Untitled thread  Pat Morgan · f779a7a0 Fix inbound router · 42m'
+/** Every fetch the bridge made is a read of one of its own GET routes: never a pickup, a hold or a resolve. */
+const onlyReads = (w: { fetched: string[] }) =>
+  w.fetched.every(u => /\/api\/ext\/(?:closeout\?|skill-map$|client-time\?project_ids=|reply-package\?package_id=[0-9a-f-]+&format=pickup$|team-ask\?)/.test(u))
+const skill = async ($: Engine, name: string, over: Record<string, unknown> = {}) => $.tool.call({ tool: 'Skill', skill: name, ...over } as never)
+const person = async ($: Engine, text: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
+/** Everything a mounted drawing shows, in order: each Text, and each Button as `[label]`. */
+const tree = async (ui: { drawn: () => Promise<unknown> }): Promise<string[]> => {
+  const out: string[] = []
+  const walk = (node: unknown): void => {
+    if (node === null || node === undefined || typeof node === 'boolean') return
+    if (typeof node === 'string' || typeof node === 'number') return
+    if (Array.isArray(node)) return node.forEach(walk)
+    const el = node as { type?: unknown; props?: Record<string, unknown>; children?: unknown }
+    const kids = el.children ?? el.props?.children
+    const text = (v: unknown): string => (Array.isArray(v) ? v.map(text).join('') : typeof v === 'string' || typeof v === 'number' ? String(v) : '')
+    if (el.type === 'Text') return void out.push(`${el.props?.bold ? '**' : ''}${el.props?.dimColor ? '(dim) ' : ''}${text(kids)}`)
+    if (el.type === 'Button') return void out.push(`[${String(el.props?.label ?? '')}]`)
+    if (el.type === 'Markdown') return void out.push(`<markdown: ${String(el.props?.text ?? '').split('\n')[0]}>`)
+    walk(kids)
+  }
+  walk(await ui.drawn())
+  return out
+}
+
+describe('0.6.0: a skill load makes a thread its client\'s, as the primary only when the client has none', () => {
+  test('a skill for a client with no thread: this thread becomes its primary through R1\'s path, is pinned and named, and its pane opens', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    expect(w.stored['mm.links']).toEqual({})
+    await skill($, 'acme-roofing-project')
+    await w.clock.advance(2_000)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+    // the bridge's own link (R1's path): the note waits for the person's act
+    expect(w.stored['mm.auto']).toEqual({ [ACME]: { sid: SELF, miss: 0, made: NOW + 4_000 } })
+    expect((w.stored['mm.current'] as Record<string, unknown>)[SELF]).toMatchObject({ pid: ACME, how: 'skill' })
+    // the sync it asked for pinned and named it
+    expect(w.threads.get(SELF)?.title).toMatch(ACME_NAMED)
+    expect(w.threads.get(SELF)?.pinned).toBe(true)
+    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Acme Roofing' }])
+    expect(w.appended).toEqual([])
+    expect(onlyReads(w)).toBe(true)
+  })
+
+  test('a plugin-qualified name (plugin:skill) counts as the skill; a subagent\'s load, a refused load and an unknown skill do not', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    await skill($, 'acme-roofing-project', { agentId: 'agent_1' }).catch(() => undefined)
+    await skill($, 'no-such-client-project')
+    await w.clock.advance(2_000)
+    expect(w.stored['mm.current']).toBeUndefined()
+    await skill($, 'massmarket:acme-roofing-project')
+    await w.clock.advance(2_000)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+  })
+
+  test('a skill for a client another thread holds: a second thread. The primary keeps everything; this thread is never pinned or renamed', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk, threads: [thread('local_a', 'Roof quote', 2)], store: { 'mm.links': { [ACME]: 'local_a' } } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    const primaryTitle = w.threads.get('local_a')?.title as string
+    expect(primaryTitle).toMatch(ACME_NAMED)
+    await skill($, 'acme-roofing-project')
+    for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a' })
+    expect((w.stored['mm.current'] as Record<string, unknown>)[SELF]).toMatchObject({ pid: ACME, how: 'skill' })
+    expect(w.threads.get(SELF)).toMatchObject({ title: 'Morning hub', pinned: false })
+    expect(threadWrites(w).filter(x => x.includes(SELF))).toEqual([])
+    // its pane: the Tracking part, the second thread's line, the client part, and no note, no pickup
+    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Acme Roofing' }])
+    const ui = await pane($)
+    const all = await lines(ui)
+    expect(all.slice(0, 3)).toEqual([
+      'Tracking to Acme Roofing · no task declared yet',
+      'Time numbers are not available yet.',
+      `This is a second thread for Acme Roofing. The reply package is picked up in "${primaryTitle}".`,
+    ])
+    expect(all[3]).toBe('This thread: Acme Roofing')
+    await ui.unmount()
+    expect(w.appended).toEqual([])
+    expect(onlyReads(w)).toBe(true)
+    expect(sends(w)).toEqual([])
+    expect(await mm($, 'status')).toContain('current threads: 2 on 1 projects · second threads: 1')
+  })
+
+  test('a hub thread that declared one client is never made another client\'s primary by a skill load', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk, threads: [thread('local_b', 'Staffing plan', 3)], store: { 'mm.links': { [BOLT]: 'local_b' } } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    await skill($, 'bolt-staffing-project')
+    await w.clock.advance(1_000)
+    await skill($, 'acme-roofing-project')
+    await w.clock.advance(2_000)
+    // Acme has no thread, and still has none: this thread declared Bolt too
+    expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_b' })
+    expect((w.stored['mm.current'] as Record<string, unknown>)[SELF]).toMatchObject({ pid: ACME, how: 'skill', declared: [BOLT, ACME] })
+  })
+
+  test('a thread whose marker named another client is never made a client\'s primary by a skill load either', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk, store: { 'mm.marked': { [SELF]: BOLT } } })
+    await skill($, 'acme-roofing-project')
+    await w.clock.advance(2_000)
+    expect(w.stored['mm.links'] ?? {}).toEqual({})
+    expect((w.stored['mm.current'] as Record<string, unknown>)[SELF]).toMatchObject({ pid: ACME, how: 'skill' })
+  })
+
+  test('Massmarket\'s own skills set the thread\'s project for the pane and the time, and never link, pin or name anything', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    await skill($, 'massmarket-internal-ops')
+    await w.clock.advance(2_000)
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Massmarket internal' }])
+    await skill($, 'massmarket-self-funnel')
+    await w.clock.advance(2_000)
+    expect(w.opened.at(-1)).toEqual({ id: 'mm-queue', title: 'Massmarket sales and marketing' })
+    expect(w.stored['mm.links']).toEqual({})
+    const ui = await pane($)
+    expect((await lines(ui))[0]).toBe('Tracking to Massmarket sales and marketing · no task declared yet')
+    // no client part in Massmarket's own thread
+    expect(await lines(ui)).not.toContain('This thread: Acme Roofing')
+    await ui.unmount()
+  })
+})
+
+describe('0.6.0: a marker kickoff, R1b and /mm unlink with second threads', () => {
+  test('a marker for a client another thread holds: this thread is a second thread, told so in the verbatim sentence with the client\'s skill', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk, threads: [thread('local_a', 'Roof quote', 2)], store: { 'mm.links': { [ACME]: 'local_a' } } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    // a session with no skill map reads it once (here, on a skill load: Massmarket's own, which links nothing)
+    await skill($, 'massmarket-internal-ops')
+    await w.clock.advance(1_000)
+    // the name as a sentence to Claude carries it: cleaned to one plain line
+    const primaryTitle = cleanTitle(w.threads.get('local_a')?.title)
+    expect(primaryTitle).toBe('21h left Acme Roofing reply ready')
+    await person($, ACME_KICKOFF)
+    await w.clock.advance(100)
+    expect(w.prompts.at(-1)?.text).toBe(
+      `${ACME_KICKOFF}\n\nAnother thread of yours already holds Acme Roofing's reply package ("${primaryTitle}"). Do not run prep and do not pick up the package here. This thread stays linked to Acme Roofing as a second thread: load the acme-roofing-project skill and then wait for the person.`,
+    )
+    expect(w.stored['mm.links']).toMatchObject({ [ACME]: 'local_a' })
+    expect((w.stored['mm.current'] as Record<string, unknown>)[SELF]).toMatchObject({ pid: ACME, how: 'marker' })
+    expect(w.opened.at(-1)).toEqual({ id: 'mm-queue', title: 'Acme Roofing' })
+  })
+
+  test('R1b moves a client to its newer thread: the old primary keeps its current project and is a second thread from then on, unpinned with its own name back', async ($, on) => {
+    const w = world(on, {
+      feed: feed({ threads: [declared(ACME, 'cli-old', 70), declared(ACME, 'cli-new', 1)] }),
+      threads: [thread('local_old', ACME_TITLE, 70, { pinned: true }), thread('local_new', 'Acme resume', 1)],
+      store: {
+        'mm.threads': { 'cli-old': { app: 'local_old', at: NOW - 72 * HOUR, since: NOW - 72 * HOUR }, 'cli-new': { app: 'local_new', at: NOW - HOUR, since: NOW - HOUR } },
+        'mm.links': { [ACME]: 'local_old' },
+        'mm.auto': { [ACME]: { sid: 'local_old', miss: 0, made: NOW - 2 * HOUR } },
+        'mm.titles': { local_old: 'Roof quote' },
+        'mm.pins': { local_old: { projectId: ACME, client: 'Acme Roofing', byUs: true } },
+      },
+    })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_new' })
+    expect(w.threads.get('local_old')).toMatchObject({ title: 'Roof quote', pinned: false })
+    const current = w.stored['mm.current'] as Record<string, { pid: string }>
+    expect(current.local_old?.pid).toBe(ACME)
+    expect(current.local_new?.pid).toBe(ACME)
+    expect(await mm($, 'status')).toContain('current threads: 2 on 1 projects · second threads: 1')
+    // nothing releases it for being second: a sync later it is still Acme's
+    await mm($, '')
+    expect((w.stored['mm.current'] as Record<string, { pid: string }>).local_old?.pid).toBe(ACME)
+    expect(w.threads.get('local_old')).toMatchObject({ title: 'Roof quote', pinned: false })
+  })
+
+  test('/mm unlink clears the thread\'s current project; /mm link sets it', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk })
+    await skill($, 'acme-roofing-project')
+    await w.clock.advance(2_000)
+    expect((w.stored['mm.current'] as Record<string, unknown>)[SELF]).toBeDefined()
+    await mm($, 'unlink')
+    expect((w.stored['mm.current'] as Record<string, unknown>)[SELF]).toBeUndefined()
+    await mm($, 'link Bolt Staffing')
+    expect((w.stored['mm.current'] as Record<string, unknown>)[SELF]).toMatchObject({ pid: BOLT, how: 'link' })
+  })
+})
+
+describe('0.6.0: the task the time-tracking hook was given', () => {
+  test('--task "<label>" and --task=<label> set this thread\'s task; one declared before the project goes with the first project', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    await $.tool.call({ tool: 'Bash', command: `node ~/.claude/mm-hooks/worklog-hook.js --task "${TASK}"` } as never)
+    expect(w.stored['mm.current']).toBeUndefined()
+    await skill($, 'acme-roofing-project')
+    await w.clock.advance(2_000)
+    expect((w.stored['mm.current'] as Record<string, unknown>)[SELF]).toMatchObject({ pid: ACME, task: TASK })
+    await $.tool.call({ tool: 'Bash', command: 'node "$HOME/.claude/mm-hooks/worklog-hook.js" --task=f779a7a0-fix' } as never)
+    expect((w.stored['mm.current'] as Record<string, unknown>)[SELF]).toMatchObject({ pid: ACME, task: 'f779a7a0-fix' })
+    const ui = await pane($)
+    expect((await lines(ui))[0]).toBe('Tracking to Acme Roofing · f779a7a0-fix')
+    await ui.unmount()
+    // a command that only mentions it does nothing
+    await $.tool.call({ tool: 'Bash', command: 'grep -n "--task" notes.txt' } as never)
+    expect((w.stored['mm.current'] as Record<string, unknown>)[SELF]).toMatchObject({ task: 'f779a7a0-fix' })
+  })
+})
+
+describe('0.6.0: the pane opens by itself for the thread\'s current project, and the person\'s close holds', () => {
+  const linked = (on: On, over: WorldOptions = {}) => world(on, { skillMap: skillsOk, store: { 'mm.links': { [ACME]: SELF } }, ...over })
+
+  test('it opens at session start and again on each surface that attaches, and for each new project', async ($, on) => {
+    const w = linked(on)
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    expect(w.opened.length).toBeGreaterThan(0)
+    expect(w.opened.every(o => o.id === 'mm-queue')).toBe(true)
+    const before = w.opened.length
+    await $.session.attach({ surface: 'mobile', clientId: 'mobile:phone' })
+    await w.clock.advance(100)
+    expect(w.opened.length).toBe(before + 1)
+    expect(w.opened.at(-1)).toEqual({ id: 'mm-queue', title: 'Acme Roofing' })
+    // the timer alone opens nothing more for the same project
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(w.opened.length).toBe(before + 1)
+    // another project: it opens for that one
+    await skill($, 'bolt-staffing-project')
+    await w.clock.advance(2_000)
+    expect(w.opened.at(-1)).toEqual({ id: 'mm-queue', title: 'Bolt Staffing' })
+    // (the person's close, which the test kit cannot raise, is held by \`opensBySelf\` and \`afterPersonClose\`: track.test.ts)
+    expect(onlyReads(w)).toBe(true)
+  })
+
+  test('opening and drawing it read only: the pickup view, never a pickup, a hold or a claim, and no note', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk, clientTime: timeOk(), threads: [thread('local_a', 'Roof quote', 2)], store: { 'mm.links': { [ACME]: 'local_a' } } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    await skill($, 'acme-roofing-project')
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Acme Roofing' }])
+    expect(onlyReads(w)).toBe(true)
+    expect(w.fetched.some(u => u.includes('/reply-package?') && u.endsWith('&format=pickup'))).toBe(true)
+    expect(w.appended).toEqual([])
+    expect(sends(w)).toEqual([])
+    expect(w.stored['mm.acted']).toBeUndefined()
+  })
+
+  test('never by itself with MM_UNATTENDED=1, or in a session whose first prompt begins SINGLE-SESSION', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk, env: { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', HOME: '/home/someone', MM_UNATTENDED: '1' } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    await skill($, 'acme-roofing-project')
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect((w.stored['mm.current'] as Record<string, unknown>)[SELF]).toMatchObject({ pid: ACME })
+    expect(w.opened).toEqual([])
+  })
+
+  test('SINGLE-SESSION: no pane by itself for the rest of the session', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    await $.prompt.submit({ text: 'SINGLE-SESSION reconcile one client', wait: false, origin: { kind: 'sdk' } })
+    await skill($, 'acme-roofing-project')
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(w.opened).toEqual([])
+  })
+
+  test('SINGLE-SESSION as the first prompt after the pane opened by itself: the bridge closes it again (its own close)', async ($, on) => {
+    const w = linked(on)
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    expect(w.opened.at(-1)).toEqual({ id: 'mm-queue', title: 'Acme Roofing' })
+    await $.prompt.submit({ text: 'SINGLE-SESSION reconcile one client', wait: false, origin: { kind: 'sdk' } })
+    expect(w.closes).toEqual([{ id: 'mm-queue', origin: 'plugin' }])
+    const opened = w.opened.length
+    await $.session.attach({ surface: 'mobile', clientId: 'mobile:phone' })
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(w.opened.length).toBe(opened)
+  })
+
+  test('a terminal session opens it too, at its project; a run nobody watches (claude -p) tracks nothing', async ($, on) => {
+    const w = world(on, { terminal: true, skillMap: skillsOk, clientTime: timeOk() })
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await skill($, 'acme-roofing-project')
+    await w.clock.advance(100)
+    expect(w.opened).toEqual([{ id: 'mm-queue', title: 'Acme Roofing' }])
+    expect((w.stored['mm.current'] as Record<string, unknown>)[`cli:${SELF_CLI}`]).toMatchObject({ pid: ACME, how: 'skill' })
+    // no link in a terminal session: there is no app thread to link
+    expect(w.stored['mm.links']).toBeUndefined()
+    // its own project's time, read at once (no timer or poller here)
+    expect(w.fetched.filter(u => u.includes('/client-time'))).toEqual([`https://onboarding-wizard.massmarket.ai/api/ext/client-time?project_ids=${ACME}&periods=today,week`])
+    const ui = await $.ui.mount({ plugin: 'mm-bridge', surface: 'terminal', component: 'Pane', requestId: 'mm-queue', props: PANE })
+    expect((await lines(ui)).slice(0, 2)).toEqual(['Tracking to Acme Roofing · no task declared yet', 'This thread: 1h 23m today · Acme Roofing today: 2h 05m tracked across 2 threads'])
+    await ui.unmount()
+  })
+
+  test('a run nobody watches: no tracking at all', async ($, on) => {
+    const w = world(on, { terminal: true, skillMap: skillsOk, env: { CLAUDE_CODE_ENTRYPOINT: 'sdk-cli', HOME: '/home/someone' } })
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: false })
+    await skill($, 'acme-roofing-project')
+    await w.clock.advance(100)
+    expect(w.stored['mm.current']).toBeUndefined()
+    expect(w.opened).toEqual([])
+    expect(w.fetched).toEqual([])
+  })
+})
+
+describe('0.6.0: the time numbers are read sparingly', () => {
+  test('a thread whose project was just set waits 15 seconds, and a change meanwhile starts the wait again', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk, clientTime: timeOk(), store: { 'mm.lease': { owner: 'someone-else', until: NOW + 10 * HOUR } } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    await skill($, 'acme-roofing-project')
+    await w.clock.advance(5_000)
+    await skill($, 'bolt-staffing-project')
+    await w.clock.advance(14_000)
+    expect(w.fetched.filter(u => u.includes('/client-time'))).toEqual([])
+    await w.clock.advance(2_000)
+    expect(w.fetched.filter(u => u.includes('/client-time'))).toEqual([`https://onboarding-wizard.massmarket.ai/api/ext/client-time?project_ids=${BOLT}&periods=today,week`])
+  })
+
+  test('once a minute per project on this computer, and not again while the numbers are under 2 minutes old', async ($, on) => {
+    const w = world(on, { terminal: true, skillMap: skillsOk, clientTime: timeOk(), store: { 'mm.timeAsked': { [ACME]: NOW - 30_000 } } })
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await skill($, 'acme-roofing-project')
+    await w.clock.advance(100)
+    // another thread here asked for Acme 30 seconds ago
+    expect(w.fetched.filter(u => u.includes('/client-time'))).toEqual([])
+    await w.clock.advance(3 * 60_000)
+    await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+    await w.clock.advance(100)
+    expect(w.fetched.filter(u => u.includes('/client-time')).length).toBe(1)
+    // a turn a minute later: the numbers are fresh, and the terminal reads at most every 2 minutes
+    await w.clock.advance(60_000)
+    await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+    await w.clock.advance(100)
+    expect(w.fetched.filter(u => u.includes('/client-time')).length).toBe(1)
+  })
+
+  test('a 404 (an OW without the route yet): not asked again for 30 minutes, and the pane says the numbers are not available yet', async ($, on) => {
+    const w = world(on, { terminal: true, skillMap: skillsOk })
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await skill($, 'acme-roofing-project')
+    await w.clock.advance(100)
+    expect(w.fetched.filter(u => u.includes('/client-time')).length).toBe(1)
+    for (let i = 0; i < 5; i++) {
+      await w.clock.advance(3 * 60_000)
+      await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+      await w.clock.advance(100)
+    }
+    expect(w.fetched.filter(u => u.includes('/client-time')).length).toBe(1)
+    const ui = await $.ui.mount({ plugin: 'mm-bridge', surface: 'terminal', component: 'Pane', requestId: 'mm-queue', props: PANE })
+    expect((await lines(ui)).slice(0, 2)).toEqual(['Tracking to Acme Roofing · no task declared yet', 'Time numbers are not available yet.'])
+    await ui.unmount()
+    await w.clock.advance(20 * 60_000)
+    await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+    await w.clock.advance(100)
+    expect(w.fetched.filter(u => u.includes('/client-time')).length).toBe(2)
+  })
+
+  test('the thread that polls reads the projects of this computer\'s threads in one call after each sync', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk, clientTime: timeOk(), threads: [thread('local_b', 'Staffing plan', 3)], store: { 'mm.links': { [ACME]: SELF, [BOLT]: 'local_b' } } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    const reads = w.fetched.filter(u => u.includes('/client-time'))
+    expect(reads.length).toBe(1)
+    expect(idsAsked(reads[0])).toEqual(new Set([ACME, BOLT]))
+    // the skill map, at most hourly
+    expect(w.fetched.filter(u => u.endsWith('/skill-map')).length).toBe(1)
+    for (let i = 0; i < 30; i++) await w.clock.advance(60_000)
+    expect(w.fetched.filter(u => u.endsWith('/skill-map')).length).toBe(1)
+    expect(w.fetched.filter(u => u.includes('/client-time')).length).toBeGreaterThan(1)
+  })
+})
+
+describe('0.6.0 (OW contract 2026-10-25): today on every read, the week at most every 30 minutes, at most 15 projects', () => {
+  test('a project\'s first read asks for today and the week; the syncs after it today alone, until its week is 30 minutes old', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk, clientTime: timeOk(), store: { 'mm.links': { [ACME]: SELF } } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    expect(periodsAsked(w)).toEqual(['today,week'])
+    // the next syncs (every 5 minutes): today alone
+    for (let i = 0; i < 20; i++) await w.clock.advance(60_000)
+    const asked = periodsAsked(w)
+    expect(asked.length).toBeGreaterThan(2)
+    expect(asked.slice(1).every(x => x === 'today')).toBe(true)
+    // a today-only answer keeps the week and the leverage last read, each with its own as-of
+    const rec = (w.stored['mm.time'] as Record<string, { at: number; weekAt: number; asOf: string; weekAsOf: string; p: { week: unknown; leverage: unknown } }>)[ACME]
+    expect(rec?.p.week).not.toBeNull()
+    expect(rec?.p.leverage).not.toBeNull()
+    expect(rec && rec.at > rec.weekAt).toBe(true)
+    expect(typeof rec?.weekAsOf).toBe('string')
+    const ui = await $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'Pane', requestId: 'mm-queue', props: PANE })
+    const shown = await lines(ui)
+    expect(shown).toContain(NUMBERS[2])
+    expect(shown).toContain(LEVERAGE)
+    await ui.unmount()
+    // 30 minutes after the week was read, the next sync asks for it again
+    for (let i = 0; i < 12; i++) await w.clock.advance(60_000)
+    expect(periodsAsked(w).slice(asked.length)).toContain('today,week')
+  })
+
+  test('two projects, one with its week due: two calls, the week asked for that one alone', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk, clientTime: timeOk(), threads: [thread('local_b', 'Staffing plan', 3)], store: { 'mm.links': { [ACME]: SELF, [BOLT]: 'local_b' }, 'mm.time': { [ACME]: { at: NOW - 60_000, weekAt: NOW - 60_000, asOf: '', p: clientTimeBody(true).projects[0] } } } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    const reads = w.fetched.filter(u => u.includes('/client-time'))
+    expect(reads.length).toBe(2)
+    expect(reads.map(u => param(u, 'periods'))).toEqual(['today,week', 'today'])
+    expect(idsAsked(reads[0])).toEqual(new Set([BOLT]))
+    expect(idsAsked(reads[1])).toEqual(new Set([ACME]))
+  })
+
+  test('a week never read (null) is not loaded: no This week line, never zeros', async ($, on) => {
+    const w = world(on, { terminal: true, skillMap: skillsOk, clientTime: () => ({ status: 200, body: clientTimeBody(true, { week: null, leverage: null }) }) })
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await skill($, 'acme-roofing-project')
+    await w.clock.advance(100)
+    const ui = await $.ui.mount({ plugin: 'mm-bridge', surface: 'terminal', component: 'Pane', requestId: 'mm-queue', props: PANE })
+    const shown = await lines(ui)
+    expect(shown).toContain(NUMBERS[1])
+    expect(shown.some(l => l.startsWith('This week'))).toBe(false)
+    expect(shown.some(l => l.startsWith('Leverage'))).toBe(false)
+    await ui.unmount()
+  })
+
+  test('the thread that polls reads at most 15 projects: threads active in the last 2 days first, then up to 7 days', async ($, on) => {
+    const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+    const current: Record<string, unknown> = {}
+    // ten active in the last 2 days, ten 3 to 5 days ago, two 8 days ago (too old)
+    for (let n = 0; n < 10; n++) current[`cli:hot${n}`] = { pid: id(n), how: 'skill', at: NOW - (n + 1) * HOUR }
+    for (let n = 10; n < 20; n++) current[`cli:warm${n}`] = { pid: id(n), how: 'skill', at: NOW - 3 * 24 * HOUR - (n - 10) * 5 * HOUR }
+    for (let n = 20; n < 22; n++) current[`cli:old${n}`] = { pid: id(n), how: 'skill', at: NOW - 8 * 24 * HOUR }
+    const w = world(on, { skillMap: skillsOk, clientTime: timeOk(), store: { 'mm.current': current } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    const reads = w.fetched.filter(u => u.includes('/client-time'))
+    expect(reads.length).toBe(1)
+    expect(idsAsked(reads[0])).toEqual(new Set([...Array.from({ length: 10 }, (_, n) => id(n)), id(10), id(11), id(12), id(13), id(14)]))
+  })
+})
+
+describe('0.6.0: the Tracking part, as the spec words it', () => {
+  const tracked = (on: On, canSee: boolean, over: WorldOptions = {}) =>
+    world(on, {
+      skillMap: skillsOk,
+      clientTime: timeOk(canSee),
+      threads: [thread('local_pat', 'Pat on Acme', 1)],
+      store: { 'mm.links': { [ACME]: SELF }, 'mm.threads': { 'cli-pat': { app: 'local_pat', at: NOW } }, 'mm.current': { [SELF]: { pid: ACME, how: 'skill', at: NOW - 60_000, task: TASK } } },
+      ...over,
+    })
+
+  for (const surface of ['desktop', 'terminal'] as const) {
+    test(`the whole of it, with leverage for a viewer who may see it (${surface})`, async ($, on) => {
+      const w = tracked(on, true)
+      await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+      await w.clock.advance(4_000)
+      const ui = await $.ui.mount({ plugin: 'mm-bridge', surface, component: 'Pane', requestId: 'mm-queue', props: PANE })
+      const all = await lines(ui)
+      expect(all.slice(0, 13)).toEqual([...TRACKED(TASK), ...NUMBERS, LEVERAGE, NOTE_LINE])
+      expect(all[13]).toBe(`As of ${localClock(NOW)}`)
+      // Pat's thread is on this computer: its row is a button that opens it
+      expect((await buttons(ui)).some(([key, label]) => key.startsWith('mm-track-open:') && label === PAT_ROW)).toBe(true)
+      await ui.unmount()
+    })
+  }
+
+  test('a viewer who may not see leverage: no leverage line', async ($, on) => {
+    const w = tracked(on, false)
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    const ui = await pane($)
+    const all = await lines(ui)
+    expect(all.some(l => l.startsWith('Leverage'))).toBe(false)
+    expect(all.slice(8, 12)).toEqual([...NUMBERS, NOTE_LINE])
+    await ui.unmount()
+  })
+
+  test('leverage with no ratio: its note', async ($, on) => {
+    const w = tracked(on, true, { clientTime: () => ({ status: 200, body: clientTimeBody(true, { leverage: { ratio: null, build_hours: 0, actual_hours: 0, window: 'last 20 business days', note: 'No quoted hours in the last 20 business days.' } }) }) })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    const ui = await pane($)
+    expect(await lines(ui)).toContain('Leverage: No quoted hours in the last 20 business days.')
+    await ui.unmount()
+  })
+
+  test('nothing tracked yet today, and this thread not in the numbers yet', async ($, on) => {
+    const zero = { client_minutes: 0, by_source: { claude_code: 0, timer: 0, browser: 0, meeting: 0 }, thread_minutes: 0, parallel: null, jarvis_minutes: 0, people: [], tasks: [] }
+    const w = tracked(on, true, { clientTime: () => ({ status: 200, body: clientTimeBody(true, { today: zero, week: zero, threads: [], leverage: null }) }) })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    const ui = await pane($)
+    expect((await lines(ui)).slice(0, 8)).toEqual([
+      `Tracking to Acme Roofing · ${TASK}`,
+      'This thread: not in the numbers yet (they refresh every 5 minutes) · Acme Roofing today: 0m tracked across 0 threads',
+      'Tasks today',
+      'Nothing tracked to Acme Roofing yet today.',
+      'Numbers',
+      'Today: 0.0 h tracked · 0.0 h in threads · Jarvis 0.0 h',
+      'This week: 0.0 h tracked · 0.0 h in threads · Jarvis 0.0 h',
+      NOTE_LINE,
+    ])
+    await ui.unmount()
+  })
+
+  test('a read that failed after one that worked: the last numbers, marked', async ($, on) => {
+    let fail = false
+    const w = tracked(on, true, { clientTime: () => (fail ? { status: 500, body: { error: 'boom' } } : { status: 200, body: clientTimeBody(true) }) })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    fail = true
+    for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
+    const ui = await pane($)
+    const all = await lines(ui)
+    expect(all).toContain(`As of ${localClock(NOW)} · could not refresh; showing the last numbers`)
+    expect(all).toContain('This thread: 1h 23m today · Acme Roofing today: 2h 05m tracked across 2 threads')
+    await ui.unmount()
+  })
+
+  for (const canSee of [true, false]) {
+    test(`[render proof] the pane as drawn on the desktop, can_see_leverage ${canSee}`, async ($, on) => {
+      const w = tracked(on, canSee)
+      await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+      await w.clock.advance(4_000)
+      const ui = await pane($)
+      const drawn = await tree(ui)
+      ;(globalThis as unknown as { console?: { log: (s: string) => void } }).console?.log(`RENDER-PROOF can_see_leverage=${canSee}\n${drawn.join('\n')}\nEND-RENDER-PROOF`)
+      expect(drawn.includes(LEVERAGE)).toBe(canSee)
+      expect(drawn.includes(`[${PAT_ROW}]`)).toBe(true)
+      await ui.unmount()
+    })
+  }
+})
+
+describe('0.6.0: the status line and the band say whether the thread is counted', () => {
+  test('the status line in each state', async ($, on) => {
+    const w = world(on, { skillMap: skillsOk, clientTime: timeOk() })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    const last = () => String(w.statuses.at(-1) ?? '')
+    expect(last()).not.toContain('⏱')
+    await person($, 'look at this')
+    await person($, 'and this')
+    await w.clock.advance(100)
+    expect(last()).toBe('MM: 3 need you · 0 pinned  ⏱ Not tracked to a client yet')
+    await skill($, 'acme-roofing-project')
+    await w.clock.advance(2_000)
+    expect(last()).toBe('MM: 3 need you · 1 pinned  ⏱ Tracking to Acme Roofing')
+    await w.clock.advance(15_000)
+    expect(last()).toBe('MM: 3 need you · 1 pinned  ⏱ Acme Roofing · this thread 1h 23m today')
+    await $.tool.call({ tool: 'Bash', command: `node ~/.claude/mm-hooks/worklog-hook.js --task "${TASK}"` } as never)
+    await w.clock.advance(100)
+    expect(last()).toBe(`MM: 3 need you · 1 pinned  ⏱ Acme Roofing · ${TASK} · this thread 1h 23m today`)
+    await mm($, 'unlink')
+    await w.clock.advance(100)
+    expect(last()).toBe('MM: 3 need you · 1 pinned  ⏱ Not tracked to a client yet')
+  })
+
+  const nudged = async ($: Engine, on: On, title = 'Acme Roofing nurture copy') => {
+    const w = world(on, { skillMap: skillsOk, self: thread(SELF, title, 0) })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    return w
+  }
+  const band = ($: Engine) => $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'AbovePrompt', props: BAND_PROPS })
+
+  test('after the person\'s second prompt (marker kickoffs and the app\'s wrapped prompts do not count), with its offers', async ($, on) => {
+    const w = await nudged($, on)
+    await person($, 'first')
+    await $.prompt.submit({ text: 'Task (from the session that started this one):\nCheck the roof quote', wait: false, origin: { kind: 'auto-continuation' } } as never)
+    await w.clock.advance(100)
+    let b = await band($)
+    expect(await lines(b)).not.toContain('This thread is not tracked to a client yet.')
+    await b.unmount()
+    await person($, 'second')
+    await w.clock.advance(100)
+    b = await band($)
+    expect(await lines(b)).toContain('This thread is not tracked to a client yet.')
+    expect((await buttons(b)).slice(-3)).toEqual([[`mm-track:${ACME}`, 'Track to Acme Roofing'], ['mm-track-internal', 'Massmarket internal'], ['mm-track-none', 'Not client work']])
+    await b.unmount()
+  })
+
+  test('Track to <Client>: the thread is the client\'s, its pane opens, and Claude gets the verbatim note', async ($, on) => {
+    const w = await nudged($, on)
+    await person($, 'first')
+    await person($, 'second')
+    await w.clock.advance(100)
+    const b = await band($)
+    await b.press({ key: `mm-track:${ACME}` })
+    await b.unmount()
+    await w.clock.advance(2_000)
+    expect((w.stored['mm.current'] as Record<string, unknown>)[SELF]).toMatchObject({ pid: ACME, how: 'press' })
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+    expect(w.opened.at(-1)).toEqual({ id: 'mm-queue', title: 'Acme Roofing' })
+    expect(w.appended.map(a => (JSON.parse(a) as { content: Array<{ text: string }> }).content[0]?.text)).toEqual([
+      '[mm-bridge] The person marked this thread as Acme Roofing\'s work. Before your next step, load the acme-roofing-project skill with the Skill tool so the time tracker counts this thread\'s time to Acme Roofing.',
+    ])
+    // the band's line is gone: the thread is tracked
+    const after = await band($)
+    expect(await lines(after)).not.toContain('This thread is not tracked to a client yet.')
+    await after.unmount()
+    expect(w.prompts.length).toBe(2)
+  })
+
+  test('Massmarket internal: internal ops, and its verbatim note', async ($, on) => {
+    const w = await nudged($, on, 'Fix the tracker')
+    await person($, 'first')
+    await person($, 'second')
+    await w.clock.advance(100)
+    const b = await band($)
+    expect((await buttons(b)).map(([key]) => key).filter(key => key.startsWith('mm-track'))).toEqual(['mm-track-internal', 'mm-track-none'])
+    await b.press({ key: 'mm-track-internal' })
+    await b.unmount()
+    await w.clock.advance(100)
+    expect((w.stored['mm.current'] as Record<string, unknown>)[SELF]).toMatchObject({ pid: INTERNAL, how: 'press' })
+    expect(w.stored['mm.links']).toEqual({})
+    expect(w.appended.map(a => (JSON.parse(a) as { content: Array<{ text: string }> }).content[0]?.text)).toEqual([
+      '[mm-bridge] The person marked this thread as Massmarket internal work. Before your next step, load the massmarket-internal-ops skill with the Skill tool so the time tracker counts it.',
+    ])
+    expect(w.opened.at(-1)).toEqual({ id: 'mm-queue', title: 'Massmarket internal' })
+  })
+
+  test('Not client work: no band line and no status for the rest of the session, and no note', async ($, on) => {
+    const w = await nudged($, on, 'Personal errands')
+    await person($, 'first')
+    await person($, 'second')
+    await w.clock.advance(100)
+    const b = await band($)
+    await b.press({ key: 'mm-track-none' })
+    await b.unmount()
+    await person($, 'third')
+    await w.clock.advance(100)
+    const again = await band($)
+    expect(await lines(again)).not.toContain('This thread is not tracked to a client yet.')
+    await again.unmount()
+    expect(String(w.statuses.at(-1) ?? '')).not.toContain('⏱')
+    expect(w.appended).toEqual([])
+    expect(w.stored['mm.current']).toBeUndefined()
   })
 })

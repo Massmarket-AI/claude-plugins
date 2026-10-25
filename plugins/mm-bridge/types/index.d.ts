@@ -138,8 +138,58 @@ export type MmNotice = { text: string; at: number }
  */
 export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number }
 
+/**
+ * (0.6.0) One line of the pane's Tracking part. `open`: the app thread (`local_…`) a press on the line opens, on a
+ * row of `Threads today` that is another thread on this computer; such a line is drawn as a button.
+ */
+export type MmTrackLine = { text: string; dim?: boolean; bold?: boolean; open?: string }
+
+/**
+ * (0.6.0) What this thread's pane shows of its current project: which project (`pid`, '' when none), the pane's
+ * title, the Tracking part line by line, and in a second thread of a client the dim line above the client part
+ * (`second`). `client`: the project's name as shown.
+ */
+export type MmTrack = { pid: string; client: string; title: string; lines: MmTrackLine[]; second?: string }
+
+/**
+ * (0.6.0) This session's own record, for the pane and the band: the person's prompts so far, whether its first
+ * prompt began `SINGLE-SESSION`, whether the person pressed Not client work, whether it runs for a person
+ * (`interactive`) or unattended (`MM_UNATTENDED=1`), the project whose pane the person closed (`closed`) and the one
+ * the pane was last opened for by itself (`opened`), the project the pane last drew (`handled`), and when this
+ * session last asked OW for its project's time (`asked`).
+ */
+export type MmSession = {
+  prompts: number
+  /** Its first prompt has been seen. */
+  first?: boolean
+  single?: boolean
+  notClient?: boolean
+  interactive?: boolean
+  unattended?: boolean
+  closed?: string
+  opened?: string
+  handled?: string
+  asked?: number
+}
+
+/** (0.6.0) A client the band offers to track this thread to: its project, its name, and the skill that counts it. */
+export type MmSuggestion = { pid: string; client: string; skill: string }
+
+/** (0.6.0) The band's line for a thread with no current project after the person's second prompt, and what it offers. */
+export type MmNudge = { show: boolean; suggest: MmSuggestion[] }
+
 declare module 'claude-code' {
   interface PluginState {
-    'mm-bridge': { view: MmView; queue: MmQueue; notice: MmNotice; band: MmBand; folds: MmFolds; people: MmPeople }
+    'mm-bridge': {
+      view: MmView
+      queue: MmQueue
+      notice: MmNotice
+      band: MmBand
+      folds: MmFolds
+      people: MmPeople
+      track: MmTrack
+      sess: MmSession
+      nudge: MmNudge
+    }
   }
 }
