@@ -716,12 +716,14 @@ export const CHIP_TITLE_MAX = 60
 export const chipTitle = (title: string): string => (title.length > CHIP_TITLE_MAX ? `${title.slice(0, CHIP_TITLE_MAX - 1)}…` : title)
 
 /**
- * R5 (Rob, 2026-10-13): the sentence a kickoff carries when the client already has a linked thread other than
- * the one starting (a chip copy started after another copy, or another thread, took the client): that thread
- * says which thread has the client, and stops.
+ * (0.6.0, spec 2026-10-25, verbatim; R5's sentence until 0.5.28) What a kickoff carries when the client already has a
+ * linked (primary) thread other than the one starting: this thread stays the client's as a second thread, and leaves
+ * the reply package to the primary. `title` is the primary thread's name; `skill` the client's skill from OW's skill
+ * map, else the kickoff's own words for it (the client's project skill).
  */
-export function staleCopySentence(client: string): string {
-  return `If ${client} already has a thread other than this one, tell me its name and stop: do not run prep, do not link this thread.`
+export function secondThreadSentence(client: string, title: string, skill?: string): string {
+  const load = skill ? `load the ${skill} skill` : "load the client's project skill"
+  return `Another thread of yours already holds ${client}'s reply package ("${title}"). Do not run prep and do not pick up the package here. This thread stays linked to ${client} as a second thread: ${load} and then wait for the person.`
 }
 
 /**

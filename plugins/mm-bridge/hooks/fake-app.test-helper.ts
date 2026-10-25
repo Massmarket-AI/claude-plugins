@@ -154,6 +154,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           fetched.push(url)
           if (feedDelayMs > 0 && url.includes('/closeout')) await new Promise<void>(resolve => void timers.push({ at: time + feedDelayMs, fn: resolve, done: false }))
           if (feedStatus !== 200 && url.includes('/closeout')) return { status: feedStatus, ok: false, headers: {}, text: 'unavailable' }
+          // (0.6.0) an OW without the time routes yet
+          if (url.includes('/skill-map') || url.includes('/client-time')) return { status: 404, ok: false, headers: {}, text: '{"error":"not_found"}' }
           return { status: 200, ok: true, headers: {}, text: JSON.stringify(url.includes('/reply-package') ? { markdown: '## A client\n\n1. What the client sent' } : feed) }
         },
       },

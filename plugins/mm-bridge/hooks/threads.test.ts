@@ -8,7 +8,7 @@ import {
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLink, titleLooksLike, titleSuggestion, waitingText,
   newerThreadFor, threadStart, markedThreads, AWAY_REASON,
-  CHIP_TITLE_MAX, REFRESH_FAILED, bandText, chipTitle, claimText, isStillOpenRow, staleCopySentence, startKickoff,
+  CHIP_TITLE_MAX, REFRESH_FAILED, bandText, chipTitle, claimText, isStillOpenRow, secondThreadSentence, startKickoff,
   START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary, startMissingLabel,
   LABEL_MAX, buttonLabel, cardReady, needsCard,
   askParagraph,
@@ -1240,8 +1240,14 @@ describe('R8 and R5: the words a Claim and a stale chip copy carry (verbatim)', 
       'Still open for Acme Roofing after our reply of 2:30 PM: the logo file; Q4 dates. Load the client\'s project skill first, then follow client-reply-prep §9: show me what is still open and the drafts for it, and wait for me. Send nothing without my go.',
     )
   })
-  test('the stale copy\'s sentence', async () => {
-    expect(staleCopySentence('Acme Roofing')).toBe('If Acme Roofing already has a thread other than this one, tell me its name and stop: do not run prep, do not link this thread.')
+  test('(0.6.0) the second thread\'s sentence, which replaced the stale copy\'s (verbatim)', async () => {
+    expect(secondThreadSentence('Acme Roofing', '🟡 21h left · Acme Roofing · reply ready', 'acme-roofing-project')).toBe(
+      'Another thread of yours already holds Acme Roofing\'s reply package ("🟡 21h left · Acme Roofing · reply ready"). Do not run prep and do not pick up the package here. This thread stays linked to Acme Roofing as a second thread: load the acme-roofing-project skill and then wait for the person.',
+    )
+    // with no skill map: the kickoff's own words for the client's skill
+    expect(secondThreadSentence('Acme Roofing', 'Acme work')).toBe(
+      'Another thread of yours already holds Acme Roofing\'s reply package ("Acme work"). Do not run prep and do not pick up the package here. This thread stays linked to Acme Roofing as a second thread: load the client\'s project skill and then wait for the person.',
+    )
   })
   test('the kickoff of a new thread is 0.5.1\'s start kickoff; a stale package with only what is still open carries the Claim words behind the marker', async () => {
     const acme = item(ACME)

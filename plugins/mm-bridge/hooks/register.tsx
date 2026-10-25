@@ -1,20 +1,25 @@
 import type { Elements, EngineInterface, Register } from 'claude-code'
 
-import type { MmBand, MmFolds, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmView } from '../types'
+import type { MmBand, MmFolds, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTrack, MmView } from '../types'
 
 import {
-  INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pinsNow,
+  INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pinsNow,
   peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
-  asksMarkdown, heldInternal, openAsks,
+  asksMarkdown, heldInternal, openAsks, shownText,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
   LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
-  newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, staleCopySentence, startKickoff, threadLink, titleSuggestion,
+  newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, secondThreadSentence, startKickoff, threadLink, titleLooksLike, titleSuggestion,
   REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, bandText, chipTitle, ownPackage, seenNow, waitingText,
   START_ALL_MAX, startAllKickoff, startAllLabel, startMissingLabel, AWAY_REASON, markedThreads, START_ALL_WORDS, startWords, startFillSaid, kickoffsAnswer,
 } from './threads'
 import type { AppThread, Fold, Kickoff, Pairs, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
+import {
+  INTERNAL_NAME, INTERNAL_NOTE, NUDGE_AFTER, NUDGE_INTERNAL, NUDGE_NONE, NUDGE_TEXT, SKILL_KEY, afterPersonClose, clientName, displayName, kindOf, mergeCurrent, mergeTime, opensBySelf,
+  parseClientTime, parseSkillMap, pressNote, secondLine, skillName, taskFrom, thisThread, titleForClaude, trackLabel, trackLines, trackStatus, weekIsDue,
+} from './track'
+import type { ClientTime, Current, How, ProjectKind, SkillEntry, TimeRecord } from './track'
 
 // The Massmarket bridge.
 // Pinned threads are each person's to-do list: a client's thread pins itself and its name says what is
@@ -34,7 +39,8 @@ import type { AppThread, Fold, Kickoff, Pairs, Recommendation, Replaced, Row, Ro
 // start missing threads or start all threads. It should just pretty much always be 'start missing threads.'") So
 // that button is Start missing threads now, always drawn; /mm still opens the list.
 //
-// ⛔ NEVER BY ITSELF. Linking, pinning and renaming are the only things a sync does. A message goes into a
+// ⛔ NEVER BY ITSELF. Linking, pinning and renaming are the only things a sync does (0.6.0: and opening this thread's
+// pane for its current project, read only; see "(0.6.0) every client thread linked" further down). A message goes into a
 // thread only from a button the person pressed in the pane or a /mm command the person typed: updateThread
 // and claimThread, reached from `press` and from `runCommand` when it runs for the person. That message
 // starts a model turn in the client's thread: the one paid moment the bridge causes, and the person asked
@@ -92,7 +98,8 @@ import type { AppThread, Fold, Kickoff, Pairs, Recommendation, Replaced, Row, Ro
 //    (0.5.19, Rob 10-20) One exception, only on a computer where the person typed /mm rc on: Remote Control
 //    follows the pin on any thread (`rcFollowsPin`). It never switches off Remote Control it did not switch on.
 // ⛔ A thread the person unlinked never links itself again, and gets its own name back.
-// ⛔ A thread that linked itself gets the pin and the name, nothing more, until the person acts on it; and
+// ⛔ A thread that linked itself gets the pin and the name, nothing more, until the person acts on it (0.6.0: its
+//    pane also opens and draws its client part, read only, with no note for Claude and no pickup); and
 //    the link is undone once (B3) its session declares another project too, unless the link was used for a
 //    send (R11). (0.5.23) The feed no longer listing that thread's session is not enough: the feed lists only
 //    the last 14 days.
@@ -107,6 +114,7 @@ import type { AppThread, Fold, Kickoff, Pairs, Recommendation, Replaced, Row, Ro
 //    200 that is not a feed is a failed call. The [mm-link] marker is the person's own prompt's alone.
 // ⛔ A client's link moves from one thread to another in two ways only: the person's /mm link, and a new
 //    thread started from the bridge's own chip for that client (Start thread, /mm start). Never otherwise.
+//    (0.6.0) A skill load or a band press links a thread only to a client that has no linked thread: it never moves one.
 // ⛔ A session reads its OWN context window, at most once in five minutes, and never another thread's.
 // ⛔ The band above the prompt draws from what is stored: it makes no feed call and no app call.
 // ⛔ The bridge reads nothing of a thread: no transcript, no events. A new thread that takes over from an
@@ -133,7 +141,7 @@ import type { AppThread, Fold, Kickoff, Pairs, Recommendation, Replaced, Row, Ro
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.5.28'
+const VERSION = '0.6.0'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -144,6 +152,12 @@ const BAND = { plugin: 'mm-bridge', key: 'band' } as const
 const FOLDS = { plugin: 'mm-bridge', key: 'folds' } as const
 /** (New people) This thread's own presses on `New people`: the open picker, presses in flight, what OW refused. */
 const PEOPLE = { plugin: 'mm-bridge', key: 'people' } as const
+/** (0.6.0) This thread's Tracking part of the pane: its current project, the pane's title, the lines. */
+const TRACK = { plugin: 'mm-bridge', key: 'track' } as const
+/** (0.6.0) This session's own record: the person's prompts, a pane they closed, a SINGLE-SESSION run. */
+const SESS = { plugin: 'mm-bridge', key: 'sess' } as const
+/** (0.6.0) The band's line for a thread not tracked to a client yet. */
+const NUDGE = { plugin: 'mm-bridge', key: 'nudge' } as const
 const PANE_VIEW = 'mm-view'
 const PANE_QUEUE = 'mm-queue'
 const SYNC_MS = 5 * 60_000
@@ -1361,6 +1375,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     await storeLast($, feed, last)
     const rowsOf = (list: readonly QueueItem[], needsYou = false): Row[] => list.map(it => rowFor(it, recs[it.projectId] as Recommendation, now, { needsYou }))
     await showQueue($, member, items, rowsOf(items, true), last.pinned, now, { teammate: rowsOf(lists.teammate), older: rowsOf(lists.older), checking: rowsOf(checking) }, now, last)
+    // (0.6.0) a terminal session's own current project, by the feed's rows for its session: no thread is touched
+    if (!known) await currentPass($, { now, links: {}, was: {}, moved: [], live, gone: new Set(), feedThreads, pairs: {}, complete: false, lookups: LOOKUPS_PER_SYNC }).catch(() => {})
     return { last, live, pairs: known ?? {}, listed: false, unseen: new Set() }
   }
 
@@ -1955,6 +1971,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   await patchStore<Record<string, number>>($, 'mm.cleared', {}, fresh => applyChanges(fresh, was.cleared, cleared))
   await patchStore<Auto>($, 'mm.auto', {}, fresh => applyChanges(fresh, was.auto, auto, 'delete'))
   await patchStore<Record<string, string>>($, 'mm.titles', {}, (fresh, stored) => keepNewest(fresh, was.titles, titles) || !stored)
+  // (0.6.0) each thread's current project, from what this pass read and the links it wrote (once per feed)
+  if (!known) await currentPass($, { now, links, was: was.links, moved: moves, live, gone, feedThreads, pairs, complete: listed.complete, lookups: asked }).catch(() => {})
   await storeLast($, feed, last)
   await showQueue($, member, items, rows, want.size, now, folds, now, last)
   return { last, live, pairs, listed: true, unseen }
@@ -2000,7 +2018,7 @@ async function showQueue(
   await $.state.set(QUEUE, queue)
   const { value: notice } = await $.state.get(NOTICE)
   if (notice?.text && now - notice.at > SYNC_MS) await $.state.set(NOTICE, { text: '', at: now })
-  $.ui.status(items.length ? `MM: ${items.length} need you · ${pinned} pinned` : 'MM: clear')
+  await putStatus($, 'base', items.length ? `MM: ${items.length} need you · ${pinned} pinned` : 'MM: clear')
 }
 
 async function sync($: EngineInterface): Promise<Last> {
@@ -2283,7 +2301,11 @@ async function clientPart($: EngineInterface): Promise<MmView> {
 async function ownIn($: EngineInterface, items: readonly QueueItem[]): Promise<QueueItem | undefined> {
   const me = await knownSelf($)
   const pid = me ? ownerOf(me, await storeGet<Record<string, string>>($, 'mm.links', {})) : undefined
-  return pid ? items.find(i => i.projectId === pid) : undefined
+  if (pid) return items.find(i => i.projectId === pid)
+  // (0.6.0) a second thread of a client: its current project is the client its part shows (Rob, 2026-10-25)
+  const key = await knownKey($)
+  const cur = key && (await tracks($)) ? (await currents($))[key] : undefined
+  return cur && isUuid(cur.pid) ? items.find(i => i.projectId === cur.pid) : undefined
 }
 
 /**
@@ -2294,8 +2316,10 @@ async function ownIn($: EngineInterface, items: readonly QueueItem[]): Promise<Q
  * S2: it opens AT ONCE, drawn from what the last sync stored; the list is then brought up to date and drawn
  * again, and the client part with it when what it shows changed. A press (`press`, the band's Drafts) may take
  * a feed this session read less than a minute ago; a typed /mm asks OW again.
- * ⛔ Opened only because the person asked. Nothing opens a pane from a timer: the API has no way to make
- *    one available without drawing it, and drawing it opens a closed side panel.
+ * ⛔ Here, opened because the person asked. (0.6.0, Rob 2026-10-25) The pane also opens by itself for the thread's
+ *    current project (`autoPane`: at session start, on each surface that attaches, when the project changes), never
+ *    from the timer alone, never again for a project whose pane the person closed in this session, and never in a run
+ *    nobody watches; that open draws and reads only.
  */
 async function showList($: EngineInterface, press: boolean): Promise<string> {
   const now = await $.clock.now()
@@ -2311,7 +2335,7 @@ async function showList($: EngineInterface, press: boolean): Promise<string> {
     before = undefined
     finish = await clearClient($)
   }
-  await $.ui.open({ id: PANE_QUEUE, title: 'Needs you' })
+  await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })
   // after the pane is open: its client part read, and the list brought up to date, side by side
   const reading = finish()
   let last: Last
@@ -2338,9 +2362,10 @@ async function showList($: EngineInterface, press: boolean): Promise<string> {
  * This thread's client in the pane, with a short note for Claude. `force` is the person asking for it
  * (/mm view, /mm link, the band's Drafts button); without it this is the timer.
  * ⛔ The timer opens no pane. It keeps the client part current, so a pane the person has open shows what
- *    is waiting now, and that is all it does to the pane.
- * ⛔ A thread that linked itself gets the pin and the name only. Nothing is added to its transcript, and
- *    its client part is not read, until the person acts on that link: Update, /mm link, or /mm view here.
+ *    is waiting now, and that is all it does to the pane. (0.6.0: `autoPane` opens it, never this.)
+ * ⛔ A thread that linked itself gets the pin and the name only from here. Nothing is added to its transcript
+ *    until the person acts on that link: Update, /mm link, or /mm view here. (0.6.0) Its client part is drawn in
+ *    the pane `autoPane` opened (`drawTrack`), read only: the pickup VIEW, never a pickup, a claim or a note.
  */
 async function refreshSelf($: EngineInterface, force: boolean): Promise<string> {
   const me = await selfId($)
@@ -2366,7 +2391,7 @@ async function refreshSelf($: EngineInterface, force: boolean): Promise<string> 
   // asked for by the person, the pane opens at once and its client part is read after (S2); the timer draws
   // the part only once it has read it
   const finish = await beginClient($, it, true, force)
-  if (force) await $.ui.open({ id: PANE_QUEUE, title: 'Needs you' })
+  if (force) await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })
   await finish()
   if (noted[me] !== sig) {
     const body = noteText(it, last?.member ?? '')
@@ -2697,6 +2722,8 @@ async function tick($: EngineInterface): Promise<void> {
           failed = { at: last?.at ?? null }
           throw err
         }
+        // (0.6.0) after each sync: the skill map (hourly) and the time of this computer's threads' projects
+        await timePass($).catch(err => noteFailure($, 'client time', err))
       }
       // (0.5.19, Rob 10-20) Remote Control follows the pin while /mm rc is on: off, it asks the app nothing
       await rcFollowsPin($).catch(err => noteFailure($, 'remote control', err))
@@ -2707,6 +2734,8 @@ async function tick($: EngineInterface): Promise<void> {
     // themselves (the thread that synced, at once; every other, on its next tick)
     await autoUpdates($).catch(err => noteFailure($, 'auto update', err))
     await refreshSelf($, false)
+    // (0.6.0) this thread's Tracking part, status line and band line, from the store; the pane opens for a new project
+    await drawTrack($, 'tick')
     // R5: this thread's own chips: the ones no longer wanted withdrawn, the missing ones minted
     await chipsTick($).catch(() => {})
     await refreshBand($)
@@ -2723,7 +2752,7 @@ async function tick($: EngineInterface): Promise<void> {
       const last = await storeGet<Last | null>($, 'mm.last', null)
       if (last && last.at === f.at) await $.store.set('mm.last', { ...last, error: short(String(err), 300) })
     }
-    $.ui.status(`MM: error, /mm status`)
+    await putStatus($, 'base', `MM: error, /mm status`).catch(() => {})
     await refreshBand($)
     await beat($, { ok: false, tickError: short(String(err), 300) })
   }
@@ -4762,7 +4791,7 @@ async function claimThread($: EngineInterface, feed: Feed | null, it: QueueItem,
 async function showDrafts($: EngineInterface, it: QueueItem): Promise<Answer> {
   const mine = await ownIn($, [it])
   const finish = await beginClient($, it, mine !== undefined, true)
-  await $.ui.open({ id: PANE_QUEUE, title: 'Needs you' })
+  await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })
   // the row pressed may be far down the list: the part just drawn is at the top
   await Promise.resolve($.ui.scroll({ to: 'start', in: PANE_QUEUE })).catch(() => {})
   return { said: '', after: finish }
@@ -5156,6 +5185,8 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       `member: ${memberText(last?.member) || '?'}`,
       `last sync: ${last ? new Date(last.at).toISOString() : 'never'} · ${last?.items.length ?? 0} need you · ${last?.pinned ?? 0} pinned`,
       `linked threads: ${Object.keys(links).length} · this thread: ${await selfId($)}`,
+      // (0.6.0) every thread with a current project, and the second threads among them
+      await currentLine($),
       `pins you took off: ${off}`,
       `poller: ${lease?.owner === (await instanceId($)) ? 'this thread' : 'another thread'}`,
       `paused: ${Boolean(await $.store.get('mm.paused'))}`,
@@ -5224,6 +5255,9 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       // The link is dropped, and so is the note that the person took our pin off it: it is no client's thread now.
       await pinAgain($, me)
     }
+    // (0.6.0) and it has no current project: nothing counts it to a client until something says so again
+    await clearCurrent($, me)
+    await drawTrack($, 'set')
     return 'This thread is no longer linked to a client.'
   }
 
@@ -5336,6 +5370,8 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
     })
   }
   await claim($, pid, me)
+  // (0.6.0) the thread's current project is the client it was linked to
+  await setCurrent($, me, { pid, how: 'link', at: await $.clock.now() })
   // ⛔ Only the person's own link stamps: one Claude or anything else made is not pinned ahead of the cap.
   if (it && by === 'person') await stamp($, pid, me)
   else if (!it) {
@@ -5349,6 +5385,7 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
     })
   }
   await reconcile($, feed, pairs)
+  await drawTrack($, 'link')
   return `This thread is now ${(it ?? named).client}'s. ${await refreshSelf($, true)}`
 }
 
@@ -5378,9 +5415,10 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
  * (settleLater): a dozen threads started together each keep their own (B1).
  * R5 (0.5.2): every running thread mints its own copy of a client's chip, and they share one prompt. A copy
  * started after the client already has a newer linked thread (another copy, or any other thread, took the
- * client since the chip was minted) is stale: it does not link and does not take the client, and the answer is
- * the sentence its kickoff gets (staleCopySentence), so that its first answer names the thread that has the
- * client and stops. So does a marker for a client that already has another linked thread, with no chip.
+ * client since the chip was minted) does not link and does not take the client, and the answer is the sentence its
+ * kickoff gets. So does a marker for a client that already has another linked thread, with no chip. (0.6.0) That
+ * sentence is `secondThreadSentence`: the thread stays the client's as a SECOND thread (its current project is the
+ * client), leaves the reply package to the primary, loads the client's skill and waits for the person.
  * Answers that sentence, or undefined.
  */
 async function linkFromMarker($: EngineInterface, text: string, origin: string | undefined): Promise<string | undefined> {
@@ -5416,6 +5454,8 @@ async function linkFromMarker($: EngineInterface, text: string, origin: string |
     times[me] = at
     capped(times)
   })
+  // (0.6.0) the thread's current project is the client its marker named, linked or not: its pane and its time
+  await setCurrent($, me, { pid: projectId, how: 'marker', at }).catch(() => null)
   if (me in (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))) return undefined
   const now = await $.clock.now()
   const chips = await chipsOf($, now)
@@ -5486,8 +5526,13 @@ async function linkFromMarker($: EngineInterface, text: string, origin: string |
   await link()
   if (!ours) {
     if (!taken) return undefined
+    // (0.6.0) the client's primary keeps the client: this thread is its second thread, and is told so (verbatim)
     const named = listedIn(last).find(i => i.projectId === projectId)?.client
-    return staleCopySentence(named ? cleanName(named) : await nameOfStored($, projectId))
+    const client = named ? cleanName(named) : await nameOfStored($, projectId)
+    const holder = (await storeGet<Record<string, string>>($, 'mm.links', {}))[projectId]
+    const title = holder ? await primaryTitleOf($, projectId, holder, true).catch(() => '') : ''
+    const skill = (await skillList($)).find(x => x.project_id === projectId && x.kind === 'client')?.skill_key
+    return secondThreadSentence(client, titleForClaude(title), skill)
   }
   if (had !== undefined) {
     const given = had
@@ -5524,13 +5569,899 @@ async function nameOfStored($: EngineInterface, projectId: string): Promise<stri
   return pin && cleanName(pin.client) ? cleanName(pin.client) : `client ${projectId.slice(0, 8)}`
 }
 
+// ---------------------------------------------------------------- (0.6.0) every client thread linked, the pane always open with tracked time
+//
+// Rob, 2026-10-25: "I think we need the side panel to be open on all bridge-connected threads... anytime a team member
+// is talking about a client, the bridge connects, even if there's more than one thread per client... It also gives them
+// confirmation that their current work is being tracked." (the whole quote is at the top of ./track.ts)
+//
+// Each thread on this computer has a CURRENT PROJECT (`mm.current`, by the app's thread id, or `cli:<session id>` for a
+// terminal session): whatever told the bridge last, the latest word winning. A skill the thread loaded (the Skill tool,
+// looked up in OW's skill map), the feed's rows for the thread's sessions, its [mm-link] marker, /mm link, the person's
+// press on the band, or the thread being the client's linked thread (`primary`). A client still has ONE linked thread,
+// its PRIMARY (`mm.links`: the pin, the name, Update, chips, Start and the reply package are its alone, exactly as
+// before); every other thread whose current project is the client is a SECOND thread: never pinned, renamed or sent
+// anything, and never the place a package is picked up. A skill load or a band press makes the thread the client's
+// primary only when the client has none and the thread declared no other client, through R1's own path (`mm.auto`
+// first, then the link); it never takes a client from another thread (only the person's /mm link moves one).
+// The pane (`mm-queue`) opens by itself for the thread's current project: its Tracking part first (the time OW tracked
+// to the project today and this week, across all its threads: `/api/ext/client-time`), then the client part (in a
+// second thread under one dim line naming the primary), then the list. The status line says what the thread is
+// counted to.
+// ⛔ Drawing and opening the pane read only: the feed, the skill map, the client's time, and the pickup VIEW
+//    (`GET /reply-package?format=pickup`, which records nothing: OW's route only reads). Nothing here picks up, claims
+//    or holds a reply package, calls `POST /reply-package/pickup`, or adds a note for Claude: the one note a press on
+//    the band adds is the person's own act (`pressTrack`), through `$.session.append`, which starts no turn.
+// ⛔ Never in a run nobody watches: a session that is not the person's (`claude -p`), one with MM_UNATTENDED=1, or one
+//    whose first prompt begins `SINGLE-SESSION` opens no pane by itself.
+
+/** (0.6.0) A thread's current project is forgotten once the app's list has not shown the thread for this long. */
+const CURRENT_KEEP_MS = 14 * DAY_MS
+/** (0.6.0) The most threads `mm.current` remembers. */
+const CURRENT_MAX = 400
+/** (0.6.0) The thread that polls reads OW's skill map at most this often. */
+const SKILLS_EVERY_MS = 3_600_000
+/** (0.6.0) After a read of the skill map failed, the thread that polls waits this long before the next. */
+const SKILLS_RETRY_MS = 15 * 60_000
+/** (0.6.0) A route OW answered 404 for is not asked again for this long: that OW does not have it yet. */
+const ROUTE_MISSING_MS = 30 * 60_000
+/** (0.6.0) A project's time younger than this is not read again for a thread whose project was just set. */
+const TIME_FRESH_MS = 2 * 60_000
+/** (0.6.0) A thread whose project was just set waits this long before it reads that project's time (a change meanwhile starts the wait again). */
+const TIME_DEBOUNCE_MS = 15_000
+/** (0.6.0) A thread reads one project's time at most once in this long on this computer (`mm.timeAsked`). */
+const TIME_ASK_EVERY_MS = 60_000
+/** (0.6.0) A terminal session (no timer, no poller) reads its own project's time at most this often. */
+const TERMINAL_TIME_MS = 2 * 60_000
+/** (0.6.0) The thread that polls reads the time of the projects of this computer's threads active in this long. */
+const TIME_ACTIVE_MS = 7 * DAY_MS
+/** (0.6.0, OW contract 2026-10-25) Threads active in this long come first in the poller's list. */
+const TIME_HOT_MS = 2 * DAY_MS
+/** (0.6.0, OW contract 2026-10-25) The most projects the thread that polls reads after each sync. */
+const TIME_POLL_MAX = 15
+/** (0.6.0) The most projects one read asks for, and the most `mm.time` keeps. */
+const TIME_MAX = 40
+/** (0.6.0) The most skills `mm.skills` keeps. */
+const SKILLS_MAX = 1_500
+/** (0.6.0) The most threads missing from the app's list one sync asks the app about (archived or not). */
+const CURRENT_CHECKS_PER_SYNC = 3
+/** (0.6.0) A thread's `seen` is written again only after this long (the sync runs every five minutes). */
+const SEEN_EVERY_MS = 30 * 60_000
+
+/** (0.6.0) What `mm.skills` holds: OW's skill map as last read, when, and a read that failed or found no route. */
+type SkillStore = { at?: number; asOf?: string; skills?: SkillEntry[]; missingUntil?: number; failedAt?: number }
+/** (0.6.0) What `mm.timeMeta` holds: whether the viewer may see leverage, and the route answering 404 until when. */
+type TimeMeta = { canSeeLeverage?: boolean; missingUntil?: number; okAt?: number; failedAt?: number }
+/**
+ * (0.6.0) Why the pane and the status line are drawn again. `start` and `attach` open the pane again for a project it
+ * already showed (a new surface); `press` and `link` are the person's own open, made where they pressed or typed.
+ */
+type TrackWhy = 'start' | 'attach' | 'tick' | 'prompt' | 'turn' | 'set' | 'data' | 'press' | 'link'
+
+/** (0.6.0) Each session's status line in two parts: the list's count (`showQueue`, a tick that failed) and what this thread is counted to. */
+const statusParts = new Map<string, { base?: string; track?: string }>()
+/** (0.6.0) The client part this session drew for a thread `refreshSelf` does not draw one for (a second thread, a primary the bridge linked by itself): its client and what it showed. */
+const partsDrawn = new Map<string, string>()
+/** (0.6.0) A task a thread declared before it had a current project: given to the first project it gets. */
+const pendingTasks = new Map<string, string>()
+/** (0.6.0) The wait before a thread reads its new project's time, by session. */
+const timeWaits = new Map<string, { cancel: () => void }>()
+/** (0.6.0) The sessions that already read OW's skill map once because none was stored. */
+const skillsAsked = new Set<string>()
+/** (0.6.0) A primary thread's name as the app answered it, by thread: for the second thread's line, asked once. */
+const primaryTitles = new Map<string, string>()
+
+/** (0.6.0) The status line: the list's part and this thread's tracking part, side by side; nothing when both are empty. */
+async function putStatus($: EngineInterface, part: 'base' | 'track', text: string | undefined): Promise<void> {
+  const id = await instanceId($)
+  const parts = { ...(statusParts.get(id) ?? {}) }
+  if (text === undefined) delete parts[part]
+  else parts[part] = text
+  statusParts.set(id, parts)
+  const shown = [parts.base, parts.track].filter(Boolean).join('  ')
+  $.ui.status(shown || undefined)
+}
+
+/** (0.6.0) This session's own record (`sess`). */
+async function sessOf($: EngineInterface): Promise<MmSession> {
+  const { value } = await $.state.get(SESS)
+  return value && typeof value === 'object' && typeof value.prompts === 'number' ? value : { prompts: 0 }
+}
+
+async function setSess($: EngineInterface, patch: Partial<MmSession>): Promise<MmSession> {
+  const next: MmSession = { ...(await sessOf($)), ...patch }
+  for (const k of Object.keys(next) as Array<keyof MmSession>) if (next[k] === undefined) delete next[k]
+  await $.state.set(SESS, next)
+  return next
+}
+
+/**
+ * (0.6.0) Whether this session tracks at all: a person's session (the terminal REPL, or the desktop app's Code tab),
+ * as session.start found it. A session it has not seen start goes by the app: the desktop's Code tab is a person's.
+ */
+async function tracks($: EngineInterface): Promise<boolean> {
+  const s = await sessOf($)
+  if (typeof s.interactive === 'boolean') return s.interactive
+  return (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop'
+}
+
+/** (0.6.0) This thread's key in `mm.current`: the app's thread id in the desktop app (asked once), `cli:<session id>` elsewhere; '' while it is not known. */
+async function threadKey($: EngineInterface): Promise<string> {
+  if ((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop') return selfId($)
+  const id = await instanceId($)
+  return SESSION_ID.test(id) ? `cli:${id}` : ''
+}
+
+/** (0.6.0) `threadKey` with no app call: '' in the desktop app while the timer has not learnt the thread's id. */
+async function knownKey($: EngineInterface): Promise<string> {
+  if ((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop') return knownSelf($)
+  const id = await instanceId($)
+  return SESSION_ID.test(id) ? `cli:${id}` : ''
+}
+
+async function currents($: EngineInterface): Promise<Record<string, Current>> {
+  const v = await storeGet<Record<string, Current>>($, 'mm.current', {})
+  return v && typeof v === 'object' && !Array.isArray(v) ? v : {}
+}
+
+/** (0.6.0) A thread's current project: its record, else the client it is linked to (`primary`). */
+function currentIn(all: Readonly<Record<string, Current>>, links: Readonly<Record<string, string>>, key: string): Current | undefined {
+  const c = Object.hasOwn(all, key) ? all[key] : undefined
+  if (c && typeof c === 'object' && isUuid(c.pid) && Number.isFinite(c.at)) return c
+  if (THREAD_ID.test(key)) {
+    const pid = ownerOf(key, links)
+    if (pid) return { pid, how: 'primary', at: 0 }
+  }
+  return undefined
+}
+
+async function currentFor($: EngineInterface, key: string): Promise<Current | undefined> {
+  if (!key) return undefined
+  return currentIn(await currents($), await storeGet<Record<string, string>>($, 'mm.links', {}), key)
+}
+
+async function skillStore($: EngineInterface): Promise<SkillStore> {
+  const v = await storeGet<SkillStore>($, 'mm.skills', {})
+  return v && typeof v === 'object' && !Array.isArray(v) ? v : {}
+}
+
+async function skillList($: EngineInterface): Promise<SkillEntry[]> {
+  const s = await skillStore($)
+  return Array.isArray(s.skills) ? s.skills.filter(x => x && typeof x.skill_key === 'string' && SKILL_KEY.test(x.skill_key) && isUuid(x.project_id)) : []
+}
+
+/** (0.6.0) The skill the time tracker knows without OW's map: Massmarket's internal ops, whose project id the bridge has. */
+const KNOWN_SKILLS: Readonly<Record<string, Omit<SkillEntry, 'skill_key'>>> = {
+  'massmarket-internal-ops': { project_id: INTERNAL_OPS, name: INTERNAL_NAME, kind: 'internal_ops' },
+}
+
+const authHeaders = async ($: EngineInterface): Promise<Record<string, string>> => ({ Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER })
+
+/**
+ * (0.6.0) OW's skill map read into `mm.skills` (`GET /api/ext/skill-map`): which project each skill counts time to. A
+ * 404 (an OW that does not have the route yet) is not asked again for ROUTE_MISSING_MS; any other failure keeps the map
+ * on record. Given APP_WAIT_MS.
+ */
+async function fetchSkills($: EngineInterface): Promise<void> {
+  const now = await $.clock.now()
+  try {
+    const asked = await within($, $.http.fetch(`${EXT}/skill-map`, { headers: await authHeaders($) }))
+    if (!asked.ok) throw new Error('no answer')
+    const r = asked.value
+    if (r.status === 404) {
+      await patchStore<SkillStore>($, 'mm.skills', {}, s => void (s.missingUntil = now + ROUTE_MISSING_MS))
+      return
+    }
+    if (!r.ok) throw new Error(`skill-map HTTP ${r.status}`)
+    const map = parseSkillMap(JSON.parse(r.text))
+    if (!map) throw new Error('skill-map: not a skill map')
+    await $.store.set('mm.skills', { at: now, asOf: map.asOf, skills: map.skills.slice(0, SKILLS_MAX) } satisfies SkillStore)
+  } catch {
+    await patchStore<SkillStore>($, 'mm.skills', {}, s => void (s.failedAt = now)).catch(() => {})
+  }
+}
+
+/** (0.6.0) A session with no skill map on record reads it once (`skillsAsked`), unless OW said it has no such route a moment ago. */
+async function ensureSkills($: EngineInterface): Promise<void> {
+  const s = await skillStore($)
+  if (Array.isArray(s.skills) || Number(s.missingUntil) > (await $.clock.now())) return
+  const id = await instanceId($)
+  if (skillsAsked.has(id)) return
+  skillsAsked.add(id)
+  await fetchSkills($)
+}
+
+/** (0.6.0) The skill map's entry for a skill name, or the one the bridge knows itself. */
+async function skillEntry($: EngineInterface, name: string): Promise<SkillEntry | undefined> {
+  if (!SKILL_KEY.test(name)) return undefined
+  await ensureSkills($)
+  const found = (await skillList($)).find(s => s.skill_key === name)
+  if (found) return found
+  return Object.hasOwn(KNOWN_SKILLS, name) ? { skill_key: name, ...(KNOWN_SKILLS[name] as Omit<SkillEntry, 'skill_key'>) } : undefined
+}
+
+/** (0.6.0) Whether a project counts as a client here: a client by the skill map (or not in it), never one of Massmarket's own projects. */
+const isClientProject = (pid: string, skills: readonly SkillEntry[]): boolean => kindOf(pid, skills) === 'client' && !INTERNAL_PROJECTS.has(pid)
+
+/**
+ * (0.6.0) A source's word on a thread's current project, over a fresh copy: the latest word wins (`mergeCurrent`). A
+ * task the thread declared before it had a project goes with the first one it gets.
+ */
+async function setCurrent($: EngineInterface, key: string, next: { pid: string; how: How; at: number; task?: string }): Promise<Current | null> {
+  if (!key || !isUuid(next.pid)) return null
+  const client = isClientProject(next.pid, await skillList($))
+  const pending = pendingTasks.get(key)
+  let out: Current | null = null
+  await patchStore<Record<string, Current>>($, 'mm.current', {}, all => {
+    const merged = mergeCurrent(Object.hasOwn(all, key) ? all[key] : undefined, { ...next, task: next.task ?? pending }, client)
+    if (!merged) return false
+    delete all[key]
+    all[key] = merged
+    capped(all, CURRENT_MAX)
+    out = merged
+  })
+  if (out) pendingTasks.delete(key)
+  return out
+}
+
+/** (0.6.0) The task a worklog-hook command declared: kept on the thread's current project (its time stays the project's word). */
+async function declareTask($: EngineInterface, label: string): Promise<void> {
+  if (!label || !(await tracks($))) return
+  const key = await threadKey($)
+  if (!key) return
+  const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+  const cur = currentIn(await currents($), links, key)
+  if (!cur) {
+    pendingTasks.set(key, label)
+    return
+  }
+  if (cur.task === label && cur.at > 0) return
+  const now = await $.clock.now()
+  await patchStore<Record<string, Current>>($, 'mm.current', {}, all => {
+    const was = Object.hasOwn(all, key) ? all[key] : undefined
+    if (was && isUuid(was.pid)) {
+      if (was.pid !== cur.pid || was.task === label) return false
+      all[key] = { ...was, task: label }
+    } else all[key] = { pid: cur.pid, how: 'primary', at: now, task: label }
+    capped(all, CURRENT_MAX)
+  })
+  await drawTrack($, 'set')
+}
+
+/**
+ * (0.6.0) After a skill load or a band press for a client: the thread becomes the client's primary when the client has
+ * no linked thread, the thread is no other client's, it declared no other client (its marker, its own declarations,
+ * the feed's rows for its sessions), and, for a skill load, the person never unlinked it. Through R1's own path: the
+ * bridge's record of the link (`mm.auto`) first, then the link, each over a fresh copy; the sync it asks for pins and
+ * names it. ⛔ Never takes a client from another thread, and never in a terminal session (no app thread to link).
+ * Answers what the thread is to the client now.
+ */
+async function maybePrimary($: EngineInterface, me: string, pid: string, how: 'skill' | 'press'): Promise<'primary' | 'second' | 'none'> {
+  if (!THREAD_ID.test(me) || !isUuid(pid) || INTERNAL_PROJECTS.has(pid)) return 'none'
+  if (await $.store.get('mm.paused')) return 'none'
+  const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+  if (links[pid] === me) return 'primary'
+  if (links[pid] !== undefined || ownerOf(me, links) !== undefined) return 'second'
+  if (how === 'skill' && me in (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))) return 'none'
+  const skills = await skillList($)
+  const marked = (await storeGet<Record<string, string>>($, 'mm.marked', {}))[me]
+  if (marked !== undefined && marked !== pid) return 'second'
+  const declared = (await currents($))[me]?.declared ?? []
+  if (declared.some(d => d !== pid && isClientProject(d, skills))) return 'second'
+  const feedThreads = recent ? feedThreadsOf(recent.feed) : []
+  if (feedThreads.length && declaredOther(pid, me, feedThreads, await storeGet<Pairs>($, 'mm.threads', {}), await storeGet<Record<string, string>>($, 'mm.marked', {}))) return 'second'
+  if (how === 'press') await forgetUnlink($, me)
+  const now = await $.clock.now()
+  await patchStore<Auto>($, 'mm.auto', {}, auto => {
+    if (auto[pid]?.sid === me) return false
+    auto[pid] = { sid: me, miss: 0, made: now }
+  })
+  let took = false
+  await patchStore<Record<string, string>>($, 'mm.links', {}, fresh => {
+    if (fresh[pid] !== undefined || ownerOf(me, fresh) !== undefined) return false
+    fresh[pid] = me
+    took = true
+  })
+  if (!took) {
+    // another session linked the client, or this thread, meanwhile: the record of a link that was not made goes
+    const held = (await storeGet<Record<string, string>>($, 'mm.links', {}))[pid]
+    if (held !== me) {
+      await patchStore<Auto>($, 'mm.auto', {}, auto => {
+        if (auto[pid]?.sid !== me) return false
+        delete auto[pid]
+      }).catch(() => {})
+    }
+    return held === me ? 'primary' : 'second'
+  }
+  await askSync($).catch(() => {})
+  return 'primary'
+}
+
+/** (0.6.0) A skill the main conversation loaded: the thread's current project, and the client's primary when it has none. */
+async function skillLoaded($: EngineInterface, raw: unknown): Promise<void> {
+  if (!(await tracks($))) return
+  const entry = await skillEntry($, skillName(raw))
+  if (!entry) return
+  const key = await threadKey($)
+  if (!key) return
+  await setCurrent($, key, { pid: entry.project_id, how: 'skill', at: await $.clock.now() })
+  if (entry.kind === 'client') await maybePrimary($, key, entry.project_id, 'skill')
+  await drawTrack($, 'set')
+}
+
+/**
+ * (0.6.0) A sync's pass over the threads' current projects, after its links are written, from what the pass read:
+ *   primary  a client's linked thread with no record yet (or one this pass linked, or one R1b moved the client from)
+ *            gets one: the losing thread keeps its project, and is a second thread from then on
+ *   feed     each of this computer's threads, by the feed's newest row for its sessions (paired as the pass paired
+ *            them), sole or not; a terminal session's own rows too
+ *   seen     a thread the app lists is seen now, with its last activity
+ *   gone     a thread the pass found gone, or archived when asked (at most CURRENT_CHECKS_PER_SYNC, once a day each,
+ *            within the pass's lookups), is forgotten; so is one the list has not shown for CURRENT_KEEP_MS
+ * Each change made over a fresh copy: the latest word still wins against what another session wrote meanwhile.
+ */
+async function currentPass(
+  $: EngineInterface,
+  o: { now: number; links: Readonly<Record<string, string>>; was: Readonly<Record<string, string>>; moved: readonly { pid: string; from: string }[]; live: ReadonlyMap<string, AppThread>; gone: ReadonlySet<string>; feedThreads: readonly FeedThread[]; pairs: Pairs; complete: boolean; lookups: number },
+): Promise<void> {
+  const { now, live } = o
+  const all = await currents($)
+  const skills = await skillList($)
+  /** Each key's word from this pass. */
+  const words = new Map<string, { pid: string; how: How; at: number }>()
+  const word = (key: string, w: { pid: string; how: How; at: number }) => {
+    const had = words.get(key)
+    if (!had || had.at <= w.at) words.set(key, w)
+  }
+  for (const [pid, sid] of Object.entries(o.links)) {
+    if (!THREAD_ID.test(sid) || !live.has(sid) || !isUuid(pid)) continue
+    const has = Object.hasOwn(all, sid) ? all[sid] : undefined
+    if (!has || (o.was[pid] !== sid && has.pid !== pid)) word(sid, { pid, how: 'primary', at: now })
+  }
+  for (const m of o.moved) if (THREAD_ID.test(m.from) && !Object.hasOwn(all, m.from)) word(m.from, { pid: m.pid, how: 'primary', at: now })
+  for (const row of o.feedThreads) {
+    const t = Math.min(Date.parse(row.last_activity_at), now)
+    if (!Number.isFinite(t)) continue
+    const app = Object.hasOwn(o.pairs, row.session_id) ? o.pairs[row.session_id]?.app : undefined
+    if (app && THREAD_ID.test(app) && live.has(app)) word(app, { pid: row.project_id, how: 'feed', at: t })
+    const cli = `cli:${row.session_id}`
+    if (Object.hasOwn(all, cli)) word(cli, { pid: row.project_id, how: 'feed', at: t })
+  }
+  /** What the pass learnt of each thread: when it was seen, its last activity, when it was asked about. */
+  const seen = new Map<string, { seen?: number; act?: number; chk?: number }>()
+  const drop = new Set<string>()
+  let checks = 0
+  for (const [key, c] of Object.entries(all)) {
+    if (!c || typeof c !== 'object' || !isUuid(c.pid)) {
+      drop.add(key)
+      continue
+    }
+    if (key.startsWith('cli:')) {
+      if (now - (Number(c.at) || 0) > CURRENT_KEEP_MS) drop.add(key)
+      continue
+    }
+    if (!THREAD_ID.test(key) || o.gone.has(key)) {
+      drop.add(key)
+      continue
+    }
+    const s = live.get(key)
+    if (s) {
+      const act = Date.parse(s.lastActivityAt ?? '')
+      const learnt: { seen?: number; act?: number } = {}
+      if (!(now - (Number(c.seen) || 0) < SEEN_EVERY_MS)) learnt.seen = now
+      if (Number.isFinite(act) && act !== c.act) learnt.act = act
+      if (Object.keys(learnt).length) seen.set(key, learnt)
+      continue
+    }
+    if (!o.complete) continue
+    if (now - (Number(c.seen) || Number(c.at) || 0) > CURRENT_KEEP_MS) {
+      drop.add(key)
+      continue
+    }
+    // not in the list (its 60 most recent): archived, or only older? asked now and then, within the pass's lookups
+    if (checks < CURRENT_CHECKS_PER_SYNC && o.lookups + checks < LOOKUPS_PER_SYNC && !(now - (Number(c.chk) || 0) < DAY_MS)) {
+      checks++
+      const found = await askApp($, key)
+      if (found === 'archived') drop.add(key)
+      else seen.set(key, { ...(typeof found === 'object' ? { seen: now } : {}), chk: now })
+    }
+  }
+  if (!words.size && !seen.size && !drop.size) return
+  await patchStore<Record<string, Current>>($, 'mm.current', {}, fresh => {
+    let changed = false
+    for (const key of drop) {
+      if (!Object.hasOwn(fresh, key)) continue
+      // a word another session wrote since this pass read the record stands
+      if (Object.hasOwn(all, key) && !sameValue(fresh[key], all[key])) continue
+      delete fresh[key]
+      changed = true
+    }
+    for (const [key, w] of words) {
+      const merged = mergeCurrent(Object.hasOwn(fresh, key) ? fresh[key] : undefined, w, isClientProject(w.pid, skills))
+      if (!merged) continue
+      fresh[key] = merged
+      changed = true
+    }
+    for (const [key, learnt] of seen) {
+      const c = Object.hasOwn(fresh, key) ? fresh[key] : undefined
+      if (!c) continue
+      fresh[key] = { ...c, ...learnt }
+      changed = true
+    }
+    capped(fresh, CURRENT_MAX)
+    return changed
+  })
+}
+
+async function timeMeta($: EngineInterface): Promise<TimeMeta> {
+  const v = await storeGet<TimeMeta>($, 'mm.timeMeta', {})
+  return v && typeof v === 'object' && !Array.isArray(v) ? v : {}
+}
+
+async function timeRecords($: EngineInterface): Promise<Record<string, TimeRecord>> {
+  const v = await storeGet<Record<string, TimeRecord>>($, 'mm.time', {})
+  return v && typeof v === 'object' && !Array.isArray(v) ? v : {}
+}
+
+/**
+ * (0.6.0) The time OW tracked to some projects, read into `mm.time` (`GET /api/ext/client-time?project_ids=...`, at most
+ * TIME_MAX). Today on every read; the week (and leverage) only for a project read for the first time or whose week is
+ * WEEK_EVERY_MS old (OW contract 2026-10-25: a week read for 40 clients takes ~3.5 s), so a read is at most two calls,
+ * `periods=today,week` for those and `periods=today` for the rest.
+ */
+async function fetchTime($: EngineInterface, pids: readonly string[]): Promise<void> {
+  const ids = [...new Set(pids.filter(isUuid))].slice(0, TIME_MAX)
+  if (!ids.length) return
+  const now = await $.clock.now()
+  if (Number((await timeMeta($)).missingUntil) > now) return
+  const recs = await timeRecords($)
+  const withWeek = ids.filter(id => weekIsDue(Object.hasOwn(recs, id) ? recs[id] : undefined, now))
+  const todayOnly = ids.filter(id => !withWeek.includes(id))
+  if (withWeek.length) await readTime($, withWeek, true)
+  if (todayOnly.length && !(Number((await timeMeta($)).missingUntil) > (await $.clock.now()))) await readTime($, todayOnly, false)
+}
+
+/**
+ * (0.6.0) One call to OW's client-time route, merged into `mm.time` (`mergeTime`: a today-only answer keeps the week and
+ * the leverage last read, each period with its own as-of). A 404 (an OW that does not have the route yet) is not asked
+ * again for ROUTE_MISSING_MS, and each pane says the numbers are not available yet; any other failure (5xx, no answer
+ * in APP_WAIT_MS, an answer of another shape) keeps the numbers on record, marked as not refreshed.
+ */
+async function readTime($: EngineInterface, ids: readonly string[], week: boolean): Promise<void> {
+  let status = 0
+  let parsed: ClientTime | null = null
+  try {
+    const url = `${EXT}/client-time?project_ids=${ids.join(',')}&periods=${week ? 'today,week' : 'today'}`
+    const asked = await within($, $.http.fetch(url, { headers: await authHeaders($) }))
+    if (asked.ok) {
+      status = asked.value.status
+      if (asked.value.ok) parsed = parseClientTime(JSON.parse(asked.value.text))
+    }
+  } catch {
+    parsed = null
+  }
+  const at = await $.clock.now()
+  if (status === 404) {
+    await patchStore<TimeMeta>($, 'mm.timeMeta', {}, m => void (m.missingUntil = at + ROUTE_MISSING_MS))
+    return
+  }
+  if (!parsed) {
+    await patchStore<TimeMeta>($, 'mm.timeMeta', {}, m => void (m.failedAt = at))
+    await patchStore<Record<string, TimeRecord>>($, 'mm.time', {}, all => {
+      for (const id of ids) all[id] = { ...(Object.hasOwn(all, id) ? all[id] : {}), failedAt: at }
+      capped(all, TIME_MAX)
+    })
+    return
+  }
+  const got = parsed
+  await patchStore<TimeMeta>($, 'mm.timeMeta', {}, m => {
+    m.canSeeLeverage = got.viewer.canSeeLeverage
+    m.okAt = at
+    delete m.missingUntil
+  })
+  await patchStore<Record<string, TimeRecord>>($, 'mm.time', {}, all => {
+    for (const id of ids) {
+      const p = got.projects.find(x => x.project_id === id)
+      const prev = Object.hasOwn(all, id) ? all[id] : undefined
+      delete all[id]
+      all[id] = p ? mergeTime(prev, p, at, got.asOf, week) : { at, skipped: true }
+    }
+    capped(all, TIME_MAX)
+  })
+}
+
+/**
+ * (0.6.0) The thread that polls, after each sync: OW's skill map at most hourly (once one is on record, or a thread
+ * here has a current project), and the time of the distinct current projects of this computer's threads active in the
+ * last TIME_ACTIVE_MS: those of threads active in the last TIME_HOT_MS first, most recent first, at most TIME_POLL_MAX
+ * (OW contract 2026-10-25), in one read (`fetchTime`: today each time, the week every WEEK_EVERY_MS).
+ */
+async function timePass($: EngineInterface): Promise<void> {
+  const now = await $.clock.now()
+  const all = await currents($)
+  const skills = await skillStore($)
+  const using = Array.isArray(skills.skills) || Object.keys(all).length > 0
+  const due = !(now - (Number(skills.at) || 0) < SKILLS_EVERY_MS) && !(Number(skills.missingUntil) > now) && !(now - (Number(skills.failedAt) || 0) < SKILLS_RETRY_MS)
+  if (using && due) await fetchSkills($)
+  const active: Array<{ pid: string; t: number }> = []
+  for (const c of Object.values(all)) {
+    if (!c || !isUuid(c.pid)) continue
+    const t = Math.max(Number(c.act) || 0, Number(c.at) || 0)
+    if (now - t <= TIME_ACTIVE_MS) active.push({ pid: c.pid, t })
+  }
+  const hot = (x: { t: number }): number => (now - x.t <= TIME_HOT_MS ? 1 : 0)
+  const pids = [...new Set(active.sort((a, b) => hot(b) - hot(a) || b.t - a.t).map(x => x.pid))].slice(0, TIME_POLL_MAX)
+  if (pids.length) await fetchTime($, pids)
+}
+
+/**
+ * (0.6.0) One project's time, read by this thread for itself: not while what is on record is younger than `fresh`,
+ * and at most once in TIME_ASK_EVERY_MS for the project on this computer (`mm.timeAsked`). Drawn again after.
+ */
+async function timeFor($: EngineInterface, pid: string, fresh = TIME_FRESH_MS): Promise<void> {
+  const now = await $.clock.now()
+  const rec = (await timeRecords($))[pid]
+  if (rec?.at && now - rec.at < fresh) return
+  if (Number((await timeMeta($)).missingUntil) > now) return
+  let go = false
+  await patchStore<Record<string, number>>($, 'mm.timeAsked', {}, asked => {
+    if (now - (Number(asked[pid]) || 0) < TIME_ASK_EVERY_MS) return false
+    asked[pid] = now
+    for (const [k, t] of Object.entries(asked)) if (!(now - Number(t) < 3_600_000)) delete asked[k]
+    go = true
+  })
+  if (!go) return
+  await fetchTime($, [pid])
+  await drawTrack($, 'data')
+}
+
+/** (0.6.0) A thread whose project was just set reads its time TIME_DEBOUNCE_MS later: a change meanwhile starts the wait again. */
+async function askTime($: EngineInterface, pid: string): Promise<void> {
+  const id = await instanceId($)
+  timeWaits.get(id)?.cancel()
+  try {
+    const wait = $.clock.after(TIME_DEBOUNCE_MS, () => {
+      timeWaits.delete(id)
+      void timeFor($, pid).catch(() => {})
+    })
+    timeWaits.set(id, wait)
+  } catch {
+    // no timer here: read now
+    await timeFor($, pid)
+  }
+}
+
+/** (0.6.0) A terminal session's own project's time, at session start and after each turn, at most every TERMINAL_TIME_MS. */
+async function terminalTime($: EngineInterface): Promise<void> {
+  if ((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop' || !(await tracks($))) return
+  const cur = await currentFor($, await knownKey($))
+  if (!cur) return
+  const now = await $.clock.now()
+  const s = await sessOf($)
+  if (now - (Number(s.asked) || 0) < TERMINAL_TIME_MS) return
+  await setSess($, { asked: now })
+  await timeFor($, cur.pid, TERMINAL_TIME_MS)
+}
+
+/** (0.6.0) Which Claude Code sessions are this thread's: its own, and the sessions paired with its app thread. And which other thread on this computer a session runs in. */
+async function sessionsOf($: EngineInterface, key: string): Promise<{ mine: (sid: string) => boolean; openable: (sid: string) => string | undefined }> {
+  const id = await instanceId($)
+  const pairs = await storeGet<Pairs>($, 'mm.threads', {})
+  const app = THREAD_ID.test(key) ? key : ''
+  const pairOf = (sid: string): string | undefined => (Object.hasOwn(pairs, sid) ? pairs[sid]?.app : undefined)
+  return {
+    mine: sid => sid === id || key === `cli:${sid}` || (app !== '' && pairOf(sid) === app),
+    openable: sid => {
+      const other = pairOf(sid)
+      return other && THREAD_ID.test(other) && other !== app ? other : undefined
+    },
+  }
+}
+
+/** (0.6.0) The name a project goes by in the pane: a client by its short name, Massmarket's own projects by their own words. */
+async function projectName($: EngineInterface, pid: string, kind: ProjectKind, skills: readonly SkillEntry[]): Promise<string> {
+  if (kind !== 'client') return displayName(kind, '')
+  const listed = listedIn(await storeGet<Last | null>($, 'mm.last', null)).find(i => i.projectId === pid)
+  if (listed && cleanName(listed.client)) return cleanName(listed.client)
+  const skill = skills.find(s => s.project_id === pid && s.name)
+  if (skill) return cleanName(clientName(skill.name))
+  const timed = (await timeRecords($))[pid]?.p?.name
+  if (timed) return cleanName(clientName(timed))
+  return nameOfStored($, pid)
+}
+
+/**
+ * (0.6.0) A client's primary thread's name, as given (each caller makes it safe for where it goes: `shownText` for the
+ * pane, `titleForClaude` for a sentence to Claude): as the last sync's recommendation named it, else as the app
+ * answers for it (asked once per thread when `ask`), else ''.
+ */
+async function primaryTitleOf($: EngineInterface, pid: string, holder: string, ask: boolean): Promise<string> {
+  const target = storedRec(await storeGet<Last | null>($, 'mm.last', null), pid)?.target
+  if (target && target.sid === holder && target.title.trim()) return target.title
+  const known = primaryTitles.get(holder)
+  if (known !== undefined || !ask || !THREAD_ID.test(holder)) return known ?? ''
+  const found = await lookup($, holder)
+  const title = typeof found === 'object' ? (found.title ?? '') : ''
+  primaryTitles.set(holder, title)
+  return title
+}
+
+/**
+ * (0.6.0) The client part in a thread `refreshSelf` draws none for: a second thread of a client, or the client's
+ * primary while the bridge's own link (the person has not acted on it). As `showClient` draws it, with no note for
+ * Claude: drawn when what it shows changed (`partSig`), emptied when the thread has no client any more.
+ * ⛔ The pickup VIEW only (`GET ...&format=pickup`): it records nothing at OW; nothing here picks a package up.
+ */
+async function drawPart($: EngineInterface, key: string, pid: string, client: boolean): Promise<void> {
+  const id = await instanceId($)
+  const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+  const drawn = partsDrawn.get(id) ?? ''
+  if (pid && client && links[pid] === key && (await storeGet<Auto>($, 'mm.auto', {}))[pid]?.sid !== key) {
+    // the person's own link: refreshSelf draws its part and its note, as before
+    partsDrawn.delete(id)
+    return
+  }
+  const it = pid && client ? listedIn(await storeGet<Last | null>($, 'mm.last', null)).find(i => i.projectId === pid) : undefined
+  const sig = it ? `${pid}\n${partSig(it)}` : ''
+  if (sig === drawn) return
+  partsDrawn.set(id, sig)
+  if (it) await showClient($, it, true)
+  else if (drawn) await clearClient($)
+}
+
+/** (0.6.0) The pane's title: the thread's current project by name, else `Needs you`. */
+async function paneTitle($: EngineInterface): Promise<string> {
+  try {
+    if (!(await tracks($))) return 'Needs you'
+    const cur = await currentFor($, await threadKey($))
+    if (!cur) return 'Needs you'
+    const skills = await skillList($)
+    return (await projectName($, cur.pid, kindOf(cur.pid, skills), skills)) || 'Needs you'
+  } catch {
+    return 'Needs you'
+  }
+}
+
+/**
+ * (0.6.0) The pane opened by itself for this thread's current project. Not in a session that is not the person's, one
+ * with MM_UNATTENDED=1, or one whose first prompt began `SINGLE-SESSION`; and not again for a project whose pane the
+ * person closed in this session (another project opens it again). A list the last sync stored is drawn in it at once.
+ * ⛔ Opens and draws only: no pickup, no claim, no hold.
+ */
+async function autoPane($: EngineInterface, pid: string, title: string): Promise<void> {
+  const s = await sessOf($)
+  if (!(await tracks($)) || !opensBySelf(s, pid, (await $.env.get('MM_UNATTENDED')) === '1')) return
+  await listShown($)
+  try {
+    await $.ui.open({ id: PANE_QUEUE, title })
+  } catch {
+    return
+  }
+  await setSess($, { opened: pid, ...(s.closed !== undefined ? { closed: undefined } : {}) })
+}
+
+/** (0.6.0) The list as the last sync stored it, drawn in a pane that has none yet (no feed call, no app call). */
+async function listShown($: EngineInterface): Promise<void> {
+  try {
+    const { value: queue } = await $.state.get(QUEUE)
+    if (queue && Array.isArray(queue.rows)) return
+    const last = await storeGet<Last | null>($, 'mm.last', null)
+    if (last && Array.isArray(last.items)) await drawStored($, last, await $.clock.now())
+  } catch {
+    // the next sync draws it
+  }
+}
+
+/**
+ * (0.6.0) This thread's Tracking part, the pane's title, the status line and the band's line, worked out again from
+ * what is stored; when its current project is first set, or changes, the pane opens for it (`autoPane`), its client
+ * part is drawn, and its time is read (`askTime`, or the terminal's own read). ⛔ Never sends, never picks anything up.
+ */
+async function drawTrack($: EngineInterface, why: TrackWhy): Promise<void> {
+  try {
+    if (!(await tracks($))) return
+    const key = await threadKey($)
+    const s = await sessOf($)
+    const now = await $.clock.now()
+    const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+    const cur = key ? currentIn(await currents($), links, key) : undefined
+    const skills = await skillList($)
+    const pid = cur?.pid ?? ''
+    const kind = pid ? kindOf(pid, skills) : 'client'
+    const client = pid !== '' && isClientProject(pid, skills)
+    let track: MmTrack = { pid: '', client: '', title: 'Needs you', lines: [] }
+    let status: string | undefined
+    const changed = pid !== '' && pid !== s.handled
+    if (cur && pid) {
+      const name = await projectName($, pid, kind, skills)
+      const time = (await timeRecords($))[pid]
+      const meta = await timeMeta($)
+      const { mine, openable } = await sessionsOf($, key)
+      const lines = trackLines({ client: name, task: cur.task, time, missing: Number(meta.missingUntil) > now, canSeeLeverage: meta.canSeeLeverage === true, mine, openable })
+      const holder = client ? links[pid] : undefined
+      const second = holder !== undefined && holder !== key ? secondLine(name, shownText(await primaryTitleOf($, pid, holder, changed || why === 'start' || why === 'attach'), 80) || 'another thread') : undefined
+      track = { pid, client: name, title: name, lines, ...(second ? { second } : {}) }
+      const here = thisThread(time?.p, mine)
+      status = trackStatus({ client: name, task: cur.task, minutes: here.minutes, counted: here.counted })
+    } else status = trackStatus({ nudge: s.prompts >= NUDGE_AFTER && !s.notClient })
+    const { value: was } = await $.state.get(TRACK)
+    if (!sameValue(was ?? null, track)) await $.state.set(TRACK, track)
+    // the pane this thread opened by itself takes the project's name once it is known better (an open id retitles)
+    const retitle = pid !== '' && !changed && was?.pid === pid && was.title !== track.title && s.opened === pid
+    await putStatus($, 'track', status)
+    await refreshNudge($, !pid && s.prompts >= NUDGE_AFTER && !s.notClient)
+    await drawPart($, key, pid, client)
+    if (pid && (changed || why === 'start' || why === 'attach' || why === 'press' || why === 'link')) {
+      await setSess($, { handled: pid })
+      if (why !== 'press' && why !== 'link') await autoPane($, pid, track.title)
+      if (changed) {
+        if ((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop') await askTime($, pid)
+        else await terminalTime($)
+      }
+    } else if (retitle) await autoPane($, pid, track.title)
+    else if (!pid && s.handled) await setSess($, { handled: undefined })
+  } catch {
+    // the pane and the status line are a convenience: they never break a sync, a prompt or a command
+  }
+}
+
+/** (0.6.0) The band's line for a thread not tracked to a client yet: shown, with its offers worked out once, or hidden. */
+async function refreshNudge($: EngineInterface, show: boolean): Promise<void> {
+  const { value: was } = await $.state.get(NUDGE)
+  if (!show) {
+    if (was?.show) await $.state.set(NUDGE, { show: false, suggest: [] })
+    return
+  }
+  if (was?.show) return
+  const suggest = await nudgeSuggestions($).catch(() => [] as MmSuggestion[])
+  await $.state.set(NUDGE, { show: true, suggest })
+}
+
+/**
+ * (0.6.0) At most two clients the band offers: those whose name this thread's own title reads like (the bridge's
+ * title match, `titleLooksLike`), among the clients OW's skill map knows a skill for. The app is asked for this
+ * thread's title once, here.
+ */
+async function nudgeSuggestions($: EngineInterface): Promise<MmSuggestion[]> {
+  if ((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) !== 'claude-desktop') return []
+  const me = await desktopOnly(async () => asThread(await mcpJsonWithin($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' })), null)
+  const title = me?.title ?? ''
+  if (!title) return []
+  await ensureSkills($)
+  const listed = listedIn(await storeGet<Last | null>($, 'mm.last', null))
+  const out: MmSuggestion[] = []
+  for (const s of await skillList($)) {
+    if (s.kind !== 'client' || INTERNAL_PROJECTS.has(s.project_id) || out.some(o => o.pid === s.project_id)) continue
+    const client = cleanName(listed.find(i => i.projectId === s.project_id)?.client || clientName(s.name))
+    if (client && titleLooksLike(title, client)) out.push({ pid: s.project_id, client, skill: s.skill_key })
+    if (out.length >= 2) break
+  }
+  return out
+}
+
+/** (0.6.0) A note for Claude, from a press of the person's: added to the transcript, which starts no turn. */
+async function noteForClaude($: EngineInterface, text: string): Promise<void> {
+  await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
+}
+
+/** (0.6.0) The person pressed Track to <Client> on the band: the thread is that client's (its primary when the client has none), the pane opens, and Claude is told to load the client's skill. */
+async function pressTrack($: EngineInterface, s: MmSuggestion): Promise<void> {
+  try {
+    const key = await threadKey($)
+    if (!key || !isUuid(s.pid) || !SKILL_KEY.test(s.skill)) return
+    await setCurrent($, key, { pid: s.pid, how: 'press', at: await $.clock.now() })
+    await maybePrimary($, key, s.pid, 'press')
+    await noteForClaude($, pressNote(cleanName(s.client), s.skill))
+    await $.state.set(NUDGE, { show: false, suggest: [] })
+    await drawTrack($, 'press')
+    await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })
+  } catch {
+    // nothing to tell: the band stays as it was
+  }
+}
+
+/** (0.6.0) The person pressed Massmarket internal on the band: the thread is Massmarket's internal ops, and Claude is told to load its skill. */
+async function pressInternal($: EngineInterface): Promise<void> {
+  try {
+    const key = await threadKey($)
+    if (!key) return
+    const pid = (await skillList($)).find(x => x.kind === 'internal_ops')?.project_id ?? INTERNAL_OPS
+    await setCurrent($, key, { pid, how: 'press', at: await $.clock.now() })
+    await noteForClaude($, INTERNAL_NOTE)
+    await $.state.set(NUDGE, { show: false, suggest: [] })
+    await drawTrack($, 'press')
+    await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })
+  } catch {
+    // as above
+  }
+}
+
+/** (0.6.0) The person pressed Not client work: no band line and no "Not tracked" status for the rest of the session. No note. */
+async function pressNotClient($: EngineInterface): Promise<void> {
+  try {
+    await setSess($, { notClient: true })
+    await $.state.set(NUDGE, { show: false, suggest: [] })
+    await drawTrack($, 'set')
+  } catch {
+    // as above
+  }
+}
+
+/**
+ * (0.6.0) A prompt, counted for the band: the person's own (PERSON_ORIGINS), not a marker kickoff and not one the app
+ * wrapped (a started thread's task, a message with the app's notes in front). The session's first prompt says whether
+ * it is a SINGLE-SESSION run: a pane opened by itself before it is closed again.
+ */
+async function countPrompt($: EngineInterface, text: string, origin: string | undefined): Promise<void> {
+  const s = await sessOf($)
+  const { prompt, task } = promptOf(text)
+  const patch: Partial<MmSession> = {}
+  if (!s.first) {
+    patch.first = true
+    if (/^SINGLE-SESSION\b/.test(text.trimStart()) || /^SINGLE-SESSION\b/.test(prompt.trimStart())) patch.single = true
+  }
+  if (origin && PERSON_ORIGINS.has(origin) && !task && prompt === text && !MARKER.test(prompt)) patch.prompts = s.prompts + 1
+  if (!Object.keys(patch).length) return
+  await setSess($, patch)
+  if (patch.single && s.opened !== undefined) await Promise.resolve($.ui.close({ id: PANE_QUEUE })).catch(() => {})
+}
+
+/** (0.6.0) The person closed the pane: it is not opened by itself again for the same project in this session. */
+async function rememberClose($: EngineInterface): Promise<void> {
+  await setSess($, afterPersonClose(await sessOf($)))
+}
+
+/** (0.6.0) A press on a row of `Threads today`: the system's opener takes the app's link to that thread (`openThread`). */
+async function openTracked($: EngineInterface, sid: string): Promise<void> {
+  if (!THREAD_ID.test(sid)) return
+  const found = await lookup($, sid)
+  if (typeof found === 'object') await openThread($, found)
+}
+
+/** (0.6.0) /mm unlink: this thread has no current project any more. */
+async function clearCurrent($: EngineInterface, me: string): Promise<void> {
+  const keys = [me, `cli:${await instanceId($)}`].filter(Boolean)
+  await patchStore<Record<string, Current>>($, 'mm.current', {}, all => {
+    let changed = false
+    for (const k of keys) {
+      if (!Object.hasOwn(all, k)) continue
+      delete all[k]
+      changed = true
+    }
+    return changed
+  })
+  for (const k of keys) pendingTasks.delete(k)
+}
+
+/** (0.6.0) /mm status's line: how many threads have a current project, on how many projects, and how many are a client's second thread. */
+async function currentLine($: EngineInterface): Promise<string> {
+  const all = await currents($)
+  const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+  const skills = await skillList($)
+  const keys = new Set([...Object.keys(all), ...Object.values(links).filter(sid => THREAD_ID.test(sid))])
+  const pids = new Set<string>()
+  let n = 0
+  let second = 0
+  for (const key of keys) {
+    const c = currentIn(all, links, key)
+    if (!c) continue
+    n++
+    pids.add(c.pid)
+    if (isClientProject(c.pid, skills) && links[c.pid] !== undefined && links[c.pid] !== key) second++
+  }
+  return `current threads: ${n} on ${pids.size} projects · second threads: ${second}`
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     // Runs in a person's session only: the terminal REPL (isInteractive) or the desktop app's Code tab, which
     // reports isInteractive false but CLAUDE_CODE_ENTRYPOINT=claude-desktop. Never in -p runs (Lane-2, daily runs).
     const entry = await $.env.get('CLAUDE_CODE_ENTRYPOINT')
-    if (!e.isInteractive && entry !== 'claude-desktop') return started
+    // (0.6.0) whether this session tracks (a person's) and opens its pane by itself (not with MM_UNATTENDED=1)
+    const interactive = Boolean(e.isInteractive) || entry === 'claude-desktop'
+    await setSess($, { interactive, unattended: (await $.env.get('MM_UNATTENDED')) === '1' }).catch(() => undefined)
+    if (!interactive) return started
     if (entry === 'claude-desktop') {
       $.clock.after(4_000, () => void tick($))
       $.clock.every(TICK_MS, () => void tick($))
@@ -5552,7 +6483,56 @@ export const register: Register = on => {
     } catch (err) {
       await beat($, { registerError: short(String(err), 300) })
     }
+    // (0.6.0) a thread with a current project opens its pane now (a terminal session reads its project's time too)
+    void (async () => {
+      await drawTrack($, 'start')
+      await terminalTime($)
+    })().catch(() => {})
     return started
+  })
+
+  // (0.6.0) a surface attached to this session: the pane opens on it for the thread's current project
+  on('session.attach', async ($, e, next) => {
+    const attached = await next(e)
+    void drawTrack($, 'attach').catch(() => {})
+    return attached
+  })
+
+  // (0.6.0) after each turn: the Tracking part and the status line again (a terminal session reads its project's time)
+  on('turn.complete', async ($, e, next) => {
+    const done = await next(e)
+    // the main conversation's turns only: a subagent's turn says nothing of this thread's work
+    if ((e as { agentId?: unknown }).agentId) return done
+    void (async () => {
+      await terminalTime($)
+      await drawTrack($, 'turn')
+    })().catch(() => {})
+    return done
+  })
+
+  // (0.6.0) the person closed the pane: not opened by itself again for the same project in this session. ⛔ Never refused.
+  on('ui.close', async ($, e, next) => {
+    try {
+      if (e.id === PANE_QUEUE && e.origin?.kind === 'person') await rememberClose($)
+    } catch {
+      // the close goes ahead whatever happens here
+    }
+    return next(e)
+  })
+
+  // (0.6.0) A skill the main conversation loaded (not a subagent's), once it loaded: the thread's current project, by
+  // OW's skill map, and the client's primary when the client has none (`maybePrimary`). ⛔ The tool's answer is
+  // handed back untouched and at once: the rest runs after it.
+  on('tool.call', { tool: 'Skill' }, async ($, e, next) => {
+    const answer = await next(e)
+    try {
+      const r = answer as { deny?: unknown; isError?: unknown; result?: unknown }
+      const result = r.result && typeof r.result === 'object' ? (r.result as { success?: unknown }) : undefined
+      if (!r.deny && !r.isError && result?.success !== false && !(e as { agentId?: unknown }).agentId) void skillLoaded($, (e as { skill?: unknown }).skill).catch(() => {})
+    } catch {
+      // the tool's answer is the answer
+    }
+    return answer
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -5566,9 +6546,13 @@ export const register: Register = on => {
       // (before the marker is read: a kickoff never claims, and the link is as it was)
       await claimInPlace($, text, origin).catch(() => {})
       sentence = await linkFromMarker($, text, origin)
+      // (0.6.0) the person's prompts, for the band; a SINGLE-SESSION run is known by its first
+      await countPrompt($, text, origin).catch(() => {})
     } catch {
       // a marker that cannot be acted on never holds a prompt back
     }
+    // (0.6.0) the Tracking part, the status line and the band, after the prompt is on its way
+    void drawTrack($, 'prompt').catch(() => {})
     // R5: a kickoff for a client another linked thread already has carries Rob's sentence, last
     return next(sentence ? { ...e, text: `${text}\n\n${sentence}` } : e)
   })
@@ -5609,14 +6593,18 @@ export const register: Register = on => {
   // (askSync), and (R11) a link this thread has by itself becomes the person's.
   // ⛔ The command runs first, exactly as it would have, and its answer is handed back untouched.
   // ⛔ All that is looked at: whether the call was refused or failed, and whether the command names one of
-  //    those routes (isClosingRoute). Nothing of the command or of its output is read further, kept,
-  //    logged or sent anywhere.
+  //    those routes (isClosingRoute); and (0.6.0) the `--task` label of a command that runs the time-tracking hook
+  //    (`taskFrom`), kept as this thread's task. Nothing else of the command, and nothing of its output, is read,
+  //    kept, logged or sent anywhere.
   // ⛔ It never refuses a command and never holds one back: anything going wrong here is swallowed.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const answer = await next(e)
     try {
       const finished = !answer.deny && !answer.isError
       const command = (e as { command?: unknown }).command
+      // (0.6.0) the task the time-tracking hook was given (`--task`): this thread's task on its current project
+      const label = !answer.deny ? taskFrom(command) : ''
+      if (label) await declareTask($, label)
       if (finished && isClosingRoute(command)) {
         // R6: the feed is read again at once
         await askSync($)
@@ -5634,15 +6622,21 @@ export const register: Register = on => {
   // always drawn: primary with how many clients need a new thread, or dim as All threads started when none do; a press
   // of it is Start all's (`pressStartAll`) either way. It took Open list's place: /mm opens the list.
   // ⛔ It draws what `refreshBand` last worked out from the store. No feed call and no app call from here.
+  // (0.6.0) Under it, in a thread not tracked to a client yet after the person's second prompt, until they say what it
+  // is: `This thread is not tracked to a client yet.` with Track to <Client> (at most two), Massmarket internal and
+  // Not client work. A press adds the one note `pressTrack` or `pressInternal` names; Not client work adds none.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const { value: band } = await $.state.get(BAND)
+    const { value: nudge } = await $.state.get(NUDGE)
+    const asking = Boolean(nudge?.show)
     // nothing to say, or a survey holds the band: the engine's own
-    if (e.props.hasSurvey || !band?.text) return next(e)
+    if (e.props.hasSurvey || (!band?.text && !asking)) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e) as Partial<ReturnType<typeof $.ui.resolve>> & Pick<ReturnType<typeof $.ui.resolve>, 'Box' | 'Text'>
+    const missing = Number(band?.missing) || 0
     // a surface that draws no button there says how to open the list instead
-    if (!Button) return <Text>{bandWords(band.text, false)}</Text>
-    const missing = Number(band.missing) || 0
-    return (
+    const line = !band?.text ? null : !Button ? (
+      <Text>{bandWords(band.text, false)}</Text>
+    ) : (
       <Box flexDirection="row" gap={1}>
         <Text>{bandWords(band.text, true)}</Text>
         {missing > 0 ? (
@@ -5653,6 +6647,27 @@ export const register: Register = on => {
         {band.drafts ? <Button key="mm-open-drafts" label="Drafts" onPress={() => void openDrafts($)} /> : null}
       </Box>
     )
+    const suggest = asking && Array.isArray(nudge?.suggest) ? nudge.suggest.slice(0, 2) : []
+    const ask = !asking ? null : (
+      <Box key="mm-nudge" flexDirection="row" gap={1}>
+        <Text>{NUDGE_TEXT}</Text>
+        {Button
+          ? suggest.map(sg => <Button key={`mm-track:${sg.pid}`} label={trackLabel(sg.client)} variant="primary" onPress={() => void pressTrack($, sg)} />)
+          : null}
+        {Button ? <Button key="mm-track-internal" label={NUDGE_INTERNAL} onPress={() => void pressInternal($)} /> : null}
+        {Button ? <Button key="mm-track-none" label={NUDGE_NONE} dimColor onPress={() => void pressNotClient($)} /> : null}
+      </Box>
+    )
+    if (line && ask) {
+      return (
+        <Box flexDirection="column">
+          {line}
+          {ask}
+        </Box>
+      )
+    }
+    if (line) return line
+    return ask ?? next(e)
   })
 
   // The pane an older version opened for a client's drafts: a thread that still has it open sees the
@@ -5685,9 +6700,12 @@ export const register: Register = on => {
     const routeTo = queue && Array.isArray(queue.routeTo) ? queue.routeTo : []
     const ui = people.length ? await peopleUi($) : {}
     const client = await clientPart($)
+    // (0.6.0) this thread's Tracking part: what it is counted to, and the time tracked to that project
+    const { value: track } = await $.state.get(TRACK)
+    const tracking = track && track.pid && Array.isArray(track.lines) && track.lines.length ? track : undefined
     // Nothing synced yet, or a value an older version of this plugin left in this session.
     const hasList = Boolean(queue && Array.isArray(queue.rows))
-    if (!hasList && !client.text) return <Text dimColor>{CHECKING}</Text>
+    if (!hasList && !client.text && !tracking) return <Text dimColor>{CHECKING}</Text>
     // (0.5.5) the thread drawing this pane, as the timer already learnt it: a row says "this thread" only of it
     const here = await knownSelf($)
     // (0.5.12) the Start all button, from what is stored: two or more clients that need a new thread
@@ -5778,6 +6796,20 @@ export const register: Register = on => {
     }
     return (
       <Box flexDirection="column">
+        {tracking ? (
+          <Box key="mm-track" flexDirection="column" marginBottom={1}>
+            {tracking.lines.map((l, n) =>
+              l.open ? (
+                <Button key={`mm-track-open:${n}`} label={l.text} onPress={() => void openTracked($, l.open as string)} />
+              ) : (
+                <Text bold={l.bold === true} dimColor={l.dim === true}>
+                  {l.text}
+                </Text>
+              ),
+            )}
+          </Box>
+        ) : null}
+        {tracking?.second ? <Text dimColor>{tracking.second}</Text> : null}
         {client.text ? (
           <Box key="mm-client" flexDirection="column" marginBottom={1}>
             {client.heading ? <Text bold>{client.heading}</Text> : null}
