@@ -5,6 +5,7 @@ import {
   parseClientTime, parseSkillMap, pressNote, secondLine, skillName, taskFrom, thisThread, trackLines, trackStatus, weekIsDue,
   LINES_TODAY, LINE_BANK, LINE_LATER, LINE_NEW, askNote, asksForLine, asksInSession, bankLine, bankNote, countsToward, declareLineText, fmtEst, forClaude, hookCommand, lineAskKey, lineAskText,
   lineButton, lineNote, lineOfThread, linkedText, newScopeNote, noBankText, parseThreadLine, proposalArgs, proposedText, statusLineTitle, ticketOf, withoutPrefix,
+  BAD_ESTIMATE, ESTIMATE_HOURS, NEXT_INVOICE, fmtAbout, goesAhead, modeOf, noPrepaidText, offersPrepaid, proposalMode, reasonOf, recordedText, settleOf, toldUnbilled,
 } from './track'
 import type { ThreadLine, TimeProject } from './track'
 
@@ -416,33 +417,33 @@ describe('0.7.0: the line band and the notes for Claude (verbatim)', () => {
   test('the band\'s words, its buttons and the note each press adds', async () => {
     expect(lineAskText('Acme Roofing', 'unmatched')).toBe('Acme Roofing: which line does this work count toward?')
     expect(lineAskText('Acme Roofing', 'maybe_new_scope')).toBe('Acme Roofing: this doesn\'t match a line on the quote.')
-    expect([LINE_NEW, LINE_BANK, LINE_LATER]).toEqual(['New scope', 'Hour bank', 'Not now'])
+    expect([LINE_NEW, LINE_BANK, LINE_LATER]).toEqual(['New scope', 'Prepaid hours', 'Not now'])
     expect(lineNote('Acme Roofing', 'Website refresh', L_SITE)).toBe(
       `[mm-bridge] The person says this thread's work counts toward Acme Roofing's line "Website refresh". Before your next step, call the mm tool with "line ${L_SITE}" and do what it returns.`,
     )
     expect(newScopeNote('Acme Roofing')).toBe(
-      '[mm-bridge] The person says this thread\'s work is new scope for Acme Roofing. Before your next step, write a short title for it (the words the client would see on a quote) and one line on why, then call the mm tool with "propose <title> -- <why>" and do what it returns. The line itself is added only when the client says yes.',
+      '[mm-bridge] The person says this thread\'s work is new scope for Acme Roofing. Before your next step, write a short title for it (the words the client would see on a quote), one line on why, and your estimate in hours, and decide whether it is urgent (something broken that is costing the client money right now). Then call the mm tool with "propose <title> -- <why> -- <N>h" (add " urgent" when it is) and do what it returns. A fix to something Massmarket built is not new scope: if that is what this is, say so to the person instead.',
     )
-    expect(bankNote('Acme Roofing')).toBe('[mm-bridge] The person says this thread\'s work is a quick fix inside Acme Roofing\'s hour bank. Before your next step, call the mm tool with "bank" and do what it returns.')
+    expect(bankNote('Acme Roofing')).toBe('[mm-bridge] The person says this thread\'s work comes out of Acme Roofing\'s prepaid hours. Before your next step, call the mm tool with "bank" and do what it returns.')
     // text from OW goes to Claude cleaned: no quotes, no shell characters
     expect(forClaude('Fix "router" $(whoami) `x` \\ now')).toBe('Fix router (whoami) x now')
   })
 
   test('the thread\'s one note: three candidates and a bank, as the spec words it', async () => {
     expect(askNote({ client: 'Acme Roofing', task: 'Copy', candidates: [{ line_key: L_COPY, title: 'Phase 1 nurture sequence' }, { line_key: L_ROUTER, title: 'Router' }, { line_key: L_SITE, title: 'Website refresh' }], bank: true })).toBe(
-      `[mm-bridge] Massmarket time tracking: this thread's work ("Copy") does not match a line on Acme Roofing's quote yet, so its minutes are not counted to a deliverable. In your next reply, ask the person one short question: does it count toward "Phase 1 nurture sequence" (${L_COPY}), "Router" (${L_ROUTER}) or "Website refresh" (${L_SITE}), is it new scope (Massmarket proposes a new line and tells the client before billing it), or is it a quick fix inside the hour bank? Then act on the answer with the mm tool: "line <line_key>", "propose <title> -- <why>" or "bank". Keep working while you wait for the answer.`,
+      `[mm-bridge] Massmarket time tracking: this thread's work ("Copy") does not match a line on Acme Roofing's quote yet, so its minutes are not counted to a deliverable. In your next reply, ask the person one short question: does it count toward "Phase 1 nurture sequence" (${L_COPY}), "Router" (${L_ROUTER}) or "Website refresh" (${L_SITE}), is it new scope (small items go ahead and the client is told; bigger ones wait for their yes), or does it come out of their prepaid hours? Then act on the answer with the mm tool: "line <line_key>", "propose <title> -- <why> -- <N>h" or "bank" (prepaid hours). Keep working while you wait for the answer.`,
     )
   })
 
   test('the thread\'s one note: only the candidates that exist; no bank clause without a bank; no "count toward" clause without candidates', async () => {
     expect(askNote({ client: 'Acme Roofing', task: 'Copy', candidates: [{ line_key: L_SITE, title: 'Website refresh' }], bank: false })).toBe(
-      `[mm-bridge] Massmarket time tracking: this thread's work ("Copy") does not match a line on Acme Roofing's quote yet, so its minutes are not counted to a deliverable. In your next reply, ask the person one short question: does it count toward "Website refresh" (${L_SITE}), or is it new scope (Massmarket proposes a new line and tells the client before billing it)? Then act on the answer with the mm tool: "line <line_key>" or "propose <title> -- <why>". Keep working while you wait for the answer.`,
+      `[mm-bridge] Massmarket time tracking: this thread's work ("Copy") does not match a line on Acme Roofing's quote yet, so its minutes are not counted to a deliverable. In your next reply, ask the person one short question: does it count toward "Website refresh" (${L_SITE}), or is it new scope (small items go ahead and the client is told; bigger ones wait for their yes)? Then act on the answer with the mm tool: "line <line_key>" or "propose <title> -- <why> -- <N>h". Keep working while you wait for the answer.`,
     )
     expect(askNote({ client: 'Acme Roofing', task: 'Copy', candidates: [], bank: true })).toBe(
-      '[mm-bridge] Massmarket time tracking: this thread\'s work ("Copy") does not match a line on Acme Roofing\'s quote yet, so its minutes are not counted to a deliverable. In your next reply, ask the person one short question: is it new scope (Massmarket proposes a new line and tells the client before billing it), or is it a quick fix inside the hour bank? Then act on the answer with the mm tool: "propose <title> -- <why>" or "bank". Keep working while you wait for the answer.',
+      '[mm-bridge] Massmarket time tracking: this thread\'s work ("Copy") does not match a line on Acme Roofing\'s quote yet, so its minutes are not counted to a deliverable. In your next reply, ask the person one short question: is it new scope (small items go ahead and the client is told; bigger ones wait for their yes), or does it come out of their prepaid hours? Then act on the answer with the mm tool: "propose <title> -- <why> -- <N>h" or "bank" (prepaid hours). Keep working while you wait for the answer.',
     )
     expect(askNote({ client: 'Acme Roofing', task: '', candidates: [], bank: false })).toBe(
-      '[mm-bridge] Massmarket time tracking: this thread\'s work does not match a line on Acme Roofing\'s quote yet, so its minutes are not counted to a deliverable. In your next reply, ask the person one short question: is it new scope (Massmarket proposes a new line and tells the client before billing it)? Then act on the answer with the mm tool: "propose <title> -- <why>". Keep working while you wait for the answer.',
+      '[mm-bridge] Massmarket time tracking: this thread\'s work does not match a line on Acme Roofing\'s quote yet, so its minutes are not counted to a deliverable. In your next reply, ask the person one short question: is it new scope (small items go ahead and the client is told; bigger ones wait for their yes)? Then act on the answer with the mm tool: "propose <title> -- <why> -- <N>h". Keep working while you wait for the answer.',
     )
     // at most three candidates
     const four = [L_COPY, L_ROUTER, L_SITE, 'L-55555555'].map((k, n) => ({ line_key: k, title: `C${n}` }))
@@ -481,8 +482,8 @@ describe('0.7.0: what mm line, propose and bank answer (verbatim)', () => {
   })
 
   test('propose: its arguments, and what it answers new or existing', async () => {
-    expect(proposalArgs('Spanish landing page -- the client asked for a Spanish version on the call')).toEqual({ title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call' })
-    expect(proposalArgs('Spanish landing page')).toEqual({ title: 'Spanish landing page', why: '' })
+    expect(proposalArgs('Spanish landing page -- the client asked for a Spanish version on the call')).toEqual({ title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', urgent: false })
+    expect(proposalArgs('Spanish landing page')).toEqual({ title: 'Spanish landing page', why: '', urgent: false })
     expect(proposalArgs(' -- why only')).toBeNull()
     expect(proposalArgs('')).toBeNull()
     expect(proposalArgs(`${'t'.repeat(200)} -- ${'w'.repeat(900)}`)?.title.length).toBe(120)
@@ -502,5 +503,219 @@ describe('0.7.0: what mm line, propose and bank answer (verbatim)', () => {
     expect(bankLine(lined({ lines: [...LINES.slice(0, 3), { ...LINES[3], status: 'closed' }] }))).toBeUndefined()
     expect(bankLine(lined({ lines: LINES.slice(0, 3) }))).toBeUndefined()
     expect(bankLine(lined())).toBeUndefined()
+  })
+})
+
+// ======================================================================== 0.7.1: new scope goes ahead when small, waits for a yes when big
+// Rob, 2026-10-26 (decision_log 99395076): new scope never comes out of revision hours. Small new scope (about 2 h or
+// less) = tell the client and go, billed on the next invoice or from prepaid hours; over 2 h or no estimate = wait for
+// the client's yes; urgent (actively costing the client money) = carry on now; a client set to always ask first always
+// waits; small unbilled items are capped at 2 h in all. The estimate is what is billed, never agent time. Every client,
+// line and number here is a fixture.
+
+/** A project as OW's client-time answer gives it, with the project-level fields `extra` adds (`prepaid_hours_left`, ...). */
+const settled = (extra: Record<string, unknown>, o: { line?: unknown; lines?: unknown; proposals?: unknown; tasks?: unknown[] } = {}): TimeProject => {
+  const parsed = parseClientTime({
+    as_of: new Date(NOW).toISOString(),
+    viewer: { email: 'a@example.com', can_see_leverage: true },
+    projects: [{
+      project_id: ACME, name: 'Acme Roofing — Pat',
+      today: day(o.tasks ?? []), week: null, leverage: null,
+      threads: [{ session_id: 'mine', title: 'Acme copy', member_email: 'a@example.com', member_name: 'Avery Lane', task: 'Copy', ticket_id: null, minutes_today: 64, last_activity_at: new Date(NOW).toISOString(), active_now: true, ...(o.line !== undefined ? { line: o.line } : {}) }],
+      lines: o.lines ?? LINES,
+      ...(o.proposals !== undefined ? { proposals: o.proposals } : {}),
+      ...extra,
+    }],
+  })?.projects[0]
+  if (!parsed) throw new Error('fixture')
+  return parsed
+}
+const SPANISH = { ticket_id8: 'abcdef12', title: 'Spanish landing page', created_at: '2026-10-26T12:00:00Z' }
+const CMD = 'node ~/.claude/mm-hooks/worklog-hook.js --task "abcdef12 Spanish landing page"'
+const PS = ' (Windows PowerShell: node "$env:USERPROFILE\\.claude\\mm-hooks\\worklog-hook.js" --task "abcdef12 Spanish landing page")'
+const rec = (over: Partial<Parameters<typeof recordedText>[0]> = {}) =>
+  recordedText({ title: 'Spanish landing page', client: 'Acme Roofing', id8: 'abcdef12', existing: false, windows: false, mode: 'tell_and_go', ...over })
+
+describe('0.7.1: OW\'s new-scope fields, checked (absent, malformed, complete)', () => {
+  test('absent: nothing new is kept, as 0.7.0 had it', async () => {
+    const p = lined({ lines: LINES, proposals: [SPANISH] })
+    for (const k of ['prepaid_hours_left', 'always_ask', 'small_limit_hours']) expect(k in p).toBe(false)
+    expect('told' in (p.lines?.[0] ?? {})).toBe(false)
+    expect('billed' in (p.lines?.[0] ?? {})).toBe(false)
+    expect(p.proposals).toEqual([SPANISH])
+    expect(offersPrepaid(p)).toBe(true)
+  })
+
+  test('complete: every field kept', async () => {
+    const p = settled(
+      { prepaid_hours_left: 3.5, always_ask: true, small_limit_hours: 2 },
+      { lines: [{ ...LINES[0], told: true, billed: false }, LINES[1]], proposals: [{ ...SPANISH, mode: 'tell_and_go', estimate_hours: 1.5, reason: 'small' }], line: thread('proposed', { proposal: { ticket_id8: 'ABCDEF12', title: 'Spanish landing page', mode: 'urgent' } }) },
+    )
+    expect([p.prepaid_hours_left, p.always_ask, p.small_limit_hours]).toEqual([3.5, true, 2])
+    expect(p.lines?.[0]).toMatchObject({ told: true, billed: false })
+    expect(p.proposals?.[0]).toEqual({ ...SPANISH, mode: 'tell_and_go', estimate_hours: 1.5, reason: 'small' })
+    expect(lineOfThread(p, sid => sid === 'mine')?.line.proposal).toEqual({ ticket_id8: 'abcdef12', title: 'Spanish landing page', mode: 'urgent' })
+    // null prepaid hours: none to draw on
+    expect(settled({ prepaid_hours_left: null }).prepaid_hours_left).toBeNull()
+  })
+
+  test('malformed: each field of another shape is absent (0.7.0\'s rules), never a guess', async () => {
+    const p = settled(
+      { prepaid_hours_left: '5', always_ask: 'yes', small_limit_hours: 0 },
+      { lines: [{ ...LINES[0], told: 'yes', billed: 1 }], proposals: [{ ...SPANISH, mode: 'maybe', estimate_hours: -2, reason: 'because' }] },
+    )
+    for (const k of ['prepaid_hours_left', 'always_ask', 'small_limit_hours']) expect(k in p).toBe(false)
+    expect('told' in (p.lines?.[0] ?? {})).toBe(false)
+    expect('billed' in (p.lines?.[0] ?? {})).toBe(false)
+    expect(p.proposals).toEqual([SPANISH])
+    expect('prepaid_hours_left' in settled({ prepaid_hours_left: -1 })).toBe(false)
+    expect([modeOf('tell_and_go'), modeOf('needs_yes'), modeOf('urgent'), modeOf('later'), modeOf(undefined)]).toEqual(['tell_and_go', 'needs_yes', 'urgent', undefined, undefined])
+    expect([settleOf('next_invoice'), settleOf('prepaid_hours'), settleOf('cash')]).toEqual(['next_invoice', 'prepaid_hours', undefined])
+    expect(['small', 'over_limit', 'always_ask', 'small_items_cap', 'no_estimate', 'urgent', 'other'].map(reasonOf)).toEqual(['small', 'over_limit', 'always_ask', 'small_items_cap', 'no_estimate', 'urgent', undefined])
+  })
+
+  test('the settings come with today, as the lines do: a read without today keeps them; a today without them has none', async () => {
+    const first = settled({ prepaid_hours_left: 4, always_ask: true, small_limit_hours: 2 })
+    const a = mergeTime(undefined, first, NOW, 'T1', true)
+    expect([a.p?.prepaid_hours_left, a.p?.always_ask, a.p?.small_limit_hours]).toEqual([4, true, 2])
+    const weekOnly: TimeProject = { project_id: ACME, name: '', today: null, week: null, threads: [], leverage: null }
+    const b = mergeTime(a, weekOnly, NOW + 1, 'T2', true)
+    expect([b.p?.prepaid_hours_left, b.p?.always_ask, b.p?.small_limit_hours]).toEqual([4, true, 2])
+    const c = mergeTime(b, lined(), NOW + 2, 'T3', false)
+    for (const k of ['prepaid_hours_left', 'always_ask', 'small_limit_hours']) expect(c.p && k in c.p).toBe(false)
+  })
+})
+
+describe('0.7.1: mm propose reads the estimate and urgent', () => {
+  test('the forms of -- <N>h: <N>h, <N> h, <N> hours', async () => {
+    const why = 'the client asked for a Spanish version on the call'
+    expect(proposalArgs(`Spanish landing page -- ${why} -- 1.5h`)).toEqual({ title: 'Spanish landing page', why, estimate: 1.5, urgent: false })
+    expect(proposalArgs(`Spanish landing page -- ${why} -- 1.5 h`)?.estimate).toBe(1.5)
+    expect(proposalArgs(`Spanish landing page -- ${why} -- 3 hours`)?.estimate).toBe(3)
+    expect(proposalArgs(`Spanish landing page -- ${why} -- 1 hour`)?.estimate).toBe(1)
+    expect(proposalArgs(`Spanish landing page -- ${why} -- 2H`)?.estimate).toBe(2)
+    expect(proposalArgs(`Spanish landing page -- ${why} -- .5h`)?.estimate).toBe(0.5)
+    expect(proposalArgs(`Spanish landing page -- ${why} -- ${ESTIMATE_HOURS.min}h`)?.estimate).toBe(0.25)
+    expect(proposalArgs(`Spanish landing page -- ${why} -- ${ESTIMATE_HOURS.max} hours`)?.estimate).toBe(200)
+    // with no why: the estimate is still read
+    expect(proposalArgs('Spanish landing page -- 2h')).toEqual({ title: 'Spanish landing page', why: '', estimate: 2, urgent: false })
+    // a number with no unit is part of the why
+    expect(proposalArgs('Spanish landing page -- pages for 2026 -- 2')).toEqual({ title: 'Spanish landing page', why: 'pages for 2026 -- 2', urgent: false })
+  })
+
+  test('urgent: after the estimate, as its own part, or alone; a why that ends in "urgent" stays the why', async () => {
+    expect(proposalArgs('Fix booking form -- form is down and leads are lost -- 1.5h urgent')).toEqual({ title: 'Fix booking form', why: 'form is down and leads are lost', estimate: 1.5, urgent: true })
+    expect(proposalArgs('Fix booking form -- form is down -- 2 hours urgent')).toMatchObject({ estimate: 2, urgent: true, why: 'form is down' })
+    expect(proposalArgs('Fix booking form -- form is down -- 2h -- urgent')).toMatchObject({ estimate: 2, urgent: true, why: 'form is down' })
+    expect(proposalArgs('Fix booking form -- form is down -- URGENT')).toEqual({ title: 'Fix booking form', why: 'form is down', urgent: true })
+    expect(proposalArgs('Spanish landing page -- the client says it is not urgent')).toEqual({ title: 'Spanish landing page', why: 'the client says it is not urgent', urgent: false })
+    expect(proposalArgs('Spanish landing page -- not urgent -- 2h')).toEqual({ title: 'Spanish landing page', why: 'not urgent', estimate: 2, urgent: false })
+  })
+
+  test('an estimate out of range (0.25 to 200 hours) is refused, nothing kept', async () => {
+    for (const n of ['0.1h', '0h', '201h', '500 hours']) {
+      const a = proposalArgs(`Spanish landing page -- why -- ${n}`)
+      expect(a?.badEstimate).toBe(true)
+      expect(a && 'estimate' in a).toBe(false)
+    }
+    expect(BAD_ESTIMATE).toBe('The estimate is in hours, from 0.25 to 200: mm propose <title> -- <why> -- <N>h (add " urgent" when it is). Nothing was recorded.')
+    // still no title, still null
+    expect(proposalArgs(' -- why -- 2h')).toBeNull()
+  })
+})
+
+describe('0.7.1: what mm propose answers, by OW\'s mode and reason (verbatim)', () => {
+  test('tell_and_go: carry on, the next reply tells the client, billed at the estimate on the next invoice', async () => {
+    expect(rec({ estimate: 1.5 })).toBe(`Recorded "Spanish landing page" as new scope for Acme Roofing (ticket abcdef12). It's small (about 1.5 h), so carry on: the next reply tells Acme Roofing, and it goes on the next invoice at about 1.5 h. Run this so the work counts to it: ${CMD}`)
+    expect(rec({ estimate: 1.5, settle: 'next_invoice' })).toBe(rec({ estimate: 1.5 }))
+  })
+
+  test('tell_and_go from prepaid hours', async () => {
+    expect(rec({ estimate: 0.25, settle: 'prepaid_hours' })).toBe(`Recorded "Spanish landing page" as new scope for Acme Roofing (ticket abcdef12). It's small (about 0.25 h), so carry on: the next reply tells Acme Roofing, and it comes out of their prepaid hours at about 0.25 h. Run this so the work counts to it: ${CMD}`)
+  })
+
+  test('needs_yes: over the limit, always ask, the small items at their cap, no estimate', async () => {
+    const spent = `Run this so any time already spent counts to it: ${CMD}`
+    expect(rec({ mode: 'needs_yes', reason: 'over_limit', estimate: 6 })).toBe(`Recorded "Spanish landing page" as new scope for Acme Roofing (ticket abcdef12). At about 6 h it needs Acme Roofing's yes first, so pause the new part: the next reply asks for it. ${spent}`)
+    expect(rec({ mode: 'needs_yes', reason: 'always_ask', estimate: 1 })).toBe(`Recorded "Spanish landing page" as new scope for Acme Roofing (ticket abcdef12). Acme Roofing is set to always ask first, so pause the new part: the next reply asks for it. ${spent}`)
+    expect(rec({ mode: 'needs_yes', reason: 'small_items_cap', estimate: 1 })).toBe(`Recorded "Spanish landing page" as new scope for Acme Roofing (ticket abcdef12). Acme Roofing's small new-scope items since the last invoice already add up to 2 hours, so this one needs their yes first. Pause the new part: the next reply asks for it. ${spent}`)
+    expect(rec({ mode: 'needs_yes', reason: 'small_items_cap', estimate: 1, limit: 2 })).toBe(rec({ mode: 'needs_yes', reason: 'small_items_cap', estimate: 1 }))
+    expect(rec({ mode: 'needs_yes', reason: 'no_estimate' })).toBe(`Recorded "Spanish landing page" as new scope for Acme Roofing (ticket abcdef12). Without an estimate it needs Acme Roofing's yes first, so pause the new part: the next reply asks for it. ${spent}`)
+    // a reason OW did not give: the yes, plainly
+    expect(rec({ mode: 'needs_yes' })).toBe(`Recorded "Spanish landing page" as new scope for Acme Roofing (ticket abcdef12). It needs Acme Roofing's yes first, so pause the new part: the next reply asks for it. ${spent}`)
+  })
+
+  test('urgent: carry on now, billed at the estimate; with no estimate, the actual time', async () => {
+    expect(rec({ mode: 'urgent', reason: 'urgent', estimate: 1.5 })).toBe(`Recorded "Spanish landing page" as urgent new scope for Acme Roofing (ticket abcdef12). Carry on now: the next reply tells Acme Roofing we're on it, and it goes on the next invoice at about 1.5 h. Run this so the work counts to it: ${CMD}`)
+    expect(rec({ mode: 'urgent', reason: 'urgent' })).toBe(`Recorded "Spanish landing page" as urgent new scope for Acme Roofing (ticket abcdef12). Carry on now: the next reply tells Acme Roofing we're on it, and the actual time goes on the next invoice. Run this so the work counts to it: ${CMD}`)
+  })
+
+  test('already recorded, Windows, and text from OW cleaned', async () => {
+    expect(rec({ estimate: 1.5, existing: true })).toBe(`Already recorded "Spanish landing page" as new scope for Acme Roofing (ticket abcdef12). It's small (about 1.5 h), so carry on: the next reply tells Acme Roofing, and it goes on the next invoice at about 1.5 h. Run this so the work counts to it: ${CMD}`)
+    expect(rec({ mode: 'needs_yes', reason: 'no_estimate', existing: true, windows: true })).toBe(`Already recorded "Spanish landing page" as new scope for Acme Roofing (ticket abcdef12). Without an estimate it needs Acme Roofing's yes first, so pause the new part: the next reply asks for it. Run this so any time already spent counts to it: ${CMD}${PS}`)
+    expect(rec({ title: 'Spanish "landing" page $(x)', estimate: 1 })).toContain('"Spanish landing page (x)"')
+    expect([fmtAbout(2), fmtAbout(1.5), fmtAbout(0.25), fmtAbout(1.333)]).toEqual(['2', '1.5', '0.25', '1.33'])
+  })
+
+  test('mm bank with no prepaid hours left', async () => {
+    expect(noPrepaidText('Acme Roofing')).toBe('Acme Roofing has no prepaid hours left; ask the person which line, or record it as new scope.')
+  })
+})
+
+describe('0.7.1: the pane and the band (verbatim)', () => {
+  /** Acme with the Spanish landing page proposed (in `mode`, when OW gives one) and this thread working it. */
+  const proposed = (mode?: string) => settled({}, { proposals: [{ ...SPANISH, ...(mode ? { mode } : {}) }], line: thread('proposed', { proposal: { ticket_id8: 'abcdef12', title: 'Spanish landing page' } }) })
+
+  test('a proposal that goes ahead is told in the next reply; one that waits is waiting for a yes', async () => {
+    const line = tl('proposed', { proposal: { ticket_id8: 'abcdef12', title: 'Spanish landing page' } })
+    expect(countsToward(line, proposed('tell_and_go'), 'Acme Roofing')).toBe('New scope: Spanish landing page · Acme Roofing is told in the next reply')
+    expect(countsToward(line, proposed('urgent'), 'Acme Roofing')).toBe('New scope: Spanish landing page · Acme Roofing is told in the next reply')
+    expect(countsToward(line, proposed('needs_yes'), 'Acme Roofing')).toBe('Proposed new line: Spanish landing page · waiting for Acme Roofing\'s yes')
+    expect(countsToward(line, proposed(), 'Acme Roofing')).toBe('Proposed new line: Spanish landing page · waiting for Acme Roofing\'s yes')
+    // the mode on the thread's own line wins over the project's proposal
+    const own = tl('proposed', { proposal: { ticket_id8: 'abcdef12', title: 'Spanish landing page', mode: 'tell_and_go' } })
+    expect(proposalMode(own, proposed('needs_yes'))).toBe('tell_and_go')
+    expect([goesAhead('tell_and_go'), goesAhead('urgent'), goesAhead('needs_yes'), goesAhead(undefined)]).toEqual([true, true, false, false])
+  })
+
+  test('Lines today: a proposal row by its mode', async () => {
+    const rows = (mode?: string) => {
+      const r = drawn(proposed(mode))
+      return r.slice(r.indexOf(LINES_TODAY))
+    }
+    expect(rows('tell_and_go')).toContain('New scope: Spanish landing page · told in the next reply')
+    expect(rows('urgent')).toContain('New scope: Spanish landing page · told in the next reply')
+    expect(rows('needs_yes')).toContain('Proposed: Spanish landing page · waiting for yes')
+    expect(rows()).toContain('Proposed: Spanish landing page · waiting for yes')
+    expect(drawn(proposed('tell_and_go')).slice(0, 2)).toEqual(['Tracking to Acme Roofing · Copy', 'New scope: Spanish landing page · Acme Roofing is told in the next reply'])
+  })
+
+  test('Lines today: a told, unbilled line says it goes on the next invoice; billed or not told, it does not', async () => {
+    const p = settled({}, { lines: [{ ...LINES[0], told: true, billed: false }, { ...LINES[1], told: true, billed: true }, { ...LINES[3], minutes: 19, told: false, billed: false }] })
+    const r = drawn(p)
+    expect(r.slice(r.indexOf(LINES_TODAY), r.indexOf(LINES_TODAY) + 4)).toEqual([
+      LINES_TODAY,
+      'Phase 1 nurture sequence · 1h 04m · est 12 h · new scope, next invoice',
+      'Inbound lead router and assignment rules · 42m · est 6 h',
+      'Support hour bank · 19m · est 10 h',
+    ])
+    expect(NEXT_INVOICE).toBe(' · new scope, next invoice')
+    expect((p.lines ?? []).map(toldUnbilled)).toEqual([true, false, false])
+  })
+
+  test('Prepaid hours: offered with prepaid hours left; not with none, or null; with no word from OW, where there is a bank', async () => {
+    expect(offersPrepaid(settled({ prepaid_hours_left: 3 }))).toBe(true)
+    expect(offersPrepaid(settled({ prepaid_hours_left: 3 }, { lines: LINES.slice(0, 3) }))).toBe(true)
+    expect(offersPrepaid(settled({ prepaid_hours_left: 0 }))).toBe(false)
+    expect(offersPrepaid(settled({ prepaid_hours_left: null }))).toBe(false)
+    expect(offersPrepaid(settled({}))).toBe(true)
+    expect(offersPrepaid(settled({}, { lines: LINES.slice(0, 3) }))).toBe(false)
+    expect(offersPrepaid(undefined)).toBe(false)
+  })
+
+  test('the band\'s words for a client set to always ask first', async () => {
+    expect(lineAskText('Acme Roofing', 'unmatched', true)).toBe('Acme Roofing: which line does this work count toward? (Acme Roofing is set to always ask first)')
+    expect(lineAskText('Acme Roofing', 'maybe_new_scope', true)).toBe('Acme Roofing: this doesn\'t match a line on the quote. (Acme Roofing is set to always ask first)')
+    expect(lineAskText('Acme Roofing', 'unmatched', false)).toBe('Acme Roofing: which line does this work count toward?')
   })
 })

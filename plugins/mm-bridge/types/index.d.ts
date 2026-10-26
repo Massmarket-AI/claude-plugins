@@ -189,6 +189,8 @@ export type MmLineChoice = { line_key: string; title: string }
  * (0.7.0) The band's line for a client's thread whose work matches no line on the quote: the project, its name as
  * shown, the project and task label it was worked out for (`key`), whether nothing matched (`unmatched`) or the work
  * looks like new scope (`maybe_new_scope`), the candidate lines (at most 3) and the hour bank, when the client has one.
+ * (0.7.1) `prepaid`: whether the band offers Prepaid hours (the client has prepaid hours left; from an OW that does not
+ * say, whether it has an hour bank); `alwaysAsk`: the client is set to always ask first.
  */
 export type MmLineAsk = {
   show: boolean
@@ -198,6 +200,8 @@ export type MmLineAsk = {
   signal?: 'unmatched' | 'maybe_new_scope'
   candidates?: MmLineChoice[]
   bank?: MmLineChoice | null
+  prepaid?: boolean
+  alwaysAsk?: boolean
 }
 
 declare module 'claude-code' {
