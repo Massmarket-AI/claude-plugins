@@ -85,11 +85,21 @@ export function parseSkillMap(raw: unknown): { asOf: string; skills: SkillEntry[
 export type LineType = 'deliverable' | 'fixes' | 'rob_time' | 'bank'
 /**
  * One line of a project's quote. `minutes`: this period's counted minutes on it; null when the viewer may not see them
- * (an estimated line, for anyone but a PM or the founder).
+ * (an estimated line, for anyone but a PM or the founder). (0.7.1) `told`: new scope the client was told about (it went
+ * ahead without waiting for a yes); `billed`: whether it is on an invoice yet. Each only from an OW that sends it.
  */
-export type ScopeLine = { line_key: string; title: string; line_type: LineType; status: string; estimate_hours: number | null; minutes: number | null }
-/** A proposed new line: an OW ticket waiting for the client's yes. */
-export type ScopeProposal = { ticket_id8: string; title: string; created_at: string }
+export type ScopeLine = { line_key: string; title: string; line_type: LineType; status: string; estimate_hours: number | null; minutes: number | null; told?: boolean; billed?: boolean }
+/**
+ * (0.7.1, Rob 2026-10-26, decision_log 99395076) How OW settled new scope: small, so it goes ahead and the client is
+ * told (`tell_and_go`); it waits for the client's yes (`needs_yes`); or it is urgent and goes ahead now (`urgent`).
+ */
+export type ProposalMode = 'tell_and_go' | 'needs_yes' | 'urgent'
+/** (0.7.1) Where small new scope is billed: on the next invoice, or out of the client's prepaid hours. */
+export type ProposalSettle = 'next_invoice' | 'prepaid_hours'
+/** (0.7.1) Why OW chose the mode. */
+export type ProposalReason = 'small' | 'over_limit' | 'always_ask' | 'small_items_cap' | 'no_estimate' | 'urgent'
+/** A proposed new line: an OW ticket waiting for the client's yes. (0.7.1) With how OW settled it, from an OW that sends it. */
+export type ScopeProposal = { ticket_id8: string; title: string; created_at: string; mode?: ProposalMode; estimate_hours?: number; reason?: ProposalReason }
 /** What OW makes of a thread's minutes. */
 export type LineSignal = 'on_line' | 'account_work' | 'fix' | 'unmatched' | 'maybe_new_scope' | 'no_quote' | 'proposed'
 /** How a thread's line was found: the line its task label declared, its ticket's line, the hour bank, or none. */
@@ -104,7 +114,7 @@ export type ThreadLine = {
   estimate_hours: number | null
   signal: LineSignal
   candidates: LineRef[]
-  proposal: { ticket_id8: string; title: string } | null
+  proposal: { ticket_id8: string; title: string; mode?: ProposalMode } | null
 }
 
 /** A line's key as OW writes it (`L-1a2b3c4d`), in characters that are safe in a sentence for Claude and in a shell command. */
@@ -117,10 +127,20 @@ export const LINE_ROWS = { lines: 40, proposals: 10, candidates: 5 } as const
 const LINE_TYPES: ReadonlySet<string> = new Set(['deliverable', 'fixes', 'rob_time', 'bank'])
 const SIGNALS: ReadonlySet<string> = new Set(['on_line', 'account_work', 'fix', 'unmatched', 'maybe_new_scope', 'no_quote', 'proposed'])
 const VIAS: ReadonlySet<string> = new Set(['declared', 'ticket', 'bank', 'none'])
+const MODES: ReadonlySet<string> = new Set(['tell_and_go', 'needs_yes', 'urgent'])
+const SETTLES: ReadonlySet<string> = new Set(['next_invoice', 'prepaid_hours'])
+const REASONS: ReadonlySet<string> = new Set(['small', 'over_limit', 'always_ask', 'small_items_cap', 'no_estimate', 'urgent'])
+
+/** (0.7.1) OW's mode, settle and reason, each when it is one OW uses. */
+export const modeOf = (v: unknown): ProposalMode | undefined => (MODES.has(String(v)) ? (v as ProposalMode) : undefined)
+export const settleOf = (v: unknown): ProposalSettle | undefined => (SETTLES.has(String(v)) ? (v as ProposalSettle) : undefined)
+export const reasonOf = (v: unknown): ProposalReason | undefined => (REASONS.has(String(v)) ? (v as ProposalReason) : undefined)
 
 const objOf = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
 /** A number OW may leave out: a finite number of zero or more, else null. */
 const optNum = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null)
+/** (0.7.1) An estimate of hours as OW or Claude gives one: a finite number above zero, else undefined. */
+const posNum = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined)
 
 function scopeLine(raw: unknown): ScopeLine | null {
   const o = objOf(raw)
@@ -128,6 +148,9 @@ function scopeLine(raw: unknown): ScopeLine | null {
   return {
     line_key: o.line_key, title: shownText(o.title, 120) || o.line_key, line_type: o.line_type as LineType, status: shownText(o.status, 40),
     estimate_hours: optNum(o.estimate_hours), minutes: optNum(o.minutes),
+    // (0.7.1) only from an OW that sends them
+    ...(typeof o.told === 'boolean' ? { told: o.told } : {}),
+    ...(typeof o.billed === 'boolean' ? { billed: o.billed } : {}),
   }
 }
 
@@ -140,7 +163,16 @@ function lineRef(raw: unknown): LineRef | null {
 function scopeProposal(raw: unknown): ScopeProposal | null {
   const o = objOf(raw)
   if (typeof o.ticket_id8 !== 'string' || !TICKET8.test(o.ticket_id8)) return null
-  return { ticket_id8: o.ticket_id8.toLowerCase(), title: shownText(o.title, 120) || o.ticket_id8.toLowerCase(), created_at: shownText(o.created_at, 40) }
+  const mode = modeOf(o.mode)
+  const estimate = posNum(o.estimate_hours)
+  const reason = reasonOf(o.reason)
+  return {
+    ticket_id8: o.ticket_id8.toLowerCase(), title: shownText(o.title, 120) || o.ticket_id8.toLowerCase(), created_at: shownText(o.created_at, 40),
+    // (0.7.1) only from an OW that sends them
+    ...(mode ? { mode } : {}),
+    ...(estimate !== undefined ? { estimate_hours: estimate } : {}),
+    ...(reason ? { reason } : {}),
+  }
 }
 
 /** (0.7.0) A thread's line, checked: undefined for one that is absent or whose signal OW does not use. */
@@ -149,6 +181,7 @@ export function parseThreadLine(raw: unknown): ThreadLine | undefined {
   const o = objOf(raw)
   if (!SIGNALS.has(String(o.signal))) return undefined
   const proposal = objOf(o.proposal)
+  const proposalMode = modeOf(proposal.mode)
   return {
     via: VIAS.has(String(o.via)) ? (o.via as LineVia) : 'none',
     line_key: typeof o.line_key === 'string' && LINE_KEY.test(o.line_key) ? o.line_key : null,
@@ -157,7 +190,26 @@ export function parseThreadLine(raw: unknown): ThreadLine | undefined {
     estimate_hours: optNum(o.estimate_hours),
     signal: o.signal as LineSignal,
     candidates: (Array.isArray(o.candidates) ? o.candidates : []).slice(0, 20).map(lineRef).filter((x): x is LineRef => x !== null).slice(0, LINE_ROWS.candidates),
-    proposal: typeof proposal.ticket_id8 === 'string' && TICKET8.test(proposal.ticket_id8) ? { ticket_id8: proposal.ticket_id8.toLowerCase(), title: shownText(proposal.title, 120) } : null,
+    proposal: typeof proposal.ticket_id8 === 'string' && TICKET8.test(proposal.ticket_id8)
+      ? { ticket_id8: proposal.ticket_id8.toLowerCase(), title: shownText(proposal.title, 120), ...(proposalMode ? { mode: proposalMode } : {}) }
+      : null,
+  }
+}
+
+/**
+ * (0.7.1) What OW's client-time answer says of a project's new-scope settings (`with=lines`): the prepaid hours it has
+ * left (null: none to draw on), whether it is set to always ask first, and the most hours a small item may take. Each
+ * only when OW sends it in the right shape: a field that is absent or of another shape stays absent (0.7.0's rules).
+ */
+export type ScopeSettings = { prepaid_hours_left?: number | null; always_ask?: boolean; small_limit_hours?: number }
+
+function scopeSettings(p: Record<string, unknown>): ScopeSettings {
+  const prepaid = p.prepaid_hours_left === null ? null : optNum(p.prepaid_hours_left) ?? undefined
+  const limit = posNum(p.small_limit_hours)
+  return {
+    ...(prepaid !== undefined ? { prepaid_hours_left: prepaid } : {}),
+    ...(typeof p.always_ask === 'boolean' ? { always_ask: p.always_ask } : {}),
+    ...(limit !== undefined ? { small_limit_hours: limit } : {}),
   }
 }
 
@@ -187,9 +239,9 @@ export type TimeLeverage = { ratio: number | null; build_hours: number; actual_h
 /**
  * One project's time. A period OW was not asked for (`periods=today`) is null; `threads` come with today alone and
  * `leverage` with the week alone. (0.7.0) `lines` and `proposals` come with today too, only from an OW that has them
- * (`with=lines`): absent, not empty, when it does not.
+ * (`with=lines`): absent, not empty, when it does not. (0.7.1) So do the new-scope settings (`ScopeSettings`).
  */
-export type TimeProject = { project_id: string; name: string; today: TimePeriod | null; week: TimePeriod | null; threads: TimeThread[]; leverage: TimeLeverage | null; lines?: ScopeLine[]; proposals?: ScopeProposal[] }
+export type TimeProject = { project_id: string; name: string; today: TimePeriod | null; week: TimePeriod | null; threads: TimeThread[]; leverage: TimeLeverage | null; lines?: ScopeLine[]; proposals?: ScopeProposal[] } & ScopeSettings
 export type ClientTime = { asOf: string; day: string; weekStart: string; viewer: { email: string; canSeeLeverage: boolean }; skipped: string[]; projects: TimeProject[] }
 
 /** The most rows of each list kept from an answer, so the store stays far under its cap. */
@@ -255,6 +307,8 @@ export function parseClientTime(raw: unknown): ClientTime | null {
         : null,
       ...(lines ? { lines } : {}),
       ...(proposals ? { proposals } : {}),
+      // (0.7.1) only from an OW that sends them
+      ...scopeSettings(p),
     })
   }
   return {
@@ -378,9 +432,15 @@ export function mergeTime(prev: TimeRecord | undefined, got: TimeProject, at: nu
   const old = prev?.p
   const todayCame = got.today !== null
   const weekCame = askedWeek && got.week !== null
-  // (0.7.0) the lines and proposals come with today, as the threads do
+  // (0.7.0) the lines and proposals come with today, as the threads do; (0.7.1) and so do the new-scope settings
   const lines = todayCame ? got.lines : old?.lines
   const proposals = todayCame ? got.proposals : old?.proposals
+  const from = todayCame ? got : old
+  const settings: ScopeSettings = {
+    ...(from?.prepaid_hours_left !== undefined ? { prepaid_hours_left: from.prepaid_hours_left } : {}),
+    ...(from?.always_ask !== undefined ? { always_ask: from.always_ask } : {}),
+    ...(from?.small_limit_hours !== undefined ? { small_limit_hours: from.small_limit_hours } : {}),
+  }
   const p: TimeProject = {
     project_id: got.project_id,
     name: got.name || old?.name || '',
@@ -390,6 +450,7 @@ export function mergeTime(prev: TimeRecord | undefined, got: TimeProject, at: nu
     leverage: weekCame ? got.leverage : (old?.leverage ?? null),
     ...(lines ? { lines } : {}),
     ...(proposals ? { proposals } : {}),
+    ...settings,
   }
   const rec: TimeRecord = {
     at: todayCame || prev?.at === undefined ? at : prev.at,
@@ -474,8 +535,9 @@ export function trackLines(t: TrackInput): MmTrackLine[] {
   const proposed = p.proposals ?? []
   if (counted.length || proposed.length) {
     out.push({ text: LINES_TODAY, bold: true })
-    for (const l of counted) out.push({ text: `${l.title} · ${fmtMin(l.minutes ?? 0)}${l.estimate_hours !== null && l.minutes !== null ? ` · est ${fmtEst(l.estimate_hours)} h` : ''}` })
-    for (const pr of proposed) out.push({ text: `Proposed: ${pr.title} · waiting for yes` })
+    for (const l of counted) out.push({ text: `${l.title} · ${fmtMin(l.minutes ?? 0)}${l.estimate_hours !== null && l.minutes !== null ? ` · est ${fmtEst(l.estimate_hours)} h` : ''}${toldUnbilled(l) ? NEXT_INVOICE : ''}` })
+    // (0.7.1) new scope that goes ahead (small or urgent) is told in the next reply; the rest waits for a yes
+    for (const pr of proposed) out.push({ text: goesAhead(pr.mode) ? `New scope: ${pr.title} · told in the next reply` : `Proposed: ${pr.title} · waiting for yes` })
   }
 
   if (p.threads.length) {
@@ -533,6 +595,19 @@ export function fmtEst(h: number): string {
 /** A project line by its key. */
 export const lineByKey = (p: TimeProject | undefined, key: string | null | undefined): ScopeLine | undefined => (key ? (p?.lines ?? []).find(l => l.line_key === key) : undefined)
 
+/** (0.7.1) Whether new scope goes ahead without waiting for a yes: small (`tell_and_go`) or urgent. */
+export const goesAhead = (mode: ProposalMode | undefined): boolean => mode === 'tell_and_go' || mode === 'urgent'
+
+/** (0.7.1) A thread's proposal's mode: OW's on the thread's line, else the project's proposal's by its ticket. */
+export const proposalMode = (l: ThreadLine, p: TimeProject | undefined): ProposalMode | undefined =>
+  l.proposal?.mode ?? (l.proposal ? (p?.proposals ?? []).find(x => x.ticket_id8 === l.proposal?.ticket_id8)?.mode : undefined)
+
+/** (0.7.1, verbatim) What a told, unbilled line adds to its Lines today row. */
+export const NEXT_INVOICE = ' · new scope, next invoice'
+
+/** (0.7.1) New scope the client was told about and that is on no invoice yet. */
+export const toldUnbilled = (l: ScopeLine): boolean => l.told === true && l.billed === false
+
 /** A line status that says it no longer takes time. */
 const ENDED = /^(closed|done|complete|completed|cancelled|canceled|archived|exhausted|inactive|declined|rejected)$/i
 
@@ -581,8 +656,12 @@ export function countsToward(l: ThreadLine, p: TimeProject | undefined, client: 
       const bank = l.title || lineByKey(p, l.line_key)?.title || bankLine(p)?.title
       return bank ? `Counts toward: account work · ${bank} (hour bank)` : 'Counts toward: account work (hour bank)'
     }
-    case 'proposed':
-      return `Proposed new line: ${l.proposal?.title || l.title || 'new scope'} · waiting for ${client}'s yes`
+    case 'proposed': {
+      const title = l.proposal?.title || l.title || 'new scope'
+      // (0.7.1) new scope that goes ahead (small or urgent): the client is told in the next reply
+      if (goesAhead(proposalMode(l, p))) return `New scope: ${title} · ${client} is told in the next reply`
+      return `Proposed new line: ${title} · waiting for ${client}'s yes`
+    }
     case 'no_quote':
       return `Counts toward: no quote on record for ${client}`
     default:
@@ -604,12 +683,22 @@ export const lineAskKey = (pid: string, task: string | undefined): string => `${
 /** (0.7.0) Whether the line band and the thread's note may show: a client's thread in a person's session that is not a SINGLE-SESSION run or MM_UNATTENDED=1. */
 export const asksInSession = (s: { single?: boolean }, unattended: boolean, client: boolean): boolean => client && !s.single && !unattended
 
-/** (0.7.0, verbatim) The band's words. */
-export const lineAskText = (client: string, signal: LineSignal): string =>
-  signal === 'maybe_new_scope' ? `${client}: this doesn't match a line on the quote.` : `${client}: which line does this work count toward?`
+/** (0.7.0, verbatim) The band's words. (0.7.1) For a client set to always ask first, they say so. */
+export const lineAskText = (client: string, signal: LineSignal, alwaysAsk = false): string =>
+  `${signal === 'maybe_new_scope' ? `${client}: this doesn't match a line on the quote.` : `${client}: which line does this work count toward?`}${alwaysAsk ? ` (${client} is set to always ask first)` : ''}`
 export const LINE_NEW = 'New scope'
-export const LINE_BANK = 'Hour bank'
+/** (0.7.1) The button that was Hour bank in 0.7.0. */
+export const LINE_BANK = 'Prepaid hours'
 export const LINE_LATER = 'Not now'
+
+/**
+ * (0.7.1) Whether the band offers Prepaid hours (and the thread's note asks about them): when the client has prepaid
+ * hours left, from an OW that says (`prepaid_hours_left`); from one that does not, 0.7.0's rule (it has an hour bank).
+ */
+export const offersPrepaid = (p: TimeProject | undefined): boolean => {
+  const left = p?.prepaid_hours_left
+  return left === undefined ? Boolean(bankLine(p)) : typeof left === 'number' && left > 0
+}
 /** A candidate's button: its title, at most 28 characters. */
 export const lineButton = (title: string): string => shownText(title, 28)
 
@@ -620,13 +709,17 @@ export const forClaude = (text: unknown, max = 120): string => cleanText(text, m
 export const lineNote = (client: string, title: string, key: string): string =>
   `[mm-bridge] The person says this thread's work counts toward ${client}'s line "${title}". Before your next step, call the mm tool with "line ${key}" and do what it returns.`
 
-/** (0.7.0, verbatim) The note a press on New scope adds for Claude. */
+/**
+ * (0.7.1, verbatim) The note a press on New scope adds for Claude. Rob, 2026-10-26 (decision_log 99395076): new scope
+ * never comes out of revision hours; small new scope goes ahead and the client is told, bigger scope (or scope with no
+ * estimate) waits for the client's yes, and urgent work (actively costing the client money) carries on now.
+ */
 export const newScopeNote = (client: string): string =>
-  `[mm-bridge] The person says this thread's work is new scope for ${client}. Before your next step, write a short title for it (the words the client would see on a quote) and one line on why, then call the mm tool with "propose <title> -- <why>" and do what it returns. The line itself is added only when the client says yes.`
+  `[mm-bridge] The person says this thread's work is new scope for ${client}. Before your next step, write a short title for it (the words the client would see on a quote), one line on why, and your estimate in hours, and decide whether it is urgent (something broken that is costing the client money right now). Then call the mm tool with "propose <title> -- <why> -- <N>h" (add " urgent" when it is) and do what it returns. A fix to something Massmarket built is not new scope: if that is what this is, say so to the person instead.`
 
-/** (0.7.0, verbatim) The note a press on Hour bank adds for Claude. */
+/** (0.7.1, verbatim) The note a press on Prepaid hours adds for Claude. */
 export const bankNote = (client: string): string =>
-  `[mm-bridge] The person says this thread's work is a quick fix inside ${client}'s hour bank. Before your next step, call the mm tool with "bank" and do what it returns.`
+  `[mm-bridge] The person says this thread's work comes out of ${client}'s prepaid hours. Before your next step, call the mm tool with "bank" and do what it returns.`
 
 /** `a`, `a or b`, `a, b or c`. */
 const orList = (items: readonly string[]): string => (items.length < 2 ? (items[0] ?? '') : `${items.slice(0, -1).join(', ')} or ${items[items.length - 1]}`)
@@ -635,16 +728,18 @@ const orList = (items: readonly string[]): string => (items.length < 2 ? (items[
  * (0.7.0, verbatim) The one note a thread gets the first time its work matches no line (per session and task label):
  * Claude asks the person where it counts, and keeps working. Only the candidates that exist are named; with no hour
  * bank its clause (and "bank") goes, and with no candidates the "does it count toward" clause (and "line") goes.
+ * (0.7.1) New scope as Rob set it on 2026-10-26 (small items go ahead, bigger ones wait for a yes), and the bank as the
+ * client's prepaid hours: `bank` is whether the band offers Prepaid hours (`offersPrepaid`).
  */
 export function askNote(o: { client: string; task: string; candidates: readonly { line_key: string; title: string }[]; bank: boolean }): string {
   const cands = o.candidates.slice(0, LINE_CHOICES).map(c => `"${c.title}" (${c.line_key})`)
   const asks = [
     ...(cands.length ? [`does it count toward ${orList(cands)}`] : []),
-    'is it new scope (Massmarket proposes a new line and tells the client before billing it)',
-    ...(o.bank ? ['is it a quick fix inside the hour bank'] : []),
+    'is it new scope (small items go ahead and the client is told; bigger ones wait for their yes)',
+    ...(o.bank ? ['does it come out of their prepaid hours'] : []),
   ]
   const question = asks.length > 1 ? `${asks.slice(0, -1).join(', ')}, or ${asks[asks.length - 1]}` : asks[0]
-  const acts = orList([...(cands.length ? ['"line <line_key>"'] : []), '"propose <title> -- <why>"', ...(o.bank ? ['"bank"'] : [])])
+  const acts = orList([...(cands.length ? ['"line <line_key>"'] : []), '"propose <title> -- <why> -- <N>h"', ...(o.bank ? ['"bank" (prepaid hours)'] : [])])
   const work = o.task ? `this thread's work ("${o.task}")` : 'this thread\'s work'
   return `[mm-bridge] Massmarket time tracking: ${work} does not match a line on ${o.client}'s quote yet, so its minutes are not counted to a deliverable. In your next reply, ask the person one short question: ${question}? Then act on the answer with the mm tool: ${acts}. Keep working while you wait for the answer.`
 }
@@ -684,13 +779,84 @@ export function proposedText(o: { title: string; client: string; id8: string; ex
 /** (0.7.0, verbatim) `mm bank` for a client with no hour bank. */
 export const noBankText = (client: string): string => `${client} has no hour bank on record; ask the person which line, or propose new scope.`
 
-/** (0.7.0) `mm propose <title> -- <why>`, split: the title (1 to 120 characters) and why (at most 500); null when there is no title. */
-export function proposalArgs(arg: string): { title: string; why: string } | null {
+/** (0.7.1, verbatim) `mm bank` for a client OW says has no prepaid hours left. */
+export const noPrepaidText = (client: string): string => `${client} has no prepaid hours left; ask the person which line, or record it as new scope.`
+
+/** (0.7.1) The fewest and most hours an estimate may give (OW's contract). */
+export const ESTIMATE_HOURS = { min: 0.25, max: 200 } as const
+
+/** (0.7.1) The end of `mm propose`'s arguments: an estimate (`<N>h`, `<N> h`, `<N> hours`) and ` urgent` after it, or `urgent` alone. */
+const ESTIMATE_PART = /^(?:(\d+(?:\.\d+)?|\.\d+)\s*(?:h|hrs?|hours?))?\s*(urgent)?$/i
+
+/** (0.7.1) `mm propose`'s arguments: the title, why, the estimate in hours and whether it is urgent; `badEstimate` when the estimate is out of range. */
+export type ProposalArgs = { title: string; why: string; estimate?: number; urgent: boolean; badEstimate?: true }
+
+/**
+ * (0.7.0) `mm propose <title> -- <why>`, split: the title (1 to 120 characters) and why (at most 500); null when there
+ * is no title. (0.7.1) `-- <N>h` after it gives the estimate (0.25 to 200 hours) and ` urgent` says it is urgent, both
+ * optional: `propose <title> -- <why> -- <N>h urgent`. Only a whole last part reads so (`-- urgent` alone too), so a
+ * why that merely ends in the word "urgent" stays the why.
+ */
+export function proposalArgs(arg: string): ProposalArgs | null {
   const at = arg.indexOf(' -- ')
   const head = (at >= 0 ? arg.slice(0, at) : arg.replace(/\s--\s*$/, '')).trim()
-  const why = at >= 0 ? arg.slice(at + 4).trim() : ''
+  let rest = at >= 0 ? arg.slice(at + 4).replace(/\s--\s*$/, '').trim() : ''
+  let estimate: number | undefined
+  let urgent = false
+  // the estimate and urgent come last, as one part or two (`-- 2h urgent`, `-- 2h -- urgent`)
+  for (let i = 0; i < 2 && rest; i++) {
+    const cut = rest.lastIndexOf(' -- ')
+    const last = (cut >= 0 ? rest.slice(cut + 4) : rest).trim()
+    const m = ESTIMATE_PART.exec(last)
+    if (!m || (!m[1] && !m[2]) || (m[1] && estimate !== undefined)) break
+    if (m[1]) estimate = Number(m[1])
+    if (m[2]) urgent = true
+    rest = cut >= 0 ? rest.slice(0, cut).trim() : ''
+  }
   const title = shownText(head, 120)
-  return title ? { title, why: shownText(why, 500) } : null
+  if (!title) return null
+  const bad = estimate !== undefined && !(estimate >= ESTIMATE_HOURS.min && estimate <= ESTIMATE_HOURS.max)
+  return { title, why: shownText(rest, 500), ...(estimate !== undefined && !bad ? { estimate } : {}), urgent, ...(bad ? { badEstimate: true as const } : {}) }
+}
+
+/** (0.7.1) `mm propose` with an estimate out of range: nothing is recorded. */
+export const BAD_ESTIMATE = `The estimate is in hours, from ${ESTIMATE_HOURS.min} to ${ESTIMATE_HOURS.max}: mm propose <title> -- <why> -- <N>h (add " urgent" when it is). Nothing was recorded.`
+
+/** (0.7.1) Hours as an estimate is said back: at most two decimals (`2`, `1.5`, `0.25`). */
+export const fmtAbout = (h: number): string => String(Math.round(Math.max(0, Number(h) || 0) * 100) / 100)
+
+/**
+ * (0.7.1, verbatim; Rob 2026-10-26, decision_log 99395076) `mm propose`, after OW recorded new scope and said how it
+ * goes: small, so Claude carries on and the next reply tells the client (billed at the estimate on the next invoice,
+ * or out of their prepaid hours); it waits for the client's yes (over 2 hours, set to always ask, the small items
+ * since the last invoice at their cap, or no estimate); or urgent, so Claude carries on now. The estimate is what is
+ * billed, never the time an agent took; with no estimate, the actual time is. An OW that gives no mode gets 0.7.0's
+ * answer (`proposedText`).
+ */
+export function recordedText(o: {
+  title: string; client: string; id8: string; existing: boolean; windows: boolean
+  mode: ProposalMode; settle?: ProposalSettle | undefined; reason?: ProposalReason | undefined; estimate?: number | undefined; limit?: number | undefined
+}): string {
+  const title = forClaude(o.title, 100)
+  const c = o.client
+  const cmd = hookCommand(`${o.id8} ${title}`, o.windows)
+  const head = `${o.existing ? 'Already recorded' : 'Recorded'} "${title}" as ${o.mode === 'urgent' ? 'urgent ' : ''}new scope for ${c} (ticket ${o.id8}).`
+  const n = o.estimate !== undefined && o.estimate > 0 ? fmtAbout(o.estimate) : ''
+  const billed =
+    o.settle === 'prepaid_hours'
+      ? n ? `it comes out of their prepaid hours at about ${n} h` : 'the actual time comes out of their prepaid hours'
+      : n ? `it goes on the next invoice at about ${n} h` : 'the actual time goes on the next invoice'
+  if (o.mode === 'tell_and_go') return `${head} It's small${n ? ` (about ${n} h)` : ''}, so carry on: the next reply tells ${c}, and ${billed}. Run this so the work counts to it: ${cmd}`
+  if (o.mode === 'urgent') return `${head} Carry on now: the next reply tells ${c} we're on it, and ${billed}. Run this so the work counts to it: ${cmd}`
+  const pause = 'pause the new part: the next reply asks for it.'
+  const limit = fmtAbout(o.limit !== undefined && o.limit > 0 ? o.limit : 2)
+  const why =
+    o.reason === 'over_limit' && n ? `At about ${n} h it needs ${c}'s yes first, so ${pause}`
+    : o.reason === 'always_ask' ? `${c} is set to always ask first, so ${pause}`
+    : o.reason === 'small_items_cap' ? `${c}'s small new-scope items since the last invoice already add up to ${limit} hour${limit === '1' ? '' : 's'}, so this one needs their yes first. Pause the new part: the next reply asks for it.`
+    : o.reason === 'no_estimate' ? `Without an estimate it needs ${c}'s yes first, so ${pause}`
+    : `It needs ${c}'s yes first, so ${pause}`
+  return `${head} ${why} Run this so any time already spent counts to it: ${cmd}`
 }
 
 // ---------------------------------------------------------------- the pane opening by itself (§4)

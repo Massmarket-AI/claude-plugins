@@ -1,6 +1,6 @@
 {
   "name": "mm-bridge",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Pins and names each client thread with what is due, links every thread working on a client, and keeps a side pane open with the client's tasks, tracked time, the quote line the work counts toward and reply drafts; never sends to a client",
   "author": {
     "name": "Massmarket AI"
