@@ -3,7 +3,10 @@ import { describe, expect, test } from 'claude-code/testing'
 import {
   INTERNAL_NOTE, NOT_AVAILABLE, TIME_ROWS, WEEK_EVERY_MS, afterPersonClose, clientName, displayName, fmtHours, fmtMin, fmtX, kindOf, mergeCurrent, mergeTime, numbersNote, opensBySelf,
   parseClientTime, parseSkillMap, pressNote, secondLine, skillName, taskFrom, thisThread, trackLines, trackStatus, weekIsDue,
+  LINES_TODAY, LINE_BANK, LINE_LATER, LINE_NEW, askNote, asksForLine, asksInSession, bankLine, bankNote, countsToward, declareLineText, fmtEst, forClaude, hookCommand, lineAskKey, lineAskText,
+  lineButton, lineNote, lineOfThread, linkedText, newScopeNote, noBankText, parseThreadLine, proposalArgs, proposedText, statusLineTitle, ticketOf, withoutPrefix,
 } from './track'
+import type { ThreadLine, TimeProject } from './track'
 
 // The tracking part of the bridge (0.6.0), with no `$`: every made-up client and number here is a fixture.
 
@@ -208,5 +211,296 @@ describe('0.6.0 (OW contract 2026-10-25): the periods asked for, and a today-onl
     const lines = trackLines({ client: 'Acme Roofing', time: { at: NOW, asOf: new Date(NOW).toISOString(), ...(p ? { p } : {}) }, missing: false, canSeeLeverage: true, mine: () => false }).map(l => l.text)
     expect(lines).toContain('Today: 1.1 h tracked · 1.1 h in threads · Jarvis 0.0 h')
     expect(lines.some(l => l.startsWith('This week'))).toBe(false)
+  })
+})
+
+// ======================================================================== 0.7.0: the deliverable line the work counts toward
+// Rob, 2026-10-26: "I want the live panel not just to show what clients are being tracked, but also the task that it
+// thinks we're working on. Maybe even separately, it could show which specific deliverable line those hours are being
+// added for." Every line, title and key here is a fixture.
+
+const L_COPY = 'L-1a2b3c4d'
+const L_ROUTER = 'L-2b3c4d5e'
+const L_SITE = 'L-3c4d5e6f'
+const L_BANK = 'L-4d5e6f7a'
+const LINES = [
+  { line_key: L_COPY, title: 'Phase 1 nurture sequence', line_type: 'deliverable', status: 'active', estimate_hours: 12, minutes: 64 },
+  { line_key: L_ROUTER, title: 'Inbound lead router and assignment rules', line_type: 'deliverable', status: 'active', estimate_hours: 6, minutes: 42 },
+  { line_key: L_SITE, title: 'Website refresh', line_type: 'deliverable', status: 'active', estimate_hours: 20, minutes: 0 },
+  { line_key: L_BANK, title: 'Support hour bank', line_type: 'bank', status: 'active', estimate_hours: 10, minutes: 0 },
+]
+const day = (tasks: unknown[] = []) => ({ client_minutes: 106, thread_minutes: 106, parallel: null, jarvis_minutes: 0, people: [{ email: 'a@example.com', name: 'Avery Lane', minutes: 106 }], tasks })
+const lined = (o: { line?: unknown; lines?: unknown; proposals?: unknown; tasks?: unknown[]; task?: string | null } = {}): TimeProject => {
+  const parsed = parseClientTime({
+    as_of: new Date(NOW).toISOString(),
+    viewer: { email: 'a@example.com', can_see_leverage: true },
+    projects: [{
+      project_id: ACME, name: 'Acme Roofing — Pat',
+      today: day(o.tasks ?? []), week: null, leverage: null,
+      threads: [{ session_id: 'mine', title: 'Acme copy', member_email: 'a@example.com', member_name: 'Avery Lane', task: o.task === undefined ? 'Copy' : o.task, ticket_id: null, minutes_today: 64, last_activity_at: new Date(NOW).toISOString(), active_now: true, ...(o.line !== undefined ? { line: o.line } : {}) }],
+      ...(o.lines !== undefined ? { lines: o.lines } : {}),
+      ...(o.proposals !== undefined ? { proposals: o.proposals } : {}),
+    }],
+  })?.projects[0]
+  if (!parsed) throw new Error('fixture')
+  return parsed
+}
+const thread = (signal: string, over: Record<string, unknown> = {}) => ({ via: 'none', line_key: null, title: null, line_type: null, estimate_hours: null, signal, candidates: [], proposal: null, ...over })
+const tl = (signal: string, over: Record<string, unknown> = {}): ThreadLine => {
+  const l = parseThreadLine(thread(signal, over))
+  if (!l) throw new Error('fixture')
+  return l
+}
+const drawn = (p: TimeProject, task = 'Copy') => trackLines({ client: 'Acme Roofing', task, time: { at: NOW, asOf: new Date(NOW).toISOString(), p }, missing: false, canSeeLeverage: false, mine: sid => sid === 'mine' }).map(l => l.text)
+
+describe('0.7.0: OW\'s new fields, checked (absent, malformed, complete)', () => {
+  test('absent: nothing new is kept, the project and its threads as 0.6.0 had them', async () => {
+    const p = lined({ tasks: [{ task: 'Copy', ticket_id: null, minutes: 64, thread_count: 1, people: [], last_activity_at: '', active_now: true }] })
+    expect('lines' in p).toBe(false)
+    expect('proposals' in p).toBe(false)
+    expect('line' in (p.threads[0] ?? {})).toBe(false)
+    expect('line_key' in (p.today?.tasks[0] ?? {})).toBe(false)
+    expect(lineOfThread(p, sid => sid === 'mine')).toBeUndefined()
+    // and the pane draws exactly what 0.6.0 drew
+    expect(drawn(p).slice(0, 4)).toEqual(['Tracking to Acme Roofing · Copy', 'This thread: 1h 04m today · Acme Roofing today: 1h 46m tracked across 1 thread', 'Tasks today', '● Copy · 1h 04m'])
+    expect(drawn(p)).not.toContain(LINES_TODAY)
+    expect(drawn(p).some(l => l.startsWith('Counts toward') || l.startsWith('Proposed'))).toBe(false)
+  })
+
+  test('malformed: a list that is not one is absent; entries of the wrong shape go; a signal OW does not use is no line', async () => {
+    expect('lines' in lined({ lines: 'nope', proposals: { a: 1 } })).toBe(false)
+    const p = lined({
+      lines: [
+        LINES[0],
+        { line_key: 'L-1; rm -rf ~', title: 'x', line_type: 'deliverable' },
+        { line_key: 'L-99999999', title: 'y', line_type: 'retainer' },
+        null,
+        { line_key: 'L-aaaaaaaa', title: 'Line\nwith a break', line_type: 'fixes', status: 'active', estimate_hours: -1, minutes: 'ten' },
+      ],
+      proposals: [{ ticket_id8: 'zzzzzzzz', title: 'bad' }, { ticket_id8: 'ABCDEF12', title: 'Spanish landing page', created_at: '2026-10-26T12:00:00Z' }],
+      tasks: [{ task: 'Copy', minutes: 1, line_key: 'not a key' }, { task: 'Router', minutes: 1, line_key: L_ROUTER }],
+      line: { signal: 'mystery', via: 'declared' },
+    })
+    expect(p.lines?.map(l => l.line_key)).toEqual([L_COPY, 'L-aaaaaaaa'])
+    expect(p.lines?.[1]).toEqual({ line_key: 'L-aaaaaaaa', title: 'Line with a break', line_type: 'fixes', status: 'active', estimate_hours: null, minutes: null })
+    expect(p.proposals).toEqual([{ ticket_id8: 'abcdef12', title: 'Spanish landing page', created_at: '2026-10-26T12:00:00Z' }])
+    expect('line_key' in (p.today?.tasks[0] ?? {})).toBe(false)
+    expect(p.today?.tasks[1]?.line_key).toBe(L_ROUTER)
+    expect('line' in (p.threads[0] ?? {})).toBe(false)
+    // a line whose parts are of the wrong shape keeps its signal and drops the parts
+    expect(parseThreadLine({ signal: 'unmatched', via: 'teleport', line_key: 'nope', line_type: 'x', estimate_hours: 'many', candidates: [{ line_key: 'bad' }, { line_key: L_SITE, title: 'Website refresh' }], proposal: { ticket_id8: 'xyz' } })).toEqual({
+      via: 'none', line_key: null, title: null, line_type: null, estimate_hours: null, signal: 'unmatched', candidates: [{ line_key: L_SITE, title: 'Website refresh', line_type: 'deliverable' }], proposal: null,
+    })
+    expect(parseThreadLine(null)).toBeUndefined()
+    expect(parseThreadLine('on_line')).toBeUndefined()
+  })
+
+  test('complete: every field kept, trimmed to what the store keeps', async () => {
+    const many = Array.from({ length: 60 }, (_, n) => ({ ...LINES[0], line_key: `L-${String(n).padStart(8, '0')}` }))
+    const p = lined({
+      lines: many,
+      line: thread('on_line', { via: 'declared', line_key: L_COPY, title: 'Phase 1 nurture sequence', line_type: 'deliverable', estimate_hours: 12, candidates: Array.from({ length: 9 }, (_, n) => ({ line_key: `L-c000000${n}`, title: `C${n}`, line_type: 'deliverable' })), proposal: { ticket_id8: 'F779A7A0', title: 'Spanish landing page' } }),
+    })
+    expect(p.lines?.length).toBe(40)
+    const line = lineOfThread(p, sid => sid === 'mine')
+    expect(line?.task).toBe('Copy')
+    expect(line?.line).toMatchObject({ via: 'declared', line_key: L_COPY, title: 'Phase 1 nurture sequence', line_type: 'deliverable', estimate_hours: 12, signal: 'on_line', proposal: { ticket_id8: 'f779a7a0', title: 'Spanish landing page' } })
+    expect(line?.line.candidates.length).toBe(5)
+    // another thread's line is not this thread's
+    expect(lineOfThread(p, () => false)).toBeUndefined()
+  })
+
+  test('the lines and proposals come with today: a read without today keeps them; a today without them has none', async () => {
+    const first = lined({ lines: LINES, proposals: [{ ticket_id8: 'abcdef12', title: 'Spanish landing page', created_at: '' }] })
+    const a = mergeTime(undefined, first, NOW, 'T1', true)
+    expect(a.p?.lines?.length).toBe(4)
+    const weekOnly: TimeProject = { ...first, today: null, threads: [] }
+    delete weekOnly.lines
+    delete weekOnly.proposals
+    const b = mergeTime(a, weekOnly, NOW + 1, 'T2', true)
+    expect(b.p?.lines?.length).toBe(4)
+    expect(b.p?.proposals?.length).toBe(1)
+    const c = mergeTime(b, lined(), NOW + 2, 'T3', false)
+    expect(c.p && 'lines' in c.p).toBe(false)
+  })
+})
+
+describe('0.7.0: the Tracking part names the line (verbatim)', () => {
+  const p = lined({ lines: LINES })
+
+  test('each signal\'s line under the heading', async () => {
+    const cases: Array<[ThreadLine, string]> = [
+      [tl('on_line', { via: 'declared', line_key: L_COPY, title: 'Phase 1 nurture sequence', estimate_hours: 12 }), 'Counts toward: Phase 1 nurture sequence · est 12 h · 1h 04m today'],
+      [tl('on_line', { via: 'ticket', line_key: L_SITE, title: 'Website refresh', estimate_hours: 20 }), 'Counts toward: Website refresh · est 20 h'],
+      [tl('on_line', { via: 'ticket', line_key: 'L-77777777', title: 'Unlisted line' }), 'Counts toward: Unlisted line'],
+      [tl('on_line', { via: 'bank', line_key: L_BANK, title: 'Support hour bank', line_type: 'bank' }), 'Counts toward: Support hour bank (hour bank)'],
+      [tl('account_work', { via: 'bank', line_key: L_BANK, title: 'Support hour bank' }), 'Counts toward: account work · Support hour bank (hour bank)'],
+      [tl('account_work', { via: 'none' }), 'Counts toward: account work'],
+      [tl('fix', { via: 'ticket', line_key: L_ROUTER, title: 'Inbound lead router and assignment rules', estimate_hours: 6 }), 'Counts toward: Inbound lead router and assignment rules · est 6 h · 42m today'],
+      [tl('fix', { via: 'none' }), 'Counts toward: no line yet (a fix)'],
+      [tl('proposed', { proposal: { ticket_id8: 'abcdef12', title: 'Spanish landing page' } }), 'Proposed new line: Spanish landing page · waiting for Acme Roofing\'s yes'],
+      [tl('unmatched'), 'Counts toward: no line yet'],
+      [tl('maybe_new_scope', { candidates: [{ line_key: L_SITE, title: 'Website refresh' }] }), 'Counts toward: no line yet'],
+      [tl('no_quote'), 'Counts toward: no quote on record for Acme Roofing'],
+    ]
+    for (const [line, text] of cases) expect(countsToward(line, p, 'Acme Roofing')).toBe(text)
+    // the estimate from the project's line when the thread's has none; a minutes of null (not the viewer's to see) shows no today
+    const hidden = lined({ lines: LINES.map(l => ({ ...l, minutes: null })) })
+    expect(countsToward(tl('on_line', { via: 'declared', line_key: L_COPY, title: 'Phase 1 nurture sequence' }), hidden, 'Acme Roofing')).toBe('Counts toward: Phase 1 nurture sequence · est 12 h')
+  })
+
+  test('drawn as the second line, under the heading; absent, no line at all', async () => {
+    const on = lined({ lines: LINES, line: thread('on_line', { via: 'declared', line_key: L_COPY, title: 'Phase 1 nurture sequence', estimate_hours: 12 }) })
+    expect(drawn(on).slice(0, 3)).toEqual(['Tracking to Acme Roofing · Copy', 'Counts toward: Phase 1 nurture sequence · est 12 h · 1h 04m today', 'This thread: 1h 04m today · Acme Roofing today: 1h 46m tracked across 1 thread'])
+    expect(drawn(lined({ lines: LINES }))[1]).toBe('This thread: 1h 04m today · Acme Roofing today: 1h 46m tracked across 1 thread')
+  })
+
+  test('a task row names its line, at most 28 characters; a key that is no line of the project names none', async () => {
+    const q = lined({
+      lines: LINES,
+      tasks: [
+        { task: 'Copy', minutes: 64, people: ['a@example.com'], active_now: true, line_key: L_COPY },
+        { task: 'f779a7a0 Router', minutes: 42, people: [], line_key: L_ROUTER },
+        { task: 'Other', minutes: 5, people: [], line_key: 'L-99999999' },
+      ],
+    })
+    const rows = drawn(q)
+    expect(rows).toContain('● Copy · 1h 04m · Avery → Phase 1 nurture sequence')
+    expect(rows).toContain('  f779a7a0 Router · 42m → Inbound lead router and ass…')
+    expect(rows).toContain('  Other · 5m')
+    expect(lineButton('Inbound lead router and assignment rules')).toBe('Inbound lead router and ass…')
+  })
+
+  test('Lines today: each line with minutes today, with its estimate, then each proposal; omitted when there are none', async () => {
+    const q = lined({ lines: LINES, proposals: [{ ticket_id8: 'abcdef12', title: 'Spanish landing page', created_at: '' }], tasks: [{ task: 'Copy', minutes: 64, people: [] }] })
+    const rows = drawn(q)
+    const at = rows.indexOf(LINES_TODAY)
+    expect(at).toBe(rows.indexOf('Tasks today') + 2)
+    expect(rows.slice(at, at + 4)).toEqual([LINES_TODAY, 'Phase 1 nurture sequence · 1h 04m · est 12 h', 'Inbound lead router and assignment rules · 42m · est 6 h', 'Proposed: Spanish landing page · waiting for yes'])
+    // a line with no estimate, and lines the viewer may not see (null minutes)
+    const r = drawn(lined({ lines: [{ ...LINES[0], estimate_hours: null }, { ...LINES[1], minutes: null }] }))
+    expect(r.slice(r.indexOf(LINES_TODAY), r.indexOf(LINES_TODAY) + 2)).toEqual([LINES_TODAY, 'Phase 1 nurture sequence · 1h 04m'])
+    expect(r).not.toContain('Inbound lead router and assignment rules · 42m · est 6 h')
+    // no minutes on any line and no proposal: no section
+    expect(drawn(lined({ lines: LINES.map(l => ({ ...l, minutes: null })), proposals: [] }))).not.toContain(LINES_TODAY)
+    expect(fmtEst(12)).toBe('12')
+    expect(fmtEst(1.25)).toBe('1.3')
+  })
+
+  test('the status line names the line, at most 24 characters, when the thread is on one', async () => {
+    expect(trackStatus({ client: 'Acme Roofing', task: 'Copy', minutes: 64, counted: true, line: 'Phase 1 nurture sequence' })).toBe('⏱ Acme Roofing · Copy → Phase 1 nurture sequence · this thread 1h 04m today')
+    expect(trackStatus({ client: 'Acme Roofing', task: 'Copy', minutes: 64, counted: true, line: 'Inbound lead router and assignment rules' })).toBe('⏱ Acme Roofing · Copy → Inbound lead router and… · this thread 1h 04m today')
+    expect(trackStatus({ client: 'Acme Roofing', task: 'Copy', minutes: 64, counted: true })).toBe('⏱ Acme Roofing · Copy · this thread 1h 04m today')
+    expect(statusLineTitle(tl('on_line', { via: 'declared', line_key: L_COPY, title: 'Phase 1 nurture sequence' }), p)).toBe('Phase 1 nurture sequence')
+    expect(statusLineTitle(tl('on_line', { via: 'ticket', line_key: L_ROUTER }), p)).toBe('Inbound lead router and assignment rules')
+    expect(statusLineTitle(tl('fix', { via: 'ticket', line_key: L_ROUTER, title: 'Router' }), p)).toBe('Router')
+    for (const s of ['fix', 'unmatched', 'maybe_new_scope', 'no_quote', 'proposed', 'account_work']) expect(statusLineTitle(tl(s), p)).toBeUndefined()
+    expect(statusLineTitle(undefined, p)).toBeUndefined()
+  })
+})
+
+describe('0.7.0: the line band and the notes for Claude (verbatim)', () => {
+  test('when it asks, and where', async () => {
+    expect(asksForLine(tl('unmatched'))).toBe(true)
+    expect(asksForLine(tl('maybe_new_scope'))).toBe(true)
+    for (const s of ['on_line', 'fix', 'account_work', 'proposed', 'no_quote']) expect(asksForLine(tl(s))).toBe(false)
+    expect(asksForLine(undefined)).toBe(false)
+    expect(asksInSession({}, false, true)).toBe(true)
+    expect(asksInSession({ single: true }, false, true)).toBe(false)
+    expect(asksInSession({}, true, true)).toBe(false)
+    expect(asksInSession({}, false, false)).toBe(false)
+    expect(lineAskKey(ACME, 'Copy')).toBe(`${ACME}|Copy`)
+    expect(lineAskKey(ACME, undefined)).toBe(`${ACME}|`)
+  })
+
+  test('the band\'s words, its buttons and the note each press adds', async () => {
+    expect(lineAskText('Acme Roofing', 'unmatched')).toBe('Acme Roofing: which line does this work count toward?')
+    expect(lineAskText('Acme Roofing', 'maybe_new_scope')).toBe('Acme Roofing: this doesn\'t match a line on the quote.')
+    expect([LINE_NEW, LINE_BANK, LINE_LATER]).toEqual(['New scope', 'Hour bank', 'Not now'])
+    expect(lineNote('Acme Roofing', 'Website refresh', L_SITE)).toBe(
+      `[mm-bridge] The person says this thread's work counts toward Acme Roofing's line "Website refresh". Before your next step, call the mm tool with "line ${L_SITE}" and do what it returns.`,
+    )
+    expect(newScopeNote('Acme Roofing')).toBe(
+      '[mm-bridge] The person says this thread\'s work is new scope for Acme Roofing. Before your next step, write a short title for it (the words the client would see on a quote) and one line on why, then call the mm tool with "propose <title> -- <why>" and do what it returns. The line itself is added only when the client says yes.',
+    )
+    expect(bankNote('Acme Roofing')).toBe('[mm-bridge] The person says this thread\'s work is a quick fix inside Acme Roofing\'s hour bank. Before your next step, call the mm tool with "bank" and do what it returns.')
+    // text from OW goes to Claude cleaned: no quotes, no shell characters
+    expect(forClaude('Fix "router" $(whoami) `x` \\ now')).toBe('Fix router (whoami) x now')
+  })
+
+  test('the thread\'s one note: three candidates and a bank, as the spec words it', async () => {
+    expect(askNote({ client: 'Acme Roofing', task: 'Copy', candidates: [{ line_key: L_COPY, title: 'Phase 1 nurture sequence' }, { line_key: L_ROUTER, title: 'Router' }, { line_key: L_SITE, title: 'Website refresh' }], bank: true })).toBe(
+      `[mm-bridge] Massmarket time tracking: this thread's work ("Copy") does not match a line on Acme Roofing's quote yet, so its minutes are not counted to a deliverable. In your next reply, ask the person one short question: does it count toward "Phase 1 nurture sequence" (${L_COPY}), "Router" (${L_ROUTER}) or "Website refresh" (${L_SITE}), is it new scope (Massmarket proposes a new line and tells the client before billing it), or is it a quick fix inside the hour bank? Then act on the answer with the mm tool: "line <line_key>", "propose <title> -- <why>" or "bank". Keep working while you wait for the answer.`,
+    )
+  })
+
+  test('the thread\'s one note: only the candidates that exist; no bank clause without a bank; no "count toward" clause without candidates', async () => {
+    expect(askNote({ client: 'Acme Roofing', task: 'Copy', candidates: [{ line_key: L_SITE, title: 'Website refresh' }], bank: false })).toBe(
+      `[mm-bridge] Massmarket time tracking: this thread's work ("Copy") does not match a line on Acme Roofing's quote yet, so its minutes are not counted to a deliverable. In your next reply, ask the person one short question: does it count toward "Website refresh" (${L_SITE}), or is it new scope (Massmarket proposes a new line and tells the client before billing it)? Then act on the answer with the mm tool: "line <line_key>" or "propose <title> -- <why>". Keep working while you wait for the answer.`,
+    )
+    expect(askNote({ client: 'Acme Roofing', task: 'Copy', candidates: [], bank: true })).toBe(
+      '[mm-bridge] Massmarket time tracking: this thread\'s work ("Copy") does not match a line on Acme Roofing\'s quote yet, so its minutes are not counted to a deliverable. In your next reply, ask the person one short question: is it new scope (Massmarket proposes a new line and tells the client before billing it), or is it a quick fix inside the hour bank? Then act on the answer with the mm tool: "propose <title> -- <why>" or "bank". Keep working while you wait for the answer.',
+    )
+    expect(askNote({ client: 'Acme Roofing', task: '', candidates: [], bank: false })).toBe(
+      '[mm-bridge] Massmarket time tracking: this thread\'s work does not match a line on Acme Roofing\'s quote yet, so its minutes are not counted to a deliverable. In your next reply, ask the person one short question: is it new scope (Massmarket proposes a new line and tells the client before billing it)? Then act on the answer with the mm tool: "propose <title> -- <why>". Keep working while you wait for the answer.',
+    )
+    // at most three candidates
+    const four = [L_COPY, L_ROUTER, L_SITE, 'L-55555555'].map((k, n) => ({ line_key: k, title: `C${n}` }))
+    expect(askNote({ client: 'Acme Roofing', task: 'Copy', candidates: four, bank: false })).not.toContain('L-55555555')
+  })
+})
+
+describe('0.7.0: what mm line, propose and bank answer (verbatim)', () => {
+  test('the ticket a label works, and the label without its prefix', async () => {
+    expect(ticketOf('f779a7a0 Fix inbound router')).toBe('f779a7a0')
+    expect(ticketOf('F779A7A0-fix')).toBe('f779a7a0')
+    expect(ticketOf('L-1a2b3c4d Copy')).toBe('')
+    expect(ticketOf('deadbeefcafe build')).toBe('')
+    expect(ticketOf('Copy')).toBe('')
+    expect(ticketOf(undefined)).toBe('')
+    expect(withoutPrefix('L-1a2b3c4d Phase 1 copy')).toBe('Phase 1 copy')
+    expect(withoutPrefix('f779a7a0 Fix inbound router')).toBe('Fix inbound router')
+    expect(withoutPrefix('f779a7a0-fix')).toBe('fix')
+    expect(withoutPrefix('Phase 1 copy')).toBe('Phase 1 copy')
+  })
+
+  test('the hook command, with PowerShell\'s form on Windows', async () => {
+    expect(hookCommand(`${L_COPY} Copy`, false)).toBe(`node ~/.claude/mm-hooks/worklog-hook.js --task "${L_COPY} Copy"`)
+    expect(hookCommand(`${L_COPY} Copy`, true)).toBe(
+      `node ~/.claude/mm-hooks/worklog-hook.js --task "${L_COPY} Copy" (Windows PowerShell: node "$env:USERPROFILE\\.claude\\mm-hooks\\worklog-hook.js" --task "${L_COPY} Copy")`,
+    )
+    expect(declareLineText({ key: L_COPY, title: 'Phase 1 nurture sequence', task: 'L-99999999 Nurture "copy"', windows: false })).toBe(
+      `Run this to count this thread's work to Phase 1 nurture sequence from now on: node ~/.claude/mm-hooks/worklog-hook.js --task "${L_COPY} Nurture copy"`,
+    )
+    // no task declared: the line's title is the task
+    expect(declareLineText({ key: L_COPY, title: 'Phase 1 nurture sequence', task: undefined, windows: false })).toBe(
+      `Run this to count this thread's work to Phase 1 nurture sequence from now on: node ~/.claude/mm-hooks/worklog-hook.js --task "${L_COPY} Phase 1 nurture sequence"`,
+    )
+    expect(linkedText('f779a7a0', 'Website refresh')).toBe('Linked ticket f779a7a0 to Website refresh; its time counts there now.')
+    expect(noBankText('Acme Roofing')).toBe('Acme Roofing has no hour bank on record; ask the person which line, or propose new scope.')
+  })
+
+  test('propose: its arguments, and what it answers new or existing', async () => {
+    expect(proposalArgs('Spanish landing page -- the client asked for a Spanish version on the call')).toEqual({ title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call' })
+    expect(proposalArgs('Spanish landing page')).toEqual({ title: 'Spanish landing page', why: '' })
+    expect(proposalArgs(' -- why only')).toBeNull()
+    expect(proposalArgs('')).toBeNull()
+    expect(proposalArgs(`${'t'.repeat(200)} -- ${'w'.repeat(900)}`)?.title.length).toBe(120)
+    expect(proposalArgs(`t -- ${'w'.repeat(900)}`)?.why.length).toBe(500)
+    expect(proposedText({ title: 'Spanish landing page', client: 'Acme Roofing', id8: 'abcdef12', existing: false, windows: false })).toBe(
+      'Proposed "Spanish landing page" for Acme Roofing (ticket abcdef12). Run this so the work counts to the proposal: node ~/.claude/mm-hooks/worklog-hook.js --task "abcdef12 Spanish landing page"',
+    )
+    expect(proposedText({ title: 'Spanish landing page', client: 'Acme Roofing', id8: 'abcdef12', existing: true, windows: true })).toBe(
+      'Already proposed "Spanish landing page" for Acme Roofing (ticket abcdef12). Run this so the work counts to the proposal: node ~/.claude/mm-hooks/worklog-hook.js --task "abcdef12 Spanish landing page" (Windows PowerShell: node "$env:USERPROFILE\\.claude\\mm-hooks\\worklog-hook.js" --task "abcdef12 Spanish landing page")',
+    )
+  })
+
+  test('the hour bank: the most recent active bank line; a closed one is none', async () => {
+    expect(bankLine(lined({ lines: LINES }))?.line_key).toBe(L_BANK)
+    const two = lined({ lines: [...LINES, { ...LINES[3], line_key: 'L-bbbbbbbb', title: 'Second bank' }] })
+    expect(bankLine(two)?.line_key).toBe('L-bbbbbbbb')
+    expect(bankLine(lined({ lines: [...LINES.slice(0, 3), { ...LINES[3], status: 'closed' }] }))).toBeUndefined()
+    expect(bankLine(lined({ lines: LINES.slice(0, 3) }))).toBeUndefined()
+    expect(bankLine(lined())).toBeUndefined()
   })
 })

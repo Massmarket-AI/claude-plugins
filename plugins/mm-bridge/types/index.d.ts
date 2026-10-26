@@ -170,6 +170,10 @@ export type MmSession = {
   opened?: string
   handled?: string
   asked?: number
+  /** (0.7.0) The project and task labels (`lineAskKey`) whose line band the person answered or put off (Not now). */
+  lineDone?: string[]
+  /** (0.7.0) The project and task labels whose one note to Claude (no line matched) was added. */
+  lineNoted?: string[]
 }
 
 /** (0.6.0) A client the band offers to track this thread to: its project, its name, and the skill that counts it. */
@@ -177,6 +181,24 @@ export type MmSuggestion = { pid: string; client: string; skill: string }
 
 /** (0.6.0) The band's line for a thread with no current project after the person's second prompt, and what it offers. */
 export type MmNudge = { show: boolean; suggest: MmSuggestion[] }
+
+/** (0.7.0) A line of a client's quote the band offers: its key and its title. */
+export type MmLineChoice = { line_key: string; title: string }
+
+/**
+ * (0.7.0) The band's line for a client's thread whose work matches no line on the quote: the project, its name as
+ * shown, the project and task label it was worked out for (`key`), whether nothing matched (`unmatched`) or the work
+ * looks like new scope (`maybe_new_scope`), the candidate lines (at most 3) and the hour bank, when the client has one.
+ */
+export type MmLineAsk = {
+  show: boolean
+  pid?: string
+  client?: string
+  key?: string
+  signal?: 'unmatched' | 'maybe_new_scope'
+  candidates?: MmLineChoice[]
+  bank?: MmLineChoice | null
+}
 
 declare module 'claude-code' {
   interface PluginState {
@@ -190,6 +212,7 @@ declare module 'claude-code' {
       track: MmTrack
       sess: MmSession
       nudge: MmNudge
+      lineAsk: MmLineAsk
     }
   }
 }
