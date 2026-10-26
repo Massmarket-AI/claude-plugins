@@ -10,6 +10,11 @@
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/sync-extension.js\"", "timeout": 10 }
         ]
+      },
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/update-plugins.js\"", "timeout": 10 }
+        ]
       }
     ]
   }

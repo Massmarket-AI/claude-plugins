@@ -162,5 +162,5 @@ test('release.mjs carries the extension right after the hook copy, and runs thes
   const carryAt = rel.indexOf("await carryPublishedExtension({ pluginDir: join(ROOT, 'plugins/mm-hooks'), token: process.env.MM_EXT_TOKEN })")
   const bumpAt = rel.indexOf('const released = []')
   assert.ok(hookAt > 0 && carryAt > hookAt && bumpAt > carryAt, 'the carry step runs before the version bump, so a new build bumps mm-hooks')
-  assert.match(rel, /'--test', 'plugins\/mm-hooks\/scripts\/sync-extension\.test\.js', 'scripts\/carry-extension\.test\.mjs'/)
+  assert.match(rel, /'--test', 'plugins\/mm-hooks\/scripts\/sync-extension\.test\.js', 'plugins\/mm-hooks\/scripts\/update-plugins\.test\.js', 'scripts\/carry-extension\.test\.mjs'/)
 })
