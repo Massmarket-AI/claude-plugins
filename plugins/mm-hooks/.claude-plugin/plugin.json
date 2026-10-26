@@ -1,7 +1,7 @@
 {
   "name": "mm-hooks",
-  "version": "1.0.10",
-  "description": "Keeps the Massmarket worklog hook and the time tracker extension on this computer current, with nothing for the person to do.",
+  "version": "1.0.11",
+  "description": "Keeps the Massmarket worklog hook, the time tracker extension and the Massmarket plugins on this computer current, with nothing for the person to do.",
   "author": {
     "name": "Massmarket AI"
   }

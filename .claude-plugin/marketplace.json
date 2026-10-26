@@ -10,7 +10,7 @@
     {
       "name": "mm-hooks",
       "source": "./plugins/mm-hooks",
-      "description": "Keeps the Massmarket worklog hook and the time tracker extension on this computer current, with nothing for the person to do."
+      "description": "Keeps the Massmarket worklog hook, the time tracker extension and the Massmarket plugins on this computer current, with nothing for the person to do."
     },
     {
       "name": "mm-bridge",

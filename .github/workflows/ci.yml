@@ -149,6 +149,7 @@ jobs:
           exit "$status"
 
       # mm-hooks' SessionStart steps and the release's extension carry: node's own test runner, no
-      # install. Every Chrome folder and server they use is fabricated in a temporary directory.
+      # install. Every Chrome folder, home, server and Claude Code CLI they use is fabricated in a temporary
+      # directory.
       - name: mm-hooks tests
-        run: node --test plugins/mm-hooks/scripts/sync-extension.test.js scripts/carry-extension.test.mjs
+        run: node --test plugins/mm-hooks/scripts/sync-extension.test.js plugins/mm-hooks/scripts/update-plugins.test.js scripts/carry-extension.test.mjs

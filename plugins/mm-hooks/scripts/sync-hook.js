@@ -72,6 +72,10 @@ try {
   result = { plugin: "mm-hooks", version: version(), at: new Date().toISOString(), action: "error", error: String((err && err.message) || err).slice(0, 300) };
 }
 // The status file is a convenience; never fail the session over it. sync-extension.js keeps its own record
-// in the same file, under `extension`, which this step carries over.
-updateStatus(HOOK_DIR, (current) => (current.extension ? Object.assign({}, result, { extension: current.extension }) : result));
+// in the same file, under `extension`, and update-plugins.js under `self_update`; this step carries both over.
+updateStatus(HOOK_DIR, (current) => {
+  const kept = {};
+  for (const key of ["extension", "self_update"]) if (current[key]) kept[key] = current[key];
+  return Object.assign({}, result, kept);
+});
 process.exit(0);
