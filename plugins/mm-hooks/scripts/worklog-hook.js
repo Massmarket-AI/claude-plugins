@@ -153,7 +153,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.11.11";
+const HOOK_VERSION = "0.11.12";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -6047,7 +6047,10 @@ function sessionTitleFor(payload, state) {
 // Claude Code writes when it has no origin and no source it recognises. Neither
 // is "auto": calling a person's turn automatic would lose real time, so both are
 // "cannot tell" — and so is a background task that reports back into a chain
-// one of them started.
+// one of them started. Since 0.11.12 an entry stamped either way whose own words
+// show the desktop app wrote it is "auto" (TURN_ORIGIN_APP_EVENT_RE): a thread
+// another session started, the app waking a session, another session's
+// message, the app's pull-request watch.
 //
 // So: the person types, their turn dispatches three background agents, and each
 // one reporting back is "person". The bridge kicks a thread off, its turn
@@ -6201,6 +6204,37 @@ const TURN_ORIGIN_SIDE_TASK_SEPARATOR = "\n\nTask:\n";
 const TURN_ORIGIN_NOTE_OPEN = "<system-reminder>";
 const TURN_ORIGIN_NOTE_CLOSE = "</system-reminder>";
 const TURN_ORIGIN_LEADING_NOTES_MAX = 8;
+
+/**
+ * ⛔ WHAT THE DESKTOP APP WRITES ITSELF, STAMPED `sdk` (0.11.12, 2026-10-26).
+ * Claude Code stamps these entries `sdk` ("cannot tell"), and "cannot tell"
+ * counts as the person's work. Measured on Rob's Mac, 2026-10-12 to 10-26, read
+ * after the app's notes in front:
+ *
+ *   `<side-sessions-event>`     291  the app waking a session when the sessions
+ *                                    it started stop
+ *   `<cross-session-message `   258  another session's message
+ *   `<ci-monitor-event>`         19  the app's pull-request watch
+ *   the start_session wrapper   125  the first entry of a thread another session
+ *     with no bridge marker          started (fresh 120, fork 5): side sessions,
+ *                                    and the 14 threads carried over on Rob's
+ *                                    profile switch of 2026-10-25
+ *
+ * All 693 were stamped `sdk`; no entry stamped `human` opened that way. Rob
+ * approved on 2026-10-26 that such a thread is the system's until the person
+ * types in it ("fix the kickoff gap"). So an entry stamped neither as the
+ * person's nor as the system's whose text, after the app's notes, begins with
+ * one of these is "auto" (turnEntryAppWroteIt). An entry stamped `human` keeps
+ * its stamp.
+ *
+ * ⛔ A FEED CARD THE PERSON STARTS STAYS AS IT WAS. A card minted from the
+ * signed task feed carries CHIP_CARD_BACKGROUND, and nothing runs until the
+ * person starts it: it is the work they chose (0.11.7). A fresh wrapper whose
+ * background is exactly that text is tested as before, by the marker rule only.
+ */
+const TURN_ORIGIN_APP_EVENT_RE = /^<(?:side-sessions-event|cross-session-message|ci-monitor-event)[\s>]/;
+const TURN_ORIGIN_FEED_CARD_OPENING =
+  TURN_ORIGIN_SIDE_FRESH_PREFIX + CHIP_CARD_BACKGROUND + TURN_ORIGIN_SIDE_TASK_SEPARATOR;
 
 /**
  * The wrapper the app puts around a scheduled task's prompt:
@@ -6623,6 +6657,22 @@ function turnEntryAutoByText(row) {
 }
 
 /**
+ * True when an entry's own words, after the app's notes, show the desktop app
+ * wrote it (see TURN_ORIGIN_APP_EVENT_RE): the app waking the session, another
+ * session's message, the pull-request watch, or the wrapper of a thread another
+ * session started, unless that wrapper carries a feed card's background. Asked
+ * only of an entry whose stamp says nothing either way. Never throws.
+ */
+function turnEntryAppWroteIt(row) {
+  const text = turnEntryAfterLeadingNotes(turnEntryText(row));
+  if (typeof text !== "string" || !text) return false;
+  if (TURN_ORIGIN_APP_EVENT_RE.test(text)) return true;
+  if (text.startsWith(TURN_ORIGIN_SIDE_FORK_PREFIX)) return true;
+  if (!text.startsWith(TURN_ORIGIN_SIDE_FRESH_PREFIX)) return false;
+  return !text.startsWith(TURN_ORIGIN_FEED_CARD_OPENING);
+}
+
+/**
  * True when a stamped transcript entry STARTS nothing: a background task
  * reporting back, or the app resuming the turn. ⛔ A prompt that opens with the
  * bridge's marker or the scheduled-task wrapper always starts a chain, whatever
@@ -6636,14 +6686,16 @@ function turnEntryContinues(row) {
 /**
  * A stamped transcript entry that starts a chain, as "person", "auto" or null
  * (cannot tell). The opening words are tested first: a bridge kickoff and a
- * scheduled task are "auto" whatever their stamp says. (Asked only of an entry
- * turnEntryContinues() answered false for.)
+ * scheduled task are "auto" whatever their stamp says. A stamp that says
+ * nothing is "auto" when the app wrote the entry (turnEntryAppWroteIt, 0.11.12).
+ * (Asked only of an entry turnEntryContinues() answered false for.)
  */
 function classifyTurnEntry(row) {
   if (turnEntryAutoByText(row)) return "auto";
   const kind = row.turnOrigin;
   if (TURN_ORIGIN_PERSON_KINDS.indexOf(kind) !== -1) return "person";
   if (TURN_ORIGIN_AUTO_KINDS.indexOf(kind) !== -1) return "auto";
+  if (turnEntryAppWroteIt(row)) return "auto";
   return null;
 }
 
