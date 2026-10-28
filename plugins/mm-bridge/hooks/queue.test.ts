@@ -6,6 +6,7 @@ import {
   CHECK_WAIT_MS, checkingTitle, fastState, internalProjects, whenText, holdSentence, holderName, isClosingRoute, isDraftDone, isUuid, mailLookbackHours, needsLine, noteText, pinsNow, shortName, stillOpenTitle, threadTitle, titleFor, titleNames, withTeammate,
   ROUTE_PAGE, dateText, peopleRows, routeChoices, routePage, routedText, seesPeople, shownText, sourceLink, waitedText,
   INTERNAL_OPS, INTERNAL_PROJECTS, askLine, asksMarkdown, feedClients, heldInternal, internalAskThread, openAsks,
+  FOUNDER_DROVE_MS, founderDrove,
 } from './queue'
 import type { Feed, FeedAsk, QueueItem } from './queue'
 import { handoverText, kickoffText, waitingText } from './threads'
@@ -992,6 +993,143 @@ describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the 
     expect(stale.queue[0]).toMatchObject({ kind: 'reply', messages: 1 })
     expect(stale.queue[0]?.theirs).toBeUndefined()
     expect(stale.teammate).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------- 0.7.2: a client the founder drives himself
+// 2026-10-27, Spotlight Dentistry, by shape (names and addresses made up): a teammate owns the client; Rob sent its
+// package from his own thread at 2:17 PM; the client wrote back with 8 questions at 4:04 PM, and the next package,
+// flagged for his OK, was ready by 5:34 PM. R2 made it the teammate's to decide, so his thread was never updated and
+// its note read "0 client messages waiting on our reply". With OW's `last_package` saying he sent or approved the
+// client's last package within 3 business days, the new mail and package are his; every other case keeps R2.
+
+describe('(0.7.2) a teammate\'s client whose last package the founder sent or approved in the last 3 business days is his', () => {
+  const SENT = '879da92b-3333-4333-8333-333333333333'
+  const NEXT = 'a575abe1-3333-4333-8333-333333333333'
+  /** Tuesday 4:30 PM: the client's message is in, no package yet. */
+  const MAIL_IN = et('2026-10-27 16:30')
+  /** Tuesday 5:40 PM: the next package is ready. */
+  const READY = et('2026-10-27 17:40')
+  /** A row that carries no `last_package` at all (an OW that does not send it yet). */
+  const ABSENT = Symbol('absent')
+  const lastPkg = (over: Record<string, unknown> = {}) => ({ package_id: SENT, sent_at: at('2026-10-27 14:17'), sent_by: FOUNDER, approved_by: FOUNDER, ...over })
+  const clientMail = (last: unknown = lastPkg()) => ({
+    ...mailAt(P1, 'Acme Dental — Jo', '2026-10-27 16:04'), subject: 'Eight questions', project_owner_email: TEAMMATE_B, last_outbound_at: at('2026-10-27 14:17'),
+    ...(last === ABSENT ? {} : { last_package: last }),
+  })
+  const nextPkg = (last: unknown = lastPkg(), over: Record<string, unknown> = {}) => ({
+    ...draft(P1, 'Acme Dental — Jo', { package_id: NEXT, covers_through: at('2026-10-27 16:04'), flagged_for_rob: true, project_owner_email: TEAMMATE_B, last_outbound_at: at('2026-10-27 14:17'), ...over }),
+    ...(last === ABSENT ? {} : { last_package: last }),
+  })
+  const spotlight = (last: unknown = lastPkg(), over: Record<string, unknown> = {}) => asFounder({ mail: [clientMail(last)], drafts: [nextPkg(last, over)] })
+  const where = (f: Feed, now: number) => {
+    const l = buildLists(f, now)
+    return { queue: ids(l.queue), teammate: ids(l.teammate), older: ids(l.older) }
+  }
+  /** R2 as it was on 10-27: under With a teammate, the teammate decides, and none of the client's mail counted for him. */
+  const r2 = (f: Feed, why: string) => {
+    expect(where(f, READY), why).toEqual({ queue: [], teammate: [P1], older: [] })
+    const it = buildLists(f, READY).teammate[0] as QueueItem
+    expect(it, why).toMatchObject({ kind: 'ok', messages: 0, theirs: 'Builder B', ok: { sends: 'Builder B' } })
+    expect(noteText(it, FOUNDER), why).toContain('0 client messages waiting on our reply')
+  }
+
+  test('the Spotlight case: the next package and the client\'s message are his, in his own list, and nothing says a teammate decides', async () => {
+    const f = spotlight()
+    expect(where(f, READY)).toEqual({ queue: [P1], teammate: [], older: [] })
+    const it = buildLists(f, READY).queue[0] as QueueItem
+    expect(it).toMatchObject({ kind: 'ready', packageId: NEXT, messages: 1, flagged: true, ok: null, open: null })
+    expect(it.theirs).toBeUndefined()
+    expect(withTeammate(it)).toBe(false)
+    expect(it.dueAt).toBe(et('2026-10-28 16:04'))
+    expect(pinsNow(it, READY)).toBe(true)
+    // the note his thread gets is for the package that is his to pick up, not "0 client messages waiting"
+    expect(noteText(it, FOUNDER)).toContain('Reply package a575abe1 is prepared and flagged for approval')
+    expect(noteText(it, FOUNDER)).not.toContain('0 client messages')
+    expect(titleFor(it, READY)).not.toContain('decides')
+    expect(titleFor(it, READY)).not.toContain('with Builder B')
+  })
+
+  test('before the package is ready, the client\'s message alone is his to answer', async () => {
+    const f = asFounder({ mail: [clientMail()] })
+    expect(where(f, MAIL_IN)).toEqual({ queue: [P1], teammate: [], older: [] })
+    expect(buildLists(f, MAIL_IN).queue[0]).toMatchObject({ kind: 'reply', messages: 1, packageId: null })
+    // control: with no `last_package` the teammate's client's message is not his, and nothing lists
+    expect(where(asFounder({ mail: [clientMail(ABSENT)] }), MAIL_IN)).toEqual({ queue: [], teammate: [], older: [] })
+  })
+
+  test('control: with no `last_package` (an OW that does not send it yet, or null) R2 is what it was on 10-27', async () => {
+    r2(spotlight(ABSENT), 'absent')
+    r2(spotlight(null), 'null')
+  })
+
+  test('control: the teammate sent and approved the last package, so R2 still applies', async () => {
+    r2(spotlight(lastPkg({ sent_by: TEAMMATE_B, approved_by: TEAMMATE_B })), 'teammate sent it')
+    r2(spotlight(lastPkg({ sent_by: TEAMMATE_B, approved_by: null })), 'nobody approved it on record')
+  })
+
+  test('his OK alone counts as his: the teammate sent the last package, he approved it', async () => {
+    const f = spotlight(lastPkg({ sent_by: TEAMMATE_B, approved_by: FOUNDER }))
+    expect(where(f, READY)).toEqual({ queue: [P1], teammate: [], older: [] })
+    // and his address is matched in any case
+    expect(where(spotlight(lastPkg({ sent_by: 'Owner@Example.COM', approved_by: null })), READY)).toEqual({ queue: [P1], teammate: [], older: [] })
+  })
+
+  test('3 business days from when it went out, weekends adding nothing: his at the line, R2 a minute past it', async () => {
+    expect(FOUNDER_DROVE_MS).toBe(3 * 24 * 3_600_000)
+    const line = subtractBusinessMs(READY, FOUNDER_DROVE_MS)
+    // Tuesday 5:40 PM less 3 business days is Thursday 5:40 PM
+    expect(line).toBe(et('2026-10-22 17:40'))
+    expect(where(spotlight(lastPkg({ sent_at: new Date(line).toISOString() })), READY)).toEqual({ queue: [P1], teammate: [], older: [] })
+    r2(spotlight(lastPkg({ sent_at: new Date(line - 60_000).toISOString() })), 'a minute past the line')
+    expect(founderDrove(spotlight(lastPkg({ sent_at: new Date(line).toISOString() })), READY)).toEqual(new Set([P1]))
+  })
+
+  test('a send time that is missing, unreadable or later than now, and a `last_package` that is not an object, decide nothing', async () => {
+    for (const [why, last] of [
+      ['no send time', lastPkg({ sent_at: null })],
+      ['not a time', lastPkg({ sent_at: 'yesterday' })],
+      ['later than now', lastPkg({ sent_at: at('2026-10-27 18:30') })],
+      ['a string', 'owner@example.com'],
+      ['a number', 7],
+      ['addresses that are not text', lastPkg({ sent_by: 1, approved_by: ['owner@example.com'] })],
+    ] as const) r2(spotlight(last), why)
+  })
+
+  test('where the client\'s rows disagree, the newest send is the last package, and at the same time it is his only if every row says so', async () => {
+    const his = lastPkg()
+    const newerTheirs = lastPkg({ package_id: NEXT, sent_at: at('2026-10-27 15:00'), sent_by: TEAMMATE_B, approved_by: TEAMMATE_B })
+    r2(asFounder({ mail: [clientMail(his)], drafts: [nextPkg(newerTheirs)] }), 'a newer send by the teammate on the draft row')
+    expect(where(asFounder({ mail: [clientMail(newerTheirs)], drafts: [nextPkg(lastPkg({ sent_at: at('2026-10-27 15:30') }))] }), READY)).toEqual({ queue: [P1], teammate: [], older: [] })
+    r2(asFounder({ mail: [clientMail(his)], drafts: [nextPkg(lastPkg({ sent_by: TEAMMATE_B, approved_by: TEAMMATE_B }))] }), 'same time, rows disagree')
+    // one row saying it and the other saying nothing is enough
+    expect(where(asFounder({ mail: [clientMail(ABSENT)], drafts: [nextPkg(his)] }), READY)).toEqual({ queue: [P1], teammate: [], older: [] })
+  })
+
+  test('a package a teammate holds is still theirs to decide: the holder is asked first', async () => {
+    const f = spotlight(lastPkg(), pickedUp('J.Smith@example.com'))
+    expect(where(f, READY)).toEqual({ queue: [], teammate: [P1], older: [] })
+    expect(buildLists(f, READY).teammate[0]).toMatchObject({ kind: 'ok', theirs: 'J Smith' })
+  })
+
+  test('a stale package the teammate sends, on a client he drives: his own stale package, with the message his, never R1', async () => {
+    const f = spotlight(lastPkg(), { status: 'stale', covers_through: at('2026-10-27 13:00') })
+    expect(where(f, READY)).toEqual({ queue: [P1], teammate: [], older: [] })
+    const it = buildLists(f, READY).queue[0] as QueueItem
+    expect(it).toMatchObject({ kind: 'reply', messages: 1 })
+    expect(it.theirs).toBeUndefined()
+    expect(it.open).toMatchObject({ state: 'stale', by: '' })
+  })
+
+  test('founder alone: a PM who sent the last package, and the teammate who owns the client, read their feeds as before', async () => {
+    const pm = 'pm@example.com'
+    const pmFeed: Feed = { member: pm, role: 'pm', mail: [clientMail(lastPkg({ sent_by: pm, approved_by: pm }))], drafts: [nextPkg(lastPkg({ sent_by: pm, approved_by: pm }))] }
+    expect(where(pmFeed, READY)).toEqual(where({ ...pmFeed, mail: [clientMail(ABSENT)], drafts: [nextPkg(ABSENT)] }, READY))
+    expect(founderDrove(pmFeed, READY).size).toBe(0)
+    const own: Feed = { member: TEAMMATE_B, role: 'builder', mail: [clientMail()], drafts: [nextPkg()] }
+    const ownBefore: Feed = { ...own, mail: [clientMail(ABSENT)], drafts: [nextPkg(ABSENT)] }
+    expect(buildLists(own, READY)).toEqual(buildLists(ownBefore, READY))
+    expect(buildLists(own, READY).queue[0]).toMatchObject({ kind: 'ready', packageId: NEXT, messages: 1 })
   })
 })
 
