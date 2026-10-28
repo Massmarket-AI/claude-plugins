@@ -20,8 +20,8 @@ import { businessMsBetween } from './business-time'
 import type { MmRow } from '../types'
 
 import {
-  MAY_NEED_OK, NOBODY, checkingTitle, cleanText, cleanTitle, clockText, decidesText, fastState, hasDue, heldInternal, holdSentence, isUuid, noThreadTitle, openAsks, pinsNow, queueLine, queueMore,
-  queueTotal, queuedOf, shownQueue, stillOpenTitle, titleFor, titleNames, withHolder, withTeammate,
+  MAY_NEED_OK, NOBODY, checkingTitle, cleanText, cleanTitle, clockText, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, noThreadTitle, openAsks,
+  pinsNow, queueLine, queueMore, queueTotal, queuedOf, shownQueue, skillFor, stillOpenTitle, titleFor, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
 } from './queue'
 import type { AskRef, FeedThread, QueueItem } from './queue'
 
@@ -411,6 +411,8 @@ export function titleSuggestion(client: string, links: Readonly<Record<string, s
  * message, another package, a package that changed: each makes it a different text.
  * (0.7.3, internal queue) The queue is read as its listed tickets alone, without its total: a ticket that comes or goes
  * below the top QUEUE_SHOWN_MAX is not something new for the thread, a change to the top of the queue is.
+ * (0.7.4) And without the tickets nobody dated: one that comes or goes is not something new for the thread either (Rob,
+ * 2026-10-27: "It doesn't necessarily create the need for a new reply"). They ride along with what is.
  */
 export function signatureOf(it: QueueItem): string {
   const o = it.open ?? null
@@ -418,7 +420,9 @@ export function signatureOf(it: QueueItem): string {
   // A package is read as it was before anyone picked it up, and without how many of its drafts are left:
   // picking it up or sending one of its drafts is not something new for the thread that has it.
   const unpicked: QueueItem = mine ? { ...it, open: null } : o ? { ...it, open: { ...o, unsent: 0 } } : it
-  const plain: QueueItem = queuedOf(it).length ? { ...unpicked, queue: { tickets: queuedOf(it), total: 0 } } : unpicked
+  const queuedPlain: QueueItem = queuedOf(it).length ? { ...unpicked, queue: { tickets: queuedOf(it), total: 0 } } : unpicked
+  const nodate = undatedCount(it)
+  const plain: QueueItem = nodate ? { ...queuedPlain, tasks: it.tasks - nodate, undatedTitles: [], undatedTasks: 0 } : queuedPlain
   return [kickoffText(plain), it.coversThrough ?? '', mine ? `held:${o.newer}` : (it.packageUpdatedAt ?? '')].join('\n')
 }
 
@@ -483,7 +487,8 @@ export const asksForPrep = (it: QueueItem): boolean => it.messages > 0 && !it.pa
  */
 export function autoUpdatable(it: QueueItem, now: number): boolean {
   const o = it.open ?? null
-  return !heldInternal(it) && !it.theirs && !withTeammate(it) && !(o && withHolder(o)) && fastState(it, now) === null
+  // (0.7.4) never for the founder's undated client tickets alone (`undatedOnly`): they ride along with what does update it
+  return !heldInternal(it) && !it.theirs && !withTeammate(it) && !(o && withHolder(o)) && fastState(it, now) === null && !undatedOnly(it)
 }
 
 /**
@@ -580,7 +585,16 @@ export function waitingText(it: QueueItem): string {
   // for the founder, a package that waits for his OK: that first, and who sends it once he has given it; one a
   // teammate decides on, before its reply is due, says so instead (R2)
   const ok = it.kind === 'ok' ? (it.theirs ? decidesText(it.theirs) : `needs your OK · ${(it.ok ?? null)?.sends ?? NOBODY} sends`) : ''
-  const parts = [ok, it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', it.tasks ? `${it.tasks} task${it.tasks > 1 ? 's' : ''} due` : '', drafts]
+  // (0.7.4) the tasks as what they are: committed and due, owing an ETA, or with no date at all
+  const eta = etaAsksOf(it).length
+  const nodate = undatedCount(it)
+  const dated = it.tasks - eta - nodate
+  const tasks = [
+    dated > 0 ? `${dated} task${dated > 1 ? 's' : ''} due` : '',
+    eta > 0 ? `${eta} need${eta > 1 ? '' : 's'} an ETA` : '',
+    nodate > 0 ? `${nodate} task${nodate > 1 ? 's' : ''} with no date` : '',
+  ]
+  const parts = [ok, it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', ...tasks, drafts]
   const base = parts.filter(Boolean).join(', ')
   // (0.5.28, internal asks) and then the viewer's open asks, `1 internal ask`: after what the client has otherwise (a
   // package of theirs with nothing else waiting is still `drafts ready`), or alone for a client listed by its asks alone
@@ -589,9 +603,28 @@ export function waitingText(it: QueueItem): string {
   // (0.7.3, internal queue) and last the viewer's internal queue, `312 tickets in the internal queue`: never a due time
   const q = queuedOf(it).length ? queueTotal(it) : 0
   const queued = q ? `${q} ticket${q > 1 ? 's' : ''} in the internal queue` : ''
-  if (!asked && !queued) return base || 'drafts ready'
-  const extra = [asked, queued].filter(Boolean).join(', ')
+  // (0.7.4, for the founder) and his teammates' late internal tickets: `2 late with Asif`
+  const m = matesOf(it)
+  const late = m.length ? `${m.length} late with ${whoseLate(m)}` : ''
+  if (!asked && !queued && !late) return base || 'drafts ready'
+  const extra = [asked, queued, late].filter(Boolean).join(', ')
   return base ? `${base}, ${extra}` : it.packageId ? `drafts ready, ${extra}` : extra
+}
+
+/**
+ * (0.7.4, ETA asks; Rob, 2026-10-27: "Team members need to provide ETAs ... They need to provide an ETA in 24 hours to me or
+ * to the system") The paragraph a kickoff and an Update carry for the viewer's tickets that owe an ETA: how to record one
+ * (task-chip-flow §5.3, `eta-commit` with the ticket's fingerprint), then each ticket with its full id and when its ETA
+ * is needed by. '' with none. ⛔ Every id is checked again: it goes into the call Claude makes.
+ */
+export function etaParagraph(it: QueueItem): string {
+  const asks = etaAsksOf(it).filter(a => a && isUuid(a.id) && Number.isFinite(a.neededBy))
+  if (!asks.length) return ''
+  const lines = asks.map((a, i) => `${i + 1}. ${cleanText(a.title, 120) || 'Untitled ticket'} (ticket ${a.id}) · ETA needed by ${dueText(a.neededBy)}`)
+  return [
+    `My tickets with no ETA yet (⏳ NO ETA). For each, ask me when it will be delivered, then record it as task-chip-flow §5.3 says: POST /api/ext/eta-commit with task_fingerprint "ticket:<its id>". Do not draft a client email for these.`,
+    ...lines,
+  ].join('\n')
 }
 
 /**
@@ -707,10 +740,14 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
                   : it.tasks === 0 && queue
                     ? // (0.7.3, internal queue) listed by its queue alone: a first line that names it, with no due time, then the queue
                       `[mm-link ${id}] ${who} has ${queueTotal(it)} ticket(s) in my internal queue, with no due dates. Load massmarket-internal-ops first, then show me the queue below as it stands now and wait for me to pick what to work on here.`
-                    : `[mm-link ${id}] ${who} has ${it.tasks} committed task(s)${tasksDue}. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`
+                    : etaOnly(it)
+                      ? // (0.7.4, ETA asks) listed by tickets that owe an ETA alone: a first line that names them, then their paragraph
+                        `[mm-link ${id}] ${who} has ${etaAsksOf(it).length} ticket(s) of mine that need an ETA${due ? `, the first needed by ${due}` : ''}. Load ${skillFor(it)} first, then ask me for the ETA of each ticket below and record it. Send nothing else without my go.`
+                      : tasksLead(it, who, tasksDue)
   // (0.5.28, internal asks) once per open ask, after the body and before any hand-over: `askParagraph`, verbatim;
-  // (0.7.3, internal queue) then the queue, in rank order (`queueParagraph`)
-  const body = [lead, ...asks.map(askParagraph), queue].filter(Boolean).join('\n\n')
+  // (0.7.4, ETA asks) then the tickets that owe an ETA (`etaParagraph`); (0.7.3, internal queue) then the queue, in rank
+  // order (`queueParagraph`)
+  const body = [lead, ...asks.map(askParagraph), etaParagraph(it), queue].filter(Boolean).join('\n\n')
   const news = `New since this thread last worked on this client: ${waitingText(it)}.`
   // ⛔ (0.5.11, review of PR #15, F4) sent by itself: the marker first, at the very start of the text, as every hook
   // that tells the person's time from the bridge's reads it (a time-tracking hook too old to read the app's own
@@ -721,6 +758,21 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
   if (opts.update) return `${news}\n${body}`
   const handover = opts.replaces ? handoverText(it, opts.replaces) : ''
   return handover ? `${body}\n\n${handover}` : body
+}
+
+/**
+ * (0.7.4) The kickoff's first line for a client listed by its tasks: the committed ones with their due time, as it always
+ * was, then the tickets nobody dated, never called committed (Rob, 2026-10-27, of those: "It doesn't necessarily create
+ * the need for a new reply").
+ */
+function tasksLead(it: QueueItem, who: string, tasksDue: string): string {
+  const id = it.projectId
+  const nodate = undatedCount(it)
+  const dated = it.tasks - etaAsksOf(it).length - nodate
+  const open = `${nodate} open ticket(s) of mine with no due date`
+  if (!nodate) return `[mm-link ${id}] ${who} has ${dated} committed task(s)${tasksDue}. Load ${skillFor(it)} first, then show me what is due and wait for me. Send nothing without my go.`
+  if (dated <= 0) return `[mm-link ${id}] ${who} has ${open}. Load ${skillFor(it)} first, then show me what is open and wait for me. Send nothing without my go.`
+  return `[mm-link ${id}] ${who} has ${dated} committed task(s)${tasksDue}, and ${open}. Load ${skillFor(it)} first, then show me what is due and wait for me. Send nothing without my go.`
 }
 
 /**
