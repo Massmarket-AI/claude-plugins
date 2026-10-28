@@ -5,7 +5,7 @@ import type { MmBand, MmFolds, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPe
 import {
   INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pinsNow,
   peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
-  asksMarkdown, heldInternal, openAsks, shownText,
+  asksMarkdown, heldInternal, internalQueueThread, openAsks, ownQueueRows, queueMarkdown, queueTotal, queuedOf, shownText,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
@@ -144,7 +144,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.7.2'
+const VERSION = '0.7.3'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -828,6 +828,8 @@ function feedProjects(feed: Feed): string[] {
   for (const t of Array.isArray(feed.threads) ? feed.threads : []) add(t?.project_id)
   // (0.5.28, internal asks) the project of each of the caller's asks: a thread that opens with its kickoff links to it
   for (const a of Array.isArray(feed.asks) ? feed.asks : []) add(a?.project_id)
+  // (0.7.3, internal queue) the internal-ops project when the viewer has a queue there: its kickoff's marker links too
+  for (const q of ownQueueRows(feed)) add(q.project_id)
   return [...ids]
 }
 
@@ -2235,8 +2237,8 @@ async function beginClient($: EngineInterface, it: QueueItem, own: boolean, atOn
     if (await newest()) await $.state.set(VIEW, { text, heading } satisfies MmView)
   }
   const withBanner = (view: string): string => [holdBanner(it), view].filter(Boolean).join('\n\n')
-  /** (0.5.28, internal asks) The client's open asks under a pickup view: '' adds nothing, for a client with none. */
-  const withAsks = (view: string, pages: Record<string, string>, at: number): string => [view, asksMarkdown(it, at, pages)].filter(Boolean).join('\n\n')
+  /** (0.5.28, internal asks) The client's open asks under a pickup view: '' adds nothing, for a client with none. (0.7.3) Then its internal queue, as `clientMarkdown` draws it. */
+  const withAsks = (view: string, pages: Record<string, string>, at: number): string => [view, asksMarkdown(it, at, pages), queueMarkdown(it)].filter(Boolean).join('\n\n')
   const now = await $.clock.now()
   const asking = openAsks(it).length > 0
   const packageId = pickupOf(it)
@@ -2281,7 +2283,8 @@ async function showClient($: EngineInterface, it: QueueItem, own: boolean): Prom
 /**
  * What a client's part shows, in a word: the thread's note and its part are drawn again only when this changes.
  * (0.5.28, internal asks) With the viewer's open asks: which, and whether each has a reply drafted (its page shows the
- * draft). A client with none has the word it always had.
+ * draft). A client with none has the word it always had. (0.7.3, internal queue) With the viewer's internal queue: its
+ * total and each listed ticket, in rank order, with its tier and reason.
  */
 function partSig(it: QueueItem): string {
   const o = it.open ?? null
@@ -2289,7 +2292,9 @@ function partSig(it: QueueItem): string {
     ? `open:${o.id}:${o.state}:${it.coversThrough ?? ''}:${o.unsent}:${o.newer}:${it.messages}:${it.tasks}`
     : it.packageId ? `pkg:${it.packageId}:${it.coversThrough}` : `q:${it.messages}:${it.tasks}:${it.dueAt}`
   const asks = openAsks(it)
-  return asks.length ? `${base}:asks:${asks.map(a => `${a.id}/${a.hasDraft ? 1 : 0}`).join(',')}` : base
+  const withAsks = asks.length ? `${base}:asks:${asks.map(a => `${a.id}/${a.hasDraft ? 1 : 0}`).join(',')}` : base
+  const queued = queuedOf(it)
+  return queued.length ? `${withAsks}:queue:${queueTotal(it)}:${queued.map(q => `${q?.id}/${q?.tier}/${q?.reason}`).join(',')}` : withAsks
 }
 
 /** The client part as the state holds it; a session an older version left its view in held plain text there. */
@@ -2930,10 +2935,11 @@ function startTitle(it: QueueItem): string {
 
 /**
  * 0.5.1's words for what a client's chip is for, uncut: `<client>: review the reply drafts` and the like. (0.5.28,
- * internal asks) A client listed by the viewer's internal asks alone: `<client>: reply to the internal ask`.
+ * internal asks) A client listed by the viewer's internal asks alone: `<client>: reply to the internal ask`. (0.7.3) The
+ * internal-ops item listed by the viewer's internal queue alone: `<client>: work the internal queue`.
  */
 function startWhat(it: QueueItem): string {
-  return `${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : it.kind === 'ask' ? 'reply to the internal ask' : 'reply to the client'}`
+  return `${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : it.kind === 'ask' ? 'reply to the internal ask' : it.kind === 'queue' ? 'work the internal queue' : 'reply to the client'}`
 }
 
 /** 0.5.1's line under that title. */
@@ -3987,13 +3993,18 @@ type ChipWorld = {
  *            (`noThreadHolder`).
  * Never for an internal project (fix round 1, L8), nor a client further out than the pin's window. (0.5.28, internal
  * asks) Except the Massmarket internal thread's while it has an open ask (`heldInternal`): chipped like a client's.
+ * (0.7.3, internal queue) And while the viewer has an internal queue: with no due time it is never in the pin's window,
+ * so its chip is its linked thread's (C1) alone; with no linked thread, none.
  */
 function needsFor(last: Last, w: ChipWorld, now: number): Need[] {
   const out: Need[] = []
   const items = (Array.isArray(last.items) ? last.items : []).slice().sort(byDue)
   for (const it of items) {
     if (out.length >= AUTO_CHIPS_MAX) break
-    if (!isUuid(it.projectId) || !pinsNow(it, now) || heldInternal(it)) continue
+    if (!isUuid(it.projectId) || heldInternal(it)) continue
+    // (0.7.3, internal queue) the internal queue is never due, so it never pins: its chip is minted all the same, in its
+    // linked thread alone (C1). With no linked thread it gets none (R17: nothing undated gets a no-thread chip).
+    if (!pinsNow(it, now) && !(internalQueueThread(it) && w.links[it.projectId] !== undefined)) continue
     const rec = storedRec(last, it.projectId)
     if (!rec) continue
     const signature = signatureOf(it)
