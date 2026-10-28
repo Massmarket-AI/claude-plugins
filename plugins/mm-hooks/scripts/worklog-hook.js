@@ -153,7 +153,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.11.12";
+const HOOK_VERSION = "0.11.13";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -6050,7 +6050,9 @@ function sessionTitleFor(payload, state) {
 // one of them started. Since 0.11.12 an entry stamped either way whose own words
 // show the desktop app wrote it is "auto" (TURN_ORIGIN_APP_EVENT_RE): a thread
 // another session started, the app waking a session, another session's
-// message, the app's pull-request watch.
+// message, the app's pull-request watch. Since 0.11.13 a message the person
+// types while a turn is still running starts a chain of their own at the point
+// it arrives (TURN_ORIGIN_TYPED_KEY): the rest of that turn is theirs.
 //
 // So: the person types, their turn dispatches three background agents, and each
 // one reporting back is "person". The bridge kicks a thread off, its turn
@@ -6235,6 +6237,33 @@ const TURN_ORIGIN_LEADING_NOTES_MAX = 8;
 const TURN_ORIGIN_APP_EVENT_RE = /^<(?:side-sessions-event|cross-session-message|ci-monitor-event)[\s>]/;
 const TURN_ORIGIN_FEED_CARD_OPENING =
   TURN_ORIGIN_SIDE_FRESH_PREFIX + CHIP_CARD_BACKGROUND + TURN_ORIGIN_SIDE_TASK_SEPARATOR;
+
+/**
+ * ⛔ A MESSAGE THE PERSON TYPES WHILE A TURN IS STILL RUNNING (0.11.13,
+ * 2026-10-28). Claude Code does not open a new turn for it: it hands it to the
+ * running turn, and writes it to the transcript as an `attachment` line of type
+ * `queued_command`, with no `turnOrigin` and no `promptId`. Before 0.11.13 the
+ * hook never read that line, so a person typing into a turn the system started
+ * stayed the system's until their next normal message (3 of the 169 system
+ * turns corrected on Rob's rows on 2026-10-26). Rob approved the fix on
+ * 2026-10-28 ("Yes: fix mid-turn typed messages as hook 0.11.13").
+ *
+ * Measured on Rob's Mac, 2026-10-12 to 10-28, 1,524 transcripts: since Claude
+ * Code 2.1.280 every such line the person typed carries `origin.kind` "human"
+ * and `humanTurn: true` (2,039); before 2.1.280, `origin.kind` "human" alone.
+ * Task reports (`task-notification`), other sessions' messages (`peer`) and the
+ * app's own events (no origin) are queued the same way and are never the
+ * person's. And in 2,039 of 2,041 the line belongs to the turn that was running:
+ * the prompt of the nearest stamped entry before it.
+ *
+ * So the line counts as a start of the person's own, at the point it arrives,
+ * when its origin is "human", `humanTurn` is not false, and its text is not one
+ * the bridge or a scheduled task wrote (turnEntryTypedMidTurn). The prompt it
+ * belongs to is that of the next stamped entry read further back in the tail
+ * (readTurnOrigin). As with a stamp, only a line holding the key as Claude Code
+ * writes it is parsed; a tool result that quotes one holds it escaped.
+ */
+const TURN_ORIGIN_TYPED_KEY = '"queued_command"';
 
 /**
  * The wrapper the app puts around a scheduled task's prompt:
@@ -6673,6 +6702,23 @@ function turnEntryAppWroteIt(row) {
 }
 
 /**
+ * True when a transcript line is a message the person typed while a turn was
+ * running (see TURN_ORIGIN_TYPED_KEY): a main-thread `queued_command`
+ * attachment whose origin is "human", `humanTurn` not false, and whose text
+ * the bridge's marker or a scheduled task's wrapper does not open. Its text is
+ * read for those two tests and nothing else. Never throws.
+ */
+function turnEntryTypedMidTurn(row) {
+  if (!row || row.type !== "attachment" || row.isSidechain === true) return false;
+  const queued = row.attachment;
+  if (!queued || typeof queued !== "object" || queued.type !== "queued_command") return false;
+  if (queued.humanTurn === false) return false;
+  const origin = queued.origin;
+  if (!origin || typeof origin !== "object" || origin.kind !== "human") return false;
+  return !turnEntryAutoByText({ message: { content: queued.prompt } });
+}
+
+/**
  * True when a stamped transcript entry STARTS nothing: a background task
  * reporting back, or the app resuming the turn. ⛔ A prompt that opens with the
  * bridge's marker or the scheduled-task wrapper always starts a chain, whatever
@@ -6749,6 +6795,17 @@ function turnEntryTaskId(row) {
  * a kickoff that was "auto" by its marker would read as the person's from there
  * on. It is passed over: the turn's own opening entry, or what was kept for the
  * prompt, still answers.
+ *
+ * ⛔ A MESSAGE TYPED INTO A RUNNING TURN STARTS THE PERSON'S CHAIN (0.11.13).
+ * The tail is searched for TURN_ORIGIN_TYPED_KEY as well, by the same rules. A
+ * typed message belongs to the prompt of the next stamped entry read after it,
+ * further back. When that is THE TURN, the person typed into it after it opened:
+ * { promptId, continues: false, value: "person" }. When it is the turn a
+ * continuing one belongs to, it is the chain's nearest start: `value` "person",
+ * `startPromptId` that prompt. A typed message whose prompt is another one is
+ * passed over with it. One newer than every stamped entry in the tail belongs
+ * to a turn whose opening has left the tail: the payload's own prompt, or the
+ * chain a continuing turn belongs to (`startPromptId` null).
  */
 function readTurnOrigin(transcriptPath, promptId) {
   let fd = null;
@@ -6771,9 +6828,17 @@ function readTurnOrigin(transcriptPath, promptId) {
 
     /** The newest stamped entry of this prompt, once found to continue a chain. */
     let turn = null;
+    /** A message the person typed mid-turn, read since the last stamped entry (0.11.13). */
+    let typed = false;
     let from = got;
+    // The nearest hit of each key before `from`; looked up again only once
+    // `from` has moved back past it. -1 stays -1: there is none further back.
+    let stampHit = buf.lastIndexOf(TURN_ORIGIN_STAMP_KEY, from - 1, "utf8");
+    let typedHit = buf.lastIndexOf(TURN_ORIGIN_TYPED_KEY, from - 1, "utf8");
     while (from > 0) {
-      const hit = buf.lastIndexOf(TURN_ORIGIN_STAMP_KEY, from - 1, "utf8");
+      if (stampHit >= from) stampHit = buf.lastIndexOf(TURN_ORIGIN_STAMP_KEY, from - 1, "utf8");
+      if (typedHit >= from) typedHit = buf.lastIndexOf(TURN_ORIGIN_TYPED_KEY, from - 1, "utf8");
+      const hit = Math.max(stampHit, typedHit);
       if (hit === -1) break;
       const lineBreakBefore = hit === 0 ? -1 : buf.lastIndexOf(10, hit - 1);
       const lineStart = lineBreakBefore + 1;
@@ -6791,13 +6856,22 @@ function readTurnOrigin(transcriptPath, promptId) {
         continue; // a half-written last line, or not JSON at all
       }
       if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+      if (turnEntryTypedMidTurn(row)) {
+        typed = true;
+        continue;
+      }
       if (row.type !== "user" || row.isSidechain === true) continue;
       if (row.isCompactSummary === true) continue;
       if (typeof row.turnOrigin !== "string") continue;
       const rowPromptId = stateString(row.promptId);
+      // A message typed since this entry was written belongs to this entry's prompt.
+      const typedAfter = typed;
+      typed = false;
       if (turn === null) {
         // Another prompt's opening entry is not this row's turn.
         if (promptId && rowPromptId && rowPromptId !== promptId) continue;
+        // The person typed into this turn after it opened: the rest of it is theirs.
+        if (typedAfter) return { promptId: rowPromptId, continues: false, value: "person" };
         if (!turnEntryContinues(row)) {
           return { promptId: rowPromptId, continues: false, value: classifyTurnEntry(row) };
         }
@@ -6807,7 +6881,17 @@ function readTurnOrigin(transcriptPath, promptId) {
         continue;
       }
       // Looking for the chain's start: the nearest earlier entry, of any prompt,
-      // that is not itself a continuation.
+      // that is not itself a continuation — or a message the person typed.
+      if (typedAfter) {
+        return {
+          promptId: turn.promptId,
+          taskId: turn.taskId,
+          continues: true,
+          chainInTail: true,
+          startPromptId: rowPromptId,
+          value: "person",
+        };
+      }
       if (turnEntryContinues(row)) continue;
       return {
         promptId: turn.promptId,
@@ -6820,8 +6904,13 @@ function readTurnOrigin(transcriptPath, promptId) {
     }
     // The turn continues a chain whose start is further back than the tail.
     if (turn !== null) {
+      if (typed) {
+        return { promptId: turn.promptId, taskId: turn.taskId, continues: true, chainInTail: true, startPromptId: null, value: "person" };
+      }
       return { promptId: turn.promptId, taskId: turn.taskId, continues: true, chainInTail: false };
     }
+    // Typed into a turn whose opening entry has left the tail: the payload's own.
+    if (typed) return { promptId, continues: false, value: "person" };
     return null;
   } catch {
     return null;
