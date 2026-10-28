@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine, FoundElement } from 'claude-code/testing'
 
-import type { Feed, FeedAsk } from './queue'
+import type { Feed, FeedAsk, FeedQueueTicket } from './queue'
 import { cleanTitle, isNewerVersion } from './queue'
 import { PANE_SENTENCE, REFRESH_FAILED, recommend } from './threads'
 import { localClock } from './track'
@@ -8513,6 +8513,102 @@ describe('(0.5.28, internal asks) the bridge lists, pins and shows an internal a
   })
 })
 
+// ======================================================================== 0.7.3: the internal queue
+// Rob, 2026-10-27: "I should be assigned all those tickets. They should just be in a queue... for me to just handle in
+// that thread as I can." OW's feed lists the caller's own internal-ops tickets with no committed date
+// (`tickets.internal_queue`, ranked); the Massmarket internal thread gets its row, its chip in its linked thread and its
+// updates, with the queue in rank order and no clock. A member with no queue sees no change.
+describe('(0.7.3, internal queue) the Massmarket internal thread lists, chips and updates the viewer\'s queue, with no clock', () => {
+  const OPS = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
+  const tid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-000000000000`
+  const qt = (n: number, over: Partial<FeedQueueTicket> = {}): FeedQueueTicket => ({
+    ticket_id: tid(n), project_id: OPS, project_name: 'Massmarket AI', title: `Ticket ${n}`, severity: 'high', internal: true, assignee_email: ME,
+    queue_tier: 'now', queue_rank: n, queue_reason: `reason ${n}`, ...over,
+  })
+  const queueFeed = (rows: FeedQueueTicket[] = [qt(2), qt(1)], total = 40): Feed => ({ member: ME, role: 'builder', mail: [], drafts: [], tickets: { internal_queue: rows }, summary: { internal_queue_total: total } })
+  const QUEUE_PART = '### Internal queue (40 tickets, no due dates)\n\n1. now · Ticket 1 (ticket 00000001) · reason 1\n2. now · Ticket 2 (ticket 00000002) · reason 2\n\n38 more in the queue.'
+  const QUEUE_KICKOFF = `[mm-link ${OPS}] Massmarket AI (OW project ${OPS}) has 40 ticket(s) in my internal queue, with no due dates. Load massmarket-internal-ops first, then show me the queue below as it stands now and wait for me to pick what to work on here.\n\nMy internal queue, in rank order (top 2 of 40, no due dates):\n1. now · Ticket 1 (ticket 00000001) · reason 1\n2. now · Ticket 2 (ticket 00000002) · reason 2\n38 more in the queue.`
+  /** ⛔ (Rob, 10-13) Anything that reads as a clock or a due time. */
+  const CLOCK = /\d+[hd] (?:late|left)|\bdue (?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|today|tomorrow)|NO THREAD/
+  const after = async (w: { clock: { advance: (ms: number) => Promise<void> } }, minutes: number) => {
+    for (let i = 0; i < minutes; i++) await w.clock.advance(60_000)
+  }
+
+  test('linked to this thread: its row, its name with no clock, never pinned by the bridge, and the queue in the pane', async ($, on) => {
+    const w = world(on, { feed: queueFeed(), threads: [], store: { 'mm.links': { [OPS]: SELF } } })
+    expect(await mm($, '')).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
+    expect(w.threads.get(SELF)).toMatchObject({ title: '🟡 Massmarket AI · internal queue', pinned: false })
+    const ui = await pane($)
+    expect((await lines(ui)).slice(0, 2)).toEqual(['This thread: Massmarket AI', 'Needs you now (1)'])
+    expect((await ui.find({ type: 'Markdown' }))?.text).toBe(`## Massmarket AI\n🟡 Massmarket AI · internal queue\n\n${QUEUE_PART}`)
+    expect((await lines(ui)).filter(l => l.includes('internal queue'))).toContain('40 tickets in the internal queue · Update thread: thread from Mon, Oct 12 exists')
+    expect(JSON.stringify(await lines(ui))).not.toMatch(CLOCK)
+    expect(sends(w)).toEqual([])
+    expect(w.prompts).toEqual([])
+    await ui.unmount()
+  })
+
+  test('linked to this thread: its chip is minted here (Do it here), though it is never due', async ($, on) => {
+    const w = world(on, { feed: queueFeed(), threads: [], store: { 'mm.links': { [OPS]: SELF } } })
+    await tickOnce($, w)
+    await after(w, 3)
+    expect(chipTitles(w)).toEqual(['Do it here: Massmarket AI: work the internal queue'])
+    expect(w.minted().at(-1)?.args.prompt).toBe(QUEUE_KICKOFF)
+    expect(w.minted().at(-1)?.args.tldr).toBe('Massmarket AI needs you: Massmarket AI · internal queue. Recommended: Do it here.')
+    expect(sends(w)).toEqual([])
+  })
+
+  test('⛔ with no linked thread it gets no chip (it is never due) and nothing is started or sent for it', async ($, on) => {
+    const w = world(on, { feed: queueFeed(), threads: [] })
+    await tickOnce($, w)
+    await after(w, 12)
+    expect(chipTitles(w)).toEqual([])
+    expect(sends(w)).toEqual([])
+    expect(w.acted().filter(c => c.tool === 'start_session')).toEqual([])
+    expect(w.prompts).toEqual([])
+  })
+
+  test('linked to another thread: the queue goes there by itself once, with no clock; the total or a ticket below the top changes nothing; a new top ticket goes once more', LONG, async ($, on) => {
+    const w = world(on, { feed: queueFeed(), threads: [thread('local_ops', 'Tracker', 30, { pinned: true })], store: { 'mm.links': { [OPS]: 'local_ops' } } })
+    await tickOnce($, w)
+    await after(w, 11)
+    await w.clock.advance(3_000)
+    expect(sends(w).map(c => [c.args.session_id, c.args.message])).toEqual([['local_ops', markerFirst(`New since this thread last worked on this client: 40 tickets in the internal queue.\n${QUEUE_KICKOFF}`)]])
+    expect(String(sends(w)[0]?.args.message)).not.toMatch(CLOCK)
+    // its name says what it is, with no clock; the person's own pin stays (R18)
+    expect(w.threads.get('local_ops')).toMatchObject({ title: '🟡 Massmarket AI · internal queue', pinned: true })
+    // more tickets below the top: nothing new for the thread
+    w.setFeed(queueFeed([qt(2), qt(1)], 41))
+    await after(w, 20)
+    expect(sends(w).length).toBe(1)
+    // a ticket ranked to the top: something new, sent once it has been seen for 10 minutes
+    w.setFeed(queueFeed([qt(2), qt(1), qt(3, { queue_rank: 0 })], 42))
+    await after(w, 16)
+    expect(sends(w).length).toBe(2)
+    expect(String(sends(w)[1]?.args.message)).toContain('\n1. now · Ticket 3 (ticket 00000003) · reason 3\n')
+    // the queue emptied: the thread gets its own name back and keeps the person's pin
+    w.setFeed(queueFeed([], 0))
+    await after(w, 6)
+    expect(w.threads.get('local_ops')).toMatchObject({ title: 'Tracker', pinned: true })
+    expect(sends(w).length).toBe(2)
+  })
+
+  test('/mm link Massmarket AI links this thread, as the feed names it by the queue', async ($, on) => {
+    const w = world(on, { feed: queueFeed(), threads: [] })
+    expect(await mm($, 'link Massmarket AI')).toBe('This thread is now Massmarket AI\'s. Showing Massmarket AI in the side pane.')
+    expect(w.stored['mm.links']).toEqual({ [OPS]: SELF })
+  })
+
+  test('⛔ a queue that is not mine changes nothing: no row, no name, no chip, no update', async ($, on) => {
+    const w = world(on, { feed: queueFeed([qt(1, { assignee_email: 'rob@massmarket.ai' })]), threads: [thread('local_ops', 'Ops notes', 30)], store: { 'mm.links': { [OPS]: 'local_ops' } } })
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    await after(w, 12)
+    expect(chipTitles(w)).toEqual([])
+    expect(sends(w)).toEqual([])
+    expect(w.threads.get('local_ops')?.title).toBe('Ops notes')
+  })
+})
+
 // ======================================================================== 0.6.0: every client thread linked, the pane always open
 // Rob, 2026-10-25: "I think we need the side panel to be open on all bridge-connected threads... anytime a team member
 // is talking about a client, the bridge connects, even if there's more than one thread per client... It also gives them
@@ -9610,7 +9706,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.2', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.3', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -9679,7 +9775,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.2', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.3', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -9745,7 +9841,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.2', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.3', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client

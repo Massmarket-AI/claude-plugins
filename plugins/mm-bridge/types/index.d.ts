@@ -3,7 +3,8 @@ export type MmMarkdown = string
 /**
  * The client part of the pane, drawn above the list: a client's prepared drafts when there is a package,
  * else the messages waiting on our reply and the tasks due; under either, (0.5.28) the viewer's open internal asks
- * about the client, each with its page once read. `heading` is `This thread: <client>` when it
+ * about the client, each with its page once read, and (0.7.3) on the Massmarket AI item the viewer's internal queue,
+ * in rank order, with no due dates. `heading` is `This thread: <client>` when it
  * is the client of the thread the pane is in, and empty for another client's (shown from its row's Drafts
  * button). An empty `text` draws no client part.
  */
