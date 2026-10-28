@@ -116,6 +116,14 @@ export type FeedTicket = {
   last_outbound_at?: string | null
   /** (0.5.2, R18) The project is internal, when the feed says so. */
   internal?: boolean
+  /**
+   * (0.7.4, ETA asks; Rob, 2026-10-27: "Team members need to provide ETAs ... They need to provide an ETA in 24 hours")
+   * On a teammate's internal ticket nobody dated (`due_at` and `due_source` null): when its ETA is needed by, 24
+   * business hours after it was assigned. Present only on such a row.
+   */
+  eta_needed_by?: string | null
+  /** (0.7.4, ETA asks) OW's words for it, `⏳ NO ETA — give one in Claude Code`: present only on such a row. Never shown as given (ETA_ASK_TEXT is). */
+  eta_ask?: string | null
 }
 
 /**
@@ -232,7 +240,11 @@ export type Feed = {
   mail?: FeedMail[]
   drafts?: FeedDraft[]
   /** `start_now` (0.5.2, R1): committed tickets due after the due-soon window whose start-by time has come or is within 24 business hours. */
-  tickets?: { overdue?: FeedTicket[]; due_today?: FeedTicket[]; due_soon?: FeedTicket[]; start_now?: FeedTicket[]; internal_queue?: FeedQueueTicket[] }
+  /**
+   * (0.7.4) `undated`: for the founder alone, his own tickets on client projects that nobody dated (Rob, 2026-10-27: "All
+   * of those belong to client projects ... They should be routed to the client projects"), R17's undated rows.
+   */
+  tickets?: { overdue?: FeedTicket[]; due_today?: FeedTicket[]; due_soon?: FeedTicket[]; start_now?: FeedTicket[]; internal_queue?: FeedQueueTicket[]; undated?: FeedTicket[] }
   /** (0.7.3, internal queue) The feed's counts: `internal_queue_total`, how many tickets the caller's internal queue holds in all. */
   summary?: { internal_queue_total?: number | null }
   threads?: FeedThread[]
@@ -344,7 +356,37 @@ export type QueueItem = {
    * stored: every read is `queuedOf(it)` and `queueTotal(it)`.
    */
   queue?: InternalQueue
+  /**
+   * (0.7.4, ETA asks) The viewer's own tickets on this client that owe an ETA: each is also counted in `tasks`, and is due
+   * when its ETA is needed by. Absent when there are none, and on an item an older version stored: read `etaAsksOf(it)`.
+   */
+  etaAsks?: EtaRef[]
+  /**
+   * (0.7.4, for the founder alone) His teammates' internal tickets on this client that are late: past their ETA, or past
+   * when their ETA was needed with none given (Rob, 2026-10-27: "it holds them accountable to that"). Never counted in
+   * `tasks` and never in the kickoff: the row and the pane show them. Read `matesOf(it)`.
+   */
+  mates?: MateRef[]
+  /**
+   * (0.7.4, ETA asks) Set on an internal project's item when tickets assigned to the viewer (never the founder) list it:
+   * it is shown like a client's, its row, chip and updates (`heldInternal`). Rob, 2026-10-27: "this should show up just
+   * like any other client with a due date."
+   */
+  assigned?: true
+  /** (0.7.4) How many of `tasks` are the founder's own undated client tickets (`tickets.undated`). */
+  undatedTasks?: number
+  /** (0.7.4) The titles of the tasks nobody dated (R17 and `tickets.undated`): the pane lists them apart from `taskTitles`, the committed ones. */
+  undatedTitles?: string[]
 }
+
+/** (0.7.4, ETA asks) A ticket of the viewer's that owes an ETA: its id (a lower-case uuid), its title, and when the ETA is needed by. */
+export type EtaRef = { id: string; title: string; neededBy: number }
+
+/** (0.7.4) A teammate's late internal ticket, for the founder: whose (their name), its id, title and since when it is late; `eta` when no ETA was ever given. */
+export type MateRef = { by: string; id: string; title: string; lateSince: number; eta: boolean }
+
+/** (0.7.4, ETA asks) What a ticket that owes an ETA says, in OW's words (ETA_ASK_TEXT): the feed's own copy of it is never shown. */
+export const ETA_ASK_TEXT = '⏳ NO ETA — give one in Claude Code'
 
 /**
  * (0.5.28, internal asks; Rob, 2026-10-23: "there should be massmarket internal thread in bridge as well") Massmarket's
@@ -357,10 +399,48 @@ export const INTERNAL_OPS = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
  * (0.5.2, R18) The projects that are internal by id, while the feed carries no internal flag: Massmarket's
  * internal-ops project and the Massmarket Core Snapshot. A feed row with `internal: true` makes any project so.
  */
-export const INTERNAL_PROJECTS: ReadonlySet<string> = new Set([INTERNAL_OPS, '3e439f40-a17f-48e2-bcfe-723af5b741fc'])
+export const INTERNAL_PROJECTS: ReadonlySet<string> = new Set([INTERNAL_OPS, '3e439f40-a17f-48e2-bcfe-723af5b741fc', 'e2c165f0-4020-4a4b-a2cf-19d2a653fdcc'])
+
+/**
+ * (0.7.4) Massmarket's second internal project, "Massmarket Internal - Discord Coordination" (OW #594): its tickets are
+ * read as the internal-ops project's are.
+ */
+export const INTERNAL_DISCORD = 'e2c165f0-4020-4a4b-a2cf-19d2a653fdcc'
+
+/** (0.7.4) The two internal projects the founder's internal queue and his teammates' ETA asks come from. */
+export const INTERNAL_TICKET_PROJECTS: ReadonlySet<string> = new Set([INTERNAL_OPS, INTERNAL_DISCORD])
 
 /** (0.5.28, internal asks) A client's open asks as its item holds them: none on an item an older version stored. */
 export const openAsks = (it: Pick<QueueItem, 'asks'>): AskRef[] => (Array.isArray(it.asks) ? it.asks : [])
+
+/** (0.7.4, ETA asks) The viewer's tickets on a client that owe an ETA, as its item holds them: none on an item an older version stored. */
+export const etaAsksOf = (it: Pick<QueueItem, 'etaAsks'>): EtaRef[] => (Array.isArray(it.etaAsks) ? it.etaAsks : [])
+
+/** (0.7.4) The founder's teammates' late internal tickets on a client, as its item holds them. */
+export const matesOf = (it: Pick<QueueItem, 'mates'>): MateRef[] => (Array.isArray(it.mates) ? it.mates : [])
+
+/** (0.7.4, ETA asks) A client listed by tickets that owe an ETA and nothing else: no client message, no package, no ask. */
+export const etaOnly = (it: QueueItem): boolean =>
+  etaAsksOf(it).length > 0 && etaAsksOf(it).length === it.tasks && it.messages === 0 && !it.packageId && !(it.open ?? null) && openAsks(it).length === 0
+
+/**
+ * (0.7.4) A client listed by the founder's undated client tickets alone (`tickets.undated`): nothing dated, no client
+ * message, no package, no ask, no queue. Rob, 2026-10-27: "It doesn't necessarily create the need for a new reply." Its
+ * thread is never updated by itself for them (`autoUpdatable`); they ride along with whatever does update it.
+ */
+export const undatedOnly = (it: QueueItem): boolean =>
+  (it.undatedTasks ?? 0) > 0 && !hasDue(it) && it.messages === 0 && !it.packageId && !(it.open ?? null) && openAsks(it).length === 0 && queuedOf(it).length === 0
+
+/**
+ * (0.7.4) How many of a client's tasks have no date at all (R17's rows and `tickets.undated`), never more than the tasks
+ * that owe no ETA: what the note, the row and the kickoff call `with no due date`, never `committed`.
+ */
+export const undatedCount = (it: Pick<QueueItem, 'tasks' | 'etaAsks' | 'undatedTitles'>): number =>
+  Math.max(0, Math.min(Array.isArray(it.undatedTitles) ? it.undatedTitles.length : 0, it.tasks - etaAsksOf(it).length))
+
+/** (0.7.4) The skill a kickoff loads first: massmarket-internal-ops for an internal project's tickets, else the client's. */
+export const skillFor = (it: Pick<QueueItem, 'projectId'>): string =>
+  INTERNAL_TICKET_PROJECTS.has(it.projectId) ? 'massmarket-internal-ops' : "the client's project skill"
 
 /** (0.7.3, internal queue) The tickets of a client's internal queue as its item holds them, in rank order: none on any other item, or one an older version stored. */
 export const queuedOf = (it: Pick<QueueItem, 'queue'>): QueueRef[] => {
@@ -393,9 +473,12 @@ export const internalAskThread = (it: Pick<QueueItem, 'projectId' | 'asks' | 'qu
 /**
  * (fix round 1, L8) An internal project's item, which gets no chip and no update by itself and no thread started by
  * itself: every internal one but (0.5.28, internal asks) the Massmarket internal thread's while it has an open ask
- * (`internalAskThread`), or (0.7.3) an internal queue.
+ * (`internalAskThread`), or (0.7.3) an internal queue, or (0.7.4) one listed by tickets assigned to the viewer, who is not
+ * the founder (`assigned`): a teammate's internal ticket shows as a client's does (Rob, 2026-10-27). Its mail and
+ * packages are read with it; an internal item with none of those tickets is held as before.
  */
-export const heldInternal = (it: Pick<QueueItem, 'projectId' | 'asks' | 'internal' | 'queue'>): boolean => it.internal === true && !internalAskThread(it)
+export const heldInternal = (it: Pick<QueueItem, 'projectId' | 'asks' | 'internal' | 'queue' | 'assigned'>): boolean =>
+  it.internal === true && !internalAskThread(it) && it.assigned !== true
 
 /** (R17) Whether a client has a due time at all (an item stored by the bridge keeps Infinity as null). */
 export const hasDue = (it: Pick<QueueItem, 'dueAt'>): boolean => typeof it.dueAt === 'number' && Number.isFinite(it.dueAt)
@@ -610,13 +693,14 @@ export function internalProjects(feed: Feed): Set<string> {
   for (const m of feed.mail ?? []) add(m)
   for (const d of feed.drafts ?? []) add(d)
   const t = feed.tickets ?? {}
-  for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? [], t.start_now ?? []]) for (const tk of k) add(tk)
+  for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? [], t.start_now ?? [], t.undated ?? []]) for (const tk of k) add(tk)
   const out = carries ? flagged : new Set(INTERNAL_PROJECTS)
   // (0.5.28, internal asks) an ask row the feed marks internal adds its project; ask rows alone never decide whether the
   // feed carries the flag (L9), so the other internal projects are read exactly as they were
   for (const a of Array.isArray(feed.asks) ? feed.asks : []) if (a && a.internal === true && isUuid(a.project_id)) out.add(a.project_id)
-  // (0.7.3, internal queue) the same for the viewer's own queued tickets: additive, never deciding L9
-  for (const q of ownQueueRows(feed)) if (q.internal === true) out.add(q.project_id)
+  // (0.7.3, internal queue) the same for the viewer's own queued tickets: additive, never deciding L9. (0.7.4) The queue
+  // lists on the internal-ops item whichever internal project a ticket is on, so that item is internal too.
+  for (const q of ownQueueRows(feed)) if (q.internal === true) out.add(q.project_id).add(INTERNAL_OPS)
   return out
 }
 
@@ -630,22 +714,34 @@ const QUEUE_REASON_MAX = 140
 const QUEUE_TIER_MAX = 24
 /** (0.7.3, internal queue) The severities OW gives a ticket, worst first: the order the queue falls back on after its rank. */
 const SEVERITIES = ['critical', 'high', 'medium', 'low'] as const
+/** (0.7.4) The most characters of a ticket's title as an ETA ask or a teammate's late ticket shows it. */
+const MATE_TITLE_MAX = 120
+
+/** (0.7.4) Whose late tickets these are, as a row names them: `Asif`, `Asif and Nayan`, `Asif and 2 more`. */
+export function whoseLate(refs: readonly MateRef[]): string {
+  const names = [...new Set(refs.map(r => r.by))]
+  if (names.length <= 1) return names[0] ?? 'a teammate'
+  return names.length === 2 ? `${names[0]} and ${names[1]}` : `${names[0]} and ${names.length - 1} more`
+}
 
 /**
  * (0.7.3, internal queue) The viewer's own queued tickets the feed gives, each once: the row's ticket id a lower-case uuid,
  * its project the internal-ops project (INTERNAL_OPS: the only item the queue lists on) with a name left once cleaned, a
  * title left once cleaned, and its assignee the viewer (any case). ⛔ Anything else is dropped: a teammate's ticket is
  * theirs, and a viewer with no queue of their own sees no change at all.
+ * (0.7.4; Rob, 2026-10-27: "Mine is the only one that should work in a queue") The founder's feed alone: any other
+ * viewer's internal tickets owe an ETA and list with a due time. And either internal project's ticket
+ * (INTERNAL_TICKET_PROJECTS): the queue is one list, on the internal-ops item.
  */
 export function ownQueueRows(feed: Feed): FeedQueueTicket[] {
   const rows = (feed.tickets ?? {}).internal_queue
   const me = typeof feed.member === 'string' ? feed.member.toLowerCase() : ''
-  if (!Array.isArray(rows) || me === '') return []
+  if (!Array.isArray(rows) || me === '' || feed.role !== 'founder') return []
   const seen = new Set<string>()
   const out: FeedQueueTicket[] = []
   for (const q of rows) {
     if (!q || typeof q !== 'object' || !isUuid(q.ticket_id) || seen.has(q.ticket_id)) continue
-    if (q.project_id !== INTERNAL_OPS || cleanName(q.project_name) === '' || queueTitle(q.title) === '') continue
+    if (!INTERNAL_TICKET_PROJECTS.has(q.project_id) || cleanName(q.project_name) === '' || queueTitle(q.title) === '') continue
     if (typeof q.assignee_email !== 'string' || q.assignee_email.toLowerCase() !== me) continue
     seen.add(q.ticket_id)
     out.push(q)
@@ -855,12 +951,26 @@ export function feedClients(feed: Feed): KnownClient[] {
   for (const d of feed.drafts ?? []) add(d?.project_id, d?.project_name)
   const t = feed.tickets ?? {}
   // (fix round 1, F5) `start_now` too: a client listed only by a task that must start now is a client the feed names
-  for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? [], t.start_now ?? []]) for (const tk of k) add(tk?.project_id, tk?.project_name)
+  // (0.7.4) and the founder's undated ones (`tickets.undated`)
+  for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? [], t.start_now ?? [], t.undated ?? []]) for (const tk of k) add(tk?.project_id, tk?.project_name)
   // (0.5.28, internal asks) and the project of each of the caller's asks: the Massmarket internal thread's among them
   for (const a of Array.isArray(feed.asks) ? feed.asks : []) add(a?.project_id, a?.project_name)
   // (0.7.3, internal queue) and the internal-ops project when the viewer has a queue there: `/mm link Massmarket AI`
-  for (const q of ownQueueRows(feed)) add(q.project_id, q.project_name)
+  const home = queueHome(feed)
+  if (home) add(home.projectId, home.projectName)
   return [...out.values()]
+}
+
+/**
+ * (0.7.4, internal queue) Where the founder's internal queue lists: the internal-ops item (INTERNAL_OPS), whichever
+ * internal project its tickets are on, named as the feed names that project ("Massmarket AI"; that name when no queued
+ * ticket is on it). Null when he has no queue.
+ */
+export function queueHome(feed: Feed): { projectId: string; projectName: string } | null {
+  const rows = ownQueueRows(feed)
+  if (!rows.length) return null
+  const named = rows.find(q => q.project_id === INTERNAL_OPS)
+  return { projectId: INTERNAL_OPS, projectName: named ? named.project_name : 'Massmarket AI' }
 }
 
 // ---------------------------------------------------------------- New people (OW ticket 549944b0)
@@ -1283,17 +1393,44 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
   const t = feed.tickets ?? {}
   // (0.5.2, R1) `start_now` too: committed tasks due further out whose work must start within 24 business hours
   const counting = new Set<string>()
-  for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? [], t.start_now ?? []]) {
-    for (const tk of k) {
+  /** (0.7.4) The founder's teammates' late internal tickets, by project: the rows of With a teammate for them. */
+  const lateMates = new Map<string, { name: string; refs: MateRef[] }>()
+  // (0.7.4) `undated` too: the founder's own client tickets nobody dated (R17's rows; Rob, 2026-10-27: "They should be
+  // routed to the client projects ... It doesn't necessarily create the need for a new reply")
+  const lists: [FeedTicket[] | undefined, '' | 'undated'][] = [[t.overdue, ''], [t.due_today, ''], [t.due_soon, ''], [t.start_now, ''], [t.undated, 'undated']]
+  for (const [list, k] of lists) {
+    for (const tk of list ?? []) {
       // (R17) a ticket with no due time (internal work nobody dated) has no due source either: it lists, undated
       const undatedRow = tk.due_at === null
       if (tk.due_source !== 'commitment' && !(undatedRow && (tk.due_source === null || tk.due_source === undefined))) continue
       if (!usable(tk.project_id, tk.project_name)) continue
-      if ((tk.assignee_email ?? '').toLowerCase() !== feed.member.toLowerCase()) continue
+      // (0.7.4, ETA asks) an undated ticket that owes an ETA is due when the ETA is needed by: 24 business hours after
+      // it was assigned (OW's clock). It lists with that clock and is late past it, as any dated task is (Rob,
+      // 2026-10-27: "this should show up just like any other client with a due date"). Never one of `undated`.
+      const neededBy = undatedRow && k !== 'undated' ? ms(tk.eta_needed_by) : NaN
+      const etaAsk = Number.isFinite(neededBy)
+      const assignee = (tk.assignee_email ?? '').toLowerCase()
+      if (assignee !== feed.member.toLowerCase()) {
+        // (0.7.4; Rob, 2026-10-27: "it holds them accountable to that") For the founder alone, a teammate's internal
+        // ticket that is late reaches him: past its ETA, or past when the ETA was needed with none given. On his feed OW
+        // lists every teammate's internal ticket (an ETA ask, or a commitment item on an internal project). It counts
+        // nothing of his and goes in no kickoff: the client's row and pane say whose it is.
+        const due = etaAsk ? neededBy : ms(tk.due_at)
+        const internalRow = etaAsk || INTERNAL_TICKET_PROJECTS.has(tk.project_id) || tk.internal === true
+        if (!founder || assignee === '' || !internalRow || !isUuid(tk.ticket_id) || !(due < now) || !inWindow(due)) continue
+        const title = cleanText(tk.title, MATE_TITLE_MAX)
+        if (!title) continue
+        const late = lateMates.get(tk.project_id) ?? { name: tk.project_name, refs: [] }
+        if (!late.refs.some(r => r.id === tk.ticket_id)) late.refs.push({ by: holderName(assignee), id: tk.ticket_id, title, lateSince: due, eta: etaAsk })
+        lateMates.set(tk.project_id, late)
+        continue
+      }
       // a ticket is in one of the feed's lists only; counted once whatever a feed sends
       if (typeof tk.ticket_id === 'string' && counting.has(tk.ticket_id)) continue
-      const due = undatedRow ? Infinity : ms(tk.due_at)
-      if (undatedRow ? older : !inWindow(due)) continue
+      const due = etaAsk ? neededBy : undatedRow ? Infinity : ms(tk.due_at)
+      if (undatedRow && !etaAsk ? older : !inWindow(due)) continue
+      // (0.7.4, ETA asks) the ticket id goes into the kickoff, for its ETA to be recorded against: a lower-case uuid
+      if (etaAsk && !isUuid(tk.ticket_id)) continue
       if (typeof tk.ticket_id === 'string') counting.add(tk.ticket_id)
       const it = item(tk.project_id, tk.project_name)
       it.tasks += 1
@@ -1302,8 +1439,14 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
       // estimate), else by its due time
       const startBy = ms(tk.start_by_at)
       act(it, Number.isFinite(startBy) && startBy < due ? startBy : due)
-      if (undatedRow) undated(it)
-      it.taskTitles.push(tk.title)
+      if (undatedRow && !etaAsk) undated(it)
+      if (k === 'undated') it.undatedTasks = (it.undatedTasks ?? 0) + 1
+      if (etaAsk) it.etaAsks = [...etaAsksOf(it), { id: tk.ticket_id, title: cleanText(tk.title, MATE_TITLE_MAX) || 'Untitled ticket', neededBy }].sort((a, b) => a.neededBy - b.neededBy)
+      // (0.7.4, ETA asks) a ticket of a teammate's own on an internal project: the item is theirs to work as a client's
+      if (!founder && internal.has(tk.project_id)) it.assigned = true
+      // the pane lists each task under what it is: a committed date, an ETA owed (`etaAsks`), or no date at all
+      if (undatedRow && !etaAsk) it.undatedTitles = [...(it.undatedTitles ?? []), tk.title]
+      else if (!etaAsk) it.taskTitles.push(tk.title)
       seen(it, 'task', Number.isFinite(ms(tk.created_at)) ? ms(tk.created_at) : due)
     }
   }
@@ -1342,10 +1485,11 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
   // lists in the current pass only, last, and never pins by the queue. ⛔ A queued ticket is not a committed task: it is
   // never counted in `tasks`, and one the feed also lists with a date is counted there alone. A viewer with no queue
   // of their own: nothing here at all.
+  // (0.7.4) The founder's alone, on the internal-ops item whichever internal project a ticket is on (`queueHome`).
   const queued = older ? [] : ownQueueRows(feed).filter(q => !counting.has(q.ticket_id))
-  const head = queued[0]
-  if (head) {
-    const it = item(head.project_id, head.project_name)
+  const home = queueHome(feed)
+  if (queued.length && home) {
+    const it = item(home.projectId, home.projectName)
     undated(it)
     // listed by its queue alone: what its title and chip call it (anything else of its keeps its own kind)
     if (it.kind === 'task' && it.tasks === 0 && openAsks(it).length === 0) it.kind = 'queue'
@@ -1391,6 +1535,23 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
           ? okTheirs.has(it.projectId) && it.dueAt > now ? (o?.state === 'held_by_other' ? o.by : (it.ok ?? null)?.sends) : undefined
           : it.kind === 'ready' ? undefined : staleTheirs.get(it.projectId)
       if (name) it.theirs = name
+    }
+  }
+
+  // (0.7.4, for the founder) His teammates' late internal tickets, on their clients' items. Where nothing of his own lists
+  // the client, it lists under With a teammate, named for whose they are (`theirs`) and due when the first went late:
+  // never pinned, never counted. Where something of his does, his row is for that (B1), and they ride along on its row
+  // and its pane only. A client whose drafts a teammate holds keeps who holds them.
+  for (const [pid, late] of lateMates) {
+    const own = byProject.get(pid)
+    const it = own ?? item(pid, late.name)
+    const refs = late.refs.sort((a, b) => a.lateSince - b.lateSince)
+    it.mates = refs
+    const first = refs[0]
+    const nothingOwn = it.kind === 'task' && it.tasks === 0 && it.messages === 0 && !it.packageId && !it.open && openAsks(it).length === 0 && queuedOf(it).length === 0
+    if (first && nothingOwn && !it.theirs) {
+      it.dueAt = Math.min(it.dueAt, first.lateSince)
+      it.theirs = whoseLate(refs)
     }
   }
 
@@ -1451,12 +1612,23 @@ export function clockText(t: number, now: number): string {
  * What is due, in a word or two: a package the viewer picked up is `your draft`, one that waits for the
  * founder's OK `needs your OK`; one a teammate decides on before its reply is due `may need your OK ·
  * <teammate> decides` (R2). (0.5.28) A client listed by the viewer's internal asks alone: `internal ask`. (0.7.3) The
- * internal-ops item listed by the viewer's internal queue alone: `internal queue`.
+ * internal-ops item listed by the viewer's internal queue alone: `internal queue`. (0.7.4) A client whose only tasks owe
+ * an ETA: `ETA needed`; for the founder, a client listed by a teammate's late tickets alone: `no ETA` while one of them
+ * never had an ETA, else `past ETA`.
  */
 const whatOf = (it: QueueItem): string =>
   it.open?.state === 'held_by_me'
     ? 'your draft'
-    : it.kind === 'ok' ? (it.theirs ? decidesText(it.theirs) : 'needs your OK') : it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : it.kind === 'ask' ? 'internal ask' : it.kind === 'queue' ? 'internal queue' : 'task'
+    : it.kind === 'ok' ? (it.theirs ? decidesText(it.theirs) : 'needs your OK') : it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : it.kind === 'ask' ? 'internal ask' : it.kind === 'queue' ? 'internal queue' : taskWhat(it)
+
+/** (0.7.4) What a `task` item is due for: see whatOf. */
+function taskWhat(it: QueueItem): string {
+  const asks = etaAsksOf(it).length
+  if (asks > 0 && asks === it.tasks) return 'ETA needed'
+  const mates = matesOf(it)
+  if (it.tasks === 0 && mates.length) return mates.some(m => m.eta) ? 'no ETA' : 'past ETA'
+  return 'task'
+}
 
 /** What is due for a client and when, in words: `reply ready due tomorrow 8 AM`. */
 export function dueLine(it: QueueItem, now: number): string {
@@ -1511,7 +1683,21 @@ export function titleFor(it: QueueItem, now: number): string {
  * writing a second reply (0.4.1's own sentence, as the client's pane ends with it). '' for any other client.
  */
 export function holdSentence(it: QueueItem): string {
-  return (it.open ?? null)?.state === 'held_by_other' ? draftsLine(it).replace(/^_|_$/g, '') : ''
+  if ((it.open ?? null)?.state === 'held_by_other') return draftsLine(it).replace(/^_|_$/g, '')
+  // (0.7.4, for the founder) a client listed by a teammate's late internal tickets alone: whose, and what is late
+  return it.tasks === 0 && it.theirs ? lateSentence(matesOf(it)) : ''
+}
+
+/** (0.7.4) `Asif owes an ETA on 2 internal tickets`, `Asif is past the ETA on 1 internal ticket`, or with both, `Asif: 3 internal tickets late, 2 with no ETA`. */
+export function lateSentence(refs: readonly MateRef[]): string {
+  const n = refs.length
+  if (!n) return ''
+  const who = whoseLate(refs)
+  const tickets = `${n} internal ticket${n === 1 ? '' : 's'}`
+  const noEta = refs.filter(r => r.eta).length
+  const owes = new Set(refs.map(r => r.by)).size > 1 ? 'owe' : 'owes'
+  const is = new Set(refs.map(r => r.by)).size > 1 ? 'are' : 'is'
+  return noEta === n ? `${who} ${owes} an ETA on ${tickets}` : noEta === 0 ? `${who} ${is} past the ETA on ${tickets}` : `${who}: ${tickets} late, ${noEta} with no ETA`
 }
 
 export function clearedTitle(client: string, now: number): string {
@@ -1617,7 +1803,13 @@ export function noteText(it: QueueItem, member: string): string {
   const shown = shownQueue(it).length
   const total = queueTotal(it)
   const queue = shown ? ` ${holderName(member)}'s internal queue holds ${total} ticket${total === 1 ? '' : 's'}, with no due dates; the side pane lists the top ${shown} in rank order.` : ''
-  return `${noteBody(it, member)}${more}${queue}`
+  // (0.7.4, ETA asks) and the tickets that owe an ETA: which, so it can be recorded against each
+  const eta = etaAsksOf(it).filter(a => isUuid(a?.id))
+  const etas = eta.length ? ` ${eta.length} ticket${eta.length === 1 ? '' : 's'} of ${holderName(member)}'s need${eta.length === 1 ? 's' : ''} an ETA (ticket ${eta.map(a => a.id.slice(0, 8)).join(', ')}): record each as task-chip-flow §5.3 says, with task_fingerprint "ticket:<id>".` : ''
+  // (0.7.4, for the founder) and his teammates' late internal tickets: whose, never his to do
+  const late = lateSentence(matesOf(it))
+  const mates = late ? ` ${late} (late); the side pane lists them. They are the teammate's to answer, not ${holderName(member)}'s.` : ''
+  return `${noteBody(it, member)}${more}${queue}${etas}${mates}`
 }
 
 /** (0.7.3, internal queue) The queued tickets an item lists, each checked again (an item an older version stored, or a store edited by hand, is read as data). */
@@ -1660,8 +1852,24 @@ export function queueMarkdown(it: Pick<QueueItem, 'queue'>): string {
   return out.join('\n')
 }
 
+/**
+ * (0.7.4) The tasks as the bridge note says them: `2 committed tasks due`, as it always has, unless some owe an ETA or
+ * have no date: `1 committed task due, 1 ticket that needs an ETA, 3 tasks with no due date`.
+ */
+function taskPhrase(it: QueueItem): string {
+  const eta = etaAsksOf(it).length
+  const nodate = undatedCount(it)
+  const dated = it.tasks - eta - nodate
+  if (!eta && !nodate) return `${it.tasks} committed task${it.tasks === 1 ? '' : 's'} due`
+  return [
+    dated > 0 ? `${dated} committed task${dated === 1 ? '' : 's'} due` : '',
+    eta > 0 ? `${eta} ticket${eta === 1 ? ' that needs' : 's that need'} an ETA` : '',
+    nodate > 0 ? `${nodate} task${nodate === 1 ? '' : 's'} with no due date` : '',
+  ].filter(Boolean).join(', ')
+}
+
 function noteBody(it: QueueItem, member: string): string {
-  const waiting = `${it.messages} client message${it.messages === 1 ? '' : 's'} waiting on our reply and ${it.tasks} committed task${it.tasks === 1 ? '' : 's'} due`
+  const waiting = `${it.messages} client message${it.messages === 1 ? '' : 's'} waiting on our reply and ${taskPhrase(it)}`
   const o = it.open ?? null
   if (o?.state === 'held_by_me' && it.packageId) {
     const newer = o.newer > 0
@@ -1676,6 +1884,8 @@ function noteBody(it: QueueItem, member: string): string {
   if (o && withHolder(o)) return `${waiting}; ${o.by} has the reply drafts (package ${o.id.slice(0, 8)}), and they are marked out of date. Do not write a second reply: ask ${o.by}.`
   if (o?.state === 'stale') return `${waiting}; reply drafts exist (package ${o.id.slice(0, 8)}) but are marked out of date. When the person asks for the reply, pick the package up and rebuild the drafts first (client-reply-prep §9 with --package ${o.id}).`
   if (o?.state === 'prepared') return `${waiting}; reply drafts are prepared for this client (package ${o.id.slice(0, 8)}). When the person asks to act on them, follow client-reply-prep §9 with --package ${o.id}.`
+  // (0.7.4) tasks alone are not a reply to prepare (Rob, 2026-10-27: "It doesn't necessarily create the need for a new reply")
+  if (it.messages === 0) return `${waiting}; no client message is waiting, so there is no reply to prepare.`
   return `${waiting}; no reply drafts are prepared yet.`
 }
 
@@ -1700,10 +1910,49 @@ export function clientMarkdown(it: QueueItem, now: number, pages: Readonly<Recor
     out.push('', '### Due (dates we committed to)')
     for (const t of it.taskTitles) out.push(`- ${t}`)
   }
-  const asksAlone = asks !== '' && !it.mail.length && !it.taskTitles.length && !it.packageId && !(it.open ?? null)
+  // (0.7.4, ETA asks) the viewer's tickets that owe an ETA, each with when it is needed by
+  const eta = etaMarkdown(it, now)
+  if (eta) out.push('', eta)
+  // (0.7.4) the tasks nobody dated, apart from the committed ones
+  const undatedTitles = Array.isArray(it.undatedTitles) ? it.undatedTitles : []
+  if (undatedTitles.length) {
+    out.push('', '### Open tickets (no due date)')
+    for (const t of undatedTitles.slice(0, UNDATED_SHOWN_MAX)) out.push(`- ${t}`)
+    if (undatedTitles.length > UNDATED_SHOWN_MAX) out.push(`- and ${undatedTitles.length - UNDATED_SHOWN_MAX} more`)
+  }
+  // (0.7.4) nothing of a reply's in play (no client message, no package): no word of reply drafts, whatever else lists
+  // the client (Rob, 2026-10-27: a task alone "doesn't necessarily create the need for a new reply")
+  const noReply = !it.mail.length && !it.packageId && !(it.open ?? null)
   if (asks) out.push('', asks)
-  if (!asksAlone) out.push('', draftsLine(it))
+  // (0.7.4, for the founder) his teammates' late internal tickets, last: theirs, not his
+  const mates = matesMarkdown(it, now)
+  if (mates) out.push('', mates)
+  if (!noReply) out.push('', draftsLine(it))
   return out.join('\n')
+}
+
+/** (0.7.4) The most undated tasks the pane lists for one client. */
+const UNDATED_SHOWN_MAX = 10
+
+/** (0.7.4, ETA asks) The pane's part for the viewer's tickets that owe an ETA: OW's words, then each with when it is needed by. '' with none. */
+export function etaMarkdown(it: QueueItem, now: number): string {
+  const asks = etaAsksOf(it).filter(a => a && isUuid(a.id) && Number.isFinite(a.neededBy))
+  if (!asks.length) return ''
+  const lines = asks.map(a => `- ${cleanText(a.title, MATE_TITLE_MAX)} (ticket ${a.id.slice(0, 8)}) · ${a.neededBy < now ? `ETA was needed by ${clockText(a.neededBy, now)}, ${lateText(a.neededBy, now)}` : `ETA needed by ${clockText(a.neededBy, now)}`}`)
+  return [`### ${ETA_ASK_TEXT}`, '', ...lines].join('\n')
+}
+
+/** (0.7.4, for the founder) The pane's part for his teammates' late internal tickets on the client. '' with none. */
+export function matesMarkdown(it: QueueItem, now: number): string {
+  const refs = matesOf(it).filter(r => r && isUuid(r.id) && Number.isFinite(r.lateSince))
+  if (!refs.length) return ''
+  const lines = refs.map(r => `- ${cleanText(r.by, 40)} · ${cleanText(r.title, MATE_TITLE_MAX)} (ticket ${r.id.slice(0, 8)}) · ${r.eta ? 'no ETA given' : 'past its ETA'}, ${lateText(r.lateSince, now)}`)
+  return [`### Late with a teammate (${refs.length})`, '', ...lines].join('\n')
+}
+
+/** (0.7.4) How late something is, as the pane says it: `3h late`, `2d late` (business time, R16). */
+function lateText(since: number, now: number): string {
+  return `${whenText(since, now).replace(/^overdue /, '')} late`
 }
 
 // ---------------------------------------------------------------- a route call that can close something

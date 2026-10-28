@@ -5524,8 +5524,16 @@ describe('fix round 1: the reviewer\'s findings', () => {
     await band.unmount()
   })
 
-  test('L8 (P3a): an internal project with a dated task gets no chip by itself', async ($, on) => {
+  test('L8 (P3a): an internal project with a dated task gets no chip by itself; (0.7.4) a teammate\'s own internal task gets its chip as a client\'s does', async ($, on) => {
+    // (0.7.4; Rob, 2026-10-27: "this should show up just like any other client with a due date") a teammate's own
+    // internal task, dated: its chip, like a client's, in words that are not a reply's
     const w = world(on, { feed: { member: ME, role: 'builder', drafts: [], mail: [], tickets: { due_today: [iTicket] }, threads: [] }, threads: [] })
+    await tickOnce($, w)
+    expect(w.minted().map(c => (c.args as { title?: string }).title)).toEqual(['Massmarket AI: work the internal task'])
+  })
+
+  test('L8 (P3a, 0.7.4): the founder\'s own dated internal task still gets no chip by itself', async ($, on) => {
+    const w = world(on, { feed: { member: FOUNDER, role: 'founder', drafts: [], mail: [], tickets: { due_today: [{ ...iTicket, assignee_email: FOUNDER }] }, threads: [] }, threads: [] })
     await tickOnce($, w)
     expect(w.minted()).toEqual([])
   })
@@ -8471,12 +8479,21 @@ describe('(0.5.28, internal asks) the bridge lists, pins and shows an internal a
     expect(chipTitles(w)).toEqual(['Massmarket AI: reply to the internal ask'])
   })
 
-  test('⛔ with no open ask it gets none, as before (L8): an internal ticket due soon mints no chip', async ($, on) => {
+  test('⛔ with no open ask it gets none, as before (L8): the founder\'s internal ticket due soon mints no chip; (0.7.4) a teammate\'s own one mints its chip', async ($, on) => {
+    const opsTask = { ticket_id: 'ops-t1', project_id: OPS, project_name: 'Massmarket AI', title: 'Rotate the key', due_at: new Date(NOW + 5 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME, internal: true }
+    const w = world(on, { feed: { member: ME, role: 'founder', mail: [], drafts: [], tickets: { due_today: [opsTask] } }, threads: [] })
+    await tickOnce($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(chipTitles(w)).toEqual([])
+  })
+
+  test('(0.7.4) a teammate\'s own internal ticket due soon mints its chip, as a client\'s task does', async ($, on) => {
+    // Rob, 2026-10-27: "this should show up just like any other client with a due date"
     const opsTask = { ticket_id: 'ops-t1', project_id: OPS, project_name: 'Massmarket AI', title: 'Rotate the key', due_at: new Date(NOW + 5 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME, internal: true }
     const w = world(on, { feed: { member: ME, role: 'builder', mail: [], drafts: [], tickets: { due_today: [opsTask] } }, threads: [] })
     await tickOnce($, w)
     for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
-    expect(chipTitles(w)).toEqual([])
+    expect(chipTitles(w)).toEqual(['Massmarket AI: work the internal task'])
   })
 
   const helper = 'node ~/.claude/skills/team-api-gateway/scripts/mm-api.mjs'
@@ -8525,7 +8542,8 @@ describe('(0.7.3, internal queue) the Massmarket internal thread lists, chips an
     ticket_id: tid(n), project_id: OPS, project_name: 'Massmarket AI', title: `Ticket ${n}`, severity: 'high', internal: true, assignee_email: ME,
     queue_tier: 'now', queue_rank: n, queue_reason: `reason ${n}`, ...over,
   })
-  const queueFeed = (rows: FeedQueueTicket[] = [qt(2), qt(1)], total = 40): Feed => ({ member: ME, role: 'builder', mail: [], drafts: [], tickets: { internal_queue: rows }, summary: { internal_queue_total: total } })
+  // (0.7.4; Rob, 2026-10-27: "Mine is the only one that should work in a queue") the founder's feed: the only one it lists on
+  const queueFeed = (rows: FeedQueueTicket[] = [qt(2), qt(1)], total = 40, role = 'founder'): Feed => ({ member: ME, role, mail: [], drafts: [], tickets: { internal_queue: rows }, summary: { internal_queue_total: total } })
   const QUEUE_PART = '### Internal queue (40 tickets, no due dates)\n\n1. now · Ticket 1 (ticket 00000001) · reason 1\n2. now · Ticket 2 (ticket 00000002) · reason 2\n\n38 more in the queue.'
   const QUEUE_KICKOFF = `[mm-link ${OPS}] Massmarket AI (OW project ${OPS}) has 40 ticket(s) in my internal queue, with no due dates. Load massmarket-internal-ops first, then show me the queue below as it stands now and wait for me to pick what to work on here.\n\nMy internal queue, in rank order (top 2 of 40, no due dates):\n1. now · Ticket 1 (ticket 00000001) · reason 1\n2. now · Ticket 2 (ticket 00000002) · reason 2\n38 more in the queue.`
   /** ⛔ (Rob, 10-13) Anything that reads as a clock or a due time. */
@@ -8606,6 +8624,78 @@ describe('(0.7.3, internal queue) the Massmarket internal thread lists, chips an
     expect(chipTitles(w)).toEqual([])
     expect(sends(w)).toEqual([])
     expect(w.threads.get('local_ops')?.title).toBe('Ops notes')
+  })
+
+  test('⛔ (0.7.4) a queue on a feed that is not the founder\'s changes nothing, even rows that are the viewer\'s own', async ($, on) => {
+    const w = world(on, { feed: queueFeed([qt(2), qt(1)], 40, 'builder'), threads: [thread('local_ops', 'Ops notes', 30)], store: { 'mm.links': { [OPS]: 'local_ops' } } })
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    await after(w, 12)
+    expect(chipTitles(w)).toEqual([])
+    expect(sends(w)).toEqual([])
+    expect(w.threads.get('local_ops')?.title).toBe('Ops notes')
+  })
+})
+
+// (0.7.4) Rob, 2026-10-27: "Team members need to provide ETAs, and this should show up just like any other client with a
+// due date. They need to provide an ETA in 24 hours to me or to the system, and then it holds them accountable to that."
+describe('(0.7.4) a teammate\'s internal ticket owes an ETA: listed with its clock, chipped and pinned as a client\'s; late, it reaches the founder', () => {
+  const OPS = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
+  const TID = '0000e7a0-0000-4000-8000-000000000001'
+  /** An ETA ask as OW #593 lists it: no due time or source, and when its ETA is needed by (here 1 PM ET, two hours ahead). */
+  const etaRow = (over: Record<string, unknown> = {}) => ({
+    ticket_id: TID, project_id: OPS, project_name: 'Massmarket AI', title: 'Fix the tracker export', due_at: null, due_source: null,
+    assignee_email: ME, eta_needed_by: new Date(NOW + 2 * HOUR).toISOString(), eta_ask: '⏳ NO ETA — give one in Claude Code', ...over,
+  })
+  const mateFeed = (rows = [etaRow()]) => ({ member: ME, role: 'builder', mail: [], drafts: [], tickets: { due_today: rows } })
+
+  test('no thread yet: its chip asks for the ETA, and its kickoff says how to record it; nothing is sent', async ($, on) => {
+    const w = world(on, { feed: mateFeed(), threads: [] })
+    await tickOnce($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(chipTitles(w)).toEqual(['Massmarket AI: give your ETA'])
+    const prompt = String(w.minted().at(-1)?.args.prompt)
+    expect(prompt.startsWith(`[mm-link ${OPS}] Massmarket AI (OW project ${OPS}) has 1 ticket(s) of mine that need an ETA, the first needed by Mon, Oct 12 1 PM ET. Load massmarket-internal-ops first`)).toBe(true)
+    expect(prompt).toContain('POST /api/ext/eta-commit with task_fingerprint "ticket:<its id>"')
+    expect(prompt).toContain(`1. Fix the tracker export (ticket ${TID}) · ETA needed by Mon, Oct 12 1 PM ET`)
+    expect(sends(w)).toEqual([])
+  })
+
+  test('linked to this thread: pinned on the ETA clock, named for it, and the pane lists the ticket under OW\'s words', async ($, on) => {
+    const w = world(on, { feed: mateFeed(), threads: [], store: { 'mm.links': { [OPS]: SELF } } })
+    await mm($, '')
+    expect(w.threads.get(SELF)).toMatchObject({ title: '🔴 2h left · Massmarket AI · ETA needed', pinned: true })
+    const ui = await pane($)
+    const md = String((await ui.find({ type: 'Markdown' }))?.text)
+    expect(md).toContain('### ⏳ NO ETA — give one in Claude Code\n\n- Fix the tracker export (ticket 0000e7a0) · ETA needed by ')
+    expect(md).not.toContain('reply drafts')
+    expect(sends(w)).toEqual([])
+    await ui.unmount()
+  })
+
+  /** A teammate's ETA ask on a client's project, its ETA needed four hours ago. */
+  const lateAsk = () => etaRow({ project_id: ACME, project_name: 'Acme Roofing — Pat', eta_needed_by: new Date(NOW - 4 * HOUR).toISOString() })
+
+  test('for the founder: a teammate\'s ticket past when its ETA was needed lists under With a teammate, whose and what; never pinned, chipped or sent', async ($, on) => {
+    const w = world(on, { feed: { member: FOUNDER, role: 'founder', mail: [], drafts: [], tickets: { overdue: [lateAsk()] } }, threads: [] })
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    const ui = await pane($)
+    expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([['mm-fold:teammate', 'With a teammate (1)']])
+    await ui.press({ key: 'mm-fold:teammate' })
+    const all = await lines(ui)
+    const row = all.findIndex(l => l.includes('with Builder A · Acme Roofing · no ETA'))
+    expect(row).toBeGreaterThan(-1)
+    expect(all[row + 1]).toBe('1 late with Builder A')
+    await ui.unmount()
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(chipTitles(w)).toEqual([])
+    expect(sends(w)).toEqual([])
+  })
+
+  test('⛔ another teammate\'s feed never shows it', async ($, on) => {
+    const w = world(on, { feed: { member: TEAMMATE_B, role: 'builder', mail: [], drafts: [], tickets: { overdue: [lateAsk()] } }, threads: [] })
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(chipTitles(w)).toEqual([])
   })
 })
 
@@ -9706,7 +9796,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.3', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.4', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -9775,7 +9865,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.3', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.4', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -9841,7 +9931,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.3', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.4', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client

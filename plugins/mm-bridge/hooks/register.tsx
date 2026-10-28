@@ -5,7 +5,7 @@ import type { MmBand, MmFolds, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPe
 import {
   INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pinsNow,
   peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
-  asksMarkdown, heldInternal, internalQueueThread, openAsks, ownQueueRows, queueMarkdown, queueTotal, queuedOf, shownText,
+  asksMarkdown, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
@@ -144,7 +144,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.7.3'
+const VERSION = '0.7.4'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -829,7 +829,8 @@ function feedProjects(feed: Feed): string[] {
   // (0.5.28, internal asks) the project of each of the caller's asks: a thread that opens with its kickoff links to it
   for (const a of Array.isArray(feed.asks) ? feed.asks : []) add(a?.project_id)
   // (0.7.3, internal queue) the internal-ops project when the viewer has a queue there: its kickoff's marker links too
-  for (const q of ownQueueRows(feed)) add(q.project_id)
+  const home = queueHome(feed)
+  if (home) add(home.projectId)
   return [...ids]
 }
 
@@ -2294,7 +2295,11 @@ function partSig(it: QueueItem): string {
   const asks = openAsks(it)
   const withAsks = asks.length ? `${base}:asks:${asks.map(a => `${a.id}/${a.hasDraft ? 1 : 0}`).join(',')}` : base
   const queued = queuedOf(it)
-  return queued.length ? `${withAsks}:queue:${queueTotal(it)}:${queued.map(q => `${q?.id}/${q?.tier}/${q?.reason}`).join(',')}` : withAsks
+  const withQueue = queued.length ? `${withAsks}:queue:${queueTotal(it)}:${queued.map(q => `${q?.id}/${q?.tier}/${q?.reason}`).join(',')}` : withAsks
+  // (0.7.4) the tickets that owe an ETA, and (for the founder) his teammates' late ones
+  const eta = etaAsksOf(it)
+  const mates = matesOf(it)
+  return `${withQueue}${eta.length ? `:eta:${eta.map(a => `${a?.id}/${a?.neededBy}`).join(',')}` : ''}${mates.length ? `:mates:${mates.map(m => `${m?.id}/${m?.lateSince}`).join(',')}` : ''}`
 }
 
 /** The client part as the state holds it; a session an older version left its view in held plain text there. */
@@ -2936,10 +2941,12 @@ function startTitle(it: QueueItem): string {
 /**
  * 0.5.1's words for what a client's chip is for, uncut: `<client>: review the reply drafts` and the like. (0.5.28,
  * internal asks) A client listed by the viewer's internal asks alone: `<client>: reply to the internal ask`. (0.7.3) The
- * internal-ops item listed by the viewer's internal queue alone: `<client>: work the internal queue`.
+ * internal-ops item listed by the viewer's internal queue alone: `<client>: work the internal queue`. (0.7.4) Listed by
+ * tickets that owe an ETA alone: `<client>: give your ETA`; a teammate's own internal tasks: `<client>: work the internal
+ * task`, never a reply.
  */
 function startWhat(it: QueueItem): string {
-  return `${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : it.kind === 'ask' ? 'reply to the internal ask' : it.kind === 'queue' ? 'work the internal queue' : 'reply to the client'}`
+  return `${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : it.kind === 'ask' ? 'reply to the internal ask' : etaOnly(it) ? 'give your ETA' : it.kind === 'queue' ? 'work the internal queue' : it.internal === true && it.messages === 0 ? 'work the internal task' : 'reply to the client'}`
 }
 
 /** 0.5.1's line under that title. */
