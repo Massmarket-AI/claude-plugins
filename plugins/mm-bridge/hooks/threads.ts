@@ -16,7 +16,6 @@
 // session or title matched it: it is not linked to a second, and it is never the thread Update acts on
 // for a second (`ownerOf`).
 
-import { businessMsBetween } from './business-time'
 import type { MmRow } from '../types'
 
 import {
@@ -25,18 +24,15 @@ import {
 } from './queue'
 import type { AskRef, FeedThread, QueueItem } from './queue'
 
-const HOUR = 3_600_000
-const DAY = 24 * HOUR
 const TZ = 'America/New_York'
-
-/** A thread counts as current for a client when its last activity is within this much business time. */
-export const RECENT_THREAD_MS = 7 * DAY
-/** Last activity further back than this is old, decided without counting business time (no calendar walk for a date years back). */
-export const OLD_THREAD_MS = 60 * DAY
 
 // (0.5.11, Rob 10-15: "Can you just automatically compress context at 60% instead of 100% to save tokens?") A thread's
 // length decides nothing any more: Claude Code compacts a long thread (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE), so it is
 // never one to replace, and its row offers Claim whatever its length.
+// (0.7.6, Rob 2026-10-27: "we should always pin the most recent thread from that client") Nor does its age:
+// RECENT_THREAD_MS (7 business days) and OLD_THREAD_MS (60 days) are gone. A client's thread is updated however long
+// ago it was last active (compaction keeps it usable, as decided 10-15), and Start is only for a client with no thread
+// of its own.
 
 /** A thread as the desktop app lists it. `link` is the app's own link to it, kept only when it is that thread's. */
 export type AppThread = { sessionId: string; title?: string; pinned?: boolean; isArchived?: boolean; lastActivityAt?: string; link?: string }
@@ -314,33 +310,84 @@ export function newerThreadFor(
  * by sessions of more than one client (`shared`), or one the feed or a marker gives to another client (`declaredOther`).
  * ⛔ Only the marker counts: a title never does, and a session's declaration is R1's (`autoLinkFor`).
  * Whether each is still open (not archived, not deleted) is the caller's to find out.
+ * (0.7.6) From 0.7.6 `mm.marked` also records the marker an Update carried into a thread (the bridge's own send, which
+ * the thread's hook never reads as a marker: it does not open the thread, and it is not the person's prompt), and the
+ * link of a linked thread the app showed archived, when its link went: see `ownThreads`.
  */
 export function markedThreads(
   projectId: string,
   links: Readonly<Record<string, string>>,
   feedThreads: readonly FeedThread[],
   pairs: Pairs,
-  skip: {
-    unlinked?: Readonly<Record<string, unknown>>
-    released?: readonly string[]
-    marked?: Readonly<Record<string, string>>
-    markedAt?: Readonly<Record<string, number>>
-    shared?: ReadonlySet<string>
-  } = {},
+  skip: OwnSkip = {},
 ): string[] {
+  return byNewest(markedOf(projectId, links, feedThreads, pairs, skip)).map(o => o.sid)
+}
+
+/** (0.7.6) What `markedThreads` and `ownThreads` pass over, and the records they read. */
+type OwnSkip = {
+  unlinked?: Readonly<Record<string, unknown>>
+  released?: readonly string[]
+  marked?: Readonly<Record<string, string>>
+  markedAt?: Readonly<Record<string, number>>
+  shared?: ReadonlySet<string>
+}
+
+/** (0.7.6) Newest first; a tie by id, so every session orders them alike. */
+const byNewest = (list: Array<{ sid: string; at: number }>): Array<{ sid: string; at: number }> =>
+  list.sort((a, b) => (b.at === a.at ? (a.sid < b.sid ? -1 : 1) : b.at > a.at ? 1 : -1))
+
+/** (0.7.6) Whether a thread is one a client with no linked thread may take back or bring back by itself (`markedThreads`'s rules). */
+function mayTakeBack(projectId: string, sid: string, links: Readonly<Record<string, string>>, feedThreads: readonly FeedThread[], pairs: Pairs, skip: OwnSkip, shared: ReadonlySet<string>): boolean {
+  if (!THREAD_ID.test(sid)) return false
+  if (ownerOf(sid, links) !== undefined || sid in (skip.unlinked ?? {}) || (skip.released ?? []).includes(sid) || shared.has(sid)) return false
+  return !declaredOther(projectId, sid, feedThreads, pairs, skip.marked ?? {})
+}
+
+/** The threads `markedThreads` gives, each with when its marker was recorded (else when its thread started). */
+function markedOf(projectId: string, links: Readonly<Record<string, string>>, feedThreads: readonly FeedThread[], pairs: Pairs, skip: OwnSkip): Array<{ sid: string; at: number }> {
   const marked = skip.marked ?? {}
-  const unlinked = skip.unlinked ?? {}
-  const released = skip.released ?? []
   const shared = skip.shared ?? sharedThreads(feedThreads, pairs)
   const out: Array<{ sid: string; at: number }> = []
   for (const [sid, pid] of Object.entries(marked)) {
-    if (pid !== projectId || !THREAD_ID.test(sid)) continue
-    if (ownerOf(sid, links) !== undefined || sid in unlinked || released.includes(sid) || shared.has(sid)) continue
-    if (declaredOther(projectId, sid, feedThreads, pairs, marked)) continue
+    if (pid !== projectId || !mayTakeBack(projectId, sid, links, feedThreads, pairs, skip, shared)) continue
     const at = skip.markedAt?.[sid]
     out.push({ sid, at: typeof at === 'number' && Number.isFinite(at) ? at : (threadStart(sid, pairs) ?? -Infinity) })
   }
-  return out.sort((a, b) => (b.at === a.at ? (a.sid < b.sid ? -1 : 1) : b.at > a.at ? 1 : -1)).map(o => o.sid)
+  return out
+}
+
+/**
+ * (0.7.6, Rob 2026-10-27: "we should always pin the most recent thread from that client") A client's OWN threads, newest
+ * first: what a client with no linked thread takes back (an open one) or brings back from the archive (an archived one)
+ * before its row offers Start. Two records say a thread is the client's own:
+ *   the marker    `markedThreads`: the thread opened with the client's [mm-link] marker, or (0.7.6) an Update carried
+ *                 that marker into it, or (0.7.6) it was the client's linked thread when the app showed it archived
+ *   the last send `given` (`mm.sent`): the thread the bridge last gave this client's kickoff to, dated when it went.
+ *                 Every Update carries the client's marker, and before 0.7.6 that was recorded nowhere else (Leader
+ *                 Transcend, 10-27: a thread holding an Update with its marker, unlinked, and a new thread offered)
+ * A thread in both is dated by the later of the two. ⛔ Every rule of `markedThreads` holds for each: never a thread
+ * linked to any client, one the person unlinked, one a client was moved off (`released`), one reached by sessions of
+ * more than one client (`shared`, B3), or one the feed or a marker gives to another client (`declaredOther`).
+ * Whether each is still open, archived or gone is the caller's to find out.
+ */
+export function ownThreads(
+  projectId: string,
+  links: Readonly<Record<string, string>>,
+  feedThreads: readonly FeedThread[],
+  pairs: Pairs,
+  skip: OwnSkip & { given?: Sent | undefined } = {},
+): string[] {
+  const shared = skip.shared ?? sharedThreads(feedThreads, pairs)
+  const out = markedOf(projectId, links, feedThreads, pairs, { ...skip, shared })
+  const g = skip.given
+  if (g && typeof g === 'object' && typeof g.sid === 'string' && mayTakeBack(projectId, g.sid, links, feedThreads, pairs, skip, shared)) {
+    const at = Number.isFinite(g.at) ? g.at : -Infinity
+    const same = out.find(o => o.sid === g.sid)
+    if (same) same.at = Math.max(same.at, at)
+    else out.push({ sid: g.sid, at })
+  }
+  return byNewest(out).map(o => o.sid)
 }
 
 /**
@@ -494,22 +541,21 @@ export function autoUpdatable(it: QueueItem, now: number): boolean {
 /**
  * (0.5.23, Rob 2026-10-21: "change auto-starts to update the older thread") The thread an update sent by itself goes
  * to, from the client's recommendation as the last sync stored it (`rec`) and the client's linked thread (`linked`):
- *   update   the row says Update: its thread
- *   older    the row says Start because the thread is older than RECENT_THREAD_MS (`last thread is from Oct 2`):
- *            that same thread is updated, and no new one is started by itself. `older` is the row's reason, for the
- *            notice log. (Auto-compaction keeps an old thread small, so updating it is safe.)
+ * the row says Update, and its thread is the linked one.
+ * (0.7.6) Until 0.7.6 a second case, `older`: a row that said Start because its linked thread was older than 7 business
+ * days had that same thread updated instead. A row never says Start for a thread's age any more (`recommend`), so an old
+ * linked thread's row says Update and lands in the case above; a row a sync before 0.7.6 stored with Start is no
+ * target (the next sync stores it again).
  * ⛔ Only ever the client's LINKED thread, and never one its row only suggests by a title: every guard of an update
- * sent by itself still applies (`autoUpdates`). A client with no thread gets none here (its thread is started by
- * itself, as before), and so does a client whose old thread is not its linked one (the person unlinked it): that
- * client's thread is still started by itself, with the hand-over from the old one. A person's Start, Start missing
- * threads and /mm start are not decided here: they open a fresh thread as before.
+ * sent by itself still applies (`autoUpdates`). A client with no linked thread gets none here (nothing is started by
+ * itself: it takes back or brings back a thread of its own first, else its row waits for the person's Start), and
+ * neither does a client whose thread is not its linked one (the person unlinked it). A person's Start, Start missing
+ * threads and /mm start are not decided here.
  */
-export function autoUpdateTarget(rec: Recommendation | undefined, linked: string | undefined): { sid: string; older?: string } | undefined {
+export function autoUpdateTarget(rec: Recommendation | undefined, linked: string | undefined): { sid: string } | undefined {
   const target = rec?.target
   if (!rec || !target || target.suggested || !THREAD_ID.test(target.sid) || target.sid !== linked) return undefined
-  if (rec.state === 'update') return { sid: target.sid }
-  if (rec.state === 'start') return { sid: target.sid, older: rec.reason }
-  return undefined
+  return rec.state === 'update' ? { sid: target.sid } : undefined
 }
 
 /**
@@ -543,10 +589,7 @@ export function ownPackage(given: Sent | undefined, sid: string, it: QueueItem):
 /**
  * What to do about a client's thread, and why. ONE action per client:
  *
- *   start    Start thread  · no thread yet
- *            Start thread  · last thread is from Oct 2                the thread is older than 7 business days
- *                                                                     ((0.5.23) by itself, a linked one is updated
- *                                                                     instead: `autoUpdateTarget`)
+ *   start    Start thread  · no thread yet                            no thread of the client's own at all
  *   update   Update thread · thread from Mon, Oct 12 exists           a thread exists and has not been given this
  *            Update thread · new since this thread was updated        the bridge updated it before, with less
  *            Update thread · "<title>" looks like this client         no known thread, but a title matches
@@ -555,6 +598,9 @@ export function ownPackage(given: Sent | undefined, sid: string, it: QueueItem):
  * The thread is the client's linked one when it has one, else the most recently active matched one.
  * `current` is decided by `sent`: the thread and the signature the bridge stored when Update last went.
  * (0.5.11, Rob 10-15) A thread's length is no reason for a new one: Claude Code compacts it instead.
+ * (0.7.6, Rob 2026-10-27: "it's better for us to have everything pinned that needs to be pinned, even if it needs to
+ * be updated or restarted") Nor is its age. Until 0.7.6 a thread last active more than 7 business days back (or 60
+ * days) made the row `Start thread · last thread is from Oct 2`; it is Update now, however old the thread.
  */
 export function recommend(
   threads: readonly ClientThread[],
@@ -566,9 +612,6 @@ export function recommend(
   const thread = [...(own.length ? own : threads)].sort((a, b) => b.lastAt - a.lastAt)[0]
   if (thread) {
     const target = { sid: thread.sid, title: thread.title, suggested: false }
-    // More than 60 days back is old whatever the weekends were: business time is only counted inside that.
-    const recent = now - thread.lastAt <= OLD_THREAD_MS && businessMsBetween(thread.lastAt, now) <= RECENT_THREAD_MS
-    if (!recent) return { state: 'start', reason: `last thread is from ${monthDay(thread.lastAt)}`, target }
     const sent = known.sent && known.sent.sid === thread.sid ? known.sent : undefined
     if (sent && known.signature !== undefined && sent.sig === known.signature) return { state: 'current', reason: `Thread updated ${clockText(sent.at, now)}`, target }
     return { state: 'update', reason: sent ? 'new since this thread was updated' : `thread from ${weekdayMonthDay(thread.lastAt)} exists`, target }
@@ -1162,7 +1205,7 @@ export function buttonLabel(verb: RowButton, row: Row, here: string | undefined)
  */
 export const bandWords = (text: string, hasButton: boolean): string => (hasButton ? text : `${text} · type /mm to open the list`)
 
-/** A row for a client that has no thread at all: the ones to notice first (not a client whose thread is old or long). */
+/** A row for a client that has no thread at all: the ones to notice first. ((0.7.6) A thread's age or length never makes one.) */
 export const isNewRow = (row: Row): boolean => row.fresh ?? (rowState(row) === 'start' && !row.target)
 
 /** The mark before the number of a row with no thread yet. */

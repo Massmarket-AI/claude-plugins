@@ -13,7 +13,7 @@ import {
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, secondThreadSentence, startKickoff, threadLink, titleLooksLike, titleSuggestion,
   REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, bandText, chipTitle, ownPackage, seenNow, waitingText,
   buildHeading, buildMore, buildOf, buildShown,
-  START_ALL_MAX, startAllKickoff, startAllLabel, startMissingLabel, AWAY_REASON, markedThreads, START_ALL_WORDS, startWords, startFillSaid, kickoffsAnswer,
+  START_ALL_MAX, startAllKickoff, startAllLabel, startMissingLabel, AWAY_REASON, ownThreads, START_ALL_WORDS, startWords, startFillSaid, kickoffsAnswer,
 } from './threads'
 import type { AppThread, Fold, Kickoff, Pairs, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
 import {
@@ -37,7 +37,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 //
 // Rob, 2026-10-12, on seeing it: "I think it should be 'update thread', 'open thread', or 'start thread'...
 // depending on whether you know what we should do." So a row has ONE action, chosen by its state: Start
-// (no thread, or the existing one is old or long), Update (the thread lacks what is waiting now), or Open
+// (no thread; (0.7.6) never for a thread's age or length), Update (the thread lacks what is waiting now), or Open
 // (it already has it). And: "How do we open this panel up in other threads where it's not already open?"
 // So every desktop thread carries one line above the prompt with a button that opens the list.
 // (0.5.14, Rob 2026-10-16: "I don't really think we even need to be able to open list. We just need to be able to
@@ -45,7 +45,8 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 // that button is Start missing threads now, always drawn; /mm still opens the list.
 //
 // ⛔ NEVER BY ITSELF. Linking, pinning and renaming are the only things a sync does (0.6.0: and opening this thread's
-// pane for its current project, read only; see "(0.6.0) every client thread linked" further down). A message goes into a
+// pane for its current project, read only; see "(0.6.0) every client thread linked" further down; (0.7.6) and asking
+// the app to unarchive a client's own archived thread, once per arrival: see "ONE THREAD PER CLIENT" below). A message goes into a
 // thread only from a button the person pressed in the pane or a /mm command the person typed: updateThread
 // and claimThread, reached from `press` and from `runCommand` when it runs for the person. That message
 // starts a model turn in the client's thread: the one paid moment the bridge causes, and the person asked
@@ -62,8 +63,9 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 //    nothing: an automatic send is nobody's act (R11).
 //    (0.5.23, Rob 2026-10-21: "change auto-starts to update the older thread") A linked thread older than 7 business
 //    days, whose row says Start, gets the same update by itself, under the same guards: by itself, an old thread is
-//    updated, never replaced. (0.5.24) A client with no linked thread got its Start card by itself, and a
-//    person's Start put that card up too; (0.5.25) no card at all: see below.
+//    updated, never replaced. (0.7.6) Its row says Update now, so it is any linked thread here. (0.5.24) A client
+//    with no linked thread got its Start card by itself, and a person's Start put that card up too; (0.5.25) no card
+//    at all: see below.
 //    (0.5.23, the cause of the refusals of 10-19 and 10-20) Those starts were for clients whose thread was there all
 //    along: the person works in two Claude profiles on this computer, the app answers "not found" for a thread of the
 //    other profile, and the sync dropped the link. A link now ends only when its thread is archived or deleted: a
@@ -71,6 +73,19 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 //    profile stays linked, and in this profile its client's row offers Start and nothing is started or sent by
 //    itself (`away`). And a client with no linked thread gets back the newest open thread that opened with its own
 //    [mm-link] marker (`markedThreads`), before anything is started for it.
+// ⛔ (0.7.6, Rob 2026-10-27: "we should always pin the most recent thread from that client... it's better for us to
+//    have everything pinned that needs to be pinned, even if it needs to be updated or restarted") ONE THREAD PER
+//    CLIENT, ALWAYS PINNED. This replaces the 10-23 rule that an archived thread is let go. A thread's age never makes
+//    its row Start. An archived linked thread's link still ends (its thread cannot be pinned, named or sent to while it
+//    is archived), but the thread is kept as the client's own (`mm.marked`), and an Update now records the marker it
+//    carries the same way (`markUpdated`). A client on the person's own list with no linked thread takes back its
+//    newest OWN thread (`ownThreads`: by those records, or by `mm.sent`, the thread its kickoff last went to): open, it
+//    is linked as before; archived in this profile, the sync asks the app to unarchive it (`revive`), then links, pins
+//    and names it, and the update by itself goes into it under every guard it has. ⛔ Once per arrival (`mm.revived`):
+//    a refused, failed or unanswered unarchive, or a thread the person archives again, is asked about again only when
+//    something newer arrives for the client. ⛔ Never a shared thread (B3), one the feed or a marker gives to another
+//    client, one the person unlinked, or one of another profile; at most REVIVALS_PER_SYNC in a sync. ⛔ The bridge
+//    still never starts a thread: a client with no thread of its own at all waits for the person's Start.
 // ⛔ (0.5.24, Rob 2026-10-21: "build mm-bridge 0.5.24 so Start presses and automatic starts put up the Start card
 //    directly, with no approval prompt first") The bridge never asks the app to start a thread (start_session
 //    `user_asked`). The app starts one that way only on the person's own typed words to the model, and asked from
@@ -115,6 +130,8 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 //    list is this thread alone (the list leaves the calling thread out) and drops nothing at all.
 //    (0.5.23) And "no such thread" drops it only where the app's own record of the thread agrees: none on disk,
 //    or one that says archived, or one in this profile's own folder.
+//    (0.7.6) "Archived" drops the link and keeps the thread as the client's own: it is brought back, unarchived, when
+//    something new arrives for the client (see "ONE THREAD PER CLIENT" above). Only "no such thread" lets it go.
 // ⛔ Feed text and thread titles are data: ids must be uuids, names and titles are cleaned (./queue.ts). A
 //    200 that is not a feed is a failed call. The [mm-link] marker is the person's own prompt's alone.
 // ⛔ A client's link moves from one thread to another in two ways only: the person's /mm link, and a new
@@ -146,7 +163,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.7.5'
+const VERSION = '0.7.6'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -191,6 +208,12 @@ const SESSION_ID = /^[A-Za-z0-9_-]{1,100}$/
 // feed's threads (the last 14 days) stop listing its thread. Its record keeps `miss` (always 0) for older versions.
 /** The most threads asked for by id in one sync: linked or pinned threads the app's list (its 60 most recent) left out. */
 const LOOKUPS_PER_SYNC = 10
+/**
+ * (0.7.6) The most archived threads one sync asks the app to unarchive (`revive`): as many as one sync may update by
+ * itself (AUTO_UPDATES_PER_SYNC), since each is brought back for its update. Each ask may wait on the person (the app
+ * asks them first) up to APP_WAIT_MS; the rest wait for the next sync.
+ */
+const REVIVALS_PER_SYNC = 3
 /** A chip the bridge minted is remembered this long: a thread started from it later than that is a thread like any other. */
 const CHIP_KEEP_MS = 30 * DAY_MS
 /** The most chips remembered at once. */
@@ -817,6 +840,91 @@ async function askApp($: EngineInterface, sid: string): Promise<AppThread | 'arc
   }
 }
 
+/**
+ * (0.7.6) Asks the app to unarchive one thread (`ccd_session_mgmt.unarchive_session`), given at most APP_WAIT_MS:
+ * whether it answered without an error in that time. ⛔ The app asks the person first for a thread this session did not
+ * start (outside bypass-permissions mode), so a refusal, an error, no answer in time and no app to ask are all false.
+ * The call itself may go on after the wait (`within`): a thread it unarchives later is found open by the next sync.
+ */
+async function unarchive($: EngineInterface, sid: string): Promise<boolean> {
+  return desktopOnly(async () => (await within($, mcpJson($, 'ccd_session_mgmt', 'unarchive_session', { session_id: sid }))).ok, false)
+}
+
+/**
+ * (0.7.6) A client's own archived thread the bridge asked the app to unarchive (`mm.revived`, by thread): for which
+ * client, when, the newest time of each kind of thing the client had then (as `Unpinned` keeps them), and how it went
+ * (`ok`: null while the app is asked). ⛔ It is not asked about again, whatever became of it, until something newer
+ * than those arrives for the client: a refusal or an unanswered ask is not asked again on every sync (each one may put
+ * a question to the person), and a thread the person archives again after it came back stays archived until then.
+ */
+type Revived = { pid: string; at: number; mail: number; pkg: number; task: number; ok: boolean | null }
+
+/** (0.7.6) The newest time of each kind of thing a client has: what "something newer arrived" is measured against. */
+const newestOf = (it: QueueItem): { mail: number; pkg: number; task: number } => ({ mail: Number(it.newest?.mail) || 0, pkg: Number(it.newest?.pkg) || 0, task: Number(it.newest?.task) || 0 })
+
+/** (0.7.6) Whether a client's archived thread may be asked about now: never asked about for it, or something newer has arrived for the client since. */
+function mayRevive(was: Revived | undefined, it: QueueItem): boolean {
+  if (!was || typeof was !== 'object' || was.pid !== it.projectId) return true
+  const n = newestOf(it)
+  return n.mail > (Number(was.mail) || 0) || n.pkg > (Number(was.pkg) || 0) || n.task > (Number(was.task) || 0)
+}
+
+/**
+ * (0.7.6, Rob 2026-10-27: "we should always pin the most recent thread from that client") Brings back a client's newest
+ * own thread, which the app here shows archived (`reconcile`): the ask on record first (`mm.revived`, over a fresh copy:
+ * a store that refuses it asks the app nothing, so the ask is never repeated on every sync), then the app is asked to
+ * unarchive it, then asked for the thread by id. The thread, open, when both answered so; otherwise undefined, and the
+ * caller links, pins, names and stamps nothing. One line in the notice log either way, and nothing in the pane.
+ */
+async function revive($: EngineInterface, it: QueueItem, sid: string, now: number): Promise<AppThread | undefined> {
+  const pid = it.projectId
+  const client = cleanName(it.client)
+  const put = (ok: boolean | null) =>
+    patchStore<Record<string, Revived>>($, 'mm.revived', {}, fresh => {
+      delete fresh[sid]
+      fresh[sid] = { pid, at: now, ...newestOf(it), ok }
+      capped(fresh)
+    })
+  try {
+    await put(null)
+  } catch {
+    return undefined
+  }
+  const done = await unarchive($, sid)
+  const back = done ? await askApp($, sid) : 'unknown'
+  const open = typeof back === 'object' ? back : undefined
+  await put(open !== undefined).catch(() => {})
+  const why = done ? 'the app unarchived it but does not show it open yet' : 'the app did not unarchive it (refused, failed, or no answer in 15 seconds)'
+  await logAuto($, open ? `brought back ${client} (${pid}): unarchived ${sid}, its own thread, to link, pin and name it` : `not brought back ${client} (${pid}) ${sid}: ${why}; asked again only when something newer arrives`)
+  return open
+}
+
+/**
+ * (0.7.6) An Update put the client's [mm-link] marker into its thread (pressed: at the start of its body; sent by itself:
+ * first of all): recorded as that thread's marker (`mm.marked`, and when, `mm.markedAt`), as the marker of a thread's
+ * opening message is (`linkFromMarker`). The thread's own hook never records it: it is the bridge's send, not the
+ * person's prompt, and it does not open the thread. So a thread whose link later goes is still the client's own, and is
+ * taken back or brought back (`ownThreads`) before the client's row offers Start (Leader Transcend, 10-27).
+ * ⛔ Never over another client's marker: a thread that carried two clients' markers is nobody's by itself (B3).
+ * The time is the first marker's, as `linkFromMarker` keeps it.
+ */
+async function markUpdated($: EngineInterface, pid: string, sid: string, at: number): Promise<void> {
+  if (!isUuid(pid) || !THREAD_ID.test(sid)) return
+  let markedNow = false
+  await patchStore<Record<string, string>>($, 'mm.marked', {}, marked => {
+    if (marked[sid] !== undefined) return false
+    marked[sid] = pid
+    capped(marked)
+    markedNow = true
+  })
+  if (!markedNow) return
+  await patchStore<Record<string, number>>($, 'mm.markedAt', {}, times => {
+    if (typeof times[sid] === 'number') return false
+    times[sid] = at
+    capped(times)
+  })
+}
+
 /** Every project id a feed carries, uuids only: what an [mm-link] marker may name. */
 function feedProjects(feed: Feed): string[] {
   const ids = new Set<string>()
@@ -1436,6 +1544,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   const unseen = new Set<string>()
   /** (0.5.23) Linked or pinned threads of another Claude profile: kept as `unseen` keeps them; their clients' rows offer Start. */
   const away = new Set<string>()
+  /** (0.7.6) The threads the app HERE showed archived, asked for by id: of these alone, a client's own may be brought back (`revive`). */
+  const archivedHere = new Set<string>()
   const me = await selfId($)
   const records = recordReader($, now, me)
   /** The threads this pass has asked the app for by id: at most LOOKUPS_PER_SYNC. */
@@ -1462,14 +1572,46 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
       if (said === 'away' || said === 'unknown' || !listed.complete) unseen.add(sid)
       else gone.add(sid)
     } else if (found !== 'archived') live.set(sid, found)
-    else if (listed.complete) gone.add(sid)
-    else unseen.add(sid)
+    else if (listed.complete) {
+      gone.add(sid)
+      archivedHere.add(sid)
+    } else unseen.add(sid)
   }
   const pairs = known ?? (await allPairs($, now, live, feedThreads))
 
   // A link to a thread that is gone, or that the person unlinked (a sync in another thread may have written
   // an older copy of the links back after the unlink), is dropped.
-  for (const [pid, sid] of Object.entries(links)) if (gone.has(sid) || sid in unlinked) delete links[pid]
+  // ⛔ (0.7.6, Rob 2026-10-27; this replaces the 10-23 rule that an archived thread is let go) A link whose thread the app
+  // here showed archived is dropped too (an archived thread is not pinned, named or sent to), but the thread is kept as
+  // the client's own first: recorded as its marker is (`mm.marked`, dated now when no time is on record), unless a
+  // marker for another client is on record (B3: then it is nobody's by itself). The client brings it back, unarchived,
+  // when something new arrives for it (`ownThreads`, `revive`, below). A thread the app has no such thread for, and one
+  // the person unlinked, are let go as before. Written at once, over a fresh copy, before any other write of this pass.
+  /** (0.7.6) The own-thread records this pass adds: thread → client. */
+  const kept: Record<string, string> = {}
+  for (const [pid, sid] of Object.entries(links)) {
+    if (!gone.has(sid) && !(sid in unlinked)) continue
+    if (archivedHere.has(sid) && !(sid in unlinked) && marked[sid] === undefined && isUuid(pid)) {
+      marked[sid] = pid
+      kept[sid] = pid
+      if (typeof markedAt[sid] !== 'number') markedAt[sid] = now
+    }
+    delete links[pid]
+  }
+  if (Object.keys(kept).length) {
+    await patchStore<Record<string, string>>($, 'mm.marked', {}, fresh => {
+      const add = Object.entries(kept).filter(([sid]) => fresh[sid] === undefined)
+      if (!add.length) return false
+      for (const [sid, pid] of add) fresh[sid] = pid
+      capped(fresh)
+    })
+    await patchStore<Record<string, number>>($, 'mm.markedAt', {}, fresh => {
+      const add = Object.keys(kept).filter(sid => typeof fresh[sid] !== 'number')
+      if (!add.length) return false
+      for (const sid of add) fresh[sid] = now
+      capped(fresh)
+    })
+  }
   // ⛔ A thread is one client's. Where two clients are linked to one thread (an older version allowed it),
   // the client it is pinned for keeps it, else the first; the other link is dropped.
   const owners = new Map<string, string>()
@@ -1553,34 +1695,98 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     auto[it.projectId] = { sid, miss: 0, made: now }
   }
 
+  // (0.7.6, B3) The threads the feed shows worked for more than one client (`sharedThreads`), or marked for one client
+  // and declared for another by the feed's rows, are on record for good (`mm.shared`): the feed lists only the last 14
+  // days, and the thread a client brings back from the archive is often older than that. ⛔ Never taken back or
+  // brought back for one client by itself.
+  const sharedSeen = await storeGet<Record<string, number>>($, 'mm.shared', {})
+  const sharedNow = sharedThreads(feedThreads, pairs)
+  for (const [sid, pid] of Object.entries(marked)) {
+    if (feedThreads.some(t => pairs[t.session_id]?.app === sid && (t.project_id !== pid || t.sole === false))) sharedNow.add(sid)
+  }
+  const newlyShared = [...sharedNow].filter(sid => THREAD_ID.test(sid) && !Object.hasOwn(sharedSeen, sid))
+  if (newlyShared.length) {
+    await patchStore<Record<string, number>>($, 'mm.shared', {}, fresh => {
+      const add = newlyShared.filter(sid => !Object.hasOwn(fresh, sid))
+      if (!add.length) return false
+      for (const sid of add) fresh[sid] = now
+      capped(fresh)
+    })
+  }
+  const neverOwn = new Set([...sharedNow, ...Object.keys(sharedSeen)])
+
   // (0.5.23) A client on the list that still has no thread takes back the newest thread that opened with its own
   // [mm-link] marker (`markedThreads`, from the bridge's own record of markers) and is still there: open in the app's
   // list; or, left out of it, open by the app's own record (another profile's thread: `away`), or by the app's answer
   // for it by id (this profile's thread, older than the list's 60). It is linked as R1 links (the bridge's own link,
-  // in `auto`), and from then on it is any linked thread: Update when it is recent, the older-thread update when it is
-  // not (`autoUpdateTarget`). ⛔ Only the marker counts, never a title. ⛔ Once per feed (`known`), never on an empty
-  // list, never a thread that is archived, deleted, or cannot be found out about in this sync (the newest one decides:
-  // an older one is never taken past it), and within LOOKUPS_PER_SYNC app calls and RECORDS_PER_SYNC record files.
+  // in `auto`), and from then on it is any linked thread: Update (`autoUpdateTarget`). ⛔ Only the marker counts, never
+  // a title. ⛔ Once per feed (`known`), never on an empty list, never a thread that is deleted or cannot be found out
+  // about in this sync (the newest one decides: an older one is never taken past it), and within LOOKUPS_PER_SYNC app
+  // calls and RECORDS_PER_SYNC record files.
+  // (0.7.6, Rob 2026-10-27) Its newest OWN thread (`ownThreads`): one with its marker (its opening message's, an
+  // Update's, or the link it had when the app showed it archived), or the thread its kickoff last went to (`mm.sent`,
+  // whose message carried its marker; Leader Transcend, 10-27), never one `mm.shared` holds. And an archived one is no
+  // longer passed over: the newest own thread the app HERE shows archived is brought back (`revive`: unarchived, then
+  // linked as above, and pinned and named below like any linked thread; the update by itself follows under all its
+  // guards), for a client the update by itself may go to (`autoUpdatable`), never an internal project's, never while
+  // the bridge is paused, once per arrival (`mayRevive`), at most REVIVALS_PER_SYNC in a sync (the rest wait for the
+  // next, and an older thread is not taken past one waiting). One that may not come back now, or that the app did not
+  // unarchive, is passed over as an archived thread always was: nothing is linked for it, and the next own thread, if
+  // any, decides. ⛔ A thread whose record only another profile's folder holds is never asked about here.
   if (!known && listed.complete) {
-    const shared = sharedThreads(feedThreads, pairs)
     const left = Array.isArray(released) ? released : []
+    const tried = await storeGet<Record<string, Revived>>($, 'mm.revived', {})
+    const paused = Boolean(await $.store.get('mm.paused'))
+    let revivals = 0
     for (const it of items) {
       if (links[it.projectId] !== undefined || !isUuid(it.projectId)) continue
-      for (const sid of markedThreads(it.projectId, links, feedThreads, pairs, { unlinked, released: left, marked, markedAt, shared })) {
-        if (gone.has(sid)) continue
-        let there: 'live' | 'away' | 'skip' | 'stop' = 'stop'
-        if (live.has(sid)) there = live.get(sid)?.isArchived ? 'skip' : 'live'
+      for (const sid of ownThreads(it.projectId, links, feedThreads, pairs, { unlinked, released: left, marked, markedAt, shared: neverOwn, given: sent[it.projectId] })) {
+        let there: 'live' | 'away' | 'archived' | 'skip' | 'stop' = 'stop'
+        if (gone.has(sid)) there = archivedHere.has(sid) ? 'archived' : 'skip'
+        else if (live.has(sid)) there = live.get(sid)?.isArchived ? 'skip' : 'live'
         else if (unseen.has(sid)) there = away.has(sid) ? 'away' : 'stop'
         else {
           const said = await records.where(sid)
           if (said === 'away') there = 'away'
-          else if (said === 'archived' || said === 'none') there = 'skip'
+          else if (said === 'archived' || said === 'none') {
+            // (0.7.6) archived by its record, or no record of it: the app here is asked for it by id, within the
+            // sync's lookups (an archived thread of this profile may come back; one unarchived since is open). One whose
+            // record only another profile's folder holds is that profile's to bring back. Otherwise passed over, as before.
+            there = 'skip'
+            if (asked < LOOKUPS_PER_SYNC && !(said === 'archived' && (await records.elsewhere(sid)) === 'archived')) {
+              asked++
+              const found = await askApp($, sid)
+              if (typeof found === 'object') {
+                live.set(sid, found)
+                there = 'live'
+              } else if (found === 'archived') {
+                archivedHere.add(sid)
+                there = 'archived'
+              }
+            }
+          }
           // this profile's thread, left out of the list (its 60 most recent): the app is asked for it by id
           else if (said === 'here' && asked < LOOKUPS_PER_SYNC) {
             asked++
             const found = await askApp($, sid)
             if (typeof found === 'object') live.set(sid, found)
-            there = typeof found === 'object' ? 'live' : found === 'unknown' ? 'stop' : 'skip'
+            if (found === 'archived') archivedHere.add(sid)
+            there = typeof found === 'object' ? 'live' : found === 'unknown' ? 'stop' : found === 'archived' ? 'archived' : 'skip'
+          }
+        }
+        if (there === 'archived') {
+          const internalItem = it.internal === true || internal.has(it.projectId) || INTERNAL_PROJECTS.has(it.projectId)
+          if (paused || internalItem || !autoUpdatable(it, now) || !mayRevive(tried[sid], it)) there = 'skip'
+          else if (revivals >= REVIVALS_PER_SYNC) there = 'stop'
+          else {
+            revivals++
+            const back = await revive($, it, sid, now)
+            // open again: no longer gone for the rest of this pass (its pin, its name, its current project)
+            if (back) {
+              live.set(sid, back)
+              gone.delete(sid)
+            }
+            there = back ? 'live' : 'skip'
           }
         }
         if (there === 'skip') continue
@@ -1617,7 +1823,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // between those two syncs (five minutes apart, or a night apart on a computer that slept) may have come
   // before the unpin or after it; the thread is pinned again, once (a missed reply costs more than one pin).
   // After that pin the sync that finds it off again is later than the act-by time, so a second unpin stands.
-  const newestOf = (it: QueueItem): Omit<Unpinned, 'at' | 'seen'> => ({ mail: Number(it.newest?.mail) || 0, pkg: Number(it.newest?.pkg) || 0, task: Number(it.newest?.task) || 0 })
+  // (`newestOf`, the newest time of each kind of thing the client has, is (0.7.6) the module's: `mayRevive` reads it too)
   /** (0.5.14) When the pin of a thread this sync finds off was last known to be on: the sync before this one. */
   const pinSeen = Number.isFinite(before?.at) ? Math.min(before?.at as number, now) : now
   for (const sid of Object.keys(unpinned)) if (gone.has(sid)) delete unpinned[sid]
@@ -1891,9 +2097,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const elsewhere = (sid: string) => declaredOther(it.projectId, sid, feedThreads, pairs, marked)
     const had = sent[it.projectId]
     // A client whose linked thread cannot be seen keeps the last recommendation's words, and no thread to act on.
-    // Otherwise ONE of three: Start (no thread, or the thread is old), Update (the thread has not been given
-    // what is waiting now), or current (it has: what Update last put there is what would go now). (0.5.11, Rob
-    // 10-15) A long thread is not one to replace: Claude Code compacts it.
+    // Otherwise ONE of three: Start (no thread), Update (the thread has not been given what is waiting now), or
+    // current (it has: what Update last put there is what would go now). (0.5.11, Rob 10-15) A long thread is not one
+    // to replace: Claude Code compacts it. (0.7.6, Rob 10-27) Nor an old one: its row says Update.
     // (0.5.23) A client whose thread is in the person's other Claude profile: Start here, nothing by itself.
     const rec: Recommendation =
       linked && away.has(linked)
@@ -3325,9 +3531,9 @@ async function ownWork($: EngineInterface, it: QueueItem, sid: string, signature
 /**
  * (0.5.11, Rob 10-15) Once for each sync on record, in every running thread, while auto is on (`/mm auto`, the switch
  * auto-start has): each client on the person's OWN list (the Needs-you list: never a client under With a teammate,
- * Older or Checking your reply) whose row says Update, on its linked thread (never a thread its row only suggests),
- * or (0.5.23) whose row says Start because its linked thread is older than 7 business days, on that same thread
- * (`autoUpdateTarget`: the old thread is updated, not replaced), once it is time (`autoUpdateDue`, from what this
+ * Older or Checking your reply) whose row says Update, on its linked thread (never a thread its row only suggests;
+ * (0.5.23) an old one too, updated, not replaced; (0.7.6) its row says Update however old it is, and so does that of a
+ * thread the sync brought back from the archive: `autoUpdateTarget`), once it is time (`autoUpdateDue`, from what this
  * bridge has seen, `mm.firstSeen`), and never one a teammate has, whose package someone else holds, or that is still
  * open after our reply (`autoUpdatable`). From what is stored only: no feed call and no app call here.
  * ⛔ Never into the thread choosing (the app's send refuses it, and here the message would be a prompt the person
@@ -3359,14 +3565,18 @@ async function autoUpdates($: EngineInterface): Promise<void> {
   const starting = await storeGet<Record<string, { until?: number }>>($, 'mm.starting', {})
   for (const it of last.items.slice().sort(byDue)) {
     const pid = it.projectId
-    // (0.5.23) the thread its row says Update for, or the linked thread its row says Start for because it is old
+    // the linked thread its row says Update for ((0.7.6) however old it is)
     const pick = autoUpdateTarget(storedRec(last, pid), links[pid])
     if (!pick || !isUuid(pid)) continue
-    // (0.5.24) an old thread whose client the person asked a new thread for is not updated by itself meanwhile (0.5.23:
-    // the person's Start replaced it): a chip of theirs is up for it, or (0.5.25) its new thread is being started, on
-    // their own words (`kickoffs` claimed it)
-    if (pick.older && (chips.some(c => c.projectId === pid && !c.auto && !c.superseded) || Object.entries(starting).some(([k, v]) => k.startsWith(`${pid}\n`) && Number(v?.until) > now))) continue
     const sid = pick.sid
+    // (0.5.24) a thread whose client the person asked a new thread for is not updated by itself meanwhile (0.5.23:
+    // the person's Start replaced it): a chip of theirs is up for it, or (0.5.25) its new thread is being started, on
+    // their own words (`kickoffs` claimed it). (0.7.6) Until 0.7.6 this held for an old thread alone, the one row that
+    // said Start, and any chip of the person's counted. A row says Update whatever its thread's age now, so it holds
+    // for every linked thread the person's /mm start (or kickoffs for the client) is replacing: a chip minted while
+    // the client had this very thread (`replacesThread`), never one minted when it had none (that one is withdrawn
+    // once the client has a thread), or a start claimed for the client.
+    if (chips.some(c => c.projectId === pid && !c.auto && !c.superseded && replacesThread(c, sid)) || Object.entries(starting).some(([k, v]) => k.startsWith(`${pid}\n`) && Number(v?.until) > now)) continue
     // ⛔ its linked thread, no other client's, and not this one
     if (links[pid] !== sid || ownerOf(sid, links) !== pid || sid === me) continue
     if (!autoUpdatable(it, now)) continue
@@ -3386,7 +3596,7 @@ async function autoUpdates($: EngineInterface): Promise<void> {
       }
       return
     }
-    const r = await autoUpdateClaim($, it, sid, signature, me, now, last.at, pick.older)
+    const r = await autoUpdateClaim($, it, sid, signature, me, now, last.at)
     // the rest of this sync's clients wait for the next sync
     if (r === 'sync') return
     if (r !== 'capped') continue
@@ -3404,11 +3614,12 @@ async function autoUpdates($: EngineInterface): Promise<void> {
  *            in the last day, counting the claims not on record yet (F1)
  *   sync     (F1) AUTO_UPDATES_PER_SYNC are claimed or sent from this sync already: the rest wait for the next sync
  *   claimed  claimed here, and sent once the claim has held (`autoUpdate`)
- * (0.5.23) `older`: the row said Start because this linked thread is old (`autoUpdateTarget`); carried to the log.
+ * ((0.5.23 to 0.7.5: `older`, the row's reason when it said Start for an old linked thread, carried to the log. (0.7.6) No
+ * row says that any more.)
  * ⛔ (Review of PR #15, F1) The caps are asked of the claims and the records as read, and again inside the write that
  * claims, over the store's fresh claims: a burst of due clients is never claimed past a cap.
  */
-async function autoUpdateClaim($: EngineInterface, it: QueueItem, sid: string, signature: string, me: string, now: number, from: number, older?: string): Promise<'skip' | 'capped' | 'sync' | 'claimed'> {
+async function autoUpdateClaim($: EngineInterface, it: QueueItem, sid: string, signature: string, me: string, now: number, from: number): Promise<'skip' | 'capped' | 'sync' | 'claimed'> {
   const pid = it.projectId
   const sig = sigHash(signature)
   const key = `${pid}\n${sig}`
@@ -3439,7 +3650,7 @@ async function autoUpdateClaim($: EngineInterface, it: QueueItem, sid: string, s
   if (!mine) return 'skip'
   autoUpdating.add(key)
   try {
-    $.clock.after(settleMs(`${me}#update#${key}`), () => void autoUpdate($, it, sid, signature, me, key, from, older).finally(() => autoUpdating.delete(key)))
+    $.clock.after(settleMs(`${me}#update#${key}`), () => void autoUpdate($, it, sid, signature, me, key, from).finally(() => autoUpdating.delete(key)))
   } catch {
     // no timer here: the claim runs out, and a later sync claims it again
     autoUpdating.delete(key)
@@ -3468,11 +3679,12 @@ async function autoUpdateClaim($: EngineInterface, it: QueueItem, sid: string, s
  * ⛔ Nothing else Update writes. No stamp and no acted: nobody acted. No claim: a send is never evidence (R11), so a
  * link the bridge made stays one it can let go. No link and no unlink record: the thread was the client's linked
  * thread before the send, and a move or an unlink made meanwhile is the person's and stands. No thread is opened.
- * (0.5.23) `older`: the client's row said Start because this linked thread is older than 7 business days (its reason,
- * `last thread is from Oct 2`): the update goes into it all the same, and the record and the notice log say so, so an
- * audit can tell it from an update the row asked for and from a thread started by itself.
+ * (0.7.6) One more write: the client's marker the message carried, recorded for the thread (`markUpdated`), so the
+ * thread stays the client's own if its link ever goes.
+ * (0.5.23 to 0.7.5: `older`, the row's `last thread is from Oct 2` when it said Start for an old linked thread, went
+ * into the record and the notice log. (0.7.6) No row says Start for a thread's age, so every record reads alike.)
  */
-async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signature: string, me: string, key: string, from: number, older?: string): Promise<void> {
+async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signature: string, me: string, key: string, from: number): Promise<void> {
   const pid = it.projectId
   const sig = sigHash(signature)
   const client = cleanName(it.client)
@@ -3524,9 +3736,9 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
     if ((given && given.sid === sid && hasWaiting(given.sig, cur)) || sentHere.get(`${pid}\n${sid}`) === signature) return
     // one message to a client at a time: a press sending to it now has it
     if (sending.has(pid)) return
-    // (0.5.23) an old linked thread updated instead of a new one: the reason says so first
+    // ((0.5.23 to 0.7.5: an old linked thread updated instead of a new one said so first; (0.7.6) every row says Update)
     const news = `something new for the client: ${short(waitingText(cur), 120)}`
-    const made: AutoUpdate = { at: now, pid, client, sig, sid, by: me, ok: null, reason: older ? `${short(older, 60)}, so that thread was updated instead of starting a new one; ${news}` : news, from }
+    const made: AutoUpdate = { at: now, pid, client, sig, sid, by: me, ok: null, reason: news, from }
     // ⛔ (F1) recorded over the store's fresh list, the caps asked again there: a list that is full refuses it
     let full: string | null = null
     /** (0.5.13) The hour's or the day's cap refused it: its line is written once per client per hour (`capNotice`). */
@@ -3587,6 +3799,8 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
     } catch (err) {
       await noteFailure($, 'auto update: what the thread now has', err)
     }
+    // (0.7.6) the client's marker, first in what went, on record for the thread: it stays the client's own (`markUpdated`)
+    await markUpdated($, pid, sid, at).catch(err => noteFailure($, 'auto update: the marker', err))
     settleLater($, `${sid}#auto`, async () => {
       if (!(await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]) await putSent($, pid, has)
     })
@@ -3869,8 +4083,9 @@ async function kickoffs($: EngineInterface, arg: string): Promise<string> {
 /**
  * (0.5.12, Rob 10-15: no clicks at all) The clients on the person's own Needs-you list that need a new thread now, as
  * the stored sync has them, soonest due first: the row's one action is Start (`rowButtons`, as the pane draws it) and
- * the client has no linked thread. A client linked to a thread that is old keeps its own row's Start: Start all is for
- * clients with no thread of their own.
+ * the client has no linked thread. Start all is for clients with no thread of their own. ((0.7.6) A linked thread's row
+ * never says Start for its age any more, and a client whose own thread is archived gets it back before it is counted
+ * here; a client whose linked thread is in another Claude profile still is.)
  */
 function needingThreads(last: Last, links: Readonly<Record<string, string>>, now: number): QueueItem[] {
   if (!Array.isArray(last.items)) return []
@@ -3987,8 +4202,8 @@ type Need = {
   /** (0.5.7) For whom: a client with no thread (C3), or its kickoff run in its own thread. (0.5.11: never a new thread for a thread's length.) */
   kind: 'nothread' | 'here'
   /**
-   * (0.5.23) For a client with no linked thread: its row's reason, as the sync gave it (`no thread yet`, or `last thread
-   * is from Oct 2` for an old thread the person unlinked): what its card, put up by itself, logs as its reason (0.5.24).
+   * (0.5.23) For a client with no linked thread: its row's reason, as the sync gave it (`no thread yet`; until 0.7.6 also
+   * `last thread is from Oct 2` for an old thread the person unlinked): what its card, put up by itself, logs as its reason (0.5.24).
    */
   why?: string
 }
@@ -4011,8 +4226,8 @@ type ChipWorld = {
  * mints by itself, from the last sync on record (no feed call), at most AUTO_CHIPS_MAX, soonest due first. ONE
  * chip per client, in one thread, so the thread that shows it can withdraw it the moment it is used:
  *   a client with a linked thread (C1)  that thread's, and no other's (C2: the band points to it):
- *     here   `Do it here: <what>`, the client's kickoff, to run in this thread (its recommendation is Update, or
- *            Start for a thread that is old)
+ *     here   `Do it here: <what>`, the client's kickoff, to run in this thread (its recommendation is Update; until
+ *            0.7.6 also Start, for a thread that was old)
  *            None when the thread already has what is waiting, or when the client is still open after our reply
  *            (Claim in the pane), or (0.5.3) while the person went on in this thread with a fresh-thread chip
  *            waiting (`claimHolds`). (0.5.11, Rob 10-15: "Can you just automatically compress context at 60%
@@ -4622,6 +4837,8 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
       fresh[pid] = sid
     })
   await step('what the thread now has', () => putSent($, pid, { sid, sig: signature, at }))
+  // (0.7.6) the client's marker the message carried, on record for the thread: it stays the client's own (`markUpdated`)
+  await step('the marker', () => markUpdated($, pid, sid, at))
   await step('the unlink record', () => forgetUnlink($, sid))
   await step('the link', linkIt)
   await step('the claim', () => claim($, pid, sid))
@@ -5219,8 +5436,9 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
   }
   // (0.5.7) whether threads start by themselves on this computer (on unless turned off); (0.5.11) and whether a
   // client's thread is updated by itself: the same switch. (0.5.23) A linked thread older than 7 business days is
-  // updated, not replaced. (0.5.24) No thread starts by itself, on or off. (0.5.25) Nor any card: a client with no
-  // thread waits for the person's Start.
+  // updated, not replaced ((0.7.6) as any linked thread: its row says Update). (0.5.24) No thread starts by itself, on
+  // or off. (0.5.25) Nor any card: a client with no thread waits for the person's Start. (0.7.6) A client's own
+  // archived thread is brought back whether this switch is on or off (`revive`): it is a link, not an update.
   if (verb === 'auto') {
     if (arg !== 'on' && arg !== 'off') return `Auto-update is ${(await autoStartOn($)) ? 'on' : 'off'} on this computer. Type /mm auto off or /mm auto on.`
     await $.store.set('mm.autostart', { on: arg === 'on' })
