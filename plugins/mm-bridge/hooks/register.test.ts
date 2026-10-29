@@ -473,8 +473,8 @@ const ACME_FRESH = '🔴 Acme Roofing · reply ready · 21h left · no thread'
 const ACME_ROW = '🟡 Acme Roofing · reply ready · 21h left'
 const BOLT_ROW = '🟡 Bolt Staffing · reply · 22h left · 2 new'
 const CEDAR_ROW = '🔴 Cedar Dental · task · 5h left'
-/** (0.7.5) The pane's one clock, at NOW in the person's own time. */
-const UPDATED = 'Updated 11:00 AM'
+/** (0.7.5) The pane's one clock, at NOW in the person's own time (11:00 AM in New York; CI runs in UTC). */
+const UPDATED = `Updated ${localClock(NOW)}`
 /** Bolt's chip, as the timer mints it by itself (R4): Bolt has no thread either in a world with no threads. */
 const BOLT_AUTO_CHIP = {
   server: 'ccd_session',
@@ -3832,7 +3832,7 @@ describe('(r) for the founder: a package that waits for his OK', () => {
       'Needs you now (1)',
       '◆ 1. 🔴 Acme Roofing · your OK · 1h late · no thread',
       'Builder B sends',
-      'Updated 9:00 AM',
+      `Updated ${localClock(NOW + PAST_DUE)}`,
     ])
     expect(await buttonsOf(ui, ACME)).toEqual(['Start thread', 'Drafts'])
     await ui.press({ key: `start:${ACME}` })

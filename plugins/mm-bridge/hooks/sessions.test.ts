@@ -5,6 +5,7 @@ import type { FakeThread } from './fake-app.test-helper'
 import type { Feed } from './queue'
 import { cleanTitle } from './queue'
 import { secondThreadSentence } from './threads'
+import { localClock } from './track'
 
 /**
  * The tests that run the bridge's own timers through an hour or more of the test's clock (the update that goes
@@ -455,10 +456,10 @@ describe('S3: a press answers within 100 ms of fake time while OW takes 5 second
     const otherQueue = () => w.view('local_s3la', 'queue') as Queue | undefined
     expect(otherQueue()?.header).toBe('Needs you now (2)')
     // (0.7.5) one clock: the person's own
-    expect(otherQueue()?.note).toBe('Updated 9:00 AM')
+    expect(otherQueue()?.note).toBe(`Updated ${localClock(NOW)}`)
     await w.advance(5_000)
     expect(await typed).toBe('2 clients need you; 1 thread pinned. The list is in the side pane.')
-    expect(otherQueue()?.note).toBe('Updated 9:06 AM')
+    expect(otherQueue()?.note).toBe(`Updated ${localClock(t0)}`)
   })
 
   test('Update says it is checking at once and sends exactly once when the feed answers; Start answers at once; Open and Drafts draw within 100 ms; each refresh then draws the list again', async () => {
