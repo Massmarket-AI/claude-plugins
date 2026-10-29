@@ -11,7 +11,7 @@ import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
   LABEL, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, secondThreadSentence, startKickoff, threadLink, titleLooksLike, titleSuggestion,
-  REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, bandText, chipTitle, ownPackage, seenNow, waitingText,
+  REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, bandText, chipTitle, ownPackage, seenNow, selfUpdateAt, selfUpdateText, waitingText,
   buildHeading, buildMore, buildOf, buildShown,
   START_ALL_MAX, startAllKickoff, startAllLabel, startMissingLabel, AWAY_REASON, ownThreads, START_ALL_WORDS, startWords, startFillSaid, kickoffsAnswer,
 } from './threads'
@@ -163,7 +163,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.7.8'
+const VERSION = '0.7.9'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -2091,6 +2091,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // sessions also declared another project, or that opened with a marker for another client: a thread the
   // B3 rule let go is not offered for Update either (clientThreads, titleSuggestion).
   const recs: Record<string, Recommendation> = {}
+  // (0.7.9, Rob 10-29) a Needs-you row whose thread is due to be updated by itself says when, by this pass's links and sends
+  const selfOf = await selfLiner($, now, { links, sent })
   const rowOf = (it: QueueItem, needsYou = false): Row => {
     const linked = links[it.projectId]
     const threads = clientThreads(it.projectId, links, feedThreads, pairs, live, marked)
@@ -2112,7 +2114,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
             signature: had && hasWaiting(had.sig, it) ? had.sig : signatureOf(it),
           })
     recs[it.projectId] = rec
-    return rowFor(it, chipLine(it, rec), now, { needsYou })
+    return rowFor(it, chipLine(it, rec), now, { needsYou, ...(needsYou ? { self: selfOf(it, rec) } : {}) })
   }
   const rows = items.map(it => rowOf(it, true))
   // (R8, Opus decision 2) a client being checked is under `Checking your reply`, with a recommendation on record
@@ -2356,7 +2358,13 @@ function storedRec(last: Last | null, projectId: string): Recommendation | undef
 async function drawStored($: EngineInterface, last: Last, now: number): Promise<void> {
   const list = (v: unknown): QueueItem[] => (Array.isArray(v) ? (v as QueueItem[]) : [])
   const at = Number.isFinite(last.at) ? last.at : now
-  const rowsOf = (items: readonly QueueItem[], needsYou = false): Row[] => items.map(it => rowFor(it, storedRec(last, it.projectId) ?? recommend([], undefined, at), at, { needsYou }))
+  // (0.7.9, Rob 10-29) worded at the sync's own moment too, as the rest of the row is (R16)
+  const selfOf = await selfLiner($, at)
+  const rowsOf = (items: readonly QueueItem[], needsYou = false): Row[] =>
+    items.map(it => {
+      const rec = storedRec(last, it.projectId)
+      return rowFor(it, rec ?? recommend([], undefined, at), at, { needsYou, ...(needsYou ? { self: selfOf(it, rec) } : {}) })
+    })
   const items = list(last.items)
   await showQueue($, memberText(last.member), items, rowsOf(items, true), Number(last.pinned) || 0, now, { teammate: rowsOf(list(last.teammate)), older: rowsOf(list(last.older)), checking: rowsOf(list(last.checking)) }, at, last)
 }
@@ -2469,13 +2477,15 @@ async function beginClient($: EngineInterface, it: QueueItem, own: boolean, atOn
   const now = await $.clock.now()
   const asking = openAsks(it).length > 0
   const packageId = pickupOf(it)
+  // (0.7.9, Rob 10-29) with no pickup view, the part says when its thread is due to be updated by itself
+  const self = packageId ? '' : (await selfLiner($, now))(it, storedRec(await storeGet<Last | null>($, 'mm.last', null), it.projectId))
   if (!packageId) {
-    await draw(clientMarkdown(it, now, recentAskPages(it, now)))
+    await draw(clientMarkdown(it, now, recentAskPages(it, now), self))
     // (0.5.28, internal asks) a client with open asks: their pages are read in the step this answers
     if (!asking) return async () => {}
     return async () => {
       const pages = await askPages($, it)
-      if (Object.keys(pages).length) await draw(clientMarkdown(it, await $.clock.now(), pages))
+      if (Object.keys(pages).length) await draw(clientMarkdown(it, await $.clock.now(), pages, self))
     }
   }
   if (atOnce) {
@@ -2638,8 +2648,10 @@ async function refreshSelf($: EngineInterface, force: boolean): Promise<string> 
   await finish()
   if (noted[me] !== sig) {
     const body = noteText(it, last?.member ?? '')
+    // (0.7.9, Rob 10-29) and when this thread is due to be updated by itself: nothing for the person to press meanwhile
+    const self = (await selfLiner($, now))(it, storedRec(last, pid))
     await $.session.append({
-      message: { type: 'user', content: [{ type: 'text', text: `[Massmarket bridge, no reply needed] ${it.projectName}: ${titleFor(it, now)}. ${body} Nothing has been sent.` }] },
+      message: { type: 'user', content: [{ type: 'text', text: `[Massmarket bridge, no reply needed] ${it.projectName}: ${titleFor(it, now)}. ${body}${self ? ` This thread ${self}.` : ''} Nothing has been sent.` }] },
     })
     await patchStore<Record<string, string>>($, 'mm.noted', {}, fresh => {
       fresh[me] = sig
@@ -3505,6 +3517,41 @@ async function hookCountsAuto($: EngineInterface, now: number): Promise<{ ok: bo
   }
   hookChecked = { at: now, ok, why }
   return hookChecked
+}
+
+/**
+ * (0.7.9, Rob 2026-10-29: "It seems like the threads aren't auto-updating anymore") What a client's row, its part of the
+ * pane and its thread's note say while its linked thread is due to be updated by itself (`selfUpdateText`), or '': a
+ * function of the client and its recommendation, over the store read once. The first guards `autoUpdates` asks, as they
+ * stand: in the desktop app, auto on and not paused, a time-tracking hook that counts the turn as automatic, the row says
+ * Update on the client's linked thread (`autoUpdateTarget`), the client is one to update by itself (`autoUpdatable`), and
+ * the thread does not have it already, nor is it the package the thread was asked to build (`ownPackage`). The time is
+ * from what this bridge has seen of the client, brought up to `now` as the next sync records it (`seenNow`). `links` and
+ * `sent`: a sync's own, not written yet. ⛔ It reads and decides nothing else: it never sends, and a line shown is never
+ * a promise the send keeps (the thread in use, a cap, a sync that fails each hold it back, as they always did).
+ */
+async function selfLiner(
+  $: EngineInterface,
+  now: number,
+  pass: { links?: Readonly<Record<string, string>>; sent?: Readonly<Record<string, Sent>> } = {},
+): Promise<(it: QueueItem, rec: Recommendation | undefined) => string> {
+  const none = (): string => ''
+  if ((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) !== 'claude-desktop') return none
+  if (!(await autoStartOn($)) || (await $.store.get('mm.paused'))) return none
+  if (!(await hookCountsAuto($, now)).ok) return none
+  const links = pass.links ?? (await storeGet<Record<string, string>>($, 'mm.links', {}))
+  const sent = pass.sent ?? (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))
+  const seen = await storeGet<Record<string, FirstSeen>>($, 'mm.firstSeen', {})
+  return (it, rec) => {
+    const pid = it.projectId
+    const pick = autoUpdateTarget(rec, links[pid])
+    if (!pick || !isUuid(pid) || ownerOf(pick.sid, links) !== pid || !autoUpdatable(it, now)) return ''
+    const signature = signatureOf(it)
+    const given = sent[pid]
+    if (given && given.sid === pick.sid && (hasWaiting(given.sig, it) || ownPackage(given, pick.sid, it))) return ''
+    const prev = seen[pid]
+    return selfUpdateText(selfUpdateAt(it, seenNow(prev && typeof prev === 'object' ? prev : undefined, it, sigHash(signature), now)), now)
+  }
 }
 
 /**
@@ -4836,7 +4883,13 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
     patchStore<Record<string, string>>($, 'mm.links', {}, fresh => {
       fresh[pid] = sid
     })
-  await step('what the thread now has', () => putSent($, pid, { sid, sig: signature, at }))
+  // ⛔ (0.7.9) and, when the kickoff asked the thread to build the package (case 6), that it did (`Sent.prep`), as an
+  // update sent by itself records it (F3): the package that then appears is the thread's own work, never something new
+  // to send it. Until 0.7.9 a press left it out. Kin Properties, 10-29: Rob pressed Update at 7:00 PM, the thread built
+  // and picked up package 7916e4d8 at 7:09, and the row said Update again, the bridge about to send the thread its
+  // own package as new once it had been quiet 10 minutes.
+  const given: Sent = { sid, sig: signature, at, ...(asksForPrep(cur) ? { prep: true as const } : {}) }
+  await step('what the thread now has', () => putSent($, pid, given))
   // (0.7.6) the client's marker the message carried, on record for the thread: it stays the client's own (`markUpdated`)
   await step('the marker', () => markUpdated($, pid, sid, at))
   await step('the unlink record', () => forgetUnlink($, sid))
@@ -4847,7 +4900,7 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
   // Checked again once, 1 to 3 seconds later, as a marker's link is: what is missing is written again. A
   // link another thread holds by the person's hand since, or an unlink the person made since, is left.
   settleLater($, sid, async () => {
-    if (!(await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]) await step('what the thread now has, again', () => putSent($, pid, { sid, sig: signature, at }))
+    if (!(await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]) await step('what the thread now has, again', () => putSent($, pid, given))
     const unlinkedAt = (await storeGet<Record<string, number>>($, 'mm.unlinked', {}))[sid]
     if (unlinkedAt !== undefined) {
       if (unlinkedAt > at) return
@@ -5747,6 +5800,10 @@ async function linkFromMarker($: EngineInterface, text: string, origin: string |
   // on record, only when its prompt is exactly the kickoff that would be sent now.
   const it = listedIn(last).find(i => i.projectId === projectId)
   const sig = chip ? chip.signature : it && kickoffText(it) === prompt.trim() ? signatureOf(it) : undefined
+  // ⛔ (0.7.9) and, when that kickoff asked the thread to build the package (case 6: it carried what the client has now,
+  // and the client has mail and no package), that it did (`Sent.prep`): the package the new thread then builds is its
+  // own work, never sent to it as new (as `updateThread` records a press)
+  const has: Sent | undefined = sig === undefined ? undefined : { sid: me, sig, at: now, ...(it && sig === signatureOf(it) && asksForPrep(it) ? { prep: true as const } : {}) }
   /** The thread the client had, when this one takes it by the chip rule. */
   let had: string | undefined
   /** Whether this thread is the client's once the link is written (it may have been already). */
@@ -5801,7 +5858,7 @@ async function linkFromMarker($: EngineInterface, text: string, origin: string |
     })
     if (!again) return
     await claim($, projectId, me)
-    if (sig !== undefined && !(await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[projectId]) await putSent($, projectId, { sid: me, sig, at: now })
+    if (has && !(await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[projectId]) await putSent($, projectId, has)
   })
   await link()
   if (!ours) {
@@ -5824,7 +5881,7 @@ async function linkFromMarker($: EngineInterface, text: string, origin: string |
   }
   // the person started this: the link is theirs, not one the bridge made by itself
   await claim($, projectId, me)
-  if (sig !== undefined) await putSent($, projectId, { sid: me, sig, at: now })
+  if (has) await putSent($, projectId, has)
   if (chip) {
     // The person started it: the chip is spent. Every chip for the client is superseded, this one's copies in
     // other threads too (they share its prompt: which copy was clicked cannot be told), for each thread that
