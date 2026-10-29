@@ -320,14 +320,16 @@ describe('F2: a write the engine refuses midway leaves nothing half done', () =>
 describe('re-review of a446f5ab: Start after a chip was spent, a re-check after a move, a refused pin, the same name twice', () => {
   /**
    * Start pressed in a hub thread mints a chip; the person starts a thread from it, which takes the client;
-   * later that thread is old, so the row offers Start again. ((0.5.11) A long thread no longer does.) `usedAfterCheck`: the chip is used after Start's
-   * 1-to-3-second check, else before it.
+   * later that thread is gone, so the row offers Start again. ((0.5.11) A long thread no longer does; (0.7.6) nor an
+   * old one.) `usedAfterCheck`: the chip is used after Start's 1-to-3-second check, else before it.
    */
   async function chipSpentThenStartAgain(usedAfterCheck: boolean, tag: string) {
     const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], mail: [mail(1, 'Client One')] }
     const hubId = `local_${tag}hub`
     const freshId = `local_${tag}new`
-    const w = fakeApp(feed, [{ sessionId: hubId }, { sessionId: freshId, title: 'Fresh thread', lastActivityAt: ago(0) }])
+    // (0.7.6) a third, unrelated thread keeps the app's list complete once the client's thread is deleted: a list with
+    // only the hub in it is never trusted to drop a link
+    const w = fakeApp(feed, [{ sessionId: hubId }, { sessionId: freshId, title: 'Fresh thread', lastActivityAt: ago(0) }, { sessionId: `local_${tag}other`, title: 'Unrelated notes', lastActivityAt: ago(100) }])
     const hub = w.session(hubId)
     await mm(hub, '')
     const spawns = () => w.calls.filter(c => c.tool === 'spawn_task')
@@ -342,10 +344,10 @@ describe('re-review of a446f5ab: Start after a chip was spent, a re-check after 
     // ⛔ the spent chip is not written back by Start's check: no chip waits for the client anywhere
     const waiting = ((w.stored('mm.chips') ?? []) as Array<{ projectId: string; superseded?: boolean }>).filter(c => c.projectId === pid(1) && !c.superseded)
     expect(waiting).toEqual([])
-    // later the new thread is older than 7 business days, and nothing new came from the client: the row offers
-    // Start again. ((0.5.11, Rob 10-15) A long one no longer would: Claude Code compacts it.)
-    const made = w.app.get(freshId)
-    if (made) made.lastActivityAt = ago(14 * 24)
+    // later the new thread is deleted, and nothing new came from the client: the row offers Start again. ((0.5.11, Rob
+    // 10-15) A long one no longer would: Claude Code compacts it. (0.7.6) Nor an old one, whose row says Update now, so
+    // the thread is deleted here instead of aged 14 days: the row's Start is what this test needs.)
+    w.app.delete(freshId)
     await w.advance(6 * 60_000)
     await mm(hub, '')
     expect([...(await paneButtons(hub)).keys()]).toContain(`start:${pid(1)}`)
@@ -1895,4 +1897,54 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(rcCalls(w)).toEqual([])
     expect(w.stored('mm.rcwait')).toEqual({ local_rc_new: { until: NOW + 60_000, activity: '' } })
   })
+})
+
+describe('(0.7.6, Rob 10-27) a client\'s own archived thread comes back, once per arrival, whichever thread syncs', () => {
+  const feed = (): Feed => ({ member: ME, role: 'founder', mail: [mail(1, 'Client One')], tickets: {}, threads: [] })
+  /** Two open threads (a hub and another), and Client One's own thread, archived; an unrelated one keeps the list complete. */
+  const threads = () => [
+    { sessionId: 'local_ua_hub' },
+    { sessionId: 'local_ua_two', title: 'Other work', lastActivityAt: ago(5) },
+    { sessionId: 'local_ua_own', title: 'Client One intake', lastActivityAt: ago(48), isArchived: true },
+    { sessionId: 'local_ua_x', title: 'Unrelated notes', lastActivityAt: ago(100) },
+  ]
+  const unarchives = (w: ReturnType<typeof fakeApp>) => w.calls.filter(c => c.tool === 'unarchive_session').map(c => String(c.args.session_id))
+
+  test('the app unarchives it: linked, pinned and named again; the archived threads list (include_archived) shows it open', async () => {
+    const w = fakeApp(feed(), threads())
+    w.put('mm.links', { [pid(1)]: 'local_ua_own' })
+    await mm(w.session('local_ua_hub'), '')
+    expect(unarchives(w)).toEqual(['local_ua_own'])
+    expect(linksOf(w)).toEqual({ [pid(1)]: 'local_ua_own' })
+    expect(w.app.get('local_ua_own')).toMatchObject({ isArchived: false, pinned: true })
+    expect(w.app.get('local_ua_own')?.title).toContain('Client One')
+    // as the app lists every thread, the archived ones too
+    const listed = (await w.session('local_ua_two').mcp.call('ccd_session_mgmt', 'list_sessions', { include_archived: true })) as { content: Array<{ text: string }> }
+    expect((JSON.parse(listed.content[0]?.text ?? '[]') as Array<{ sessionId: string; isArchived: boolean }>).find(t => t.sessionId === 'local_ua_own')?.isArchived).toBe(false)
+  })
+
+  for (const how of ['refuse', 'error'] as const) {
+    test(`the app does not unarchive it (${how}): the link is dropped, and a sync in another thread does not ask again until something newer arrives`, async () => {
+      // (the fake app serves this feed as it is at each read)
+      const f = feed()
+      const w = fakeApp(f, threads())
+      w.unarchiving.set('local_ua_own', how)
+      w.put('mm.links', { [pid(1)]: 'local_ua_own' })
+      await mm(w.session('local_ua_hub'), '')
+      expect(unarchives(w)).toEqual(['local_ua_own'])
+      expect(linksOf(w)).toEqual({})
+      expect(w.app.get('local_ua_own')).toMatchObject({ isArchived: true, pinned: false })
+      // the record is in the one store: the other thread's sync does not ask
+      await w.advance(6 * 60_000)
+      await mm(w.session('local_ua_two'), '')
+      expect(unarchives(w)).toEqual(['local_ua_own'])
+      // a new message from the client: asked once more
+      w.unarchiving.delete('local_ua_own')
+      f.mail = [...(f.mail ?? []), mail(1, 'Client One', 0)]
+      await w.advance(6 * 60_000)
+      await mm(w.session('local_ua_two'), '')
+      expect(unarchives(w)).toEqual(['local_ua_own', 'local_ua_own'])
+      expect(linksOf(w)).toEqual({ [pid(1)]: 'local_ua_own' })
+    })
+  }
 })

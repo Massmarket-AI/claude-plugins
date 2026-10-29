@@ -80,6 +80,12 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   const silentRc = new Set<string>()
   /** (0.5.19) Threads the app answers this state for (on, off, connecting, unavailable), whatever was asked. */
   const rcStates = new Map<string, string>()
+  /**
+   * (0.7.6) How the app answers `unarchive_session` for a thread, when not as it does for one it may unarchive (it is
+   * unarchived, and the app says so): `refuse`, the person said no to the app's question (an error answer); `error`, the
+   * call itself fails; `silent`, the app never answers (the person has not answered its question).
+   */
+  const unarchiving = new Map<string, 'refuse' | 'error' | 'silent'>()
   const text = (value: unknown): Mcp => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }], isError: false })
   const views = new Map<string, Map<string, unknown>>()
 
@@ -106,7 +112,18 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           const id = args.session_id === 'self' ? self : String(args.session_id ?? '')
           const t = app.get(id)
           if (tool === 'get_session') return t ? text(t) : { content: [{ type: 'text', text: `Session ${id} not found.` }], isError: true }
-          if (tool === 'list_sessions') return text([...app.values()].filter(x => x.sessionId !== self && !x.isArchived && !unlisted.includes(x.sessionId)))
+          // (0.7.6) `include_archived`: the archived threads too, as the app lists them then
+          if (tool === 'list_sessions') return text([...app.values()].filter(x => x.sessionId !== self && (args.include_archived === true || !x.isArchived) && !unlisted.includes(x.sessionId)))
+          // (0.7.6) as the app answers unarchive_session: the thread unarchived, or the person's no, an error, no answer
+          if (tool === 'unarchive_session') {
+            const how = unarchiving.get(id)
+            if (how === 'silent') return new Promise<Mcp>(() => undefined)
+            if (how === 'error') throw new Error('mm-bridge: $.mcp.call: ccd_session_mgmt.unarchive_session failed: internal error')
+            if (how === 'refuse') return { content: [{ type: 'text', text: 'The user declined to unarchive this session.' }], isError: true }
+            if (!t) return { content: [{ type: 'text', text: `Session ${id} not found.` }], isError: true }
+            t.isArchived = false
+            return text(`Session ${id} unarchived.`)
+          }
           if (tool === 'set_session_title' && t) t.title = String(args.title)
           if (tool === 'set_pinned' && failPins.has(id)) return { content: [{ type: 'text', text: 'set_pinned failed' }], isError: true }
           if (tool === 'set_pinned' && t) t.pinned = Boolean(args.pinned)
@@ -229,6 +246,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
     refuseRc,
     silentRc,
     rcStates,
+    unarchiving,
     session,
     /** The fake clock now. */
     now: () => time,

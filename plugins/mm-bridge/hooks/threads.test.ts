@@ -3,11 +3,11 @@ import { describe, expect, test } from 'claude-code/testing'
 import { buildLists, buildQueue, openAsks, threadTitleShort, titleFor } from './queue'
 import type { AskRef, Feed, FeedAsk, FeedLastPackage, FeedQueueTicket, FeedThread, QueueItem } from './queue'
 import {
-  AUTO_NO_DRAFTS_MS, AUTO_QUIET_MS, LABEL, NEW_MARK, OLD_THREAD_MS, OPENERS, THREAD_ID,
+  AUTO_NO_DRAFTS_MS, AUTO_QUIET_MS, LABEL, NEW_MARK, OPENERS, THREAD_ID,
   asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, ownPackage, seenNow,
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLink, titleLooksLike, titleSuggestion, waitingText,
-  newerThreadFor, threadStart, markedThreads, AWAY_REASON,
+  newerThreadFor, threadStart, markedThreads, ownThreads, AWAY_REASON,
   CHIP_TITLE_MAX, REFRESH_FAILED, bandText, chipTitle, claimText, isStillOpenRow, secondThreadSentence, startKickoff,
   START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary, startMissingLabel,
   LABEL_MAX, buttonLabel, cardReady, needsCard,
@@ -59,21 +59,20 @@ describe('R2: the recommendation on each row', () => {
     expect(rec).toEqual({ state: 'update', reason: 'thread from Fri, Oct 9 exists', target: { sid: 'local_a', title: 'Roof quote', suggested: false } })
   })
 
-  test('7 business days count across weekends: Thursday Oct 1 at 11 AM is still current on Monday Oct 12 at 11 AM', async () => {
+  test('(0.7.6) no 7-business-day line any more: Thursday Oct 1 at 11 AM, and one minute older, are both Update on Monday Oct 12 at 11 AM', async () => {
     // Oct 1 (13 h) + Oct 2 (24 h) + Oct 5 to 9 (120 h) + Oct 12 (11 h) = 168 business hours = exactly 7 business days,
     // over 11 calendar days and two weekends.
     expect(recommend([known('local_a', 'Roof quote', '2026-10-01 11:00')], undefined, NOW)).toMatchObject({ state: 'update', reason: 'thread from Thu, Oct 1 exists' })
-    // one minute older than that is past it
+    // (0.7.6) one minute older than that was Start, `last thread is from Oct 1`; Rob, 10-27: the client's thread is always the one to update
     expect(recommend([known('local_a', 'Roof quote', '2026-10-01 10:59')], undefined, NOW)).toEqual({
-      state: 'start', reason: 'last thread is from Oct 1', target: { sid: 'local_a', title: 'Roof quote', suggested: false },
+      state: 'update', reason: 'thread from Thu, Oct 1 exists', target: { sid: 'local_a', title: 'Roof quote', suggested: false },
     })
-    // counted in calendar days, Saturday Oct 3 would be 9 days back; in business time it is 5 days and 11 hours
     expect(recommend([known('local_a', 'Roof quote', '2026-10-03 11:00')], undefined, NOW)).toMatchObject({ state: 'update', reason: 'thread from Sat, Oct 3 exists' })
   })
 
-  test('the newest known thread is older than that: Start thread, saying when the last one was', async () => {
+  test('(0.7.6) the newest known thread is weeks old: Update thread on it, saying when it was last active (it was Start, `last thread is from Sep 22`)', async () => {
     const rec = recommend([known('local_old', 'Roof quote', '2026-09-22 10:00'), known('local_older', 'First call', '2026-09-10 10:00')], undefined, NOW)
-    expect(rec).toEqual({ state: 'start', reason: 'last thread is from Sep 22', target: { sid: 'local_old', title: 'Roof quote', suggested: false } })
+    expect(rec).toEqual({ state: 'update', reason: 'thread from Tue, Sep 22 exists', target: { sid: 'local_old', title: 'Roof quote', suggested: false } })
   })
 
   test('of several threads the most recently active one is the one to update', async () => {
@@ -102,23 +101,20 @@ describe('R2: the recommendation on each row', () => {
     expect(rec.target).toEqual({ sid: 'local_t', title, suggested: true })
   })
 
-  test('last activity more than 60 days back is old without counting business time: a date years back costs nothing', async () => {
+  test('(0.7.6) last activity any number of days back, years too: Update on that thread (it was Start past 60 days, or past 7 business days), and a date years back costs nothing', async () => {
     const DAY = 24 * 3_600_000
-    expect(OLD_THREAD_MS).toBe(60 * DAY)
     const started = Date.now()
-    for (const lastAt of [NOW - 61 * DAY, NOW - 365 * DAY, NOW - 5 * 365 * DAY, 0]) {
-      expect(recommend([{ sid: 's', title: 't', lastAt, source: 'linked' }], undefined, NOW)).toMatchObject({ state: 'start', target: { sid: 's' } })
+    for (const lastAt of [NOW - 59 * DAY, NOW - 61 * DAY, NOW - 365 * DAY, NOW - 5 * 365 * DAY, 0]) {
+      expect(recommend([{ sid: 's', title: 't', lastAt, source: 'linked' }], undefined, NOW)).toMatchObject({ state: 'update', target: { sid: 's' } })
     }
-    expect(recommend([{ sid: 's', title: 't', lastAt: 0, source: 'linked' }], undefined, NOW).reason).toBe('last thread is from Dec 31')
-    // walking the calendar day by day from 1970 took seconds; the four answers together take a blink
+    expect(recommend([{ sid: 's', title: 't', lastAt: 0, source: 'linked' }], undefined, NOW).reason).toBe('thread from Wed, Dec 31 exists')
+    // the five answers together take a blink: no calendar is walked at all
     expect(Date.now() - started).toBeLessThan(250)
-    // inside 60 days business time still decides: 59 days back is old too, by the 7-business-day rule
-    expect(recommend([{ sid: 's', title: 't', lastAt: NOW - 59 * DAY, source: 'linked' }], undefined, NOW).state).toBe('start')
   })
 
-  test('a known thread, however old, comes before a title that merely looks right', async () => {
+  test('a known thread, however old, comes before a title that merely looks right ((0.7.6) and its row says Update)', async () => {
     const suggestion = { sid: 'local_t', title: 'Acme Roofing notes', suggested: true }
-    expect(recommend([known('local_old', 'Roof quote', '2026-09-22 10:00')], suggestion, NOW)).toMatchObject({ state: 'start', reason: 'last thread is from Sep 22', target: { sid: 'local_old' } })
+    expect(recommend([known('local_old', 'Roof quote', '2026-09-22 10:00')], suggestion, NOW)).toMatchObject({ state: 'update', reason: 'thread from Tue, Sep 22 exists', target: { sid: 'local_old', suggested: false } })
   })
 })
 
@@ -476,11 +472,12 @@ describe('R3 and R8: the rows of the Needs-you pane', () => {
 
   test('ONE action per row, chosen by its state, then Drafts', async () => {
     expect(rowButtons(start).map(b => LABEL[b])).toEqual(['Start thread', 'Drafts'])
-    expect(rowButtons(stale).map(b => LABEL[b])).toEqual(['Start thread', 'Drafts'])
+    // (0.7.6) a thread three weeks old is Update, not Start
+    expect(rowButtons(stale).map(b => LABEL[b])).toEqual(['Update thread', 'Drafts'])
     expect(rowButtons(update).map(b => LABEL[b])).toEqual(['Update thread', 'Drafts'])
     expect(rowButtons(suggested).map(b => LABEL[b])).toEqual(['Update thread', 'Drafts'])
     expect(rowButtons(current).map(b => LABEL[b])).toEqual(['Open thread', 'Drafts'])
-    expect([start.state, stale.state, update.state, suggested.state, current.state]).toEqual(['start', 'start', 'update', 'update', 'current'])
+    expect([start.state, stale.state, update.state, suggested.state, current.state]).toEqual(['start', 'update', 'update', 'update', 'current'])
     // a row an older version drew, which called its state `action`
     expect(rowButtons({ ...update, state: undefined, action: 'update' } as never).map(b => LABEL[b])).toEqual(['Update thread', 'Drafts'])
     expect(rowButtons({ ...start, state: undefined } as never).map(b => LABEL[b])).toEqual(['Start thread', 'Drafts'])
@@ -495,7 +492,8 @@ describe('R3 and R8: the rows of the Needs-you pane', () => {
     expect([waitingText(item(ACME)), waitingText(item(BOLT)), waitingText(item(CEDAR))]).toEqual(['drafts ready', '2 messages waiting', '1 task due'])
     // (0.7.5) the second line is only what the first lacks: the action and its reason are not drawn (the button says it), the row still carries them
     expect([rowDetail(update), rowDetail(stale), rowDetail(current)]).toEqual(['', '', ''])
-    expect([update.reason, stale.reason, current.reason]).toEqual(['thread from Fri, Oct 9 exists', 'last thread is from Sep 22', 'Thread updated 9:30 AM'])
+    // (0.7.6) the three-week-old thread's reason is its day, as any thread's (it was `last thread is from Sep 22`)
+    expect([update.reason, stale.reason, current.reason]).toEqual(['thread from Fri, Oct 9 exists', 'thread from Tue, Sep 22 exists', 'Thread updated 9:30 AM'])
     // the one reason a button does not carry: the thread Update goes to only looks like the client by its title
     expect(rowDetail(suggested)).toBe('"Bolt Staffing invoice question" looks like this client')
   })
@@ -611,8 +609,8 @@ describe('(0.5.11) a long thread is not replaced: Claude Code compacts it', () =
     // (0.7.5) the reason is the row's, not drawn: the row is one line
     expect(row.reason).toBe('thread from Fri, Oct 9 exists')
     expect(rowDetail(row)).toBe('')
-    // an old thread is still Start, for being old
-    expect(recommend([known('local_old', 'Intake', '2026-09-22 10:00')], undefined, NOW)).toMatchObject({ state: 'start', reason: 'last thread is from Sep 22' })
+    // (0.7.6) nor its age: an old thread was Start for being old; it is Update now
+    expect(recommend([known('local_old', 'Intake', '2026-09-22 10:00')], undefined, NOW)).toMatchObject({ state: 'update', reason: 'thread from Tue, Sep 22 exists' })
   })
 })
 
@@ -757,10 +755,12 @@ describe('(0.5.23, Rob 10-21: "change auto-starts to update the older thread") w
   const linkedOld = known('local_old', 'Roof quote', '2026-09-22 10:00')
   const linkedRecent = known('local_a', 'Roof quote', '2026-10-09 15:00')
 
-  test('a linked thread older than 7 business days: the row still says Start, and the update by itself goes into that thread, marked older with the row\'s reason', async () => {
+  test('(0.7.6) a linked thread older than 7 business days: its row says Update, and the update by itself goes into that thread like any other (no longer marked older)', async () => {
     const rec = recommend([linkedOld], undefined, NOW)
-    expect(rec).toMatchObject({ state: 'start', reason: 'last thread is from Sep 22', target: { sid: 'local_old', suggested: false } })
-    expect(autoUpdateTarget(rec, 'local_old')).toEqual({ sid: 'local_old', older: 'last thread is from Sep 22' })
+    expect(rec).toMatchObject({ state: 'update', reason: 'thread from Tue, Sep 22 exists', target: { sid: 'local_old', suggested: false } })
+    expect(autoUpdateTarget(rec, 'local_old')).toEqual({ sid: 'local_old' })
+    // (0.7.6) a row a sync before 0.7.6 stored as Start for its old thread is no target: the next sync stores it again
+    expect(autoUpdateTarget({ state: 'start', reason: 'last thread is from Sep 22', target: { sid: 'local_old', title: 'Roof quote', suggested: false } }, 'local_old')).toBeUndefined()
   })
 
   test('a linked thread whose row says Update: that thread, as before, not marked older', async () => {
@@ -769,7 +769,7 @@ describe('(0.5.23, Rob 10-21: "change auto-starts to update the older thread") w
     expect(autoUpdateTarget(rec, 'local_a')).toEqual({ sid: 'local_a' })
   })
 
-  test('no thread yet: none, so its thread is started by itself as before', async () => {
+  test('no thread yet: none ((0.7.6) and nothing is started by itself: the row waits for the person\'s Start)', async () => {
     const rec = recommend([], undefined, NOW)
     expect(rec).toEqual({ state: 'start', reason: 'no thread yet', fresh: true })
     expect(autoUpdateTarget(rec, undefined)).toBeUndefined()
@@ -777,7 +777,8 @@ describe('(0.5.23, Rob 10-21: "change auto-starts to update the older thread") w
 
   test('⛔ an old thread that is not the client\'s linked one (the person unlinked it, or another thread is linked): none', async () => {
     const rec = recommend([{ ...linkedOld, source: 'matched' }], undefined, NOW)
-    expect(rec.state).toBe('start')
+    // (0.7.6) its row says Update on it, as for a recent one (it said Start for being old)
+    expect(rec.state).toBe('update')
     expect(autoUpdateTarget(rec, undefined)).toBeUndefined()
     expect(autoUpdateTarget(rec, 'local_other')).toBeUndefined()
   })
@@ -1700,6 +1701,42 @@ describe('(0.5.23) markedThreads: the threads a client with no linked thread may
     expect(row.reason).toBe('its thread is in another Claude profile')
     expect(rowButtons(row)[0]).toBe('start')
     expect(row.fresh).toBe(false)
+  })
+})
+
+describe('(0.7.6, Rob 10-27: "we should always pin the most recent thread from that client") ownThreads: a client\'s own threads, newest first', () => {
+  const marked = { local_m1: ACME, local_m2: ACME, local_b: BOLT }
+  const markedAt = { local_m1: et('2026-10-01 09:00'), local_m2: et('2026-10-05 09:00') }
+
+  test('its marked threads, as markedThreads gives them, and the thread its kickoff last went to (`mm.sent`), dated when it went', () => {
+    expect(ownThreads(ACME, {}, [], {}, { marked, markedAt })).toEqual(markedThreads(ACME, {}, [], {}, { marked, markedAt }))
+    // Leader Transcend (10-27): a thread whose only marker came in an Update, which no record held until 0.7.6
+    expect(ownThreads(ACME, {}, [], {}, { marked, markedAt, given: { sid: 'local_upd', sig: 'x', at: et('2026-10-09 09:00') } })).toEqual(['local_upd', 'local_m2', 'local_m1'])
+    expect(ownThreads(ACME, {}, [], {}, { marked, markedAt, given: { sid: 'local_upd', sig: 'x', at: et('2026-10-03 09:00') } })).toEqual(['local_m2', 'local_upd', 'local_m1'])
+    // a marked thread that was also given the kickoff is dated by the later of the two, and listed once
+    expect(ownThreads(ACME, {}, [], {}, { marked, markedAt, given: { sid: 'local_m1', sig: 'x', at: et('2026-10-09 09:00') } })).toEqual(['local_m1', 'local_m2'])
+    // no marker and no send: none
+    expect(ownThreads(CEDAR, {}, [], {}, { marked, markedAt })).toEqual([])
+    expect(ownThreads(CEDAR, {}, [], {}, { marked, markedAt, given: { sid: 'local_c', sig: 'x', at: NOW } })).toEqual(['local_c'])
+  })
+
+  test('⛔ every rule of markedThreads holds for the thread its kickoff went to: never linked to any client, unlinked by the person, a client moved off it, shared (B3), another client\'s by the feed or its marker, or not an app thread', () => {
+    const given = { sid: 'local_upd', sig: 'x', at: et('2026-10-09 09:00') }
+    const pairs: Pairs = { 'cli-upd': { app: 'local_upd', at: NOW } }
+    for (const [name, skip, links, feed] of [
+      ['linked to another client', {}, { [CEDAR]: 'local_upd' }, []],
+      ['unlinked by the person', { unlinked: { local_upd: 1 } }, {}, []],
+      ['a client moved off it', { released: ['local_upd'] }, {}, []],
+      ['shared (B3): `mm.shared` or the feed', { shared: new Set(['local_upd']) }, {}, []],
+      ['marked for another client', { marked: { ...marked, local_upd: BOLT } }, {}, []],
+      ['the feed gives it to another client', {}, {}, [declared(BOLT, 'cli-upd', '2026-10-09 10:00')]],
+    ] as Array<[string, Record<string, unknown>, Record<string, string>, FeedThread[]]>) {
+      expect(ownThreads(ACME, links, feed, pairs, { marked, markedAt, given, ...skip }), name).not.toContain('local_upd')
+    }
+    expect(ownThreads(ACME, {}, [], {}, { marked, markedAt, given: { ...given, sid: 'not a thread' } })).toEqual(['local_m2', 'local_m1'])
+    // ⛔ and the feed's own shared threads, with no `shared` passed: worked for two clients, it is nobody's by itself
+    const both = [declared(ACME, 'cli-upd', '2026-10-09 10:00'), declared(BOLT, 'cli-upd-b', '2026-10-09 11:00')]
+    expect(ownThreads(ACME, {}, both, { ...pairs, 'cli-upd-b': { app: 'local_upd', at: NOW } }, { marked, markedAt, given })).not.toContain('local_upd')
   })
 })
 
