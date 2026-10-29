@@ -27,8 +27,9 @@ describe('0.6.0: the words and numbers the Tracking part is drawn with (verbatim
     )
     expect(INTERNAL_NOTE).toBe('[mm-bridge] The person marked this thread as Massmarket internal work. Before your next step, load the massmarket-internal-ops skill with the Skill tool so the time tracker counts it.')
     expect(secondLine('Acme Roofing', 'Roof quote')).toBe('This is a second thread for Acme Roofing. The reply package is picked up in "Roof quote".')
+    // (0.7.5) the note behind More, in the plain words of the redesign (`your time`, `thread time`)
     expect(numbersNote('Acme Roofing')).toBe(
-      'Tracked counts each minute once per person. In threads counts every thread in full. Parallel is the second divided by the first. Jarvis is work done for Acme Roofing with nobody in the thread.',
+      'Your time counts each minute once per person. Thread time counts every thread in full, so two threads at once count twice. Parallel is thread time divided by your time. Jarvis is work done for Acme Roofing with nobody in the thread.',
     )
   })
 
@@ -127,24 +128,24 @@ describe('0.6.0: the Tracking part, line by line', () => {
 
   test('one thread, a task with no label, a person with no name: the address before the @, and one thread', async () => {
     const lines = trackLines({ client: 'Acme Roofing', time: { at: NOW, asOf: new Date(NOW).toISOString(), ...(p ? { p } : {}) }, missing: false, canSeeLeverage: false, mine: sid => sid === 'mine' })
-    expect(lines.map(l => l.text).slice(0, 7)).toEqual([
-      'Tracking to Acme Roofing · no task declared yet',
-      'This thread: 1h 05m today · Acme Roofing today: 1h 05m tracked across 1 thread',
-      'Tasks today',
-      '● No task declared · 1h 05m · a',
-      'Threads today',
-      '● Untitled thread  a · no task · 1h 05m (this thread)',
-      'Numbers',
+    // (0.7.5) closed to its one line (this thread's minutes in it), then one numbers line and ONE time list by task:
+    // the person with no name is the address before the @, and one thread is not counted as threads
+    expect(lines.map(l => l.text).slice(0, 3)).toEqual([
+      '⏱ This thread: Acme Roofing · no task declared yet · 1h 05m today',
+      'Today: 1.1 h of your time · 1.1 h of thread time',
+      'No task declared · 1h 05m · a (this thread)',
     ])
-    expect(lines[0]?.bold).toBe(true)
-    expect(lines[1]?.dim).toBe(true)
+    expect(lines[0]?.part).toBe('head')
+    expect(lines[1]?.part).toBeUndefined()
+    expect(lines.some(l => /· \d+ threads/.test(l.text))).toBe(false)
     expect(lines.some(l => l.text.startsWith('Leverage'))).toBe(false)
     expect(thisThread(p, sid => sid === 'mine')).toEqual({ minutes: 65, counted: true })
   })
 
   test('no numbers yet: the heading, then Checking…, or that the numbers are not available', async () => {
-    expect(trackLines({ client: 'Acme Roofing', missing: false, canSeeLeverage: true, mine: () => false }).map(l => l.text)).toEqual(['Tracking to Acme Roofing · no task declared yet', 'Checking…'])
-    expect(trackLines({ client: 'Acme Roofing', task: 'Copy', missing: true, canSeeLeverage: true, mine: () => false }).map(l => l.text)).toEqual(['Tracking to Acme Roofing · Copy', NOT_AVAILABLE])
+    // (0.7.5) the heading is the one line the part closes to
+    expect(trackLines({ client: 'Acme Roofing', missing: false, canSeeLeverage: true, mine: () => false }).map(l => l.text)).toEqual(['⏱ This thread: Acme Roofing · no task declared yet', 'Checking…'])
+    expect(trackLines({ client: 'Acme Roofing', task: 'Copy', missing: true, canSeeLeverage: true, mine: () => false }).map(l => l.text)).toEqual(['⏱ This thread: Acme Roofing · Copy', NOT_AVAILABLE])
     expect(NOT_AVAILABLE).toBe('Time numbers are not available yet.')
   })
 })
@@ -210,7 +211,9 @@ describe('0.6.0 (OW contract 2026-10-25): the periods asked for, and a today-onl
   test('drawn with no week yet: the Today line and no This week line, never zeros', async () => {
     const p = answer({ as_of: new Date(NOW).toISOString(), today: day(65), week: null })
     const lines = trackLines({ client: 'Acme Roofing', time: { at: NOW, asOf: new Date(NOW).toISOString(), ...(p ? { p } : {}) }, missing: false, canSeeLeverage: true, mine: () => false }).map(l => l.text)
-    expect(lines).toContain('Today: 1.1 h tracked · 1.1 h in threads · Jarvis 0.0 h')
+    // (0.7.5) in plain words; Jarvis has its own line, behind More
+    expect(lines).toContain('Today: 1.1 h of your time · 1.1 h of thread time')
+    expect(lines).toContain('Jarvis: 0.0 h today')
     expect(lines.some(l => l.startsWith('This week'))).toBe(false)
   })
 })
@@ -262,8 +265,8 @@ describe('0.7.0: OW\'s new fields, checked (absent, malformed, complete)', () =>
     expect('line' in (p.threads[0] ?? {})).toBe(false)
     expect('line_key' in (p.today?.tasks[0] ?? {})).toBe(false)
     expect(lineOfThread(p, sid => sid === 'mine')).toBeUndefined()
-    // and the pane draws exactly what 0.6.0 drew
-    expect(drawn(p).slice(0, 4)).toEqual(['Tracking to Acme Roofing · Copy', 'This thread: 1h 04m today · Acme Roofing today: 1h 46m tracked across 1 thread', 'Tasks today', '● Copy · 1h 04m'])
+    // and the pane draws what it draws with none of them: (0.7.5) the one line, the numbers, the time list, and no line's words
+    expect(drawn(p).slice(0, 3)).toEqual(['⏱ This thread: Acme Roofing · Copy · 1h 04m today', 'Today: 1.8 h of your time · 1.8 h of thread time', 'Copy · 1h 04m (this thread)'])
     expect(drawn(p)).not.toContain(LINES_TODAY)
     expect(drawn(p).some(l => l.startsWith('Counts toward') || l.startsWith('Proposed'))).toBe(false)
   })
@@ -352,8 +355,9 @@ describe('0.7.0: the Tracking part names the line (verbatim)', () => {
 
   test('drawn as the second line, under the heading; absent, no line at all', async () => {
     const on = lined({ lines: LINES, line: thread('on_line', { via: 'declared', line_key: L_COPY, title: 'Phase 1 nurture sequence', estimate_hours: 12 }) })
-    expect(drawn(on).slice(0, 3)).toEqual(['Tracking to Acme Roofing · Copy', 'Counts toward: Phase 1 nurture sequence · est 12 h · 1h 04m today', 'This thread: 1h 04m today · Acme Roofing today: 1h 46m tracked across 1 thread'])
-    expect(drawn(lined({ lines: LINES }))[1]).toBe('This thread: 1h 04m today · Acme Roofing today: 1h 46m tracked across 1 thread')
+    // (0.7.5) under the one line the part closes to, before the numbers
+    expect(drawn(on).slice(0, 3)).toEqual(['⏱ This thread: Acme Roofing · Copy · 1h 04m today', 'Counts toward: Phase 1 nurture sequence · est 12 h · 1h 04m today', 'Today: 1.8 h of your time · 1.8 h of thread time'])
+    expect(drawn(lined({ lines: LINES }))[1]).toBe('Today: 1.8 h of your time · 1.8 h of thread time')
   })
 
   test('a task row names its line, at most 28 characters; a key that is no line of the project names none', async () => {
@@ -366,9 +370,10 @@ describe('0.7.0: the Tracking part names the line (verbatim)', () => {
       ],
     })
     const rows = drawn(q)
-    expect(rows).toContain('● Copy · 1h 04m · Avery → Phase 1 nurture sequence')
-    expect(rows).toContain('  f779a7a0 Router · 42m → Inbound lead router and ass…')
-    expect(rows).toContain('  Other · 5m')
+    // (0.7.5) the one time list by task: no activity mark, and this thread's own task says so
+    expect(rows).toContain('Copy · 1h 04m · Avery → Phase 1 nurture sequence (this thread)')
+    expect(rows).toContain('f779a7a0 Router · 42m → Inbound lead router and ass…')
+    expect(rows).toContain('Other · 5m')
     expect(lineButton('Inbound lead router and assignment rules')).toBe('Inbound lead router and ass…')
   })
 
@@ -376,7 +381,9 @@ describe('0.7.0: the Tracking part names the line (verbatim)', () => {
     const q = lined({ lines: LINES, proposals: [{ ticket_id8: 'abcdef12', title: 'Spanish landing page', created_at: '' }], tasks: [{ task: 'Copy', minutes: 64, people: [] }] })
     const rows = drawn(q)
     const at = rows.indexOf(LINES_TODAY)
-    expect(at).toBe(rows.indexOf('Tasks today') + 2)
+    // (0.7.5) right under the one time list (here, its one task)
+    expect(at).toBe(rows.indexOf('Copy · 1h 04m (this thread)') + 1)
+    expect(at).toBeGreaterThan(0)
     expect(rows.slice(at, at + 4)).toEqual([LINES_TODAY, 'Phase 1 nurture sequence · 1h 04m · est 12 h', 'Inbound lead router and assignment rules · 42m · est 6 h', 'Proposed: Spanish landing page · waiting for yes'])
     // a line with no estimate, and lines the viewer may not see (null minutes)
     const r = drawn(lined({ lines: [{ ...LINES[0], estimate_hours: null }, { ...LINES[1], minutes: null }] }))
@@ -687,7 +694,8 @@ describe('0.7.1: the pane and the band (verbatim)', () => {
     expect(rows('urgent')).toContain('New scope: Spanish landing page · told in the next reply')
     expect(rows('needs_yes')).toContain('Proposed: Spanish landing page · waiting for yes')
     expect(rows()).toContain('Proposed: Spanish landing page · waiting for yes')
-    expect(drawn(proposed('tell_and_go')).slice(0, 2)).toEqual(['Tracking to Acme Roofing · Copy', 'New scope: Spanish landing page · Acme Roofing is told in the next reply'])
+    // (0.7.5) under the one line the part closes to
+    expect(drawn(proposed('tell_and_go')).slice(0, 2)).toEqual(['⏱ This thread: Acme Roofing · Copy · 1h 04m today', 'New scope: Spanish landing page · Acme Roofing is told in the next reply'])
   })
 
   test('Lines today: a told, unbilled line says it goes on the next invoice; billed or not told, it does not', async () => {

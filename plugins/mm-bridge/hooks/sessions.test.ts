@@ -454,10 +454,11 @@ describe('S3: a press answers within 100 ms of fake time while OW takes 5 second
     expect(w.opened.slice(opens)).toEqual([{ thread: 'local_s3la', id: 'mm-queue' }])
     const otherQueue = () => w.view('local_s3la', 'queue') as Queue | undefined
     expect(otherQueue()?.header).toBe('Needs you now (2)')
-    expect(otherQueue()?.note).toContain('Updated 13:00 UTC')
+    // (0.7.5) one clock: the person's own
+    expect(otherQueue()?.note).toBe('Updated 9:00 AM')
     await w.advance(5_000)
     expect(await typed).toBe('2 clients need you; 1 thread pinned. The list is in the side pane.')
-    expect(otherQueue()?.note).toContain('Updated 13:06 UTC')
+    expect(otherQueue()?.note).toBe('Updated 9:06 AM')
   })
 
   test('Update says it is checking at once and sends exactly once when the feed answers; Start answers at once; Open and Drafts draw within 100 ms; each refresh then draws the list again', async () => {

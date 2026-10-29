@@ -49,6 +49,11 @@ export type MmRow = {
   claim?: boolean
   /** (0.5.2, R8) The server is checking our reply to this client: the row is under `Checking your reply`, named as its thread is, with Drafts alone. */
   checking?: true
+  /**
+   * (0.7.5, the panel redesign) The row's second line: what is waiting that its first line (`title`) does not already
+   * say, such as `2 drafts not sent`. Absent when there is nothing to add: the row is one line.
+   */
+  extra?: string
 }
 
 /**
@@ -80,7 +85,21 @@ export type MmQueue = {
   people?: MmPerson[]
   /** (New people) The projects Route to project offers, by name. */
   routeTo?: MmProject[]
+  /**
+   * (0.7.5) The viewer's own clients listed by undated tickets alone: a closed group `No due date (n)` in the line of
+   * groups under the list. Never pinned or counted in the header.
+   */
+  undated?: MmRow[]
+  /** (0.7.5) The viewer's internal queue, drawn under the list as `Your build queue · N`. Absent for a viewer with none. */
+  build?: MmBuild
 }
+
+/**
+ * (0.7.5, the panel redesign) `Your build queue · N` under the list: how many tickets the viewer's internal queue holds,
+ * the top few in rank order (one line each), the internal-ops row, whose linked thread the part's button opens, and
+ * (the founder's) teammates' late internal tickets.
+ */
+export type MmBuild = { total: number; top: string[]; row: MmRow; /** For the founder: his teammates' late internal tickets, `9 late with Has9 and 2 more`. */ late?: string }
 
 /**
  * (New people) One person under `New people`: who, what they wrote about, when, what to check first, what we
@@ -122,7 +141,20 @@ export type MmProject = { projectId: string; name: string }
 export type MmPeople = { open?: string; pick?: string; page?: number; busy?: Record<string, number>; errors?: Record<string, string> }
 
 /** Which of the two groups under the list the person has opened. */
-export type MmFolds = { teammate?: boolean; older?: boolean; checking?: boolean }
+export type MmFolds = {
+  teammate?: boolean
+  older?: boolean
+  checking?: boolean
+  /** (0.7.5) `New people` is closed until opened, as the other groups are. */
+  people?: boolean
+  /** (0.7.5) `No due date`. */
+  undated?: boolean
+  /** (0.7.5) The Tracking part, closed to its one line until opened; `more`: its further numbers. */
+  track?: boolean
+  more?: boolean
+  /** (0.7.5) The tasks of the time list opened to their threads, by key (`MmTrackLine.toggle`). */
+  tasks?: string[]
+}
 
 /** What the last button press did, shown above the list. */
 export type MmNotice = { text: string; at: number }
@@ -143,14 +175,19 @@ export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: nu
  * (0.6.0) One line of the pane's Tracking part. `open`: the app thread (`local_…`) a press on the line opens, on a
  * row of `Threads today` that is another thread on this computer; such a line is drawn as a button.
  */
-export type MmTrackLine = { text: string; dim?: boolean; bold?: boolean; open?: string }
+/**
+ * (0.7.5) `part`: `head` is the one line the Tracking part closes to (a press opens it), `more` is drawn only once its
+ * More is opened; any other line is drawn while the part is open. `toggle`: a task with several threads, a press opens
+ * it to them; `under`: a thread row of that task, drawn only while it is open.
+ */
+export type MmTrackLine = { text: string; dim?: boolean; bold?: boolean; open?: string; part?: 'head' | 'more'; toggle?: string; under?: string }
 
 /**
  * (0.6.0) What this thread's pane shows of its current project: which project (`pid`, '' when none), the pane's
  * title, the Tracking part line by line, and in a second thread of a client the dim line above the client part
  * (`second`). `client`: the project's name as shown.
  */
-export type MmTrack = { pid: string; client: string; title: string; lines: MmTrackLine[]; second?: string }
+export type MmTrack = { pid: string; client: string; title: string; lines: MmTrackLine[]; second?: string; /** (0.7.5) When its numbers are from (ms), for the pane's one `Updated` line where it has no list. */ at?: number }
 
 /**
  * (0.6.0) This session's own record, for the pane and the band: the person's prompts so far, whether its first

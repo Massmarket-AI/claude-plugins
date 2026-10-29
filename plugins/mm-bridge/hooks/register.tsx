@@ -1,23 +1,25 @@
 import type { Elements, EngineInterface, Register } from 'claude-code'
 
-import type { MmBand, MmFolds, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTrack, MmView } from '../types'
+import type { MmBand, MmFolds, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTrack, MmTrackLine, MmView } from '../types'
 
 import {
   INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pinsNow,
   peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
-  asksMarkdown, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText,
+  asksMarkdown, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText, undatedOnly,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
-  LABEL, PANE_SENTENCE, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
+  LABEL, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, secondThreadSentence, startKickoff, threadLink, titleLooksLike, titleSuggestion,
   REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, bandText, chipTitle, ownPackage, seenNow, waitingText,
+  buildHeading, buildMore, buildOf, buildShown,
   START_ALL_MAX, startAllKickoff, startAllLabel, startMissingLabel, AWAY_REASON, markedThreads, START_ALL_WORDS, startWords, startFillSaid, kickoffsAnswer,
 } from './threads'
 import type { AppThread, Fold, Kickoff, Pairs, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
 import {
   INTERNAL_NAME, INTERNAL_NOTE, NUDGE_AFTER, NUDGE_INTERNAL, NUDGE_NONE, NUDGE_TEXT, SKILL_KEY, afterPersonClose, clientName, displayName, kindOf, mergeCurrent, mergeTime, opensBySelf,
   parseClientTime, parseSkillMap, pressNote, secondLine, skillName, taskFrom, thisThread, titleForClaude, trackLabel, trackLines, trackStatus, weekIsDue,
+  MORE, localClock, timeAsOf,
   LINE_BANK, LINE_CHOICES, LINE_KEY, LINE_LATER, LINE_NEW, TICKET8, askNote, asksForLine, asksInSession, bankLine, bankNote, declareLineText, forClaude, lineAskKey, lineAskText,
   lineButton, lineNote, lineOfThread, linkedText, newScopeNote, noBankText, proposalArgs, proposedText, statusLineTitle, taskLabel, ticketOf,
   BAD_ESTIMATE, modeOf, noPrepaidText, offersPrepaid, reasonOf, recordedText, settleOf,
@@ -144,7 +146,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.7.4'
+const VERSION = '0.7.5'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -2012,21 +2014,39 @@ async function showQueue(
 ): Promise<void> {
   const people = await peopleShown($, found.people, now)
   const routeTo = Array.isArray(found.routeTo) ? found.routeTo : []
+  // (0.7.5, the panel redesign; Rob, 2026-10-27: "queue first, one merged time list, plain numbers") The list is what
+  // needs the viewer now: the internal-ops item listed by the viewer's internal queue alone is drawn under it as `Your
+  // build queue`, and a client listed by undated tickets alone goes to the closed group `No due date`.
+  const byPid = new Map(items.map(it => [it.projectId, it]))
+  const home = items.find(it => queuedOf(it).length > 0)
+  const homeRow = home ? rows.find(r => r.projectId === home.projectId) : undefined
+  const build = home && homeRow ? buildOf(home, homeRow) : undefined
+  const undated = rows.filter(r => {
+    const it = byPid.get(r.projectId)
+    return it !== undefined && undatedOnly(it)
+  })
+  const listed = rows.filter(r => {
+    const it = byPid.get(r.projectId)
+    return !it || needsYouNow(it) || (it.kind === 'queue' && !build)
+  })
   const queue: MmQueue = {
     // (R1: no cap on pins any more; the header counts the list)
-    header: items.length ? `Needs you now (${items.length})` : 'Nothing needs you right now.',
-    rows,
-    note: `Updated ${new Date(syncedAt).toISOString().slice(11, 16)} UTC for ${member}. ${PANE_SENTENCE}`,
+    header: listed.length ? `Needs you now (${listed.length})` : 'Nothing needs you right now.',
+    rows: listed,
+    // (0.7.5) one clock: the person's own, in the one line at the bottom of the pane
+    note: `Updated ${localClock(syncedAt)}`,
     syncedAt,
     ...(folds.teammate.length ? { teammate: folds.teammate } : {}),
     ...(folds.older.length ? { older: folds.older } : {}),
     ...(folds.checking?.length ? { checking: folds.checking } : {}),
+    ...(undated.length ? { undated } : {}),
+    ...(build ? { build: { total: build.total, top: [...build.top], row: build.row, ...(build.late ? { late: build.late } : {}) } } : {}),
     ...(people.length ? { people, ...(routeTo.length ? { routeTo } : {}) } : {}),
   }
   await $.state.set(QUEUE, queue)
   const { value: notice } = await $.state.get(NOTICE)
   if (notice?.text && now - notice.at > SYNC_MS) await $.state.set(NOTICE, { text: '', at: now })
-  await putStatus($, 'base', items.length ? `MM: ${items.length} need you · ${pinned} pinned` : 'MM: clear')
+  await putStatus($, 'base', listed.length ? `MM: ${listed.length} need you · ${pinned} pinned` : 'MM: clear')
 }
 
 async function sync($: EngineInterface): Promise<Last> {
@@ -2370,7 +2390,9 @@ async function showList($: EngineInterface, press: boolean): Promise<string> {
     if (after) await showClient($, after, true)
     else await clearClient($)
   }
-  return last.items.length ? `${last.items.length} client${last.items.length === 1 ? '' : 's'} need you; ${last.pinned} thread${last.pinned === 1 ? '' : 's'} pinned. The list is in the side pane.` : 'Nothing needs you right now.'
+  // (0.7.5) counted as the pane's header counts them: not the internal queue, not the clients with no due date
+  const n = last.items.filter(needsYouNow).length
+  return n ? `${n} client${n === 1 ? '' : 's'} need you; ${last.pinned} thread${last.pinned === 1 ? '' : 's'} pinned. The list is in the side pane.` : 'Nothing needs you right now.'
 }
 
 /**
@@ -5142,12 +5164,25 @@ async function resolvePerson($: EngineInterface, id: string, action: PersonActio
 }
 
 /** Opens or closes one of the two groups under the list, in this thread's pane. The person's press: nothing is fetched, called or changed. */
-async function toggleFold($: EngineInterface, key: Fold): Promise<void> {
+async function toggleFold($: EngineInterface, key: Fold | 'people' | 'track' | 'more'): Promise<void> {
   try {
     const { value } = await $.state.get(FOLDS)
     await $.state.set(FOLDS, { ...(value ?? {}), [key]: !value?.[key] } satisfies MmFolds)
   } catch {
     // a group that does not open is not worth an error
+  }
+}
+
+/** (0.7.5) A task of the time list opened to its threads, or closed again: at most 20 kept open. */
+async function toggleTask($: EngineInterface, key: string): Promise<void> {
+  try {
+    const { value } = await $.state.get(FOLDS)
+    const open = new Set(Array.isArray(value?.tasks) ? value.tasks.filter(k => typeof k === 'string') : [])
+    if (open.has(key)) open.delete(key)
+    else open.add(key)
+    await $.state.set(FOLDS, { ...(value ?? {}), tasks: [...open].slice(-20) } satisfies MmFolds)
+  } catch {
+    // as above
   }
 }
 
@@ -6310,7 +6345,9 @@ async function drawTrack($: EngineInterface, why: TrackWhy): Promise<void> {
       const lines = trackLines({ client: name, task: cur.task, time, missing: Number(meta.missingUntil) > now, canSeeLeverage: meta.canSeeLeverage === true, mine, openable })
       const holder = client ? links[pid] : undefined
       const second = holder !== undefined && holder !== key ? secondLine(name, shownText(await primaryTitleOf($, pid, holder, changed || why === 'start' || why === 'attach'), 80) || 'another thread') : undefined
-      track = { pid, client: name, title: name, lines, ...(second ? { second } : {}) }
+      // (0.7.5) and when its numbers are from, for the pane's one `Updated` line where it has no list
+      const at = timeAsOf(time)
+      track = { pid, client: name, title: name, lines, ...(second ? { second } : {}), ...(at ? { at } : {}) }
       const here = thisThread(time?.p, mine)
       // (0.7.0) the line this thread's minutes count toward, as OW says
       const line = lineOfThread(time?.p, mine)
@@ -7002,7 +7039,7 @@ export const register: Register = on => {
     const drawRow = (row: Row, lead: string) => (
       <Box flexDirection="column" marginTop={1}>
         <Text>{`${lead} ${row.title}`}</Text>
-        <Text dimColor>{rowDetail(row, here)}</Text>
+        {rowDetail(row) ? <Text dimColor>{rowDetail(row)}</Text> : null}
         {row.note ? <Text dimColor>{row.note}</Text> : null}
         {isStillOpenRow(row) ? (row.stillOpen as string[]).map(item => <Text dimColor>{`- ${item}`}</Text>) : null}
         <Box flexDirection="row" gap={1}>
@@ -7083,21 +7120,35 @@ export const register: Register = on => {
         </Box>
       )
     }
+    // (0.7.5, the panel redesign; Rob, 2026-10-27: "queue first, one merged time list, plain numbers") Top to bottom: in
+    // a waiting client's thread its part first (Rob, 2026-10-12), then `Needs you now`, one line a row; `Your build
+    // queue`; the groups under the list on ONE line, each its own button; the Tracking part closed to its one line; and
+    // one `Updated <time>` line in the person's own clock.
+    const build = hasList && queue && buildShown(queue.build, here) ? queue.build : undefined
+    const groups = hasList && queue ? foldGroups(queue) : []
+    const trackOpen = folds?.track === true
+    const moreOpen = folds?.more === true
+    const openTasks = new Set(Array.isArray(folds?.tasks) ? folds.tasks : [])
+    const trackBody = tracking ? tracking.lines.filter(l => l.part !== 'more') : []
+    const trackMore = tracking ? tracking.lines.filter(l => l.part === 'more') : []
+    const drawTrack = (l: MmTrackLine, n: number) => {
+      if (l.part === 'head') return <Button key="mm-track-head" plain label={`${l.text}  ${trackOpen ? '▾' : '▸'}`} onPress={() => void toggleFold($, 'track')} />
+      if (l.under && !openTasks.has(l.under)) return null
+      const text = l.under ? `    ${l.text}` : l.text
+      if (l.toggle) {
+        const key = l.toggle
+        return <Button key={`mm-track-task:${n}`} plain label={`${text}  ${openTasks.has(key) ? '▾' : '▸'}`} onPress={() => void toggleTask($, key)} />
+      }
+      if (l.open) return <Button key={`mm-track-open:${n}`} plain label={text} onPress={() => void openTracked($, l.open as string)} />
+      return (
+        <Text bold={l.bold === true} dimColor={l.dim === true}>
+          {text}
+        </Text>
+      )
+    }
+    const updated = hasList && queue ? queue.note : tracking?.at ? `Updated ${localClock(tracking.at)}` : ''
     return (
       <Box flexDirection="column">
-        {tracking ? (
-          <Box key="mm-track" flexDirection="column" marginBottom={1}>
-            {tracking.lines.map((l, n) =>
-              l.open ? (
-                <Button key={`mm-track-open:${n}`} label={l.text} onPress={() => void openTracked($, l.open as string)} />
-              ) : (
-                <Text bold={l.bold === true} dimColor={l.dim === true}>
-                  {l.text}
-                </Text>
-              ),
-            )}
-          </Box>
-        ) : null}
         {tracking?.second ? <Text dimColor>{tracking.second}</Text> : null}
         {client.text ? (
           <Box key="mm-client" flexDirection="column" marginBottom={1}>
@@ -7109,34 +7160,53 @@ export const register: Register = on => {
         {offer > 0 ? <Button key="mm-start-all" label={startAllLabel(offer)} variant="primary" onPress={() => void pressStartAll($)} /> : null}
         {notice?.text ? <Text>{notice.text}</Text> : null}
         {hasList && queue?.warning ? <Text>{queue.warning}</Text> : null}
-        {hasList && people.length ? (
+        {hasList && queue ? rowGroups(queue.rows).flatMap(group => group.rows.map(({ row, n, mark }) => drawRow(row, `${mark}${n}.`))) : null}
+        {build ? (
+          <Box key="mm-build" flexDirection="column" marginTop={1}>
+            <Text bold>{buildHeading(build)}</Text>
+            {build.top.map((title, i) => (
+              <Text>{` ${i + 1}. ${title}`}</Text>
+            ))}
+            {buildMore(build) ? <Text dimColor>{` ${buildMore(build)}`}</Text> : null}
+            {build.late ? <Text dimColor>{` ${build.late}`}</Text> : null}
+            {build.row.target ? <Button key="mm-build-open" label={LABEL.open} variant="primary" onPress={() => void press($, 'open', build.row)} /> : null}
+          </Box>
+        ) : null}
+        {hasList && (people.length || groups.length) ? (
+          <Box key="mm-folds" flexDirection="row" flexWrap="wrap" gap={1} marginTop={1}>
+            {people.length ? <Button key="mm-fold:people" label={`New people (${people.length})`} dimColor={folds?.people !== true} onPress={() => void toggleFold($, 'people')} /> : null}
+            {groups.map(group => (
+              <Button key={`mm-fold:${group.key}`} label={group.heading} dimColor={folds?.[group.key] !== true} onPress={() => void toggleFold($, group.key)} />
+            ))}
+          </Box>
+        ) : null}
+        {hasList && people.length && folds?.people ? (
           <Box key="mm-people" flexDirection="column" marginTop={1}>
             <Text bold dimColor>{`New people (${people.length})`}</Text>
             <Text dimColor>Wrote to us, and no project matched.</Text>
             {people.map(drawPerson)}
           </Box>
         ) : null}
-        {hasList && queue
-          ? rowGroups(queue.rows).map(group => (
-              <Box flexDirection="column" marginTop={1}>
-                <Text bold dimColor>
-                  {group.heading}
-                </Text>
-                {group.rows.map(({ row, n, mark }) => drawRow(row, `${mark}${n}.`))}
-              </Box>
-            ))
-          : null}
-        {hasList && queue
-          ? foldGroups(queue).map(group => (
-              <Box flexDirection="column" marginTop={1}>
-                <Button key={`mm-fold:${group.key}`} label={group.heading} onPress={() => void toggleFold($, group.key)} />
-                {folds?.[group.key] ? group.rows.map(({ row, n }) => drawRow(row, `${n}.`)) : null}
-              </Box>
-            ))
-          : null}
-        {hasList && queue ? (
+        {groups
+          .filter(group => folds?.[group.key])
+          .map(group => (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold dimColor>
+                {group.heading}
+              </Text>
+              {group.rows.map(({ row, n }) => drawRow(row, `${n}.`))}
+            </Box>
+          ))}
+        {tracking ? (
+          <Box key="mm-track" flexDirection="column" marginTop={1}>
+            {trackOpen ? trackBody.map(drawTrack) : trackBody.filter(l => l.part === 'head').map(drawTrack)}
+            {trackOpen && trackMore.length ? <Button key="mm-track-more" plain label={`${MORE}  ${moreOpen ? '▾' : '▸'}`} onPress={() => void toggleFold($, 'more')} /> : null}
+            {trackOpen && moreOpen ? trackMore.map((l, n) => drawTrack(l, trackBody.length + n)) : null}
+          </Box>
+        ) : null}
+        {updated ? (
           <Box marginTop={1}>
-            <Text dimColor>{queue.note}</Text>
+            <Text dimColor>{updated}</Text>
           </Box>
         ) : null}
       </Box>
