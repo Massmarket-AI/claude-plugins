@@ -20,8 +20,8 @@ import { businessMsBetween } from './business-time'
 import type { MmRow } from '../types'
 
 import {
-  MAY_NEED_OK, NOBODY, checkingTitle, cleanText, cleanTitle, clockText, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, noThreadTitle, openAsks,
-  pinsNow, queueLine, queueMore, queueTotal, queuedOf, shownQueue, skillFor, stillOpenTitle, titleFor, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
+  MAY_NEED_OK, NOBODY, checkingTitle, cleanText, cleanTitle, clockText, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
+  pinsNow, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownQueue, shownText, skillFor, stillOpenTitle, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
 } from './queue'
 import type { AskRef, FeedThread, QueueItem } from './queue'
 
@@ -612,6 +612,42 @@ export function waitingText(it: QueueItem): string {
 }
 
 /**
+ * (0.7.5, the panel redesign; spec 2026-10-27: "A second line appears only when it adds something the first lacks (for
+ * example '2 drafts not sent'); never repeat the status") A row's second line: what is waiting that its first line
+ * (`rowLine`) does not say, '' when nothing does. Never the internal queue (its own part, `Your build queue`), and never
+ * the action or its reason: the row's button says what it does.
+ */
+export function rowExtra(it: QueueItem): string {
+  const o = it.open ?? null
+  const parts: string[] = []
+  // the founder's OK given, who sends it
+  if (it.kind === 'ok' && !it.theirs) parts.push(`${(it.ok ?? null)?.sends ?? NOBODY} sends`)
+  // one client message where the first line names no reply or draft for it (two or more: its `N new`)
+  const forMail = it.kind === 'reply' || it.kind === 'ready' || it.kind === 'ok' || o?.state === 'held_by_me'
+  if (it.messages === 1 && !forMail) parts.push('1 message waiting')
+  // the tasks as what they are, unless the first line's `task` or `ETA needed` is the one there is
+  const eta = etaAsksOf(it).length
+  const nodate = undatedCount(it)
+  const dated = it.tasks - eta - nodate
+  if (!(it.kind === 'task' && it.tasks === 1)) {
+    if (dated > 0) parts.push(`${dated} task${dated > 1 ? 's' : ''} due`)
+    if (eta > 0) parts.push(`${eta} need${eta > 1 ? '' : 's'} an ETA`)
+    if (nodate > 0) parts.push(`${nodate} task${nodate > 1 ? 's' : ''} with no date`)
+  }
+  // the drafts, where the first line does not say them (`your draft`, `reply ready`, `with <Name>`)
+  if (o?.state === 'held_by_me' && o.unsent > 0) parts.push(`${o.unsent} draft${o.unsent === 1 ? '' : 's'} not sent`)
+  else if (o?.state === 'stale') parts.push('drafts out of date')
+  else if (o && o.state !== 'held_by_me' && o.state !== 'held_by_other' && it.kind !== 'ready' && it.kind !== 'ok') parts.push('drafts ready')
+  // the viewer's open asks, past the one the first line names
+  const asks = openAsks(it).length
+  if (asks && !(it.kind === 'ask' && asks === 1)) parts.push(`${asks} internal ask${asks > 1 ? 's' : ''}`)
+  // (for the founder) his teammates' late internal tickets
+  const m = matesOf(it)
+  if (m.length) parts.push(`${m.length} late with ${whoseLate(m)}`)
+  return parts.join(' · ')
+}
+
+/**
  * (0.7.4, ETA asks; Rob, 2026-10-27: "Team members need to provide ETAs ... They need to provide an ETA in 24 hours to me or
  * to the system") The paragraph a kickoff and an Update carry for the viewer's tickets that owe an ETA: how to record one
  * (task-chip-flow §5.3, `eta-commit` with the ticket's fingerprint), then each ticket with its full id and when its ETA
@@ -1039,11 +1075,16 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: Ro
   // R8: the check of our reply left items open, and the client has a thread to claim them in
   const fast = withMate ? null : fastState(it, now)
   const still = fast?.state === 'still_open' && rec.target && !rec.target.suggested ? fast : null
-  // R4: on the Needs-you list, no thread of any kind, and due within the pin's window
-  const noThread = !withMate && opts.needsYou === true && rec.fresh === true && pinsNow(it, now)
+  // on the Needs-you list with no thread of any kind: ` · no thread`, and (R4) red when it is due within the pin's window
+  const fresh = !withMate && opts.needsYou === true && rec.fresh === true
   // R8: the server is checking our reply: the row is named as its thread is
   const checking = !withMate && fast?.state === 'checking' ? fast : null
-  const title = checking ? checkingTitle(it.client, checking.at, now) : noThread ? noThreadTitle(it, now) : still ? stillOpenTitle(it.client) : titleFor(it, now)
+  // (0.7.5, the panel redesign) ONE line: the chip, the client, what is needed, the time left (`rowLine`)
+  const title = checking ? checkingTitle(it.client, checking.at, now) : still ? stillOpenTitle(it.client) : rowLine(it, now, { fresh, pins: fresh && pinsNow(it, now) })
+  // (0.7.5) and a second line only for what the first does not say (never for a row not the viewer's: its note says it),
+  // with the one reason a button does not carry: Update would go to a thread whose title only looks like the client
+  const guess = rec.target?.suggested ? rec.reason : ''
+  const extra = withMate || still || checking ? '' : [rowExtra(it), guess].filter(Boolean).join(' · ')
   // (the founder) a package flagged for his OK that a teammate has, theirs to decide until its reply is due:
   // the row's sentence is followed by Opus's words, R2. A row with no sentence (a prepared package) gets no
   // line of them alone: its title and waiting text already say it (Opus, 10-13).
@@ -1056,6 +1097,7 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: Ro
     // the thread this row's button acts on: a press acts on this one or on none
     ...(rec.target ? { target: rec.target.sid } : {}),
     ...(note ? { note } : {}),
+    ...(extra ? { extra } : {}),
     // (the founder's alone, 0.5.1) a teammate's to see through: no action, with a sentence or without one
     ...(withMate && it.theirs ? { theirs: true } : {}),
     // R8: what is still open, drawn under the row, and its one action, Claim in this thread ((0.5.11, Opus 10-15)
@@ -1085,18 +1127,16 @@ export function rowButtons(row: Row): RowButton[] {
 }
 
 /**
- * The second line of a row: what is waiting, then the action and its reason, or when the thread was updated. A row with no action: what is waiting.
- * `here` (0.5.5): the thread drawing the pane. A reason that says "this thread" says so only there: anywhere else it names the client's thread.
+ * The second line of a row, '' for none. (0.7.5, the panel redesign; spec 2026-10-27: "Each row is ONE line ... A second
+ * line appears only when it adds something the first lacks ... never repeat the status") What is waiting that the
+ * row's first line does not say (`extra`), and never the action or its reason: the row's button says what it does. A
+ * row not the viewer's (its `note` says whose it is) and a row with items still open (drawn under it) have none.
  */
-export function rowDetail(row: Row, here?: string): string {
-  if (notMine(row) || isStillOpenRow(row)) return row.waiting
-  const state = rowState(row)
-  const reason = row.reason === UPDATED_HERE && !isHere(row, here) ? `new since ${row.client}'s thread was updated` : row.reason
-  return state === 'current' ? `${row.waiting} · ${reason}` : `${row.waiting} · ${LABEL[state]}: ${reason}`
+export function rowDetail(row: Row): string {
+  if (notMine(row) || isStillOpenRow(row)) return ''
+  return typeof row.extra === 'string' ? row.extra : ''
 }
 
-/** The reason recommend gives a thread that was updated before and has something newer since. */
-const UPDATED_HERE = 'new since this thread was updated'
 /** (0.5.5) Whether the thread a row acts on is the thread drawing the pane. */
 const isHere = (row: Row, here: string | undefined): boolean => Boolean(here) && row.target === here
 /** (0.5.5) The most characters of a button's label. */
@@ -1144,47 +1184,95 @@ export function rowGroups(rows: readonly Row[]): Array<{ heading: string; rows: 
   ].filter(g => g.rows.length > 0)
 }
 
-export type Fold = 'checking' | 'teammate' | 'older'
+export type Fold = 'checking' | 'teammate' | 'older' | 'undated'
 
 /** The groups under the list as a pane holds them. */
-export type Folds = { checking?: readonly Row[]; teammate?: readonly Row[]; older?: readonly Row[] }
+export type Folds = { checking?: readonly Row[]; teammate?: readonly Row[]; older?: readonly Row[]; undated?: readonly Row[] }
 
 /**
  * The groups under the list, in the order they are drawn: (0.5.2, R8, Opus decision 2) `Checking your reply
- * (n)`, then `With a teammate (n)`, then `Older (n)`. Each is closed until the person opens it, and one with
- * nobody in it is not drawn. Their rows are numbered on from the list's. Nobody in them is pinned, and the
- * header does not count them.
+ * (n)`, then `With a teammate (n)`, then `Older (n)`, then (0.7.5) `No due date (n)`: the viewer's own clients listed by
+ * undated tickets alone. Each is closed until the person opens it, and one with nobody in it is not drawn. (0.7.5) Their
+ * headings are drawn on one line, each its own button (`New people` first, where there is anyone). Their rows are
+ * numbered on from the list's. Nobody in them is pinned, and the header does not count them.
  */
 export function foldGroups(queue: { rows: readonly Row[] } & Folds): Array<{ key: Fold; heading: string; rows: Array<{ row: Row; n: number }> }> {
   const checking = Array.isArray(queue.checking) ? queue.checking : []
   const teammate = Array.isArray(queue.teammate) ? queue.teammate : []
   const older = Array.isArray(queue.older) ? queue.older : []
+  const undated = Array.isArray(queue.undated) ? queue.undated : []
   const numbered = (group: readonly Row[], from: number) => group.map((row, i) => ({ row, n: from + i + 1 }))
   const groups: Array<{ key: Fold; heading: string; rows: Array<{ row: Row; n: number }> }> = [
     { key: 'checking', heading: `Checking your reply (${checking.length})`, rows: numbered(checking, queue.rows.length) },
     { key: 'teammate', heading: `With a teammate (${teammate.length})`, rows: numbered(teammate, queue.rows.length + checking.length) },
     { key: 'older', heading: `Older (${older.length})`, rows: numbered(older, queue.rows.length + checking.length + teammate.length) },
+    { key: 'undated', heading: `No due date (${undated.length})`, rows: numbered(undated, queue.rows.length + checking.length + teammate.length + older.length) },
   ]
   return groups.filter(g => g.rows.length > 0)
 }
+
+/** (0.7.5) How many tickets of the internal queue `Your build queue` lists in the pane; the linked thread's update keeps its top 10. */
+export const BUILD_SHOWN = 3
+/** (0.7.5) The most characters of a ticket's title there: one line of the pane. */
+export const BUILD_TITLE_MAX = 72
+
+/** (0.7.5) The pane's part for the viewer's internal queue, as it holds it (`MmBuild`). */
+export type Build = { total: number; top: readonly string[]; row: Row; late?: string }
+
+/**
+ * (0.7.5, spec 2026-10-27: "'Your build queue · N' follows, only for a viewer with internal tickets ... The panel shows the
+ * top 3, then '+ N more in your Massmarket AI thread'") The part for the internal-ops item that lists the viewer's internal
+ * queue: its total, its top tickets' titles in rank order (one line each), and its row (the button opens its linked
+ * thread). For the founder, his teammates' late internal tickets that rode along on that item's row (0.7.4) ride along
+ * here: `9 late with Has9 and 2 more`. Undefined for an item with no queue.
+ */
+export function buildOf(it: QueueItem, row: Row): Build | undefined {
+  const shown = shownQueue(it)
+  if (!shown.length) return undefined
+  const m = matesOf(it)
+  const late = m.length ? `${m.length} late with ${whoseLate(m)}` : ''
+  return { total: queueTotal(it), top: shown.slice(0, BUILD_SHOWN).map(q => shownText(q.title, BUILD_TITLE_MAX)), row, ...(late ? { late } : {}) }
+}
+
+/** (0.7.5) The heading of `Your build queue`, and what its last line says of the tickets it does not list. */
+export const buildHeading = (b: Pick<Build, 'total'>): string => `Your build queue · ${b.total}`
+
+export function buildMore(b: Build): string {
+  const more = b.total - b.top.length
+  if (more <= 0) return ''
+  return b.row.target ? `+ ${more} more in your ${b.row.client} thread` : `+ ${more} more in the queue`
+}
+
+/** (0.7.5) Whether the part is drawn in the thread `here`: never in the thread it points at, where the client part above lists the queue already. */
+export const buildShown = (b: Build | undefined, here: string | undefined): b is Build => Boolean(b) && !(here && b?.row.target === here)
 
 /**
  * The pane as plain text, one line per thing drawn: for tests and for a surface that draws no buttons. `folds` are the groups under the list, each drawn open.
  * `here` (0.5.5): the thread drawing it, as for `rowDetail` and `buttonLabel`.
  */
-export function paneText(rows: readonly Row[], header: string, note: string, folds: Folds = {}, here?: string): string {
+export function paneText(rows: readonly Row[], header: string, note: string, folds: Folds & { build?: Build } = {}, here?: string): string {
   const out = [header]
   const draw = (row: Row, lead: string): void => {
-    out.push('', `${lead} ${row.title}`, `   ${rowDetail(row, here)}`)
+    out.push(`${lead} ${row.title}`)
+    const detail = rowDetail(row)
+    if (detail) out.push(`   ${detail}`)
     if (row.note) out.push(`   ${row.note}`)
     for (const item of isStillOpenRow(row) ? (row.stillOpen as string[]) : []) out.push(`   - ${item}`)
     out.push(`   ${rowButtons(row).map(b => `[ ${buttonLabel(b, row, here)} ]`).join(' ')}`)
   }
-  for (const group of rowGroups(rows)) {
-    out.push('', group.heading)
-    for (const { row, n, mark } of group.rows) draw(row, `${mark}${n}.`)
+  // (0.7.5) one list, the clients with no thread yet first and marked
+  for (const group of rowGroups(rows)) for (const { row, n, mark } of group.rows) draw(row, `${mark}${n}.`)
+  if (buildShown(folds.build, here)) {
+    const b = folds.build
+    out.push('', buildHeading(b), ...b.top.map((t, i) => ` ${i + 1}. ${t}`))
+    const more = buildMore(b)
+    if (more) out.push(` ${more}`)
+    if (b.late) out.push(` ${b.late}`)
+    if (b.row.target) out.push(`   [ ${LABEL.open} ]`)
   }
-  for (const group of foldGroups({ rows, ...folds })) {
+  const groups = foldGroups({ rows, ...folds })
+  if (groups.length) out.push('', groups.map(g => g.heading).join(' · '))
+  for (const group of groups) {
     out.push('', group.heading)
     for (const { row, n } of group.rows) draw(row, `${n}.`)
   }

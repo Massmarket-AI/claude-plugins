@@ -1679,6 +1679,34 @@ export function titleFor(it: QueueItem, now: number): string {
 }
 
 /**
+ * (0.7.5, the panel redesign; Rob, 2026-10-27: "queue first, one merged time list, plain numbers") A row of the pane in
+ * ONE line: the chip, the client, what is needed, then the time left: `🔴 ReGen Society · your OK · 1d late`, and after
+ * it what else the thread's name says (`3 new`, `with <Name>`, `flagged`). A client whose drafts a teammate holds and
+ * that is not the viewer's: no clock, `with <Name>`. Nothing due: no clock (R17). `fresh`: the client has no thread at
+ * all (` · no thread` last), red when it pins now (R4).
+ */
+export function rowLine(it: QueueItem, now: number, opts: { fresh?: boolean; pins?: boolean } = {}): string {
+  const theirs = withTeammate(it)
+  const due = !theirs && hasDue(it)
+  const what = whatOf(it)
+  const red = opts.pins === true || (due && isRed(it, now))
+  const parts = [`${red ? '🔴' : '🟡'} ${it.client}`, what === 'needs your OK' ? 'your OK' : what]
+  if (due) parts.push(clockLead(it.dueAt, now))
+  if (it.messages > 1) parts.push(`${it.messages} new`)
+  if (theirs) parts.push(`with ${it.theirs ?? it.open?.by ?? ''}`)
+  else if (it.open?.state === 'held_by_other') parts.push(`with ${it.open.by}`)
+  if (it.flagged) parts.push('flagged')
+  if (opts.fresh) parts.push('no thread')
+  return parts.join(' · ')
+}
+
+/**
+ * (0.7.5) Whether a client of the viewer's own list is drawn under `Needs you now`: not one listed by the internal queue
+ * alone (its own part, `Your build queue`), and not one listed by undated tickets alone (`No due date`, under the list).
+ */
+export const needsYouNow = (it: QueueItem): boolean => it.kind !== 'queue' && !undatedOnly(it)
+
+/**
  * For a client whose drafts a teammate holds: who has them, how many are not sent, and to ask before
  * writing a second reply (0.4.1's own sentence, as the client's pane ends with it). '' for any other client.
  */

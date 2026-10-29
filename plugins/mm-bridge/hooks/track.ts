@@ -478,15 +478,19 @@ export type TrackInput = {
   openable?: (sessionId: string) => string | undefined
 }
 
-/** (0.6.0, verbatim) What the dim explanation under the numbers says. */
+/**
+ * (0.7.5, the panel redesign; spec 2026-10-27: "plain numbers") What the dim explanation behind More says: the 0.6.0
+ * note in the new words (`your time`, `thread time`).
+ */
 export const numbersNote = (client: string): string =>
-  `Tracked counts each minute once per person. In threads counts every thread in full. Parallel is the second divided by the first. Jarvis is work done for ${client} with nobody in the thread.`
+  `Your time counts each minute once per person. Thread time counts every thread in full, so two threads at once count twice. Parallel is thread time divided by your time. Jarvis is work done for ${client} with nobody in the thread.`
 
 export const NOT_AVAILABLE = 'Time numbers are not available yet.'
 export const CHECKING_TIME = 'Checking…'
 export const COULD_NOT_REFRESH = ' · could not refresh; showing the last numbers'
 
-const threads = (n: number): string => `${n} thread${n === 1 ? '' : 's'}`
+/** (0.7.5) The label of the press that opens the Tracking part's further numbers. */
+export const MORE = 'More'
 
 /** This thread's minutes today, and whether its session is in the numbers at all. */
 export function thisThread(p: TimeProject | undefined, mine: (sid: string) => boolean): { minutes: number; counted: boolean } {
@@ -494,40 +498,68 @@ export function thisThread(p: TimeProject | undefined, mine: (sid: string) => bo
   return { minutes: rows.reduce((sum, t) => sum + t.minutes_today, 0), counted: rows.length > 0 }
 }
 
-function numbersLine(label: string, p: TimePeriod): string {
-  const parallel = p.parallel === null ? '' : ` · parallel ${fmtX(p.parallel)}×`
-  return `${label}: ${fmtHours(p.client_minutes)} h tracked · ${fmtHours(p.thread_minutes)} h in threads${parallel} · Jarvis ${fmtHours(p.jarvis_minutes)} h`
-}
+/** (0.7.5) A period's numbers in plain words: `Today: 2.5 h of your time · 3.4 h of thread time`. */
+export const plainNumbers = (label: string, p: TimePeriod): string => `${label}: ${fmtHours(p.client_minutes)} h of your time · ${fmtHours(p.thread_minutes)} h of thread time`
+
+/** (0.7.5) The key a task of the time list opens and closes by (`MmTrackLine.toggle`): its label, or none. */
+export const taskKey = (task: Pick<TimeTask, 'task'>): string => `task:${task.task ?? ''}`
+
+/** (0.7.5) Today's threads that worked on a task: the threads whose declared task is the task's own (none for none). */
+const threadsOf = (p: TimeProject, task: Pick<TimeTask, 'task'>): TimeThread[] => p.threads.filter(th => (th.task ?? null) === (task.task ?? null))
 
 /**
- * (0.6.0) The Tracking part of the pane, line by line, in the words of the spec (2026-10-25, verbatim labels): the
- * heading, this thread and the client today, the tasks today, the threads today, the numbers, and when they are from.
+ * The Tracking part of the pane, line by line. (0.7.5, the panel redesign; Rob, 2026-10-27: "queue first, one merged time
+ * list, plain numbers") It is drawn at the bottom of the pane, closed to its first line (`part: 'head'`): `⏱ This thread:
+ * <client> · <task> · <minutes> today`, or `not counted yet` when this thread is not in the numbers yet. Opened: what this
+ * thread's minutes count toward (0.7.0), one numbers line in plain words, and ONE time list by task (task, minutes,
+ * people, and how many threads when more than one): a task with one other thread opens it on a press, one with several
+ * opens to its threads (`toggle`, `under`). The lines that took minutes and the new scope proposed (0.7.0) follow. This
+ * week, parallel, Jarvis, leverage and the explanation are behind More (`part: 'more'`). No clock of its own: the pane's
+ * one `Updated` line says when, and a read that failed says when its numbers are from.
  */
 export function trackLines(t: TrackInput): MmTrackLine[] {
   const out: MmTrackLine[] = []
-  out.push({ text: `Tracking to ${t.client} · ${t.task ? t.task : 'no task declared yet'}`, bold: true })
   const rec = t.time
   const p = rec?.p
   const day = p?.today
+  const declared = t.task ? t.task : 'no task declared yet'
   if (!p || !day) {
+    out.push({ text: `⏱ This thread: ${t.client} · ${declared}`, part: 'head' })
     out.push({ text: rec?.skipped || rec?.failedAt || t.missing ? NOT_AVAILABLE : CHECKING_TIME, dim: true })
     return out
   }
-  // (0.7.0) what this thread's minutes count toward, under the heading; nothing from an OW that does not say
+  const here = thisThread(p, t.mine)
+  out.push({ text: `⏱ This thread: ${t.client} · ${declared} · ${here.counted ? `${fmtMin(here.minutes)} today` : 'not counted yet'}`, part: 'head' })
+  // (0.7.0) what this thread's minutes count toward; nothing from an OW that does not say
   const line = lineOfThread(p, t.mine)?.line
   if (line) out.push({ text: countsToward(line, p, t.client) })
-  const here = thisThread(p, t.mine)
-  const today = `${t.client} today: ${fmtMin(day.client_minutes)} tracked across ${threads(p.threads.length)}`
-  out.push({ text: here.counted ? `This thread: ${fmtMin(here.minutes)} today · ${today}` : `This thread: not in the numbers yet (they refresh every 5 minutes) · ${today}`, dim: true })
+  out.push({ text: plainNumbers('Today', day) })
 
-  out.push({ text: 'Tasks today', bold: true })
   if (!day.tasks.length) out.push({ text: `Nothing tracked to ${t.client} yet today.`, dim: true })
   const names = new Map(day.people.map(x => [x.email.toLowerCase(), x.name]))
   for (const task of day.tasks) {
     const who = task.people.map(e => firstName(names.get(e.toLowerCase()) ?? '', e)).join(', ')
     // (0.7.0) the line the task counts toward, when it is one of the project's lines
     const onLine = task.line_key ? lineByKey(p, task.line_key) : undefined
-    out.push({ text: `${task.active_now ? '● ' : '  '}${task.task ?? 'No task declared'} · ${fmtMin(task.minutes)}${who ? ` · ${who}` : ''}${onLine ? ` → ${shownText(onLine.title, 28)}` : ''}` })
+    const threads = threadsOf(p, task)
+    const count = Math.max(task.thread_count, threads.length)
+    const text = `${task.task ?? 'No task declared'} · ${fmtMin(task.minutes)}${who ? ` · ${who}` : ''}${count > 1 ? ` · ${count} threads` : ''}${onLine ? ` → ${shownText(onLine.title, 28)}` : ''}`
+    if (threads.length > 1) {
+      const key = taskKey(task)
+      out.push({ text, toggle: key })
+      for (const th of threads) {
+        const mine = t.mine(th.session_id)
+        const name = th.member_name || (th.member_email.split('@')[0] ?? '') || 'someone'
+        const row = `${th.title ?? 'Untitled thread'} · ${name} · ${fmtMin(th.minutes_today)}${mine ? ' (this thread)' : ''}`
+        const open = mine ? undefined : t.openable?.(th.session_id)
+        out.push(open ? { text: row, under: key, open } : { text: row, under: key })
+      }
+      continue
+    }
+    const only = threads[0]
+    const mine = only ? t.mine(only.session_id) : false
+    const open = only && !mine ? t.openable?.(only.session_id) : undefined
+    out.push(open ? { text, open } : { text: mine ? `${text} (this thread)` : text })
   }
 
   // (0.7.0) the lines that took minutes today (those the viewer may see), then the new lines proposed
@@ -540,33 +572,29 @@ export function trackLines(t: TrackInput): MmTrackLine[] {
     for (const pr of proposed) out.push({ text: goesAhead(pr.mode) ? `New scope: ${pr.title} · told in the next reply` : `Proposed: ${pr.title} · waiting for yes` })
   }
 
-  if (p.threads.length) {
-    out.push({ text: 'Threads today', bold: true })
-    for (const th of p.threads) {
-      const mine = t.mine(th.session_id)
-      const name = th.member_name || (th.member_email.split('@')[0] ?? '') || 'someone'
-      const row = `${th.active_now ? '● ' : '  '}${th.title ?? 'Untitled thread'}  ${name} · ${th.task ?? 'no task'} · ${fmtMin(th.minutes_today)}${mine ? ' (this thread)' : ''}`
-      const open = mine ? undefined : t.openable?.(th.session_id)
-      out.push(open ? { text: row, open } : { text: row })
-    }
-  }
+  if (Number(rec?.failedAt) > (Number(rec?.at) || 0)) out.push({ text: `Could not refresh; these numbers are from ${localClock(timeAsOf(rec))}.`, dim: true })
 
-  out.push({ text: 'Numbers', bold: true })
-  out.push({ text: numbersLine('Today', day) })
-  // a week never read yet is not loaded: no line, never zeros
-  if (p.week) out.push({ text: numbersLine('This week', p.week) })
+  // behind More: the week (a week never read yet is not loaded: no line, never zeros), parallel, Jarvis, leverage, the note
+  const week = p.week
+  if (week) out.push({ text: plainNumbers('This week', week), part: 'more' })
+  if (day.parallel !== null || (week && week.parallel !== null)) {
+    const parts = [day.parallel !== null ? `${fmtX(day.parallel)}× today` : '', week && week.parallel !== null ? `${fmtX(week.parallel)}× this week` : ''].filter(Boolean)
+    out.push({ text: `Parallel: ${parts.join(' · ')}`, part: 'more' })
+  }
+  out.push({ text: `Jarvis: ${fmtHours(day.jarvis_minutes)} h today${week ? ` · ${fmtHours(week.jarvis_minutes)} h this week` : ''}`, part: 'more' })
   const lev = p.leverage
   if (t.canSeeLeverage && lev) {
-    if (lev.ratio !== null) out.push({ text: `Leverage: ${fmtX(lev.ratio)}× (${fmtH(lev.build_hours)} quoted hours done in ${fmtH(lev.actual_hours)} h, last 20 business days)` })
-    else if (lev.note) out.push({ text: `Leverage: ${lev.note}` })
+    if (lev.ratio !== null) out.push({ text: `Leverage: ${fmtX(lev.ratio)}× (${fmtH(lev.build_hours)} quoted hours done in ${fmtH(lev.actual_hours)} h, last 20 business days)`, part: 'more' })
+    else if (lev.note) out.push({ text: `Leverage: ${lev.note}`, part: 'more' })
   }
-  out.push({ text: numbersNote(t.client), dim: true })
-
-  const asOf = Date.parse(rec?.asOf ?? '')
-  const when = Number.isFinite(asOf) ? asOf : Number(rec?.at) || 0
-  const failed = Number(rec?.failedAt) > (Number(rec?.at) || 0)
-  out.push({ text: `As of ${localClock(when)}${failed ? COULD_NOT_REFRESH : ''}`, dim: true })
+  out.push({ text: numbersNote(t.client), dim: true, part: 'more' })
   return out
+}
+
+/** (0.7.5) When a record's numbers are from (ms), for the pane's one `Updated` line; 0 when it has none. */
+export function timeAsOf(rec: TimeRecord | undefined): number {
+  const asOf = Date.parse(rec?.asOf ?? '')
+  return Number.isFinite(asOf) ? asOf : Number(rec?.at) || 0
 }
 
 /**

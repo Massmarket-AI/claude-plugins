@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { buildLists, buildQueue, openAsks, threadTitleShort } from './queue'
+import { buildLists, buildQueue, openAsks, threadTitleShort, titleFor } from './queue'
 import type { AskRef, Feed, FeedAsk, FeedLastPackage, FeedQueueTicket, FeedThread, QueueItem } from './queue'
 import {
-  AUTO_NO_DRAFTS_MS, AUTO_QUIET_MS, LABEL, NEW_MARK, OLD_THREAD_MS, OPENERS, PANE_SENTENCE, THREAD_ID,
+  AUTO_NO_DRAFTS_MS, AUTO_QUIET_MS, LABEL, NEW_MARK, OLD_THREAD_MS, OPENERS, THREAD_ID,
   asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, ownPackage, seenNow,
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLink, titleLooksLike, titleSuggestion, waitingText,
@@ -399,7 +399,8 @@ describe('R5: the kickoff and the row for a package that is not simply ready', (
     )
     expect(waitingText(since)).toBe('1 message waiting, 1 draft not sent')
     expect(kickoffText(since, { update: true }).split('\n')[0]).toBe('New since this thread last worked on this client: 1 message waiting, 1 draft not sent.')
-    expect(rowFor(since, recommend([], undefined, NOW), NOW)).toMatchObject({ title: '🟡 21h left · Acme Roofing · your draft', waiting: '1 message waiting, 1 draft not sent' })
+    // (0.7.5) the row in one line, and the drafts not sent on its second
+    expect(rowFor(since, recommend([], undefined, NOW), NOW)).toMatchObject({ title: '🟡 Acme Roofing · your draft · 21h left', waiting: '1 message waiting, 1 draft not sent', extra: '1 draft not sent' })
   })
 
   test('a package a teammate picked up: show what is waiting, run no prep, draft no second reply', async () => {
@@ -409,7 +410,8 @@ describe('R5: the kickoff and the row for a package that is not simply ready', (
       `[mm-link ${BOLT}] Bolt Staffing (Sam) (OW project ${BOLT}): J Smith picked up the reply drafts (package aaaaaaaa) and has 1 not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`,
     )
     expect(waitingText(it)).toBe('2 messages waiting, drafts with J Smith')
-    expect(rowFor(it, recommend([], undefined, NOW), NOW)).toMatchObject({ title: '🟡 with J Smith · Bolt Staffing · reply · 2 new', waiting: '2 messages waiting, drafts with J Smith' })
+    // (0.7.5) the row in one line: who holds the drafts after what the thread's name says
+    expect(rowFor(it, recommend([], undefined, NOW), NOW)).toMatchObject({ title: '🟡 Bolt Staffing · reply · 2 new · with J Smith', waiting: '2 messages waiting, drafts with J Smith' })
   })
 
   test('the holder\'s address is feed text: only a cleaned name reaches the kickoff, on one line, with one marker', async () => {
@@ -491,38 +493,30 @@ describe('R3 and R8: the rows of the Needs-you pane', () => {
 
   test('what is waiting, as the row shows it, then the action and why, or when the thread was updated', async () => {
     expect([waitingText(item(ACME)), waitingText(item(BOLT)), waitingText(item(CEDAR))]).toEqual(['drafts ready', '2 messages waiting', '1 task due'])
-    expect(rowDetail(update)).toBe('drafts ready · Update thread: thread from Fri, Oct 9 exists')
-    expect(rowDetail(stale)).toBe('1 task due · Start thread: last thread is from Sep 22')
-    expect(rowDetail(current)).toBe('drafts ready · Thread updated 9:30 AM')
+    // (0.7.5) the second line is only what the first lacks: the action and its reason are not drawn (the button says it), the row still carries them
+    expect([rowDetail(update), rowDetail(stale), rowDetail(current)]).toEqual(['', '', ''])
+    expect([update.reason, stale.reason, current.reason]).toEqual(['thread from Fri, Oct 9 exists', 'last thread is from Sep 22', 'Thread updated 9:30 AM'])
+    // the one reason a button does not carry: the thread Update goes to only looks like the client by its title
+    expect(rowDetail(suggested)).toBe('"Bolt Staffing invoice question" looks like this client')
   })
 
   test('the pane for one row in each state, and a title suggestion', async () => {
-    const text = paneText([start, update, current, suggested], 'Needs you now (4)', `Updated 15:00 UTC for ${ME}. ${PANE_SENTENCE}`)
+    // (0.7.5) one flat list, a row one line (a second only for what the first lacks), and one `Updated` line in the person's clock
+    const text = paneText([start, update, current, suggested], 'Needs you now (4)', 'Updated 11:00 AM')
     expect(text).toBe(
       [
         'Needs you now (4)',
-        '',
-        'New: no thread yet (1)',
-        '',
-        '◆ 1. 🔴 5h left · Cedar Dental · task',
-        '   1 task due · Start thread: no thread yet',
+        '◆ 1. 🔴 Cedar Dental · task · 5h left',
         '   [ Start thread ] [ Drafts ]',
-        '',
-        'In a thread (3)',
-        '',
-        '2. 🟡 21h left · Acme Roofing · reply ready',
-        '   drafts ready · Update thread: thread from Fri, Oct 9 exists',
+        '2. 🟡 Acme Roofing · reply ready · 21h left',
         '   [ Update thread ] [ Drafts ]',
-        '',
-        '3. 🟡 21h left · Acme Roofing · reply ready',
-        '   drafts ready · Thread updated 9:30 AM',
+        '3. 🟡 Acme Roofing · reply ready · 21h left',
         '   [ Open thread ] [ Drafts ]',
-        '',
-        '4. 🟡 22h left · Bolt Staffing · reply · 2 new',
-        '   2 messages waiting · Update thread: "Bolt Staffing invoice question" looks like this client',
+        '4. 🟡 Bolt Staffing · reply · 22h left · 2 new',
+        '   "Bolt Staffing invoice question" looks like this client',
         '   [ Update thread ] [ Drafts ]',
         '',
-        'Updated 15:00 UTC for builder-a@example.com. Pins: overdue (anything still open since Wed Oct 14), or due within the next 24 business hours. Weekends do not count. Threads for these clients link themselves; use Update or Start on a row to pick one up.',
+        'Updated 11:00 AM',
       ].join('\n'),
     )
   })
@@ -614,7 +608,9 @@ describe('(0.5.11) a long thread is not replaced: Claude Code compacts it', () =
     expect(recommend([thread], undefined, NOW, { sent, signature: sig }).state).toBe('current')
     const row = rowFor(item(ACME), recommend([thread], undefined, NOW), NOW)
     expect(rowButtons(row)).toEqual(['update', 'drafts'])
-    expect(rowDetail(row)).toBe('drafts ready · Update thread: thread from Fri, Oct 9 exists')
+    // (0.7.5) the reason is the row's, not drawn: the row is one line
+    expect(row.reason).toBe('thread from Fri, Oct 9 exists')
+    expect(rowDetail(row)).toBe('')
     // an old thread is still Start, for being old
     expect(recommend([known('local_old', 'Intake', '2026-09-22 10:00')], undefined, NOW)).toMatchObject({ state: 'start', reason: 'last thread is from Sep 22' })
   })
@@ -991,9 +987,10 @@ describe('a package the person picked up, in the thread that was given it: nothi
 })
 
 describe('the two groups under the list: With a teammate, then Older', () => {
-  const row = (client: string, over: Partial<ReturnType<typeof rowFor>> = {}) => ({ ...rowFor(item(CEDAR), recommend([], undefined, NOW), NOW), client, title: `🟡 2h left · ${client} · task`, ...over })
-  const theirs = row('Dune Freight', { title: '🟡 with J Smith · Dune Freight · reply', waiting: '1 message waiting, drafts with J Smith', note: 'J Smith picked up the reply drafts for this client and has 1 draft not sent yet. Ask J Smith before writing a second reply.' })
-  const old = row('Elm Travel', { title: '🔴 5d late · Elm Travel · reply', waiting: '1 message waiting', state: 'update', reason: 'thread from Fri, Oct 9 exists', fresh: false, target: 'local_e' })
+  // (0.7.5) the rows' one-line titles, as rowLine draws them
+  const row = (client: string, over: Partial<ReturnType<typeof rowFor>> = {}) => ({ ...rowFor(item(CEDAR), recommend([], undefined, NOW), NOW), client, title: `🟡 ${client} · task · 2h left`, ...over })
+  const theirs = row('Dune Freight', { title: '🟡 Dune Freight · reply · with J Smith', waiting: '1 message waiting, drafts with J Smith', note: 'J Smith picked up the reply drafts for this client and has 1 draft not sent yet. Ask J Smith before writing a second reply.' })
+  const old = row('Elm Travel', { title: '🔴 Elm Travel · reply · 5d late', waiting: '1 message waiting', state: 'update', reason: 'thread from Fri, Oct 9 exists', fresh: false, target: 'local_e' })
 
   test('in that order, numbered on from the list, and one with nobody in it is not drawn', async () => {
     const rows = [row('Cedar Dental'), row('Acme Roofing')]
@@ -1007,29 +1004,26 @@ describe('the two groups under the list: With a teammate, then Older', () => {
 
   test('a row under With a teammate: who has the drafts, the sentence, and Drafts alone; a row under Older keeps its one action', async () => {
     expect(rowButtons(theirs)).toEqual(['drafts'])
-    expect(rowDetail(theirs)).toBe('1 message waiting, drafts with J Smith')
+    // (0.7.5) who has the drafts is in the row's one line, the sentence is its note; no second line repeats them
+    expect(rowDetail(theirs)).toBe('')
     expect(rowButtons(old)).toEqual(['update', 'drafts'])
-    expect(rowDetail(old)).toBe('1 message waiting · Update thread: thread from Fri, Oct 9 exists')
+    // (0.7.5) the action's reason is not drawn: its button says what it does
+    expect(rowDetail(old)).toBe('')
+    // (0.7.5) the groups' headings on one line, then each group as it is opened
     expect(paneText([row('Cedar Dental')], 'Needs you now (1)', 'note', { teammate: [theirs], older: [old] }).split('\n')).toEqual([
       'Needs you now (1)',
-      '',
-      'New: no thread yet (1)',
-      '',
-      '◆ 1. 🟡 2h left · Cedar Dental · task',
-      '   1 task due · Start thread: no thread yet',
+      '◆ 1. 🟡 Cedar Dental · task · 2h left',
       '   [ Start thread ] [ Drafts ]',
       '',
-      'With a teammate (1)',
+      'With a teammate (1) · Older (1)',
       '',
-      '2. 🟡 with J Smith · Dune Freight · reply',
-      '   1 message waiting, drafts with J Smith',
+      'With a teammate (1)',
+      '2. 🟡 Dune Freight · reply · with J Smith',
       '   J Smith picked up the reply drafts for this client and has 1 draft not sent yet. Ask J Smith before writing a second reply.',
       '   [ Drafts ]',
       '',
       'Older (1)',
-      '',
-      '3. 🔴 5d late · Elm Travel · reply',
-      '   1 message waiting · Update thread: thread from Fri, Oct 9 exists',
+      '3. 🔴 Elm Travel · reply · 5d late',
       '   [ Update thread ] [ Drafts ]',
       '',
       'note',
@@ -1040,15 +1034,16 @@ describe('the two groups under the list: With a teammate, then Older', () => {
     const held = { package_id: PKG, project_id: BOLT, project_name: 'Bolt Staffing (Sam)', status: 'picked_up', covers_through: at('2026-10-12 08:00'), drafts_ready: 1, drafts_unsent: 1, picked_up_by: 'j.smith@example.com', picked_up_at: at('2026-10-12 10:30'), project_owner_email: ME }
     const lists = buildLists({ ...FEED, drafts: [held] }, NOW)
     const bolt = lists.teammate.find(i => i.projectId === BOLT) as QueueItem
+    // (0.7.5) the row in one line: who holds the drafts after what the thread's name says
     expect(rowFor(bolt, recommend([], undefined, NOW), NOW)).toMatchObject({
-      title: '🟡 with J Smith · Bolt Staffing · reply · 2 new', waiting: '2 messages waiting, drafts with J Smith',
+      title: '🟡 Bolt Staffing · reply · 2 new · with J Smith', waiting: '2 messages waiting, drafts with J Smith',
       note: 'J Smith picked up the reply drafts for this client (Mon 10:30 AM) and has 1 draft not sent yet. Ask J Smith before writing a second reply.',
     })
     const mine = buildLists({ ...FEED, drafts: [held], tickets: { due_today: [{ ticket_id: 't9', project_id: BOLT, project_name: 'Bolt Staffing (Sam)', title: 'Send the rate card', due_at: at('2026-10-12 16:00'), due_source: 'commitment', assignee_email: ME }] } }, NOW)
     const stays = mine.queue.find(i => i.projectId === BOLT) as QueueItem
     const ordinary = rowFor(stays, recommend([], undefined, NOW), NOW)
     expect(ordinary.note).toBeUndefined()
-    expect(ordinary).toMatchObject({ title: '🔴 5h left · Bolt Staffing · reply · 2 new · with J Smith', waiting: '2 messages waiting, 1 task due, drafts with J Smith' })
+    expect(ordinary).toMatchObject({ title: '🔴 Bolt Staffing · reply · 5h left · 2 new · with J Smith', waiting: '2 messages waiting, 1 task due, drafts with J Smith' })
     expect(rowButtons(ordinary)).toEqual(['start', 'drafts'])
   })
 })
@@ -1093,19 +1088,20 @@ describe('R1 and R2: a row under With a teammate, for the founder', () => {
 
   test('R2, prepared and flagged: no line of its own under the title (title and waiting text say it), Drafts and no action', async () => {
     const row = rowOf(founderFeed([pkgOf()]), 'teammate')
+    // (0.7.5) the row in one line; with no note, nothing under it but Drafts
     expect(row).toMatchObject({
-      title: '🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides', waiting: 'may need your OK · Builder B decides, drafts ready', theirs: true,
+      title: '🟡 Acme Roofing · may need your OK · Builder B decides · with Builder B', waiting: 'may need your OK · Builder B decides, drafts ready', theirs: true,
     })
     expect(row.note).toBeUndefined()
     expect(rowButtons(row)).toEqual(['drafts'])
-    expect(rowDetail(row)).toBe('may need your OK · Builder B decides, drafts ready')
+    expect(rowDetail(row)).toBe('')
   })
 
   test('R2, picked up by a teammate: the row\'s sentence, then " · may need your OK"; the holder decides, whoever owns the client', async () => {
     for (const owner of [SENDS, FOUNDER, null]) {
       const row = rowOf(founderFeed([pkgOf({ status: 'picked_up', picked_up_by: 'j.smith@example.com', picked_up_at: at('2026-10-12 09:30'), project_owner_email: owner })]), 'teammate')
       expect(row.note, String(owner)).toBe('J Smith picked up the reply drafts for this client (Mon 9:30 AM) and has 1 draft not sent yet. Ask J Smith before writing a second reply. · may need your OK')
-      expect(row.title).toBe('🟡 with J Smith · Acme Roofing · may need your OK · J Smith decides')
+      expect(row.title).toBe('🟡 Acme Roofing · may need your OK · J Smith decides · with J Smith')
       expect(row.waiting).toBe('may need your OK · J Smith decides, drafts with J Smith')
       expect(rowButtons(row)).toEqual(['drafts'])
     }
@@ -1116,7 +1112,8 @@ describe('R1 and R2: a row under With a teammate, for the founder', () => {
     const row = rowOf(founderFeed([pkgOf()]), 'queue', due)
     expect(row.note).toBeUndefined()
     expect(row.theirs).toBeUndefined()
-    expect(row.title).toBe('🔴 1h late · Acme Roofing · needs your OK')
+    // (0.7.5) one line: `needs your OK` reads `your OK`, the clock after it
+    expect(row.title).toBe('🔴 Acme Roofing · your OK · 1h late')
     expect(row.waiting).toBe('needs your OK · Builder B sends, drafts ready')
     expect(rowButtons(row)).toEqual(['start', 'drafts'])
   })
@@ -1125,23 +1122,25 @@ describe('R1 and R2: a row under With a teammate, for the founder', () => {
     const mail = [{ message_id_key: 'm1', received_at: at('2026-10-12 10:00'), sender: 'client@example.com', subject: 'Question', snippet: 'hello', project_id: ACME, project_name: 'Acme Roofing — Pat', reply_status: 'unanswered', project_owner_email: SENDS }]
     for (const flagged of [true, false]) {
       const row = rowOf(founderFeed([pkgOf({ status: 'stale', flagged_for_rob: flagged })], mail), 'teammate')
-      expect(row).toMatchObject({ title: '🟡 with Builder B · Acme Roofing · reply', waiting: '1 message waiting, drafts out of date', theirs: true })
+      // (0.7.5) the row in one line; a teammate's row has no second line
+      expect(row).toMatchObject({ title: '🟡 Acme Roofing · reply · with Builder B', waiting: '1 message waiting, drafts out of date', theirs: true })
       expect(row.note).toBeUndefined()
       expect(rowButtons(row)).toEqual(['drafts'])
-      expect(rowDetail(row)).toBe('1 message waiting, drafts out of date')
+      expect(rowDetail(row)).toBe('')
     }
   })
 
   test('the pane draws such a row under With a teammate, numbered on from the list', async () => {
     const l = buildLists(founderFeed([pkgOf()]), NOW)
     const rows = l.teammate.map(it => rowFor(it, recommend([], undefined, NOW), NOW))
+    // (0.7.5) the groups' line of headings, then the group as it is opened; the row in one line
     expect(paneText([], 'Nothing needs you right now.', 'note', { teammate: rows }).split('\n')).toEqual([
       'Nothing needs you right now.',
       '',
       'With a teammate (1)',
       '',
-      '1. 🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides',
-      '   may need your OK · Builder B decides, drafts ready',
+      'With a teammate (1)',
+      '1. 🟡 Acme Roofing · may need your OK · Builder B decides · with Builder B',
       '   [ Drafts ]',
       '',
       'note',
@@ -1149,7 +1148,8 @@ describe('R1 and R2: a row under With a teammate, for the founder', () => {
   })
 })
 
-describe('a teammate\'s own pane is byte-identical to 0.5.0 for the same feed', () => {
+// (0.7.5) The pane is the redesign's layout now (Rob, 2026-10-27); who sees what is still exactly 0.5.0's for the same feed.
+describe('a teammate\'s own pane, for the same feed: who sees what is 0.5.0\'s, drawn in the 0.7.5 layout', () => {
   const OTHER = 'builder-b@example.com'
   const pid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`
   const pkg = (n: number) => `aaaaaaa${n}-bbbb-4ccc-8ddd-eeeeeeeeeeee`
@@ -1182,43 +1182,38 @@ describe('a teammate\'s own pane is byte-identical to 0.5.0 for the same feed', 
     ],
     tickets: { due_today: [{ ticket_id: 't8', project_id: pid(8), project_name: 'Hale Plumbing', title: 'Send the quote', due_at: at('2026-10-12 16:00'), due_source: 'commitment', assignee_email: ME }] },
   }
-  /** What 0.5.0 (b83abc92) gave for this very feed at NOW, captured by running its own code on it. */
+  /** What 0.5.0 (b83abc92) gave for this very feed at NOW, captured by running its own code on it: who is in which list, and what each item holds. */
   const TEAMMATE_050 = {
     lists: "{\"queue\":[{\"projectId\":\"00000008-0000-4000-8000-000000000008\",\"projectName\":\"Hale Plumbing\",\"client\":\"Hale Plumbing\",\"dueAt\":1791835200000,\"kind\":\"task\",\"messages\":0,\"tasks\":1,\"packageId\":null,\"coversThrough\":null,\"packageUpdatedAt\":null,\"flagged\":false,\"mail\":[],\"taskTitles\":[\"Send the quote\"],\"open\":null,\"ok\":null,\"newest\":{\"mail\":0,\"pkg\":0,\"task\":1791835200000}},{\"projectId\":\"00000001-0000-4000-8000-000000000001\",\"projectName\":\"Acme Roofing Pat\",\"client\":\"Acme Roofing\",\"dueAt\":1791892800000,\"kind\":\"ready\",\"messages\":0,\"tasks\":0,\"packageId\":\"aaaaaaa1-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"coversThrough\":\"2026-10-12T12:00:00.000Z\",\"packageUpdatedAt\":null,\"flagged\":true,\"mail\":[],\"taskTitles\":[],\"open\":null,\"ok\":null,\"newest\":{\"mail\":0,\"pkg\":1791806400000,\"task\":0}},{\"projectId\":\"00000003-0000-4000-8000-000000000003\",\"projectName\":\"Cedar Dental\",\"client\":\"Cedar Dental\",\"dueAt\":1791900000000,\"kind\":\"reply\",\"messages\":1,\"tasks\":0,\"packageId\":null,\"coversThrough\":null,\"packageUpdatedAt\":null,\"flagged\":false,\"mail\":[{\"at\":\"2026-10-12T14:00:00.000Z\",\"sender\":\"client@example.com\",\"subject\":\"Question\",\"snippet\":\"hello\"}],\"taskTitles\":[],\"open\":{\"id\":\"aaaaaaa3-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"state\":\"stale\",\"by\":\"\",\"at\":null,\"unsent\":1,\"newer\":0},\"ok\":null,\"newest\":{\"mail\":1791813600000,\"pkg\":0,\"task\":0}}],\"teammate\":[{\"projectId\":\"00000002-0000-4000-8000-000000000002\",\"projectName\":\"Bolt Staffing (Sam)\",\"client\":\"Bolt Staffing\",\"dueAt\":1791896400000,\"kind\":\"reply\",\"messages\":1,\"tasks\":0,\"packageId\":null,\"coversThrough\":null,\"packageUpdatedAt\":null,\"flagged\":false,\"mail\":[{\"at\":\"2026-10-12T13:00:00.000Z\",\"sender\":\"client@example.com\",\"subject\":\"Question\",\"snippet\":\"hello\"}],\"taskTitles\":[],\"open\":{\"id\":\"aaaaaaa2-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"state\":\"held_by_other\",\"by\":\"J Smith\",\"at\":\"2026-10-12T13:30:00.000Z\",\"unsent\":1,\"newer\":0},\"ok\":null,\"newest\":{\"mail\":1791810000000,\"pkg\":0,\"task\":0}},{\"projectId\":\"00000006-0000-4000-8000-000000000006\",\"projectName\":\"Fig Legal\",\"client\":\"Fig Legal\",\"dueAt\":1791900900000,\"kind\":\"reply\",\"messages\":1,\"tasks\":0,\"packageId\":null,\"coversThrough\":null,\"packageUpdatedAt\":null,\"flagged\":false,\"mail\":[{\"at\":\"2026-10-12T14:15:00.000Z\",\"sender\":\"client@example.com\",\"subject\":\"Question\",\"snippet\":\"hello\"}],\"taskTitles\":[],\"open\":{\"id\":\"aaaaaaa6-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"state\":\"held_by_other\",\"by\":\"Builder B\",\"at\":\"2026-10-12T13:00:00.000Z\",\"unsent\":1,\"newer\":0},\"ok\":null,\"newest\":{\"mail\":1791814500000,\"pkg\":0,\"task\":0}}],\"older\":[{\"projectId\":\"00000007-0000-4000-8000-000000000007\",\"projectName\":\"Gale Clinic\",\"client\":\"Gale Clinic\",\"dueAt\":1791208800000,\"kind\":\"reply\",\"messages\":1,\"tasks\":0,\"packageId\":null,\"coversThrough\":null,\"packageUpdatedAt\":null,\"flagged\":false,\"mail\":[{\"at\":\"2026-10-02T14:00:00.000Z\",\"sender\":\"client@example.com\",\"subject\":\"Question\",\"snippet\":\"hello\"}],\"taskTitles\":[],\"open\":null,\"ok\":null,\"newest\":{\"mail\":1790949600000,\"pkg\":0,\"task\":0}}]}",
-    rows: "{\"queue\":[{\"projectId\":\"00000008-0000-4000-8000-000000000008\",\"client\":\"Hale Plumbing\",\"title\":\"🔴 5h left · Hale Plumbing · task\",\"waiting\":\"1 task due\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true},{\"projectId\":\"00000001-0000-4000-8000-000000000001\",\"client\":\"Acme Roofing\",\"title\":\"🟡 21h left · Acme Roofing · reply ready · flagged\",\"waiting\":\"drafts ready\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true},{\"projectId\":\"00000003-0000-4000-8000-000000000003\",\"client\":\"Cedar Dental\",\"title\":\"🟡 23h left · Cedar Dental · reply\",\"waiting\":\"1 message waiting, drafts out of date\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true}],\"teammate\":[{\"projectId\":\"00000002-0000-4000-8000-000000000002\",\"client\":\"Bolt Staffing\",\"title\":\"🟡 with J Smith · Bolt Staffing · reply\",\"waiting\":\"1 message waiting, drafts with J Smith\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true,\"note\":\"J Smith picked up the reply drafts for this client (Mon 9:30 AM) and has 1 draft not sent yet. Ask J Smith before writing a second reply.\"},{\"projectId\":\"00000006-0000-4000-8000-000000000006\",\"client\":\"Fig Legal\",\"title\":\"🟡 with Builder B · Fig Legal · reply\",\"waiting\":\"1 message waiting, drafts with Builder B\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true,\"note\":\"Builder B picked up the reply drafts for this client (Mon 9 AM) and has 1 draft not sent yet. Ask Builder B before writing a second reply.\"}],\"older\":[{\"projectId\":\"00000007-0000-4000-8000-000000000007\",\"client\":\"Gale Clinic\",\"title\":\"🔴 5d late · Gale Clinic · reply\",\"waiting\":\"1 message waiting\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true}]}",
+  }
+  /**
+   * (0.7.5) The same rows and pane in the redesign's layout: each row one line (`rowLine`), a second (`extra`) only
+   * for what the first lacks, one flat list, the groups' headings on one line. The same clients in the same lists.
+   */
+  const TEAMMATE_075 = {
+    rows: "{\"queue\":[{\"projectId\":\"00000008-0000-4000-8000-000000000008\",\"client\":\"Hale Plumbing\",\"title\":\"🔴 Hale Plumbing · task · 5h left\",\"waiting\":\"1 task due\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true},{\"projectId\":\"00000001-0000-4000-8000-000000000001\",\"client\":\"Acme Roofing\",\"title\":\"🟡 Acme Roofing · reply ready · 21h left · flagged\",\"waiting\":\"drafts ready\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true},{\"projectId\":\"00000003-0000-4000-8000-000000000003\",\"client\":\"Cedar Dental\",\"title\":\"🟡 Cedar Dental · reply · 23h left\",\"waiting\":\"1 message waiting, drafts out of date\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true,\"extra\":\"drafts out of date\"}],\"teammate\":[{\"projectId\":\"00000002-0000-4000-8000-000000000002\",\"client\":\"Bolt Staffing\",\"title\":\"🟡 Bolt Staffing · reply · with J Smith\",\"waiting\":\"1 message waiting, drafts with J Smith\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true,\"note\":\"J Smith picked up the reply drafts for this client (Mon 9:30 AM) and has 1 draft not sent yet. Ask J Smith before writing a second reply.\"},{\"projectId\":\"00000006-0000-4000-8000-000000000006\",\"client\":\"Fig Legal\",\"title\":\"🟡 Fig Legal · reply · with Builder B\",\"waiting\":\"1 message waiting, drafts with Builder B\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true,\"note\":\"Builder B picked up the reply drafts for this client (Mon 9 AM) and has 1 draft not sent yet. Ask Builder B before writing a second reply.\"}],\"older\":[{\"projectId\":\"00000007-0000-4000-8000-000000000007\",\"client\":\"Gale Clinic\",\"title\":\"🔴 Gale Clinic · reply · 5d late\",\"waiting\":\"1 message waiting\",\"state\":\"start\",\"reason\":\"no thread yet\",\"fresh\":true}]}",
     pane: [
       "H",
-      "",
-      "New: no thread yet (3)",
-      "",
-      "◆ 1. 🔴 5h left · Hale Plumbing · task",
-      "   1 task due · Start thread: no thread yet",
+      "◆ 1. 🔴 Hale Plumbing · task · 5h left",
+      "   [ Start thread ] [ Drafts ]",
+      "◆ 2. 🟡 Acme Roofing · reply ready · 21h left · flagged",
+      "   [ Start thread ] [ Drafts ]",
+      "◆ 3. 🟡 Cedar Dental · reply · 23h left",
+      "   drafts out of date",
       "   [ Start thread ] [ Drafts ]",
       "",
-      "◆ 2. 🟡 21h left · Acme Roofing · reply ready · flagged",
-      "   drafts ready · Start thread: no thread yet",
-      "   [ Start thread ] [ Drafts ]",
-      "",
-      "◆ 3. 🟡 23h left · Cedar Dental · reply",
-      "   1 message waiting, drafts out of date · Start thread: no thread yet",
-      "   [ Start thread ] [ Drafts ]",
+      "With a teammate (2) · Older (1)",
       "",
       "With a teammate (2)",
-      "",
-      "4. 🟡 with J Smith · Bolt Staffing · reply",
-      "   1 message waiting, drafts with J Smith",
+      "4. 🟡 Bolt Staffing · reply · with J Smith",
       "   J Smith picked up the reply drafts for this client (Mon 9:30 AM) and has 1 draft not sent yet. Ask J Smith before writing a second reply.",
       "   [ Drafts ]",
-      "",
-      "5. 🟡 with Builder B · Fig Legal · reply",
-      "   1 message waiting, drafts with Builder B",
+      "5. 🟡 Fig Legal · reply · with Builder B",
       "   Builder B picked up the reply drafts for this client (Mon 9 AM) and has 1 draft not sent yet. Ask Builder B before writing a second reply.",
       "   [ Drafts ]",
       "",
       "Older (1)",
-      "",
-      "6. 🔴 5d late · Gale Clinic · reply",
-      "   1 message waiting · Start thread: no thread yet",
+      "6. 🔴 Gale Clinic · reply · 5d late",
       "   [ Start thread ] [ Drafts ]",
       "",
       "N",
@@ -1236,8 +1231,9 @@ describe('a teammate\'s own pane is byte-identical to 0.5.0 for the same feed', 
     expect(JSON.stringify({ queue: as050(three.queue), teammate: as050(three.teammate), older: as050(three.older) })).toBe(TEAMMATE_050.lists)
     // every item acts by its due time (no task here has a start-by time)
     for (const it of [...l.queue, ...l.teammate, ...l.older]) expect(it.actBy).toBe(it.dueAt)
-    expect(JSON.stringify({ queue: rowsOf(l.queue), teammate: rowsOf(l.teammate), older: rowsOf(l.older) })).toBe(TEAMMATE_050.rows)
-    expect(paneText(rowsOf(l.queue), 'H', 'N', { teammate: rowsOf(l.teammate), older: rowsOf(l.older) }).split('\n')).toEqual(TEAMMATE_050.pane)
+    // (0.7.5) the rows and the pane in the redesign's layout, for the same clients in the same lists
+    expect(JSON.stringify({ queue: rowsOf(l.queue), teammate: rowsOf(l.teammate), older: rowsOf(l.older) })).toBe(TEAMMATE_075.rows)
+    expect(paneText(rowsOf(l.queue), 'H', 'N', { teammate: rowsOf(l.teammate), older: rowsOf(l.older) }).split('\n')).toEqual(TEAMMATE_075.pane)
   })
 })
 
@@ -1304,14 +1300,16 @@ describe('R8 and R5: the words a Claim and a stale chip copy carry (verbatim)', 
 
 describe('R4 and R8: the rows', () => {
   const fresh = recommend([], undefined, NOW)
-  test('R4: a client on the Needs-you list with no thread, due within 24 business hours: 🔴 NO THREAD, due <time>', async () => {
-    expect(rowFor(item(CEDAR), fresh, NOW, { needsYou: true }).title).toBe('🔴 NO THREAD · Cedar Dental · due 4 PM')
-    // not on the Needs-you list (a fold), or with a thread: the name it has always had
-    expect(rowFor(item(CEDAR), fresh, NOW).title).toBe('🔴 5h left · Cedar Dental · task')
+  test('R4: a client on the Needs-you list with no thread, due within 24 business hours: (0.7.5) red, its one line ending · no thread', async () => {
+    // (0.7.5) the row's one line ends ` · no thread`, red while it pins now (the `🔴 NO THREAD` title is gone from rows)
+    expect(rowFor(item(CEDAR), fresh, NOW, { needsYou: true }).title).toBe('🔴 Cedar Dental · task · 5h left · no thread')
+    // not on the Needs-you list (a fold), or with a thread: no ` · no thread`; (0.7.5) the thread's own name is unchanged
+    expect(rowFor(item(CEDAR), fresh, NOW).title).toBe('🔴 Cedar Dental · task · 5h left')
+    expect(titleFor(item(CEDAR), NOW)).toBe('🔴 5h left · Cedar Dental · task')
     // further out than the pin's window: no alarm
     const later: Feed = { ...FEED, drafts: [], mail: [], tickets: { due_soon: [{ ticket_id: 't9', project_id: CEDAR, project_name: 'Cedar Dental', title: 'x', due_at: at('2026-10-14 16:00'), due_source: 'commitment', assignee_email: ME }] } }
     const [far] = buildQueue(later, NOW)
-    expect(rowFor(far as QueueItem, fresh, NOW, { needsYou: true }).title).toBe('🟡 2d left · Cedar Dental · task')
+    expect(rowFor(far as QueueItem, fresh, NOW, { needsYou: true }).title).toBe('🟡 Cedar Dental · task · 2d left · no thread')
   })
   test('R8: still open after our reply, with a thread: its name, its items under it, and Claim in this thread ((0.5.11) whatever the thread\'s length)', async () => {
     const f: Feed = { ...FEED, drafts: [{ ...(FEED.drafts?.[0] as object), last_outbound_at: at('2026-10-12 10:00'), checked_send_at: at('2026-10-12 10:00'), still_open: ['the logo file'] } as never] }
@@ -1322,7 +1320,9 @@ describe('R4 and R8: the rows', () => {
     expect(isStillOpenRow(row)).toBe(true)
     expect(rowButtons(row)).toEqual(['claim', 'drafts'])
     expect(LABEL.claim).toBe('Claim in this thread')
-    expect(rowDetail(row)).toBe('drafts ready')
+    // (0.7.5) no second line: the items still open, drawn under it, say what waits
+    expect(row.waiting).toBe('drafts ready')
+    expect(rowDetail(row)).toBe('')
     expect(paneText([row], 'H', 'N')).toContain('   - the logo file')
     // (0.5.11, Opus 10-15) no length takes Claim off any more; a row an older version drew with no Claim keeps none
     expect(rowButtons({ ...row, claim: false })).toEqual(['drafts'])
@@ -1394,10 +1394,14 @@ describe('0.5.5: a row says "this thread" only in the thread it acts on (Rob, 10
     // the other buttons never say "this thread"
     for (const verb of ['update', 'start', 'open', 'drafts'] as const) expect(buttonLabel(verb, row, 'local_bo')).toBe(LABEL[verb])
   })
-  test('a row\'s reason: "this thread" in its own thread, the client\'s thread anywhere else', async () => {
+  // (0.7.5) a row's reason is no longer drawn (its button says what it does), so no row's text says "this thread" in the wrong thread; Claim's label still follows the rule
+  test('a row\'s reason: (0.7.5) not drawn in any thread; Claim\'s label still names the client\'s thread anywhere but its own', async () => {
     const plain = { ...row, stillOpen: undefined, claim: undefined }
-    expect(rowDetail(plain, 'local_bp')).toBe('drafts ready · Update thread: new since this thread was updated')
-    expect(rowDetail(plain, 'local_bo')).toBe('drafts ready · Update thread: new since Birch-Lane\'s thread was updated')
+    expect(rowDetail(plain)).toBe('')
+    for (const here of ['local_bp', 'local_bo']) {
+      expect(paneText([plain], 'H', 'N', {}, here)).not.toContain('this thread was updated')
+      expect(paneText([plain], 'H', 'N', {}, here)).not.toContain('Birch-Lane\'s thread was updated')
+    }
     expect(paneText([row], 'H', 'N', {}, 'local_bo')).toContain('[ Claim in Birch-Lane\'s thread ] [ Drafts ]')
     expect(paneText([row], 'H', 'N', {}, 'local_bp')).toContain('[ Claim in this thread ] [ Drafts ]')
   })
@@ -1789,7 +1793,8 @@ describe('(0.5.28, internal asks) the kickoff and Update text for an ask', () =>
     )
     // its row: the ask's clock, and the one action its thread state gives (here: no thread yet, Start)
     const row = rowFor(asked, recommend([], undefined, fri), fri, { needsYou: true })
-    expect(row).toMatchObject({ title: '🔴 NO THREAD · Massmarket AI · due Mon 3:11 PM', waiting: '1 message waiting, 1 internal ask', state: 'start' })
+    // (0.7.5) in one line, ending ` · no thread`, and the ask on its second
+    expect(row).toMatchObject({ title: '🔴 Massmarket AI · reply · 23h left · no thread', waiting: '1 message waiting, 1 internal ask', state: 'start', extra: '1 internal ask' })
   })
 })
 
@@ -1862,9 +1867,10 @@ describe('(0.7.3, internal queue) the kickoff and Update text for the internal q
     const it = itemOf([qt(1)], 3)
     expect(autoUpdatable(it, tue)).toBe(true)
     expect(autoUpdateDue(it, tue, { sig: 'x', at: tue - AUTO_QUIET_MS, mail: 0 })).toBe(true)
-    // no thread yet: a Start, with the item's own name (never `NO THREAD · due`: it is never due)
+    // no thread yet: a Start, with the item's own name and (0.7.5) ` · no thread`, never a clock: it is never due
     const row = rowFor(it, recommend([], undefined, tue), tue, { needsYou: true })
-    expect(row).toMatchObject({ title: '🟡 Massmarket AI · internal queue', waiting: '3 tickets in the internal queue', state: 'start' })
+    expect(row).toMatchObject({ title: '🟡 Massmarket AI · internal queue · no thread', waiting: '3 tickets in the internal queue', state: 'start' })
+    expect(row.title).not.toMatch(CLOCK)
     // with its undated internal mail: still updated by itself (the queue makes it so), and the mail kickoff comes first
     const internalMail = {
       message_id_key: 'ops-1', received_at: '2026-10-27T13:00:00Z', reply_due_at: null, sender: 'someone@massmarket.ai', subject: 'Hi', snippet: 'hello',
