@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { buildLists, buildQueue, openAsks, threadTitleShort, titleFor } from './queue'
-import type { AskRef, Feed, FeedAsk, FeedLastPackage, FeedQueueTicket, FeedThread, QueueItem } from './queue'
+import type { AskRef, Feed, FeedAsk, FeedQueueTicket, FeedThread, QueueItem } from './queue'
 import {
   AUTO_NO_DRAFTS_MS, AUTO_QUIET_MS, LABEL, NEW_MARK, OPENERS, THREAD_ID,
   asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, ownPackage, seenNow,
@@ -711,36 +711,28 @@ describe('(0.5.11) a client\'s thread updated by itself: which clients, and when
     expect(autoUpdatable({ ...item(ACME), lastOut: NOW - HOUR, check: { sendAt: NOW - HOUR, stillOpen: ['the quote'], covers: 0 } }, NOW)).toBe(false)
   })
 
-  test('(0.7.2, 2026-10-27, Spotlight Dentistry) a teammate\'s client whose last package the founder sent within 3 business days: his thread is updated by itself; without that, R2 holds it back as before', async () => {
+  test('(0.7.8, 2026-10-27, Spotlight Dentistry) a teammate\'s client whose last package the founder sent or approved: R2 holds it back, and his thread is never updated by itself', async () => {
     const FOUNDER = 'owner@example.com'
     const SENDS = 'builder-b@example.com'
     const READY = et('2026-10-27 17:40')
     // the founder sent the client's last package at 2:17 PM; the client wrote back at 4:04 PM; the next package,
-    // flagged for his OK and sent by the teammate who owns the client, is ready
+    // flagged for his OK and sent by the teammate who owns the client, is ready. Rob, 2026-10-28: "Just because I sent
+    // the last package myself shouldn't mean that I took it over."
     const last = { package_id: PKG, sent_at: at('2026-10-27 14:17'), sent_by: FOUNDER, approved_by: FOUNDER }
     const spotlight = (lastPackage: unknown): Feed => ({
       member: FOUNDER, role: 'founder', tickets: {},
       mail: [{
         message_id_key: 'm1', received_at: at('2026-10-27 16:04'), sender: 'client@example.com', subject: 'Eight questions', snippet: 'hello',
         project_id: ACME, project_name: 'Acme Dental — Jo', reply_status: 'unanswered', project_owner_email: SENDS, last_outbound_at: at('2026-10-27 14:17'),
-        ...(lastPackage === undefined ? {} : { last_package: lastPackage as FeedLastPackage | null }),
+        ...(lastPackage === undefined ? {} : { last_package: lastPackage }),
       }],
       drafts: [{
         package_id: 'a575abe1-bbbb-4ccc-8ddd-eeeeeeeeeeee', project_id: ACME, project_name: 'Acme Dental — Jo', status: 'prepared', covers_through: at('2026-10-27 16:04'),
         drafts_ready: 1, drafts_unsent: 1, flagged_for_rob: true, project_owner_email: SENDS, last_outbound_at: at('2026-10-27 14:17'),
-        ...(lastPackage === undefined ? {} : { last_package: lastPackage as FeedLastPackage | null }),
+        ...(lastPackage === undefined ? {} : { last_package: lastPackage }),
       }],
     })
-    const his = buildLists(spotlight(last), READY)
-    expect(his.teammate).toEqual([])
-    const it = his.queue[0] as QueueItem
-    expect(it).toMatchObject({ projectId: ACME, kind: 'ready', messages: 1 })
-    expect(autoUpdatable(it, READY)).toBe(true)
-    // drafts ready: it goes once the bridge has seen them unchanged for 10 minutes, as for a client of his own
-    expect(autoUpdateDue(it, READY, { sig: 'x', at: READY - 10 * MIN, mail: READY - 10 * MIN })).toBe(true)
-    expect(waitingText(it)).not.toContain('decides')
-    // control: no `last_package`, or one the teammate sent: R2, under With a teammate, and never updated by itself
-    for (const lastPackage of [undefined, { ...last, sent_by: SENDS, approved_by: SENDS }]) {
+    for (const lastPackage of [last, { ...last, sent_by: SENDS }, { ...last, sent_by: SENDS, approved_by: SENDS }, undefined]) {
       const l = buildLists(spotlight(lastPackage), READY)
       expect(l.queue).toEqual([])
       const theirs = l.teammate[0] as QueueItem
