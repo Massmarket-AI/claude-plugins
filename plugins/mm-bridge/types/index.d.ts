@@ -54,6 +54,11 @@ export type MmRow = {
    * say, such as `2 drafts not sent`. Absent when there is nothing to add: the row is one line.
    */
   extra?: string
+  /**
+   * (0.7.7) The client's own thread, archived and not brought back by itself: the row's action is Restore thread, which
+   * asks the app to unarchive this thread, never Start.
+   */
+  archived?: string
 }
 
 /**

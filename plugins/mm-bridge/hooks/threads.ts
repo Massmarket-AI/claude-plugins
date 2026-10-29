@@ -35,7 +35,8 @@ const TZ = 'America/New_York'
 // of its own.
 
 /** A thread as the desktop app lists it. `link` is the app's own link to it, kept only when it is that thread's. */
-export type AppThread = { sessionId: string; title?: string; pinned?: boolean; isArchived?: boolean; lastActivityAt?: string; link?: string }
+/** (0.7.7) `cwd`: the folder the app says the thread runs in (the folder it was started in, never where its shell moved to). */
+export type AppThread = { sessionId: string; title?: string; pinned?: boolean; isArchived?: boolean; lastActivityAt?: string; link?: string; cwd?: string }
 
 /**
  * Claude Code session id → the app thread it runs in, as each session records about itself. `at` is when the
@@ -67,10 +68,20 @@ export type Recommendation = {
    * by itself. Start missing threads counts such a client as one with no thread here.
    */
   away?: true
+  /**
+   * (0.7.7, Rob 2026-10-28: one thread per client, and Start only for a client that never had one) The client's newest
+   * own thread, which the app here shows archived and the sync did not bring back by itself (the app refused or did not
+   * answer, the person archived it again, the bridge is paused, or it waits behind this sync's REVIVALS_PER_SYNC): the
+   * row offers Restore thread, never Start, and Start missing threads and `kickoffs` leave the client out.
+   */
+  archived?: string
 }
 
 /** (0.5.23) A client's row when its linked thread is in another Claude profile: Start, and why. */
 export const AWAY_REASON = 'its thread is in another Claude profile'
+
+/** (0.7.7) A client's row when its own thread is archived and was not brought back by itself: Restore, and why. */
+export const ARCHIVED_REASON = 'its thread is archived'
 
 /**
  * What Update last put into a client's thread: which thread, the signature of what it carried, and when.
@@ -1006,10 +1017,23 @@ export function startFillSaid(words: string, all: boolean, how: 'filled' | 'draf
 export type Kickoff = { client: string; args: Record<string, unknown> }
 
 /**
- * (0.5.25) What the mm tool's `kickoffs` answers: how to use what follows, the threads to start (one JSON line), the
- * clients it skipped and why, and how many more need a thread after START_ALL_MAX.
+ * (0.7.7; 10-28: nine clients came back in the next batch, before their new threads' markers linked them) A client
+ * whose kickoff `kickoffs` handed out this recently, and whose link has not changed since, is pending: held back from
+ * the next batch and from a single ask, so that following the answer's own "call kickoffs again" never starts it twice.
  */
-export function kickoffsAnswer(kicks: readonly Kickoff[], skipped: ReadonlyArray<{ client: string; why: string }>, left: number): string {
+export const KICKOFF_PENDING_MS = 10 * 60_000
+
+/**
+ * (0.5.25) What the mm tool's `kickoffs` answers: how to use what follows, the threads to start (one JSON line), the
+ * clients it skipped and why, and how many more need a thread after START_ALL_MAX. (0.7.7) And the clients held back:
+ * `pending`, whose kickoff went out in the last KICKOFF_PENDING_MS, and `restore`, whose own thread is archived.
+ */
+export function kickoffsAnswer(
+  kicks: readonly Kickoff[],
+  skipped: ReadonlyArray<{ client: string; why: string }>,
+  left: number,
+  held: { pending?: readonly string[]; restore?: readonly string[] } = {},
+): string {
   const out: string[] = []
   if (kicks.length) {
     out.push(
@@ -1018,6 +1042,18 @@ export function kickoffsAnswer(kicks: readonly Kickoff[], skipped: ReadonlyArray
     out.push(JSON.stringify(kicks.map(k => ({ client: k.client, arguments: k.args }))))
   }
   if (skipped.length) out.push(`Skipped: ${skipped.map(s => `${s.client} (${s.why})`).join('; ')}.`)
+  const pending = held.pending ?? []
+  if (pending.length) {
+    out.push(
+      `Already handed out in the last ${KICKOFF_PENDING_MS / 60_000} minutes and not linked yet: ${pending.join(', ')}. Do not start ${pending.length === 1 ? 'it' : 'them'} again: a new thread links itself when its first message arrives.`,
+    )
+  }
+  const restore = held.restore ?? []
+  if (restore.length) {
+    out.push(
+      `Own thread archived: ${restore.join(', ')}. Never start a new thread for ${restore.length === 1 ? 'it' : 'them'}: bring ${restore.length === 1 ? 'it' : 'each'} back with mm ${restore.map(c => `"restore ${c}"`).join(', ')} (the app may ask the person first).`,
+    )
+  }
   if (left > 0) out.push(`${left} more need${left === 1 ? 's' : ''} a thread: once these have started, call mm with "kickoffs" again.`)
   return out.join('\n') || 'No client needs a new thread now.'
 }
@@ -1089,7 +1125,7 @@ export function openCommand(thread: { sessionId: string; link?: unknown } | unde
 
 // ---------------------------------------------------------------- the pane
 
-export const LABEL = { update: 'Update thread', start: 'Start thread', open: 'Open thread', drafts: 'Drafts', claim: 'Claim in this thread' } as const
+export const LABEL = { update: 'Update thread', start: 'Start thread', open: 'Open thread', drafts: 'Drafts', claim: 'Claim in this thread', restore: 'Restore thread' } as const
 export type RowButton = keyof typeof LABEL
 
 /** R8: the sentence under the list. */
@@ -1139,6 +1175,8 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: Ro
     fresh: rec.fresh === true,
     // the thread this row's button acts on: a press acts on this one or on none
     ...(rec.target ? { target: rec.target.sid } : {}),
+    // (0.7.7) the client's own archived thread: what Restore thread brings back
+    ...(rec.archived && rec.state === 'start' ? { archived: rec.archived } : {}),
     ...(note ? { note } : {}),
     ...(extra ? { extra } : {}),
     // (the founder's alone, 0.5.1) a teammate's to see through: no action, with a sentence or without one
@@ -1166,6 +1204,8 @@ export function rowButtons(row: Row): RowButton[] {
   // R8: Claim in this thread ((0.5.11) whatever the thread's length; a row an older version drew with no Claim keeps none)
   if (isStillOpenRow(row)) return row.claim ? ['claim', 'drafts'] : ['drafts']
   const state = rowState(row)
+  // (0.7.7) a client whose own thread is archived gets that thread back, never a new one
+  if (state === 'start' && typeof row.archived === 'string' && THREAD_ID.test(row.archived)) return ['restore', 'drafts']
   return [state === 'current' ? 'open' : state, 'drafts']
 }
 
