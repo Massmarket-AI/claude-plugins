@@ -55,7 +55,7 @@ export type MmRow = {
    */
   extra?: string
   /**
-   * (0.7.7) The client's own thread, archived and not brought back by itself: the row's action is Restore thread, which
+   * (0.7.10) The client's own thread, archived and not brought back by itself: the row's action is Restore thread, which
    * asks the app to unarchive this thread, never Start.
    */
   archived?: string

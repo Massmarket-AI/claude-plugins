@@ -35,7 +35,7 @@ const TZ = 'America/New_York'
 // of its own.
 
 /** A thread as the desktop app lists it. `link` is the app's own link to it, kept only when it is that thread's. */
-/** (0.7.7) `cwd`: the folder the app says the thread runs in (the folder it was started in, never where its shell moved to). */
+/** (0.7.10) `cwd`: the folder the app says the thread runs in (the folder it was started in, never where its shell moved to). */
 export type AppThread = { sessionId: string; title?: string; pinned?: boolean; isArchived?: boolean; lastActivityAt?: string; link?: string; cwd?: string }
 
 /**
@@ -69,7 +69,7 @@ export type Recommendation = {
    */
   away?: true
   /**
-   * (0.7.7, Rob 2026-10-28: one thread per client, and Start only for a client that never had one) The client's newest
+   * (0.7.10, Rob 2026-10-28: one thread per client, and Start only for a client that never had one) The client's newest
    * own thread, which the app here shows archived and the sync did not bring back by itself (the app refused or did not
    * answer, the person archived it again, the bridge is paused, or it waits behind this sync's REVIVALS_PER_SYNC): the
    * row offers Restore thread, never Start, and Start missing threads and `kickoffs` leave the client out.
@@ -80,7 +80,7 @@ export type Recommendation = {
 /** (0.5.23) A client's row when its linked thread is in another Claude profile: Start, and why. */
 export const AWAY_REASON = 'its thread is in another Claude profile'
 
-/** (0.7.7) A client's row when its own thread is archived and was not brought back by itself: Restore, and why. */
+/** (0.7.10) A client's row when its own thread is archived and was not brought back by itself: Restore, and why. */
 export const ARCHIVED_REASON = 'its thread is archived'
 
 /**
@@ -581,9 +581,40 @@ export function autoUpdateTarget(rec: Recommendation | undefined, linked: string
 export function autoUpdateDue(it: QueueItem, now: number, seen: FirstSeen | undefined): boolean {
   if (!seen || !(now - seen.at >= AUTO_QUIET_MS)) return false
   if (it.messages === 0) return true
+  return draftsReady(it) || (seen.mail > 0 && now - seen.mail >= AUTO_NO_DRAFTS_MS)
+}
+
+/** (0.5.11, review of PR #15, F3) Reply drafts are ready for the client: a package prepared for the person, or one they hold. */
+const draftsReady = (it: QueueItem): boolean => {
   const o = it.open ?? null
-  const ready = it.kind === 'ready' || o?.state === 'prepared' || o?.state === 'held_by_me'
-  return ready || (seen.mail > 0 && now - seen.mail >= AUTO_NO_DRAFTS_MS)
+  return it.kind === 'ready' || o?.state === 'prepared' || o?.state === 'held_by_me'
+}
+
+/**
+ * (0.7.9, Rob 2026-10-29: "It seems like the threads aren't auto-updating anymore. They're not repinning themselves.")
+ * When a client's linked thread is due to be updated by itself, from what this bridge has seen of the client (`seen`, as
+ * `seenNow` has it for what the client has now): AUTO_QUIET_MS after it was first seen unchanged, as `autoUpdateDue`
+ * asks; and with client mail waiting and no reply drafts ready, once they are ready, at the latest AUTO_NO_DRAFTS_MS
+ * after the oldest waiting message was first seen (`drafts`). Kin Properties, 10-29: TJ's email reached OW at 6:50 PM
+ * ET and the bridge saw it at 6:57. It held the update for Lane-2's drafts (its run for Kin went from 7:08 to 7:16), as
+ * it should. But nothing on screen said so, the row offered Update, and at 7:00 Rob pressed it, taking the updates for
+ * stopped.
+ * This says when, never whether: every guard of the send still applies when the time comes (`autoUpdates`).
+ */
+export function selfUpdateAt(it: QueueItem, seen: FirstSeen): { at: number; drafts: boolean } {
+  const quiet = seen.at + AUTO_QUIET_MS
+  if (it.messages === 0 || draftsReady(it)) return { at: quiet, drafts: false }
+  return { at: Math.max(quiet, (seen.mail > 0 ? seen.mail : seen.at) + AUTO_NO_DRAFTS_MS), drafts: true }
+}
+
+/**
+ * (0.7.9) What a row, the client's part of the pane and its thread's note say of it: `updates itself when the drafts
+ * are ready (by 8:57 PM)`, `updates itself at about 7:07 PM`, and `updates itself shortly` once that time has passed (the
+ * next sync sends it, or the thread is in use and it waits until the thread has been quiet AUTO_IDLE_MS).
+ */
+export function selfUpdateText(when: { at: number; drafts: boolean }, now: number): string {
+  if (!(when.at > now)) return 'updates itself shortly'
+  return when.drafts ? `updates itself when the drafts are ready (by ${clockText(when.at, now)})` : `updates itself at about ${clockText(when.at, now)}`
 }
 
 /**
@@ -1017,7 +1048,7 @@ export function startFillSaid(words: string, all: boolean, how: 'filled' | 'draf
 export type Kickoff = { client: string; args: Record<string, unknown> }
 
 /**
- * (0.7.7; 10-28: nine clients came back in the next batch, before their new threads' markers linked them) A client
+ * (0.7.10; 10-28: nine clients came back in the next batch, before their new threads' markers linked them) A client
  * whose kickoff `kickoffs` handed out this recently, and whose link has not changed since, is pending: held back from
  * the next batch and from a single ask, so that following the answer's own "call kickoffs again" never starts it twice.
  */
@@ -1025,7 +1056,7 @@ export const KICKOFF_PENDING_MS = 10 * 60_000
 
 /**
  * (0.5.25) What the mm tool's `kickoffs` answers: how to use what follows, the threads to start (one JSON line), the
- * clients it skipped and why, and how many more need a thread after START_ALL_MAX. (0.7.7) And the clients held back:
+ * clients it skipped and why, and how many more need a thread after START_ALL_MAX. (0.7.10) And the clients held back:
  * `pending`, whose kickoff went out in the last KICKOFF_PENDING_MS, and `restore`, whose own thread is archived.
  */
 export function kickoffsAnswer(
@@ -1146,7 +1177,7 @@ export const rowState = (row: Row): RowState => {
  * client there with no thread at all). (0.5.11: no context reading any more; R8's Claim shows whatever the
  * thread's length.)
  */
-export type RowOptions = { needsYou?: boolean }
+export type RowOptions = { needsYou?: boolean; self?: string }
 
 export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: RowOptions = {}): Row {
   // a client whose drafts a teammate holds, and that is not the viewer's to act on: who to ask, and no action
@@ -1163,7 +1194,9 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: Ro
   // (0.7.5) and a second line only for what the first does not say (never for a row not the viewer's: its note says it),
   // with the one reason a button does not carry: Update would go to a thread whose title only looks like the client
   const guess = rec.target?.suggested ? rec.reason : ''
-  const extra = withMate || still || checking ? '' : [rowExtra(it), guess].filter(Boolean).join(' · ')
+  // (0.7.9, Rob 10-29) and, on an Update row whose thread is due to be updated by itself, when (`selfUpdateText`)
+  const self = rec.state === 'update' && !guess ? opts.self ?? '' : ''
+  const extra = withMate || still || checking ? '' : [rowExtra(it), guess, self].filter(Boolean).join(' · ')
   // (the founder) a package flagged for his OK that a teammate has, theirs to decide until its reply is due:
   // the row's sentence is followed by Opus's words, R2. A row with no sentence (a prepared package) gets no
   // line of them alone: its title and waiting text already say it (Opus, 10-13).
@@ -1175,7 +1208,7 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: Ro
     fresh: rec.fresh === true,
     // the thread this row's button acts on: a press acts on this one or on none
     ...(rec.target ? { target: rec.target.sid } : {}),
-    // (0.7.7) the client's own archived thread: what Restore thread brings back
+    // (0.7.10) the client's own archived thread: what Restore thread brings back
     ...(rec.archived && rec.state === 'start' ? { archived: rec.archived } : {}),
     ...(note ? { note } : {}),
     ...(extra ? { extra } : {}),
@@ -1204,7 +1237,7 @@ export function rowButtons(row: Row): RowButton[] {
   // R8: Claim in this thread ((0.5.11) whatever the thread's length; a row an older version drew with no Claim keeps none)
   if (isStillOpenRow(row)) return row.claim ? ['claim', 'drafts'] : ['drafts']
   const state = rowState(row)
-  // (0.7.7) a client whose own thread is archived gets that thread back, never a new one
+  // (0.7.10) a client whose own thread is archived gets that thread back, never a new one
   if (state === 'start' && typeof row.archived === 'string' && THREAD_ID.test(row.archived)) return ['restore', 'drafts']
   return [state === 'current' ? 'open' : state, 'drafts']
 }

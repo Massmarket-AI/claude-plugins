@@ -11,9 +11,10 @@
 //     and do not list)
 //   - for the founder alone: a reply package flagged for his OK, whoever owns the client (kind `ok`); one a
 //     teammate sends only once its reply is due (0.5.1, R2: until then it is theirs to decide)
-//   - (0.7.2) for the founder alone: a teammate's client whose last reply package he sent or approved within the
-//     last 3 business days (`founderDrove`): its new mail and package are his, as on a client of his own, and R2
-//     does not apply to it
+//     (0.7.2 to 0.7.7 also made a teammate's client the founder's own when he had sent or approved its last
+//     package within 3 business days. Rob removed that on 2026-10-28: "Just because I sent the last package
+//     myself shouldn't mean that I took it over." On a client handed to the team, only a package flagged for his
+//     OK (R2) and a package he picks up himself are his.)
 //   - (0.5.28, internal asks) an internal ask of the viewer's: a teammate's Discord message that asks them for
 //     something, on the item of the client it is about (or of the internal-ops project), due 24 business hours after
 //     it was asked, internal or not (kind `ask` when nothing else lists the client)
@@ -50,18 +51,7 @@ export type FeedMail = {
   internal?: boolean
   /** (0.5.2, R8) Our newest send to the client, when the feed gives it: what tells the bridge a reply went. */
   last_outbound_at?: string | null
-  /** (0.7.2) The client's last reply package that went out, when the feed gives it (`FeedLastPackage`). */
-  last_package?: FeedLastPackage | null
 }
-
-/**
- * (0.7.2) The client's newest reply package that went out, on every mail and draft row of the client as
- * `last_outbound_at` is: when its client email was sent, who sent it, and who approved it (the package's go, or the
- * founder's OK on a flagged one). The addresses are only compared with the feed's `member`, never shown or passed
- * on. Absent or null on a server that does not send it yet, and on a client with no package sent: every row is
- * read as before. Any field may be missing or null.
- */
-export type FeedLastPackage = { package_id?: string | null; sent_at?: string | null; sent_by?: string | null; approved_by?: string | null }
 
 export type FeedDraft = {
   package_id: string
@@ -92,8 +82,6 @@ export type FeedDraft = {
   checked_at?: string | null
   checked_send_at?: string | null
   last_outbound_at?: string | null
-  /** (0.7.2) The client's last reply package that went out, when the feed gives it (`FeedLastPackage`). */
-  last_package?: FeedLastPackage | null
 }
 
 export type FeedTicket = {
@@ -534,11 +522,6 @@ export const WINDOW_BACK_MS = 3 * DAY
  * never lands does not keep a client off the list. Real time (it is not a client's clock).
  */
 export const CHECK_WAIT_MS = 2 * HOUR
-/**
- * (0.7.2) How recent the client's last package must be for the founder to keep driving the client
- * (`founderDrove`): 3 business days from when it went out (weekends add nothing).
- */
-export const FOUNDER_DROVE_MS = 3 * DAY
 export const MAX_PINS = 8
 /** The least mail look-back asked of OW, in business hours (Rob, 2026-10-13: "expanding that to 7 days"). */
 export const MAIL_LOOKBACK_MIN_HOURS = 168
@@ -820,40 +803,6 @@ function lastOutbound(feed: Feed): Map<string, number> {
   for (const d of feed.drafts ?? []) add(d?.project_id, d?.last_outbound_at)
   const t = feed.tickets ?? {}
   for (const k of [t.overdue ?? [], t.due_today ?? [], t.due_soon ?? [], t.start_now ?? []]) for (const tk of k) add(tk?.project_id, tk?.last_outbound_at)
-  return out
-}
-
-/**
- * (0.7.2; 2026-10-27, Spotlight Dentistry) The clients the founder is driving himself: those whose last reply package
- * (the feed's `last_package`) he sent or approved, and that went out within the last FOUNDER_DROVE_MS of business
- * time. Rob sent a teammate's client's package from his own thread at 2:17 PM; the client wrote back at 4:04 PM and
- * the next package, flagged for his OK, was ready by 5:34 PM, but R2 made it the teammate's to decide and his thread
- * was never updated (its note read "0 client messages waiting on our reply"). For such a client the founder's feed is
- * read as on a client of his own: the new mail is counted for him, the new package is his to pick up, R1 and R2 do
- * not apply, and his linked thread is updated by itself. ⛔ A package a teammate holds is still theirs (the holder is
- * asked first). Founder alone: every other feed is read as before, and so is his own feed while OW sends no
- * `last_package`. Where the rows of a client disagree, the newest send is the last package; at the same time, it is
- * his only if every row there says so. A row with no usable send time decides nothing.
- */
-export function founderDrove(feed: Feed, now: number): Set<string> {
-  const out = new Set<string>()
-  const me = typeof feed.member === 'string' ? feed.member.toLowerCase() : ''
-  if (feed.role !== 'founder' || me === '') return out
-  const last = new Map<string, { at: number; his: boolean }>()
-  const add = (pid: unknown, raw: unknown): void => {
-    if (!isUuid(pid) || !raw || typeof raw !== 'object') return
-    const p = raw as FeedLastPackage
-    const at = typeof p.sent_at === 'string' ? ms(p.sent_at) : NaN
-    if (!Number.isFinite(at)) return
-    const by = (who: unknown): boolean => typeof who === 'string' && who.toLowerCase() === me
-    const his = by(p.sent_by) || by(p.approved_by)
-    const seen = last.get(pid)
-    if (!seen || at > seen.at) last.set(pid, { at, his })
-    else if (at === seen.at && !his) seen.his = false
-  }
-  for (const m of feed.mail ?? []) add(m?.project_id, m?.last_package)
-  for (const d of feed.drafts ?? []) add(d?.project_id, d?.last_package)
-  for (const [pid, { at, his }] of last) if (his && at <= now && businessWithin(at, now, FOUNDER_DROVE_MS)) out.add(pid)
   return out
 }
 
@@ -1196,9 +1145,6 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
   /** (R18) The internal projects: by the feed's own flag on any row, else by id. */
   const internal = internalProjects(feed)
   const founder = feed.role === 'founder'
-  /** (0.7.2) The clients the founder drives himself (`founderDrove`), read here as clients of his own. */
-  const drove = founderDrove(feed, now)
-  const mine = (owner: string | null | undefined, projectId: string): boolean => isMine(owner, feed) || drove.has(projectId)
   const byProject = new Map<string, QueueItem>()
   // ⛔ A row whose project id is not a lower-case uuid, or whose name has nothing left once cleaned, is
   // dropped: the id goes into the [mm-link] marker and the name into the kickoff, both read by Claude.
@@ -1250,7 +1196,7 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
   for (const m of feed.mail ?? []) {
     if (m.reply_status !== 'unanswered' || !m.project_id || !m.project_name) continue
     if (!usable(m.project_id, m.project_name)) continue
-    if (!mine(m.project_owner_email, m.project_id)) continue
+    if (!isMine(m.project_owner_email, feed)) continue
     const due = replyDue(m)
     if (due === Infinity) {
       if (older) continue
@@ -1288,10 +1234,9 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     if (held ? unsent < 1 || holder === '' : (d.status !== 'prepared' && d.status !== 'stale') || ready < 1) continue
     // (the founder) A teammate has this package to see through (Opus, 10-13): the teammate who holds it, whoever
     // owns the client; with nobody holding it, the owner on record when that is a teammate. ⛔ A package he
-    // holds is his, and so is one with no holder on a client with no owner on record (R3), or (0.7.2) on a client
-    // he drives himself (`founderDrove`): a teammate who holds it still has it.
+    // holds is his, and so is one with no holder on a client with no owner on record (R3).
     const sender = typeof d.project_owner_email === 'string' ? d.project_owner_email.toLowerCase() : ''
-    const mates = founder && (held ? holder !== me : sender !== '' && sender !== me && !drove.has(d.project_id))
+    const mates = founder && (held ? holder !== me : sender !== '' && sender !== me)
     // ⛔ R1 (0.5.1): a stale package a teammate has never puts a row on the founder's list, flagged or not
     // (Rob's 16 rows, 10-13: four such clients were answered by hand; the owner's stale reminder
     // carries what is still open). So it is never a package that waits for his OK. (A stale package is held
@@ -1313,9 +1258,8 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     })
     // ⛔ The holder is asked first, the owner second: a package the viewer holds is theirs to finish whoever
     // owns the client (Rob, 2026-10-12: a client owned by a teammate, picked up and sent by the founder,
-    // never appeared on the founder's list). A prepared one is theirs when the client is (for the founder, also
-    // when he drives the client himself: 0.7.2).
-    const readyForMe = d.status === 'prepared' && (holder === '' || holder === me) && mine(d.project_owner_email, d.project_id) && inReach
+    // never appeared on the founder's list). A prepared one is theirs when the client is.
+    const readyForMe = d.status === 'prepared' && (holder === '' || holder === me) && isMine(d.project_owner_email, feed) && inReach
     if (heldByMe || readyForMe) {
       it.kind = 'ready'
       it.packageId = d.package_id
@@ -1345,7 +1289,7 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     // it): while our latest send waits for the server's check, or the check left something open, the client is
     // listed by it, so its thread is named for that and pins again on what is still open. Otherwise it changes
     // nothing here, as before (M1: a stale package alone lists nothing).
-    if (d.status === 'stale' && !held && !staleTheirsHere && !forOk && mine(d.project_owner_email, d.project_id)) {
+    if (d.status === 'stale' && !held && !staleTheirsHere && !forOk && isMine(d.project_owner_email, feed)) {
       const c = checkOf(d)
       it.check = c
       if (fastOf(c, it.lastOut ?? 0, now) && inReach) {
@@ -1376,7 +1320,7 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     // message waiting it lists nothing, and that stays so (Rob's 10-13 morning meeting, finding M1: 12 of
     // 102 packages in 14 days went stale because we had already replied by hand; listing them would invite
     // a second reply, and OW's fix will close such packages). With a message waiting, the message lists it.
-    if (forOk && (held || !mine(d.project_owner_email, d.project_id))) {
+    if (forOk && (held || !isMine(d.project_owner_email, feed))) {
       it.kind = 'ok'
       it.ok = { sends: d.project_owner_email ? holderName(d.project_owner_email) : NOBODY }
       // R2: one a teammate sends is theirs to decide until its reply is due (below)
@@ -1514,8 +1458,7 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
   //   R2: a current package flagged for his OK that a teammate sends is theirs to decide, the person holding it
   //       approving it with a one-line reason or asking him (Rob, 10-07: client-reply-prep §1 rule 13, §5.2),
   //       until its reply is due: the due time its row shows, in business time. From then it is in his list,
-  //       as the `ok` kind always was. With a teammate: whoever holds it, else the one who sends it. (0.7.2) Not on
-  //       a client he drives himself (`founderDrove`), unless a teammate holds the package.
+  //       as the `ok` kind always was. With a teammate: whoever holds it, else the one who sends it.
   //   R1: a stale package a teammate sends, with a client message waiting after its drafts. ⛔ Those messages
   //       place the client under With a teammate and nothing more: where anything of his own lists the client
   //       (a task of his, his own mail, a package of his or one that waits for his OK), his row is for that, and
@@ -1924,9 +1867,10 @@ function noteBody(it: QueueItem, member: string): string {
  * (0.7.3, internal queue) Then the viewer's internal queue (`queueMarkdown`); the same holds for an item listed by its
  * asks and its queue alone.
  */
-export function clientMarkdown(it: QueueItem, now: number, pages: Readonly<Record<string, string>> = {}): string {
+export function clientMarkdown(it: QueueItem, now: number, pages: Readonly<Record<string, string>> = {}, self = ''): string {
   const asks = [asksMarkdown(it, now, pages), queueMarkdown(it)].filter(Boolean).join('\n\n')
-  const out = [`## ${it.projectName}`, `${titleFor(it, now)}`]
+  // (0.7.9, Rob 10-29) when its thread is due to be updated by itself, under the title: `This thread updates itself ...`
+  const out = [`## ${it.projectName}`, self ? `${titleFor(it, now)}\n\nThis thread ${self}.` : `${titleFor(it, now)}`]
   if (it.mail.length) {
     out.push('', '### Waiting on our reply')
     for (const m of it.mail.sort((a, b) => a.at.localeCompare(b.at))) {

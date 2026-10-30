@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { buildLists, buildQueue, openAsks, threadTitleShort, titleFor } from './queue'
-import type { AskRef, Feed, FeedAsk, FeedLastPackage, FeedQueueTicket, FeedThread, QueueItem } from './queue'
+import type { AskRef, Feed, FeedAsk, FeedQueueTicket, FeedThread, QueueItem } from './queue'
 import {
   AUTO_NO_DRAFTS_MS, AUTO_QUIET_MS, LABEL, NEW_MARK, OPENERS, THREAD_ID,
-  asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, ownPackage, seenNow,
+  asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, ownPackage, seenNow, selfUpdateAt, selfUpdateText,
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLink, titleLooksLike, titleSuggestion, waitingText,
   newerThreadFor, threadStart, markedThreads, ownThreads, AWAY_REASON,
@@ -663,6 +663,43 @@ describe('(0.5.11) a client\'s thread updated by itself: which clients, and when
     expect(autoUpdateDue(item(CEDAR), NOW, seen(10))).toBe(true)
   })
 
+  test('(0.7.9, Rob 10-29: "It seems like the threads aren\'t auto-updating anymore") when it goes, and what the row says meanwhile: the same waits, never a new one', async () => {
+    // Bolt: mail and no drafts, first seen 5 minutes ago: once the drafts are ready, by 120 minutes after its mail was first seen
+    expect(selfUpdateAt(item(BOLT), seen(5, 5))).toEqual({ at: NOW + 115 * MIN, drafts: true })
+    expect(selfUpdateText(selfUpdateAt(item(BOLT), seen(5, 5)), NOW)).toBe('updates itself when the drafts are ready (by 12:55 PM)')
+    // a second message seen since does not move the 120 minutes (they count from the oldest waiting one)
+    expect(selfUpdateAt(item(BOLT), seen(1, 60))).toEqual({ at: NOW + 60 * MIN, drafts: true })
+    // drafts ready (prepared, held by the person, or a package ready for them): 10 minutes after they were first seen
+    for (const it of [{ ...item(BOLT), open: pkg('prepared') }, { ...item(BOLT), open: pkg('held_by_me') }, item(ACME)]) {
+      expect(selfUpdateAt(it, seen(3, 30))).toEqual({ at: NOW + 7 * MIN, drafts: false })
+      expect(selfUpdateText(selfUpdateAt(it, seen(3, 30)), NOW)).toBe('updates itself at about 11:07 AM')
+    }
+    // drafts out of date are not ready: they wait as no drafts do
+    expect(selfUpdateAt({ ...item(BOLT), open: pkg('stale') }, seen(3, 30)).drafts).toBe(true)
+    // a task alone: 10 minutes after it was first seen
+    expect(selfUpdateAt(item(CEDAR), seen(2))).toEqual({ at: NOW + 8 * MIN, drafts: false })
+    // its time passed (the next sync sends it, or the thread is in use and it waits): shortly, drafts or none
+    expect(selfUpdateText({ at: NOW, drafts: false }, NOW)).toBe('updates itself shortly')
+    expect(selfUpdateText({ at: NOW - MIN, drafts: true }, NOW)).toBe('updates itself shortly')
+    // ⛔ the same moments `autoUpdateDue` goes at: due at the time said, not a minute before
+    for (const [it, s] of [[item(BOLT), seen(5, 5)], [item(ACME), seen(3)], [item(CEDAR), seen(2)]] as const) {
+      const when = selfUpdateAt(it, s).at
+      const later = { ...s, at: s.at - (when - NOW), mail: s.mail ? s.mail - (when - NOW) : 0 }
+      const sooner = { ...s, at: s.at - (when - NOW) + MIN, mail: s.mail ? s.mail - (when - NOW) + MIN : 0 }
+      expect(autoUpdateDue(it, NOW, later)).toBe(true)
+      expect(autoUpdateDue(it, NOW, sooner)).toBe(false)
+    }
+    // an Update row carries it as its second line, after what is waiting; a row that only suggests a thread by its title,
+    // and a row that says Open or Start, never do
+    const update = recommend([known('local_b', 'Staffing plan', '2026-10-12 09:00')], undefined, NOW)
+    expect(rowDetail(rowFor(item(BOLT), update, NOW, { needsYou: true, self: 'updates itself at about 11:07 AM' }))).toBe('updates itself at about 11:07 AM')
+    expect(rowDetail(rowFor(item(CEDAR), update, NOW, { needsYou: true }))).toBe('')
+    const guess = recommend([], { sid: 'local_t', title: 'Bolt Staffing plan', suggested: true }, NOW)
+    expect(rowDetail(rowFor(item(BOLT), guess, NOW, { needsYou: true, self: 'updates itself at about 11:07 AM' }))).not.toContain('updates itself')
+    const current = recommend([known('local_b', 'Staffing plan', '2026-10-12 09:00')], undefined, NOW, { sent: { sid: 'local_b', sig: signatureOf(item(BOLT)), at: NOW }, signature: signatureOf(item(BOLT)) })
+    expect(rowDetail(rowFor(item(BOLT), current, NOW, { needsYou: true, self: 'updates itself at about 11:07 AM' }))).toBe('')
+  })
+
   test('(review of PR #15, F3) what the bridge has seen of a client: kept while it is unchanged; its mail\'s wait kept while mail waits, without a break', async () => {
     const T = NOW - 30 * MIN
     // first seen: now, and its mail from now
@@ -711,36 +748,28 @@ describe('(0.5.11) a client\'s thread updated by itself: which clients, and when
     expect(autoUpdatable({ ...item(ACME), lastOut: NOW - HOUR, check: { sendAt: NOW - HOUR, stillOpen: ['the quote'], covers: 0 } }, NOW)).toBe(false)
   })
 
-  test('(0.7.2, 2026-10-27, Spotlight Dentistry) a teammate\'s client whose last package the founder sent within 3 business days: his thread is updated by itself; without that, R2 holds it back as before', async () => {
+  test('(0.7.8, 2026-10-27, Spotlight Dentistry) a teammate\'s client whose last package the founder sent or approved: R2 holds it back, and his thread is never updated by itself', async () => {
     const FOUNDER = 'owner@example.com'
     const SENDS = 'builder-b@example.com'
     const READY = et('2026-10-27 17:40')
     // the founder sent the client's last package at 2:17 PM; the client wrote back at 4:04 PM; the next package,
-    // flagged for his OK and sent by the teammate who owns the client, is ready
+    // flagged for his OK and sent by the teammate who owns the client, is ready. Rob, 2026-10-28: "Just because I sent
+    // the last package myself shouldn't mean that I took it over."
     const last = { package_id: PKG, sent_at: at('2026-10-27 14:17'), sent_by: FOUNDER, approved_by: FOUNDER }
     const spotlight = (lastPackage: unknown): Feed => ({
       member: FOUNDER, role: 'founder', tickets: {},
       mail: [{
         message_id_key: 'm1', received_at: at('2026-10-27 16:04'), sender: 'client@example.com', subject: 'Eight questions', snippet: 'hello',
         project_id: ACME, project_name: 'Acme Dental — Jo', reply_status: 'unanswered', project_owner_email: SENDS, last_outbound_at: at('2026-10-27 14:17'),
-        ...(lastPackage === undefined ? {} : { last_package: lastPackage as FeedLastPackage | null }),
+        ...(lastPackage === undefined ? {} : { last_package: lastPackage }),
       }],
       drafts: [{
         package_id: 'a575abe1-bbbb-4ccc-8ddd-eeeeeeeeeeee', project_id: ACME, project_name: 'Acme Dental — Jo', status: 'prepared', covers_through: at('2026-10-27 16:04'),
         drafts_ready: 1, drafts_unsent: 1, flagged_for_rob: true, project_owner_email: SENDS, last_outbound_at: at('2026-10-27 14:17'),
-        ...(lastPackage === undefined ? {} : { last_package: lastPackage as FeedLastPackage | null }),
+        ...(lastPackage === undefined ? {} : { last_package: lastPackage }),
       }],
     })
-    const his = buildLists(spotlight(last), READY)
-    expect(his.teammate).toEqual([])
-    const it = his.queue[0] as QueueItem
-    expect(it).toMatchObject({ projectId: ACME, kind: 'ready', messages: 1 })
-    expect(autoUpdatable(it, READY)).toBe(true)
-    // drafts ready: it goes once the bridge has seen them unchanged for 10 minutes, as for a client of his own
-    expect(autoUpdateDue(it, READY, { sig: 'x', at: READY - 10 * MIN, mail: READY - 10 * MIN })).toBe(true)
-    expect(waitingText(it)).not.toContain('decides')
-    // control: no `last_package`, or one the teammate sent: R2, under With a teammate, and never updated by itself
-    for (const lastPackage of [undefined, { ...last, sent_by: SENDS, approved_by: SENDS }]) {
+    for (const lastPackage of [last, { ...last, sent_by: SENDS }, { ...last, sent_by: SENDS, approved_by: SENDS }, undefined]) {
       const l = buildLists(spotlight(lastPackage), READY)
       expect(l.queue).toEqual([])
       const theirs = l.teammate[0] as QueueItem

@@ -3,7 +3,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine, FoundElement } from 'claude-code/testing'
 
 import type { Feed, FeedAsk, FeedQueueTicket, FeedTicket } from './queue'
-import { cleanTitle, isNewerVersion } from './queue'
+import { cleanTitle, clockText, isNewerVersion } from './queue'
 import { REFRESH_FAILED, recommend } from './threads'
 import { localClock } from './track'
 
@@ -204,7 +204,7 @@ function world(on: On, opts: WorldOptions = {}) {
     }
     // (0.7.6) as the app answers unarchive_session
     if (e.tool === 'unarchive_session') {
-      // (0.7.7) a function: the answer as the test has it now
+      // (0.7.10) a function: the answer as the test has it now
       const unarchive = typeof opts.unarchive === 'function' ? opts.unarchive() : opts.unarchive
       if (unarchive === 'silent') return new Promise<never>(() => undefined)
       if (unarchive === 'error') return { deny: 'mm-bridge: $.mcp.call: ccd_session_mgmt.unarchive_session failed: internal error' }
@@ -493,6 +493,8 @@ const BOLT_ROW = '🟡 Bolt Staffing · reply · 22h left · 2 new'
 const CEDAR_ROW = '🔴 Cedar Dental · task · 5h left'
 /** (0.7.5) The pane's one clock, at NOW in the person's own time (11:00 AM in New York; CI runs in UTC). */
 const UPDATED = `Updated ${localClock(NOW)}`
+/** (0.7.9) The second line of an Update row whose linked thread is due to be updated by itself, as a sync at NOW words it. */
+const SOON = 'updates itself at about 11:10 AM'
 /** Bolt's chip, as the timer mints it by itself (R4): Bolt has no thread either in a world with no threads. */
 const BOLT_AUTO_CHIP = {
   server: 'ccd_session',
@@ -743,6 +745,7 @@ describe('R3: the buttons on each row', () => {
         'Needs you now (3)',
         `◆ 1. ${CEDAR_FRESH}`,
         `2. ${ACME_ROW}`,
+        SOON,
         `3. ${BOLT_ROW}`,
         '"Bolt Staffing invoice question" looks like this client',
         UPDATED,
@@ -935,10 +938,11 @@ describe('R3: the buttons on each row', () => {
     // another client's part carries no "This thread" heading, and the list is still under it, whole
     expect(await lines(ui)).not.toContain('This thread: Acme Roofing')
     // (0.7.5) the list in the redesign's layout
-    expect((await lines(ui)).slice(-6)).toEqual([
+    expect((await lines(ui)).slice(-7)).toEqual([
       'Needs you now (3)',
       `◆ 1. ${CEDAR_FRESH}`,
       `2. ${ACME_ROW}`,
+      SOON,
       `3. ${BOLT_ROW}`,
       '"Bolt Staffing invoice question" looks like this client',
       UPDATED,
@@ -1465,7 +1469,7 @@ describe('F3: a press acts on the thread its row showed; a typed name is never g
       threads: [thread('local_b', 'Staffing plan', 20), thread('local_t', 'Bolt Staffing: invoice question', 400)],
       store: { 'mm.threads': PAIRS },
       // (0.7.6) the app does not unarchive it (the sync after the press asks it to: Bolt's own thread is brought back
-      // when the app does, the next test). (0.7.7) Bolt's own thread is still its own: Restore, never the look-alike
+      // when the app does, the next test). (0.7.10) Bolt's own thread is still its own: Restore, never the look-alike
       unarchive: 'refuse',
     })
     await mm($, '')
@@ -1482,7 +1486,7 @@ describe('F3: a press acts on the thread its row showed; a typed name is never g
     expect(w.toasts).toEqual([GONE])
     expect(w.stored['mm.links']).toEqual({})
     expect(w.stored['mm.acted']).toBeUndefined()
-    // the list was drawn again: (0.7.7; until 0.7.7 it showed the look-alike, and a press on that row updated it) Bolt's own
+    // the list was drawn again: (0.7.10; until 0.7.10 it showed the look-alike, and a press on that row updated it) Bolt's own
     // thread is archived and stays its own: the row offers Restore thread, and the look-alike is neither offered nor sent to
     expect(await lines(ui)).not.toContain('"Bolt Staffing invoice question" looks like this client')
     expect(await buttonsOf(ui, BOLT)).toEqual(['Restore thread', 'Drafts'])
@@ -2388,7 +2392,7 @@ describe('a row says Start, Update or Open: one action, chosen by what the threa
     const ui = await pane($)
     expect(await buttonsOf(ui, ACME)).toEqual(['Update thread', 'Drafts'])
     // (0.7.5) the row is one line in each state: its button says what it does, no reason or "Thread updated" under it
-    expect(await under(ui, ACME_ROW)).toBe(UPDATED)
+    expect(await under(ui, ACME_ROW)).toBe(SOON)
     await ui.press({ key: `update:${ACME}` })
     expect(await buttonsOf(ui, ACME)).toEqual(['Open thread', 'Drafts'])
     expect(await under(ui, ACME_ROW)).toBe(UPDATED)
@@ -2445,7 +2449,7 @@ describe('a row says Start, Update or Open: one action, chosen by what the threa
     expect(w.toasts).toEqual(['Could not send to Acme Roofing\'s thread: Session local_a is busy.'])
     expect(await buttonsOf(ui, ACME)).toEqual(['Update thread', 'Drafts'])
     // (0.7.5) still one line: the row as it was before the press
-    expect(await under(ui, ACME_ROW)).toBe(UPDATED)
+    expect(await under(ui, ACME_ROW)).toBe(SOON)
     await ui.unmount()
   })
 
@@ -2500,7 +2504,7 @@ describe('a row says Start, Update or Open: one action, chosen by what the threa
     const ui = await pane($)
     expect(await buttonsOf(ui, CEDAR)).toEqual(['Update thread', 'Drafts'])
     // (0.7.5) the reason (0.5.5: "this thread" in Cedar's own thread) is not drawn: the row is one line
-    expect(await under(ui, CEDAR_ROW)).toBe(UPDATED)
+    expect(await under(ui, CEDAR_ROW)).toBe(SOON)
     expect((await lines(ui)).some(l => l.includes('was updated'))).toBe(false)
     await ui.unmount()
   })
@@ -2793,7 +2797,7 @@ describe('(0.5.11) a long thread is not replaced: its row is Update or Open as f
     const ui = await pane($)
     expect(await buttonsOf(ui, ACME)).toEqual(['Update thread', 'Drafts'])
     expect(await lines(ui)).toContain(plain)
-    expect(await under(ui, ACME_ROW)).toBe(UPDATED)
+    expect(await under(ui, ACME_ROW)).toBe(SOON)
     w.setFeed(acmeFeed({}, rows(5000)))
     await mm($, '')
     expect(await buttonsOf(ui, ACME)).toEqual(['Update thread', 'Drafts'])
@@ -2826,7 +2830,7 @@ describe('(0.5.11) a long thread is not replaced: its row is Update or Open as f
       const ui = await pane($)
       expect(await buttonsOf(ui, ACME)).toEqual(['Update thread', 'Drafts'])
       expect(await lines(ui)).toContain(plain)
-      expect(await under(ui, ACME_ROW)).toBe(UPDATED)
+      expect(await under(ui, ACME_ROW)).toBe(SOON)
       await ui.unmount()
     })
   }
@@ -3443,6 +3447,7 @@ describe('one pane: this thread\'s client on top, the list under it', () => {
       `◆ 1. ${CEDAR_FRESH}`,
       `◆ 2. ${BOLT_FRESH}`,
       `3. ${ACME_ROW}`,
+      SOON,
       UPDATED,
     ])
     expect((await ui.find({ type: 'Markdown' }))?.text).toBe('## Acme Roofing\n\n1. What the client sent')
@@ -3521,7 +3526,7 @@ describe('F10: a reply package someone picked up stays in the panel, with who ho
     expect(w.appended.length).toBe(1)
     expect(w.appended[0]).toContain('already picked up by')
     expect(w.appended[0]).toContain(
-      `[Massmarket bridge, no reply needed] Acme Roofing Pat: ${HELD_TITLE}. Reply package aaaaaaaa is already picked up by Builder A, the person in this session, with 1 draft not sent yet; the five-part pickup view is in the side pane. The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${PKG}. Nothing has been sent.`,
+      `[Massmarket bridge, no reply needed] Acme Roofing Pat: ${HELD_TITLE}. Reply package aaaaaaaa is already picked up by Builder A, the person in this session, with 1 draft not sent yet; the five-part pickup view is in the side pane. The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${PKG}. This thread ${SOON}. Nothing has been sent.`,
     )
     expect(w.appended[0]).not.toContain('no reply drafts are prepared yet')
     expect(await viewText($, 'Acme Roofing')).toBe(HELD_VIEW)
@@ -3531,7 +3536,7 @@ describe('F10: a reply package someone picked up stays in the panel, with who ho
     // (Cedar and Bolt have no thread yet and are listed first, so Acme is the third row) (0.7.5) its one line, and the
     // drafts not sent on its second (no reason: its button says what it does)
     expect(await lines(ui)).toContain('3. 🟡 Acme Roofing · your draft · 21h left')
-    expect(await under(ui, '🟡 Acme Roofing · your draft · 21h left')).toBe('1 draft not sent')
+    expect(await under(ui, '🟡 Acme Roofing · your draft · 21h left')).toBe(`1 draft not sent · ${SOON}`)
     await ui.press({ key: `drafts:${ACME}` })
     await ui.unmount()
     expect(await viewText($, 'Acme Roofing')).toBe(HELD_VIEW)
@@ -6208,9 +6213,9 @@ describe('0.5.25: the mm tool\'s kickoffs, for the model on the person\'s own wo
   const notices = (w: { written: Array<{ path: string; text: string }> }) => w.written.filter(f => f.path.endsWith('bridge-notices.log')).map(f => f.text).join('')
   const ACME_ALL = NOT_TAKEN(ACME, 'Acme Roofing Pat')
 
-  // (0.7.7) and no folder when no client-thread folder is known: the app's default is this thread's own folder, never the
+  // (0.7.10) and no folder when no client-thread folder is known: the app's default is this thread's own folder, never the
   // folder its shell moved to (`session.cwd` answers '/work' here, and is no longer asked)
-  test('kickoffs: every client with no thread, soonest due first, with start_session\'s arguments exactly (user_asked, fresh, the marker first, the words that never take the package, the background, (0.7.7) no folder when none is known); each one claimed and logged; nothing started, sent or minted', async ($, on) => {
+  test('kickoffs: every client with no thread, soonest due first, with start_session\'s arguments exactly (user_asked, fresh, the marker first, the words that never take the package, the background, (0.7.10) no folder when none is known); each one claimed and logged; nothing started, sent or minted', async ($, on) => {
     const w = world(on, { tools: 'start' })
     await mm($, '')
     const said = await tool($, 'kickoffs')
@@ -6253,7 +6258,7 @@ describe('0.5.25: the mm tool\'s kickoffs, for the model on the person\'s own wo
     expect(kicksIn(said).map(k => k.client)).toEqual(['Cedar Dental', 'Acme Roofing'])
     expect(said.split('\n').at(-1)).toBe('Skipped: Bolt Staffing (another thread is starting it now).')
     expect((w.stored['mm.starting'] as Record<string, unknown>)[`${BOLT}\n0badc0de`]).toEqual({ owner: 'local_elsewhere', until: NOW + 60_000 })
-    // asked again in this thread: (0.7.7; until 0.7.7 its own claims were its own, and the two came back) the two
+    // asked again in this thread: (0.7.10; until 0.7.10 its own claims were its own, and the two came back) the two
     // just handed out are pending, and nothing is handed out twice
     const again = await tool($, 'kickoffs')
     expect(kicksIn(again)).toEqual([])
@@ -6949,6 +6954,107 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(String(sends(w)[1]?.args.message).startsWith(`[mm-link ${BOLT}] New since this thread last worked on this client: `)).toBe(true)
     expect(notices(w)).not.toContain('its package is the thread\'s own work')
   })
+
+  // ---- (0.7.9) Kin Properties, 2026-10-29: Rob pressed Update on mail with no drafts at 7:00 PM ET; the thread built and
+  // picked up the package at 7:09, and the row said Update again, the bridge about to send the thread its own package
+  for (const [name, over] of [
+    ['picked up by the person, as the Kin thread did', heldBy(ME, { picked_up_at: ago(0.1) })],
+    ['prepared', {}],
+  ] as const) {
+    test(`⛔ (0.7.9) Update pressed on mail with no drafts asks the thread to build them; the package it builds, ${name}, is its own work, never sent to it as new`, LONG, async ($, on) => {
+      const mail = boltMail(0.5)
+      const w = world(on, { feed: feed({ drafts: [], tickets: {}, mail: [mail] }), threads: [thread('local_b', 'Staffing plan', 20)], store: { 'mm.links': { [BOLT]: 'local_b' } } })
+      await tickOnce($, w)
+      const ui = await pane($)
+      await ui.press({ key: `update:${BOLT}` })
+      await ui.unmount()
+      expect(sends(w).map(c => c.args.session_id)).toEqual(['local_b'])
+      expect(String(sends(w)[0]?.args.message)).toContain('no package exists yet, so run prep first')
+      // the press records that it asked for the package, as an update sent by itself does
+      expect((w.stored['mm.sent'] as Record<string, { prep?: boolean }>)[BOLT]?.prep).toBe(true)
+      // the thread runs prep: a package now exists, covering the message
+      w.setFeed(feed({ drafts: [packageFor(BOLT, 'Bolt Staffing (Sam)', { covers_through: ago(0.5), ...over })], tickets: {}, mail: [mail] }))
+      await after(w, 30)
+      expect(sends(w).length).toBe(1)
+      expect(noticeLines(w, /in local_b: its package is the thread's own work \(it was asked to build it\)/).length).toBe(1)
+      const now = (w.stored['mm.sent'] as Record<string, { prep?: boolean; sid: string }>)[BOLT]
+      expect(now?.sid).toBe('local_b')
+      expect(now?.prep).toBeUndefined()
+      // the row says the thread has it
+      const again = await pane($)
+      expect(await buttonsOf(again, BOLT)).toEqual(['Open thread', 'Drafts'])
+      await again.unmount()
+    })
+  }
+
+  test('(0.7.9) a press that does not ask for the package records no such thing: a client message after it still goes to the thread', LONG, async ($, on) => {
+    const w = linkedWorld(on)
+    await tickOnce($, w)
+    const ui = await pane($)
+    await ui.press({ key: `update:${ACME}` })
+    await ui.unmount()
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
+    expect((w.stored['mm.sent'] as Record<string, { prep?: boolean }>)[ACME]?.prep).toBeUndefined()
+  })
+
+  // ---- (0.7.9, Rob 2026-10-29: "It seems like the threads aren't auto-updating anymore. They're not repinning
+  // themselves.") A row whose thread is due to be updated by itself says when, and so does its thread's part of the pane
+  /** (0.7.9) The line the pane draws right under Bolt's row. */
+  const underBolt = async (ui: Drawing): Promise<string | undefined> => {
+    const all = await lines(ui)
+    const at = all.findIndex(l => l.includes('Bolt Staffing ·'))
+    return at < 0 ? undefined : all[at + 1]
+  }
+  /** (0.7.9) When the first sync (at NOW + 4 s) first saw Bolt's mail, plus the 120 minutes. */
+  const BOLT_BY = `updates itself when the drafts are ready (by ${clockText(NOW + 4_000 + 120 * 60_000, NOW)})`
+
+  test('(0.7.9) mail with no drafts: its row says its thread updates itself when the drafts are ready, by 120 minutes after the mail was first seen; once they are, at about when; then nothing', LONG, async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], tickets: {}, mail: [boltMail(0.5)] }), threads: [thread('local_b', 'Staffing plan', 20)], store: { 'mm.links': { [BOLT]: 'local_b' } } })
+    await tickOnce($, w)
+    const ui = await pane($)
+    expect(await underBolt(ui)).toBe(BOLT_BY)
+    expect(await buttonsOf(ui, BOLT)).toEqual(['Update thread', 'Drafts'])
+    await ui.unmount()
+    // ten minutes on, nothing new: nothing sent before its time
+    await after(w, 10)
+    expect(sends(w)).toEqual([])
+    // the drafts are ready: the update goes ten minutes after they were first seen, and the row says about when
+    w.setFeed(feed({ drafts: [packageFor(BOLT, 'Bolt Staffing (Sam)', { covers_through: ago(0.4) })], tickets: {}, mail: [boltMail(0.5)] }))
+    await after(w, 5)
+    const ready = await pane($)
+    expect(await underBolt(ready)).toMatch(/updates itself at about \d{1,2}(:\d\d)? (AM|PM)$/)
+    await ready.unmount()
+    await after(w, 11)
+    await w.clock.advance(3_000)
+    expect(sends(w).map(c => c.args.session_id)).toEqual(['local_b'])
+    // and once the thread has it, no row says it
+    const done = await pane($)
+    expect((await lines(done)).join('\n')).not.toContain('updates itself')
+    await done.unmount()
+  })
+
+  test('(0.7.9) in the client\'s own thread: its part of the pane and the note say the same', LONG, async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], tickets: {}, mail: [boltMail(0.5)] }), store: { 'mm.links': { [BOLT]: SELF } } })
+    await tickOnce($, w)
+    const view = await $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'Pane', requestId: 'mm-view', props: { ...PANE, title: 'Bolt Staffing' } })
+    expect((await view.find({ type: 'Markdown' }))?.text ?? '').toContain(`\n\nThis thread ${BOLT_BY}.`)
+    await view.unmount()
+    expect(w.appended.length).toBe(1)
+    expect(w.appended[0]).toContain(`no reply drafts are prepared yet. This thread ${BOLT_BY}. Nothing has been sent.`)
+  })
+
+  for (const [name, opts] of [
+    ['auto is off (/mm auto off)', { 'mm.autostart': { on: false } }],
+    ['the bridge is paused', { 'mm.paused': true }],
+  ] as const) {
+    test(`(0.7.9) ${name}: no row says its thread updates itself`, async ($, on) => {
+      const w = world(on, { feed: feed({ drafts: [], tickets: {}, mail: [boltMail(0.5)] }), threads: [thread('local_b', 'Staffing plan', 20)], store: { 'mm.links': { [BOLT]: 'local_b' }, ...opts } })
+      await tickOnce($, w)
+      const ui = await pane($)
+      expect((await lines(ui)).join('\n')).not.toContain('updates itself')
+      await ui.unmount()
+    })
+  }
 
   const SENT = ago(1)
   const skipped: Array<[string, WorldOptions]> = [
@@ -8608,8 +8714,8 @@ describe('(0.5.28, internal asks) the bridge lists, pins and shows an internal a
     // the page is read in this thread's own session, after the package's
     expect(w.fetched.filter(u => u.includes('/team-ask'))).toEqual([PAGE_URL])
     // its row counts the ask ((0.7.5) on its second line, what its first does not say); nothing is sent, posted or started
-    expect((await lines(ui)).filter(l => l.includes('internal ask'))).toEqual(['1 internal ask'])
-    expect(await under(ui, ACME_ROW)).toBe('1 internal ask')
+    expect((await lines(ui)).filter(l => l.includes('internal ask'))).toEqual([`1 internal ask · ${SOON}`])
+    expect(await under(ui, ACME_ROW)).toBe(`1 internal ask · ${SOON}`)
     expect(sends(w)).toEqual([])
     expect(w.prompts).toEqual([])
     await ui.unmount()
@@ -8637,7 +8743,7 @@ describe('(0.5.28, internal asks) the bridge lists, pins and shows an internal a
     expect(await mm($, '')).toBe('4 clients need you; 1 thread pinned. The list is in the side pane.')
     expect(w.threads.get(SELF)).toMatchObject({ title: '🟡 23h left · Dune Labs · internal ask', pinned: true })
     const ui = await pane($)
-    expect((await ui.find({ type: 'Markdown' }))?.text).toBe(`## Dune Labs\n🟡 23h left · Dune Labs · internal ask\n\n${ASKS_PART}\n\n${PAGE}`)
+    expect((await ui.find({ type: 'Markdown' }))?.text).toBe(`## Dune Labs\n🟡 23h left · Dune Labs · internal ask\n\nThis thread ${SOON}.\n\n${ASKS_PART}\n\n${PAGE}`)
     expect((await ui.find({ type: 'Markdown' }))?.text).not.toContain('reply drafts')
     await ui.unmount()
   })
@@ -8770,7 +8876,7 @@ describe('(0.7.3, internal queue) the Massmarket internal thread lists, chips an
     expect(w.threads.get(SELF)).toMatchObject({ title: '🟡 Massmarket AI · internal queue', pinned: false })
     const ui = await pane($)
     expect((await lines(ui)).slice(0, 2)).toEqual(['This thread: Massmarket AI', 'Nothing needs you right now.'])
-    expect((await ui.find({ type: 'Markdown' }))?.text).toBe(`## Massmarket AI\n🟡 Massmarket AI · internal queue\n\n${QUEUE_PART}`)
+    expect((await ui.find({ type: 'Markdown' }))?.text).toBe(`## Massmarket AI\n🟡 Massmarket AI · internal queue\n\nThis thread ${SOON}.\n\n${QUEUE_PART}`)
     // (0.7.5) in the thread it points at, the client part above lists the queue: no row and no `Your build queue` part here
     expect((await lines(ui)).filter(l => l.includes('internal queue') || l.startsWith('Your build queue'))).toEqual([])
     expect(JSON.stringify(await lines(ui))).not.toMatch(CLOCK)
@@ -10071,7 +10177,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.7', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.10', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10140,7 +10246,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.7', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.10', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10206,7 +10312,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.7', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.10', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
@@ -10549,7 +10655,7 @@ describe('0.7.6 (Rob, 10-27: "always pin the most recent thread from that client
   }
 
   for (const how of ['refuse', 'error', 'silent'] as const) {
-    test(`the app does not unarchive it (${how}): nothing is linked, pinned, named or stamped; one line in the notice log; (0.7.7) the row offers Restore thread, never Start; asked again only when something newer arrives`, LONG, async ($, on) => {
+    test(`the app does not unarchive it (${how}): nothing is linked, pinned, named or stamped; one line in the notice log; (0.7.10) the row offers Restore thread, never Start; asked again only when something newer arrives`, LONG, async ($, on) => {
       const w = roadWorld(on, { unarchive: how })
       await tickOnce($, w)
       // (silent: the sync waits the app out, 15 seconds)
@@ -10563,7 +10669,7 @@ describe('0.7.6 (Rob, 10-27: "always pin the most recent thread from that client
       expect((w.stored['mm.revived'] as Record<string, { pid: string; ok: boolean | null }>)[ROAD_SID]).toMatchObject({ pid: ROAD, ok: false })
       const line = `not brought back Road Dog Industrial (${ROAD}) ${ROAD_SID}: the app did not unarchive it (refused, failed, or no answer in 15 seconds); asked again only when something newer arrives`
       expect(count(notices(w), line)).toBe(1)
-      // (0.7.7, Rob 10-28; until 0.7.7 its row was a Start, and Start missing threads gave it) its own thread is still
+      // (0.7.10, Rob 10-28; until 0.7.10 its row was a Start, and Start missing threads gave it) its own thread is still
       // its own: the row offers Restore thread, and no new thread is handed out for it
       const ui = await pane($)
       expect(await buttonsOf(ui, ROAD)).toEqual(['Restore thread', 'Drafts'])
@@ -10596,7 +10702,7 @@ describe('0.7.6 (Rob, 10-27: "always pin the most recent thread from that client
     await after(w, 30)
     expect(unarchives(w)).toEqual([ROAD_SID])
     expect(w.stored['mm.links']).toEqual({})
-    // meanwhile (0.7.7; until 0.7.7 a Start) its row offers Restore thread
+    // meanwhile (0.7.10; until 0.7.10 a Start) its row offers Restore thread
     const ui = await pane($)
     expect(await buttonsOf(ui, ROAD)).toEqual(['Restore thread', 'Drafts'])
     await ui.unmount()
@@ -10742,13 +10848,13 @@ describe('0.7.6 (Rob, 10-27: "always pin the most recent thread from that client
   })
 })
 
-// ======================================================================== (0.7.7) kickoffs and archived own threads
+// ======================================================================== (0.7.10) kickoffs and archived own threads
 // Rob, 2026-10-28, backfilling one thread per client: nine clients came back in the next kickoffs batch before their new
 // threads' markers linked them; the batch's threads took the asking thread's shell folder after a `cd`; and a client
 // whose own thread stayed archived was offered a fresh Start. Rule (10-27/10-28): one thread per client, and Start only
 // for a client that never had a thread of its own. Rob, 10-29: the team works from the one folder they allowed the time
 // tracker to track, so a client's thread must never start outside it.
-describe('0.7.7 (Rob, 10-28): kickoffs never hand a client out twice, start in the client-thread folder, and an archived own thread is restored, never restarted', () => {
+describe('0.7.10 (Rob, 10-28): kickoffs never hand a client out twice, start in the client-thread folder, and an archived own thread is restored, never restarted', () => {
   const ROAD = '44444444-4444-4444-8444-444444444444'
   const ROAD_SID = 'local_roaddog'
   const ROAD_OLD_TITLE = '🔴 3h late · Road Dog Industrial · your draft'
