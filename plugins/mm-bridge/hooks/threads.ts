@@ -101,8 +101,11 @@ export const ARCHIVED_REASON = 'its thread is archived'
  * What Update last put into a client's thread: which thread, the signature of what it carried, and when.
  * (0.5.11, review of PR #15, F3) `prep`: it went by itself and asked the thread to build the client's package
  * (kickoff case 6, `asksForPrep`): the package that then appears is the thread's own work, not something new for it.
+ * (0.7.14) `wait`: it went by itself while Lane-2 could still build the client's reply drafts (`draftsComing`): the thread
+ * was told they follow, not asked to build them, so the package Lane-2 then builds is something new for it (a second
+ * update), and if none comes the thread is asked to build one (`prepDue`).
  */
-export type Sent = { sid: string; sig: string; at: number; prep?: true }
+export type Sent = { sid: string; sig: string; at: number; prep?: true; wait?: true }
 
 /** The client a thread is linked to: the first project whose link is that thread. */
 export function ownerOf(sid: string, links: Readonly<Record<string, string>>): string | undefined {
@@ -522,9 +525,12 @@ export function hasWaiting(had: string, it: QueueItem): boolean {
  */
 export const AUTO_QUIET_MS = 10 * 60_000
 /**
- * (0.5.11, review of PR #15, F3) With client mail waiting and no reply drafts ready, it goes once this bridge first
- * saw the oldest waiting message this long ago, unless drafts are ready sooner. OW holds its own notice 120 minutes,
- * and Lane-2 aims to have the drafts ready in 60: the thread is not asked to build them while Lane-2 still may.
+ * (0.5.11, review of PR #15, F3) With client mail waiting and no package at all, Lane-2 may still build the reply drafts
+ * this long after the bridge first saw the oldest waiting message. OW holds its own notice 120 minutes, and Lane-2 aims
+ * to have the drafts ready in 60: the thread is not asked to build them while Lane-2 still may.
+ * (0.7.14, Rob 2026-10-30: "It should automatically update") Until 0.7.14 the update itself waited this long for the
+ * drafts. It goes after AUTO_QUIET_MS now, saying the drafts follow (`draftsComing`); this is when a thread whose drafts
+ * never came is asked to build them (`prepDue`).
  */
 export const AUTO_NO_DRAFTS_MS = 120 * 60_000
 
@@ -576,59 +582,88 @@ export function autoUpdatable(it: QueueItem, now: number): boolean {
  * itself: it takes back or brings back a thread of its own first, else its row waits for the person's Start), and
  * neither does a client whose thread is not its linked one (the person unlinked it). A person's Start, Start missing
  * threads and /mm start are not decided here.
+ * (0.7.14) `followUp`: the thread is due the follow-up that asks it for prep (`prepDue`): it has what is waiting, so its
+ * row says so (`current`), and that row's thread is the target too.
  */
-export function autoUpdateTarget(rec: Recommendation | undefined, linked: string | undefined): { sid: string } | undefined {
+export function autoUpdateTarget(rec: Recommendation | undefined, linked: string | undefined, followUp = false): { sid: string } | undefined {
   const target = rec?.target
   if (!rec || !target || target.suggested || !THREAD_ID.test(target.sid) || target.sid !== linked) return undefined
-  return rec.state === 'update' ? { sid: target.sid } : undefined
+  // (0.7.14) the follow-up that asks for prep (`prepDue`) goes to a thread that has what is waiting: its row says so
+  return rec.state === 'update' || (followUp && rec.state === 'current') ? { sid: target.sid } : undefined
 }
 
 /**
  * (0.5.11, Rob 10-15: "[A client]'s call ended a little while back... I don't understand why it
  * hasn't already handed the new context there so the draft is ready when I open the thread up") Whether it is time
  * to update a client's thread by itself, from what this bridge has seen of the client (`seen`, for what it has
- * NOW: the caller gives the record of this signature only). (Review of PR #15, F3) The bridge has seen it, unchanged,
- * for AUTO_QUIET_MS; and then no client message waits (tasks only), or reply drafts are ready (a package prepared for
- * the person, or one they hold), or the bridge first saw the oldest waiting message AUTO_NO_DRAFTS_MS ago. Never
- * the feed's own times.
+ * NOW: the caller gives the record of this signature only): the bridge has seen it, unchanged, for AUTO_QUIET_MS.
+ * Never the feed's own times.
+ * (0.7.14, Rob 2026-10-30: "I'm not sure why I need to click Update. It should automatically update") Until 0.7.14, with
+ * client mail waiting, it also waited for the reply drafts, up to AUTO_NO_DRAFTS_MS: Jason's email of 10-30 sat on his
+ * pinned thread's row as Update for two hours while Lane-2 had not drafted. The mail goes in now, saying the drafts
+ * follow (`draftsComing`), and the drafts go in as a second update when they are ready: they are something new for the
+ * thread (its signature changes).
  */
-export function autoUpdateDue(it: QueueItem, now: number, seen: FirstSeen | undefined): boolean {
-  if (!seen || !(now - seen.at >= AUTO_QUIET_MS)) return false
-  if (it.messages === 0) return true
-  return draftsReady(it) || (seen.mail > 0 && now - seen.mail >= AUTO_NO_DRAFTS_MS)
+export function autoUpdateDue(seen: FirstSeen | undefined, now: number): boolean {
+  return Boolean(seen) && now - (seen as FirstSeen).at >= AUTO_QUIET_MS
 }
 
-/** (0.5.11, review of PR #15, F3) Reply drafts are ready for the client: a package prepared for the person, or one they hold. */
-const draftsReady = (it: QueueItem): boolean => {
-  const o = it.open ?? null
-  return it.kind === 'ready' || o?.state === 'prepared' || o?.state === 'held_by_me'
+/**
+ * (0.7.14) Lane-2 may still build the client's reply drafts: client mail waits with no package at all (kickoff case 6,
+ * `asksForPrep`), and the bridge first saw the oldest waiting message less than AUTO_NO_DRAFTS_MS ago (or has no record
+ * of it yet). An update sent by itself then says the drafts follow (kickoffText's `wait`), never asks for prep.
+ */
+export function draftsComing(it: QueueItem, now: number, seen: FirstSeen | undefined): boolean {
+  return asksForPrep(it) && !(seen && seen.mail > 0 && now - seen.mail >= AUTO_NO_DRAFTS_MS)
+}
+
+/**
+ * (0.7.14) The thread was updated by itself while the drafts could still come (`Sent.wait`), with what the client has
+ * now, and they did not come: still no package, AUTO_NO_DRAFTS_MS after the oldest waiting message was first seen. Its
+ * follow-up asks it to build them (case 6 sent by itself), as 0.5.11's one update did at that time.
+ */
+export function prepDue(given: Sent | undefined, sid: string, it: QueueItem, now: number, seen: FirstSeen | undefined): boolean {
+  return !!given && given.wait === true && given.sid === sid && hasWaiting(given.sig, it) && asksForPrep(it) && !draftsComing(it, now, seen)
 }
 
 /**
  * (0.7.9, Rob 2026-10-29: "It seems like the threads aren't auto-updating anymore. They're not repinning themselves.")
  * When a client's linked thread is due to be updated by itself, from what this bridge has seen of the client (`seen`, as
  * `seenNow` has it for what the client has now): AUTO_QUIET_MS after it was first seen unchanged, as `autoUpdateDue`
- * asks; and with client mail waiting and no reply drafts ready, once they are ready, at the latest AUTO_NO_DRAFTS_MS
- * after the oldest waiting message was first seen (`drafts`). Kin Properties, 10-29: TJ's email reached OW at 6:50 PM
- * ET and the bridge saw it at 6:57. It held the update for Lane-2's drafts (its run for Kin went from 7:08 to 7:16), as
- * it should. But nothing on screen said so, the row offered Update, and at 7:00 Rob pressed it, taking the updates for
- * stopped.
+ * asks. (0.7.14) Until 0.7.14, with mail waiting and no drafts, up to AUTO_NO_DRAFTS_MS later, "when the drafts are
+ * ready": no update waits for them now.
  * This says when, never whether: every guard of the send still applies when the time comes (`autoUpdates`).
  */
-export function selfUpdateAt(it: QueueItem, seen: FirstSeen): { at: number; drafts: boolean } {
-  const quiet = seen.at + AUTO_QUIET_MS
-  if (it.messages === 0 || draftsReady(it)) return { at: quiet, drafts: false }
-  return { at: Math.max(quiet, (seen.mail > 0 ? seen.mail : seen.at) + AUTO_NO_DRAFTS_MS), drafts: true }
+export function selfUpdateAt(seen: FirstSeen): number {
+  return seen.at + AUTO_QUIET_MS
 }
 
 /**
- * (0.7.9) What a row, the client's part of the pane and its thread's note say of it: `updates itself when the drafts
- * are ready (by 8:57 PM)`, `updates itself at about 7:07 PM`, and `updates itself shortly` once that time has passed (the
- * next sync sends it, or the thread is in use and it waits until the thread has been quiet AUTO_IDLE_MS).
+ * (0.7.9) What a row, the client's part of the pane and its thread's note say of it: `updates itself at about 7:07 PM`,
+ * and `updates itself shortly` once that time has passed (the next sync sends it, or the thread is in use and it waits
+ * until the thread has been quiet AUTO_IDLE_MS).
  */
-export function selfUpdateText(when: { at: number; drafts: boolean }, now: number): string {
-  if (!(when.at > now)) return 'updates itself shortly'
-  return when.drafts ? `updates itself when the drafts are ready (by ${clockText(when.at, now)})` : `updates itself at about ${clockText(when.at, now)}`
+export function selfUpdateText(at: number, now: number): string {
+  return at > now ? `updates itself at about ${clockText(at, now)}` : 'updates itself shortly'
+}
+
+/**
+ * (0.7.14, Rob 2026-10-30: "if a new thread is recommended, the chip should show up in the old thread") A client's
+ * thread whose transcript on this computer is this large or larger is long: an update sent into it by itself asks it to
+ * put up a card for a fresh thread (`freshParagraph`). 12 MiB: of 100 of Rob's transcripts sampled on 10-30, the median
+ * was 4.3 MB with no compaction, 12.4 MB with two.
+ */
+export const FRESH_THREAD_BYTES = 12 * 1_048_576
+
+/**
+ * (0.7.14) What an update sent by itself into a long thread (`FRESH_THREAD_BYTES`) carries last: put up a card for a fresh
+ * thread for the client, in this thread, through the mm tool's kickoffs (whose kickoff carries this thread's hand-over
+ * and, once started, takes the client's link and its pin), unless one is up already. The card starts nothing: the person
+ * clicks it or not. `name`: the client's full name, as kickoffs finds it.
+ */
+export function freshParagraph(name: string, bytes: number): string {
+  const mb = Math.round(bytes / 1_048_576)
+  return `This thread is long (its transcript is ${mb} MB), so a fresh thread would cost less from here on. Unless this thread already shows a card for one, call mm with "kickoffs ${name}" and propose that thread with start_session using exactly the title, prompt, background and cwd it gives, but with initiation "own_initiative", so the card waits here for my click. If kickoffs says it is pending, a card is up already: propose nothing. Started, the new thread gets this thread's hand-over and takes over the client's link and pin. Then carry on with the update above.`
 }
 
 /**
@@ -810,6 +845,9 @@ export function askParagraph(a: Pick<AskRef, 'id' | 'asker' | 'dueAt'>): string 
  *   6. client messages with no package yet
  *   7. committed tasks only (a package that is out of date, or another owner's, changes nothing here:
  *      the client is in the list for the task)
+ * (0.7.14) `wait`, with `auto`: case 6 sent while Lane-2 may still build the drafts (`draftsComing`): its words say they
+ *    follow as a second update and ask for no prep (Opus's, 10-30, verbatim). A thread they never reach is asked for prep
+ *    later, in case 6's own words (`prepDue`).
  * ⛔ (0.5.11) `auto`: the message an update sent by itself carries (`autoUpdate`), which no person pressed for (with
  *    `update`, the marker comes first: F4 below). It
  *    never takes the package (client-reply-prep §9.1's pickup call): taken by a send nobody pressed for, OW would
@@ -826,7 +864,7 @@ export function askParagraph(a: Pick<AskRef, 'id' | 'asker' | 'dueAt'>): string 
  *    last in the body, after any ask's paragraph and before any hand-over. It takes nothing, so a send by itself carries
  *    the same words. ⛔ No due date and no clock for it anywhere.
  */
-export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: Replaced | undefined; auto?: boolean } = {}): string {
+export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: Replaced | undefined; auto?: boolean; wait?: boolean } = {}): string {
   const id = it.projectId
   const who = `${it.projectName} (OW project ${id})`
   // (R17) nothing due: the kickoff says no due time (the clause is left out, never "due Invalid Date")
@@ -865,7 +903,10 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
                 ? notTaken(o.id.slice(0, 8))
                 : `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${o.id.slice(0, 8)} and wait for me. Send nothing without my go.`
               : it.messages > 0
-                ? opts.auto
+                ? opts.auto && opts.wait
+                  ? // (0.7.14, Opus 10-30, verbatim) case 6 sent by itself while Lane-2 may still build the drafts (`draftsComing`)
+                    `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Lane-2 is building the reply drafts, and they come into this thread as a second update once they are ready. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep before the drafts come unless I ask you to. Send nothing without my go.`
+                  : opts.auto
                   ? // (0.5.11, Opus 10-15, verbatim) case 6 sent by itself
                     `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep: no package exists yet, so run prep (§2) to build one, then show the five-part pickup view without taking the package: no pickup call until I answer here. Then wait for me. Send nothing without my go.`
                   : `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
