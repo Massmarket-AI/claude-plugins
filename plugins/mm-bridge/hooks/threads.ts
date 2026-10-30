@@ -19,7 +19,7 @@
 import type { MmRow } from '../types'
 
 import {
-  MAY_NEED_OK, NOBODY, checkingTitle, cleanText, cleanTitle, clockText, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
+  MAY_NEED_OK, NOBODY, checkingTitle, cleanText, cleanTitle, clockLead, clockText, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
   pinsNow, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownQueue, shownText, skillFor, stillOpenTitle, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
 } from './queue'
 import type { AskRef, FeedThread, QueueItem } from './queue'
@@ -75,9 +75,23 @@ export type Recommendation = {
    * row offers Restore thread, never Start, and Start missing threads and `kickoffs` leave the client out.
    */
   archived?: string
+  /**
+   * (0.7.11, Rob 2026-10-30: "I don't think we need to be creating threads for people that haven't been active or sent us
+   * anything for more than a couple months") A `start` for a client that is not ACTIVE (nothing of theirs waiting, no
+   * message from them in the last ACTIVE_WINDOW_MS) and has nothing due for the viewer: its row stays, with no Start, and
+   * Start missing threads, the profile-switch band and `kickoffs` leave it out. A new message from the client lifts it on
+   * the next sync.
+   */
+  dormant?: true
 }
 
-/** (0.5.23) A client's row when its linked thread is in another Claude profile: Start, and why. */
+/** (0.7.11) What a quiet client's row says where Start would have been. */
+export const DORMANT_REASON = 'nothing from them in 6 weeks'
+
+/**
+ * (0.5.23) A client's row when its linked thread is in another Claude profile: Start, and why. (0.7.11) Only while it has
+ * no thread of its own in this profile: one it has here is linked instead (`mm.profileLinks`).
+ */
 export const AWAY_REASON = 'its thread is in another Claude profile'
 
 /** (0.7.10) A client's row when its own thread is archived and was not brought back by itself: Restore, and why. */
@@ -1092,6 +1106,117 @@ export function kickoffsAnswer(
 /** `local_<id>`: the app's id for a thread, which is what the session tools take. */
 export const THREAD_ID = /^local_[A-Za-z0-9_-]{1,100}$/
 
+// ---------------------------------------------------------------- (0.7.11) a client's thread follows you across Claude profiles
+
+/**
+ * (0.7.11, Rob 2026-10-30: "switching profiles all the time. It needs to be able to detect and adapt to that.") A client
+ * whose linked thread is in another Claude profile on this computer and that has no thread of its own in this one (the
+ * sync found none to link here): what the pane's band, the line on the first prompt after a switch and `kickoffs` say
+ * of it. A client with its own thread here is linked to that one instead, and is never one of these.
+ */
+export type AwayClient = {
+  projectId: string
+  client: string
+  /** Its thread in the other profile (the app's id). */
+  sid: string
+  /** The folder of the app's records that holds that thread: one per Claude profile. */
+  dir?: string
+  /** When what it is listed for is due, where something is due. */
+  due?: number
+  /** With `due`: `reply` or `task`. */
+  what?: string
+  /** Where the sync listed it: Needs you (`items`), a closed group under it, or no list at all (`none`: its thread is pinned in the other profile). */
+  listed: 'items' | 'teammate' | 'older' | 'checking' | 'none'
+  /** That thread's transcript on this computer, when its record names its session and folder (`transcriptPath`). */
+  transcript?: string
+  /** That thread's own title, as the bridge kept it before renaming it. */
+  title?: string
+}
+
+/** (0.7.11) How many names the band and the prompt line list before `and N more`. */
+export const AWAY_NAMES_MAX = 8
+
+/** (0.7.11) Due first, soonest first; the rest after, in the order given. */
+export function awaySorted(list: readonly AwayClient[]): AwayClient[] {
+  const at = (a: AwayClient): number => (typeof a.due === 'number' && Number.isFinite(a.due) ? a.due : Infinity)
+  return list.map((a, i) => ({ a, i })).sort((x, y) => at(x.a) - at(y.a) || x.i - y.i).map(x => x.a)
+}
+
+/** (0.7.11) One away client as the band names it: `PlacementCorp (reply due 5:27 PM ET)`, `(reply 2h late)`, or the name alone. */
+export function awayLabel(a: AwayClient, now: number): string {
+  if (typeof a.due !== 'number' || !Number.isFinite(a.due) || !a.what) return a.client
+  if (a.due < now) return `${a.client} (${a.what} ${clockLead(a.due, now)})`
+  return `${a.client} (${a.what} due ${clockText(a.due, now)} ET)`
+}
+
+/**
+ * (0.7.11) The pane's band, at the very top, while any client is away with no thread here: `You switched Claude profiles.
+ * 3 client threads are in the other one: PlacementCorp (reply due 5:27 PM ET), It's Under It All, Remver Consulting.`
+ */
+export function awayBandText(list: readonly AwayClient[], now: number): string {
+  const sorted = awaySorted(list)
+  const shown = sorted.slice(0, AWAY_NAMES_MAX).map(a => awayLabel(a, now))
+  const more = sorted.length - shown.length
+  const names = more > 0 ? `${shown.join(', ')}, and ${more} more` : shown.join(', ')
+  return `You switched Claude profiles. ${sorted.length} client thread${sorted.length === 1 ? ' is' : 's are'} in the other one: ${names}.`
+}
+
+/** (0.7.11) The band's one button: it puts START_ALL_WORDS in the prompt box, as Start missing threads does. */
+export const awayButton = (n: number): string => (n === 1 ? 'Start it here' : 'Start them here')
+
+/**
+ * (0.7.11) The one line the first prompt the person types after a switch carries for Claude: the band's words, then to
+ * offer one button that sends START_ALL_WORDS, and to start nothing itself. ⛔ It never asks Claude to start a thread:
+ * the person's own words do that, on a turn of their own.
+ */
+export function awayPromptLine(list: readonly AwayClient[], now: number): string {
+  return `[mm-bridge] ${awayBandText(list, now)} Do not start any thread on this turn. At the end of your reply, offer the person one button that sends "${START_ALL_WORDS}" (with no buttons, ask them to send those words).`
+}
+
+/** (0.7.11) A Claude Code session id as a record names it: a uuid. */
+const CLI_SESSION = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+
+/**
+ * (0.7.11) Where Claude Code keeps a session's transcript: `<home>/.claude/projects/<folder>/<session>.jsonl`, the folder
+ * being the session's working folder with every character but a letter or a digit made `-`
+ * (`/Users/rob/Projects` → `-Users-rob-Projects`). Undefined when a part is not what a record holds (an absolute folder,
+ * a uuid session) or the folder's name is longer than Claude Code keeps whole (200: it shortens longer ones).
+ */
+export function transcriptPath(home: string, cwd: unknown, cli: unknown): string | undefined {
+  if (!home || typeof cwd !== 'string' || typeof cli !== 'string' || !CLI_SESSION.test(cli)) return undefined
+  // eslint-disable-next-line no-control-regex
+  if (cwd.length > 1000 || /[\u0000-\u001f]/.test(cwd) || !/^(\/|[A-Za-z]:[\\/])/.test(cwd)) return undefined
+  const folder = cwd.replace(/[^A-Za-z0-9]/g, '-')
+  if (folder.length > 200) return undefined
+  const sep = /^[A-Za-z]:\\/.test(home) ? '\\' : '/'
+  return [home.replace(/[\\/]+$/, ''), '.claude', 'projects', folder, `${cli}.jsonl`].join(sep)
+}
+
+/**
+ * (0.7.11) The paragraph a new thread's kickoff carries for a client whose last thread is in another Claude profile: the
+ * session tools here cannot open that thread, so the new thread reads the end of its transcript on disk first and
+ * carries on from it, rather than starting cold. '' when the old thread's id is not an app thread id.
+ * ⛔ The title is the thread's own text: cleaned to one line and cut at 60 before it goes in.
+ */
+export function awayHandoverText(projectName: string, a: Pick<AwayClient, 'sid' | 'title' | 'transcript'>): string {
+  if (!THREAD_ID.test(a.sid)) return ''
+  const named = a.title ? ` ("${cleanTitle(a.title)}")` : ''
+  const read = a.transcript
+    ? `Before anything else, read the last part of its transcript on this computer, ${a.transcript} (only its last 200 lines or so, never the whole file), and list anything left open in it: a question waiting on me, something promised and not done, a draft that was not sent. Keep that list to ten lines, then carry on from where that thread stopped.`
+    : 'Its transcript could not be found from here, so carry on from the client\'s project skill and records.'
+  return `This client's last thread is in another Claude profile: thread ${a.sid}${named} for ${projectName}. The session tools here cannot open it. ${read}`
+}
+
+/**
+ * (0.7.11) The kickoff for a client on no list whose thread is pinned in another Claude profile (the profile-switch
+ * skill's pinned `BRIDGE` row): its marker first, then to show where it stands, then the hand-over.
+ */
+export function carryKickoff(projectId: string, client: string, a: Pick<AwayClient, 'sid' | 'title' | 'transcript'>): string {
+  const lead = `[mm-link ${projectId}] ${client} (OW project ${projectId}) has nothing on my list right now, and its pinned thread is in another Claude profile. Load the client's project skill first, then show me where it stands and wait for me. Send nothing without my go.`
+  const handover = awayHandoverText(client, a)
+  return handover ? `${lead}\n\n${handover}` : lead
+}
+
 /**
  * The second paragraph of a kickoff that starts a new thread while the client already has one (Rob,
  * 2026-10-12: "inspect the recent context of an existing thread for anything unreconciled before creating
@@ -1196,7 +1321,9 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: Ro
   const guess = rec.target?.suggested ? rec.reason : ''
   // (0.7.9, Rob 10-29) and, on an Update row whose thread is due to be updated by itself, when (`selfUpdateText`)
   const self = rec.state === 'update' && !guess ? opts.self ?? '' : ''
-  const extra = withMate || still || checking ? '' : [rowExtra(it), guess, self].filter(Boolean).join(' · ')
+  // (0.7.11) and, where Start would have been for a quiet client, why there is none
+  const quiet = rec.dormant === true && rec.state === 'start' && !rec.archived ? DORMANT_REASON : ''
+  const extra = withMate || still || checking ? '' : [rowExtra(it), guess, self, quiet].filter(Boolean).join(' · ')
   // (the founder) a package flagged for his OK that a teammate has, theirs to decide until its reply is due:
   // the row's sentence is followed by Opus's words, R2. A row with no sentence (a prepared package) gets no
   // line of them alone: its title and waiting text already say it (Opus, 10-13).
@@ -1210,6 +1337,8 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: Ro
     ...(rec.target ? { target: rec.target.sid } : {}),
     // (0.7.10) the client's own archived thread: what Restore thread brings back
     ...(rec.archived && rec.state === 'start' ? { archived: rec.archived } : {}),
+    // (0.7.11) a quiet client: no Start
+    ...(rec.dormant === true && rec.state === 'start' && !rec.archived ? { dormant: true as const } : {}),
     ...(note ? { note } : {}),
     ...(extra ? { extra } : {}),
     // (the founder's alone, 0.5.1) a teammate's to see through: no action, with a sentence or without one
@@ -1239,6 +1368,8 @@ export function rowButtons(row: Row): RowButton[] {
   const state = rowState(row)
   // (0.7.10) a client whose own thread is archived gets that thread back, never a new one
   if (state === 'start' && typeof row.archived === 'string' && THREAD_ID.test(row.archived)) return ['restore', 'drafts']
+  // (0.7.11) a client with nothing from them in ACTIVE_WINDOW_MS and nothing due for the viewer: no new thread
+  if (state === 'start' && row.dormant === true) return ['drafts']
   return [state === 'current' ? 'open' : state, 'drafts']
 }
 

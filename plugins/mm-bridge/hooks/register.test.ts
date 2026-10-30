@@ -4984,16 +4984,18 @@ describe('B3: a thread is linked by itself only to the one client its sessions d
 // ======================================================================== 0.5.2 (Rob, 2026-10-13 evening)
 
 describe('R1: a pin means "needs you": pinned while something must be acted on within 24 business hours', () => {
-  test('a reply due in 30 business hours is on the list, its thread named and not pinned; it pins itself once within 24', async ($, on) => {
+  test('a reply due in 30 business hours is on the list, its thread named; (0.7.11) and pinned at once: the client wrote today, so it is ACTIVE', async ($, on) => {
     const due = new Date(NOW + 30 * HOUR).toISOString() // Tuesday 5 PM: 13 business hours today, 17 tomorrow
     const w = world(on, {
       feed: feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 1, { reply_due_at: due })], threads: [declared(BOLT, 'cli-bolt', 20)] }),
       threads: [thread('local_b', 'Staffing plan', 20)],
       store: { 'mm.threads': PAIRS },
     })
-    expect(await mm($, '')).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
-    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 1d left · Bolt Staffing · reply', pinned: false })
-    // six hours on, it is 24 business hours away: pinned
+    // (0.7.11, Rob 10-27 "always pin the most recent thread from that client", 10-30 "why are things not getting pinned")
+    // an ACTIVE client's thread is pinned whatever its time; until 0.7.11 this waited for the 24 business hours. R1's
+    // window still decides for a client that is not active (the 0.7.11 tests: a dated task and no client message).
+    expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 1d left · Bolt Staffing · reply', pinned: true })
     await w.clock.advance(6 * HOUR)
     expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
     expect(w.threads.get('local_b')?.pinned).toBe(true)
@@ -5563,17 +5565,19 @@ describe('R16: a row and its thread\'s name, from one pass, always agree', () =>
 })
 
 describe('R17: a client with nothing due', () => {
-  test('listed last with no clock; never pinned, no NO THREAD row, no chip by itself, and the band counts it nowhere', async ($, on) => {
+  test('listed last with no clock; no NO THREAD row, no chip by itself, and the band counts it nowhere; (0.7.11) its thread pinned: the client wrote today', async ($, on) => {
     const w = world(on, {
       feed: feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 1, { reply_due_at: null })], threads: [declared(BOLT, 'cli-bolt', 20)] }),
       threads: [thread('local_b', 'Staffing plan', 20)],
       store: { 'mm.threads': PAIRS, 'mm.lease': { owner: 'x', until: 0 } },
     })
     await tickOnce($, w)
-    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 Bolt Staffing · reply', pinned: false })
+    // (0.7.11, Rob 10-27/10-30) an ACTIVE client's thread is pinned, with or without a clock (until 0.7.11: never pinned)
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 Bolt Staffing · reply', pinned: true })
     expect(w.acted()).toEqual([])
     const band = await bandOf($)
-    expect(await lines(band)).toEqual(['Nothing needs you in the next 24 hours.'])
+    // (0.7.11) the band counts the pinned thread (until 0.7.11: 'Nothing needs you in the next 24 hours.')
+    expect(await lines(band)).toEqual(['Needs you: 1 pinned.'])
     await band.unmount()
   })
 
@@ -8097,7 +8101,7 @@ describe('0.5.23 (the 14 refused starts of 10-19 and 10-20): a link lasts until 
     expect(sends(w)).toEqual([])
   })
 
-  test('the person\'s Start on that row: (0.5.25) the client\'s words in the prompt box, and kickoffs gives its start with no hand-over (the old thread cannot be read from this profile)', async ($, on) => {
+  test('the person\'s Start on that row: (0.5.25) the client\'s words in the prompt box, and kickoffs gives its start; (0.7.11) with a hand-over that names the old thread (its record gives no transcript here)', async ($, on) => {
     const w = awayWorld(on)
     await tickOnce($, w)
     const ui = await pane($)
@@ -8105,7 +8109,10 @@ describe('0.5.23 (the 14 refused starts of 10-19 and 10-20): a link lasts until 
     await ui.unmount()
     expect(w.fills).toEqual([startOf('Acme Roofing')])
     expect(sessionCalls(w)).toEqual([])
-    expect((await kickoffsOf($, 'acme')).map(k => k.arguments.prompt)).toEqual([ACME_KICKOFF])
+    // (0.7.11) until 0.7.11 no hand-over at all: the session tools here cannot open the old thread. Its id and name now go
+    // in, and its transcript when its record names one (the 0.7.11 tests); this record names none.
+    const handover = 'This client\'s last thread is in another Claude profile: thread local_p2 ("Roof quote") for Acme Roofing Pat. The session tools here cannot open it. Its transcript could not be found from here, so carry on from the client\'s project skill and records.'
+    expect((await kickoffsOf($, 'acme')).map(k => k.arguments.prompt)).toEqual([`${ACME_KICKOFF}\n\n${handover}`])
   })
 
   // ---- fix 2: a client with no linked thread takes back its marked thread
@@ -8184,13 +8191,15 @@ describe('0.5.23 (the 14 refused starts of 10-19 and 10-20): a link lasts until 
     expect(w.stored['mm.links']).toEqual({})
   })
 
-  test('the newest marked thread is in the other profile: taken back, kept as that profile\'s (its row offers Start here), and nothing is started or sent by itself', async ($, on) => {
+  test('the newest marked thread is in the other profile, and none is here: taken back, kept as that profile\'s (its row offers Start here), and nothing is started or sent by itself', async ($, on) => {
+    // (0.7.11) with an older marked thread HERE as well (local_m1, until 0.7.11 part of this test), that one is linked
+    // instead: a client's own thread in the profile in use comes first (the 0.7.11 tests)
     const w = world(on, {
       tools: 'start',
       feed: acmeOnly(),
-      threads: [thread('local_other', 'Unrelated notes', 100), thread('local_m1', 'Roof quote', 120)],
+      threads: [thread('local_other', 'Unrelated notes', 100)],
       files: { ...mine, ...rec(OTHER, 'local_m2') },
-      store: { 'mm.marked': { local_m1: ACME, local_m2: ACME }, 'mm.markedAt': { local_m1: NOW - 9 * 24 * HOUR, local_m2: NOW - 3 * 24 * HOUR } },
+      store: { 'mm.marked': { local_m2: ACME }, 'mm.markedAt': { local_m2: NOW - 3 * 24 * HOUR } },
     })
     await tickOnce($, w)
     expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_m2' })
@@ -10177,7 +10186,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.10', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.11', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10246,7 +10255,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.10', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.11', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10312,7 +10321,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.10', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.11', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
@@ -10560,7 +10569,10 @@ describe('(0.7.5) the pane: Needs you now, then Your build queue, then the group
     expect(drawn.some(l => l.includes('Bolt Staffing'))).toBe(false)
     await ui.press({ key: 'mm-fold:undated' })
     const open = await lines(ui)
-    expect(open.slice(open.indexOf('No due date (1)'))).toEqual(['No due date (1)', '2. 🟡 Bolt Staffing · task · no thread', '2 tasks with no date', UPDATED])
+    // (0.7.11, Rob 10-30) Bolt's only items are undated tickets and nothing came from Bolt in six weeks: its row stays,
+    // says so, and offers no Start (until 0.7.11 it offered Start thread)
+    expect(open.slice(open.indexOf('No due date (1)'))).toEqual(['No due date (1)', '2. 🟡 Bolt Staffing · task · no thread', '2 tasks with no date · nothing from them in 6 weeks', UPDATED])
+    expect(await buttonsOf(ui, BOLT)).toEqual(['Drafts'])
     expect(sends(w)).toEqual([])
     await ui.unmount()
   })
@@ -11027,5 +11039,312 @@ describe('0.7.10 (Rob, 10-28): kickoffs never hand a client out twice, start in 
     expect(await mm($, 'restore cedar')).toBe('Cedar Dental has no archived thread of its own to bring back.')
     expect(unarchives(w)).toEqual([])
     expect((await kickoffsOf($, 'cedar')).length).toBe(1)
+  })
+})
+
+// ======================================================================== 0.7.11 (Rob, 2026-10-30)
+
+/** (0.7.11) The app's records of two Claude profiles on this computer: the one the person left (A) and the one in use (B). */
+const PROFILES_ROOT = '/home/someone/Library/Application Support/Claude/claude-code-sessions'
+const PROFILE_A = `${PROFILES_ROOT}/acct-a/org-a`
+const PROFILE_B = `${PROFILES_ROOT}/acct-b/org-b`
+/** One record file as the app writes it: `isStarred` is the sidebar's pin, `cliSessionId` and `cwd` say where its transcript is. */
+const profileRec = (dir: string, sid: string, over: Record<string, unknown> = {}) => ({
+  [`${dir}/${sid}.json`]: { text: JSON.stringify({ sessionId: sid, isArchived: false, title: 'not read', ...over }), mtimeMs: NOW - HOUR },
+})
+const minutesOn = async (w: { clock: { advance: (ms: number) => Promise<void> } }, minutes: number) => {
+  for (let i = 0; i < minutes; i++) await w.clock.advance(60_000)
+}
+const awayLine = async (ui: Drawing): Promise<string | undefined> => (await lines(ui)).find(l => l.startsWith('You switched Claude profiles'))
+const DAYS = 24 * HOUR
+
+describe('0.7.11 (Rob, 10-30: "switching profiles all the time. It needs to be able to detect and adapt to that."): a client\'s thread follows the person across Claude profiles', () => {
+  const CLI_A1 = 'dddddddd-0000-4000-8000-0000000000a1'
+  const CLI_LT = 'dddddddd-0000-4000-8000-0000000000b2'
+  const LT = '88888888-8888-4888-8888-888888888888'
+  const acmeOnly = (): Feed => feed({ mail: [], tickets: {}, threads: [] })
+  /** Where Acme's thread in A keeps its transcript on this computer. */
+  const TRANSCRIPT = `/home/someone/.claude/projects/-work-acme/${CLI_A1}.jsonl`
+  /** The band's words for Acme, its reply due Tuesday 8 AM ET. */
+  const ACME_AWAY = 'You switched Claude profiles. 1 client thread is in the other one: Acme Roofing (reply due Tue 8 AM ET).'
+  /** In profile B now. Acme is linked to local_a1, its thread in profile A (pinned there, run in /work/acme), pinned and named by the bridge. */
+  const inB = (on: On, more: { threads?: Thread[]; files?: Record<string, { text: string; mtimeMs: number }>; store?: Record<string, unknown>; feed?: Feed } = {}) =>
+    world(on, {
+      tools: 'start',
+      feed: more.feed ?? acmeOnly(),
+      threads: [thread('local_other', 'Unrelated notes', 100), ...(more.threads ?? [])],
+      files: { ...profileRec(PROFILE_B, SELF), ...profileRec(PROFILE_A, 'local_a1', { isStarred: true, cliSessionId: CLI_A1, cwd: '/work/acme' }), ...(more.files ?? {}) },
+      store: { 'mm.links': { [ACME]: 'local_a1' }, 'mm.pins': { local_a1: ourPin(ACME, 'Acme Roofing') }, 'mm.titles': { local_a1: 'Roof quote' }, ...(more.store ?? {}) },
+    })
+  /** Leader Transcend: on no list in B, its thread pinned in A. */
+  const ltIn = (on: On, store: Record<string, unknown> = {}) =>
+    inB(on, {
+      feed: feed({ drafts: [], mail: [], tickets: {}, threads: [] }),
+      files: profileRec(PROFILE_A, 'local_lt', { isStarred: true, cliSessionId: CLI_LT, cwd: '/work/lt' }),
+      store: { 'mm.links': { [LT]: 'local_lt' }, 'mm.pins': { local_lt: ourPin(LT, 'Leader Transcend') }, 'mm.titles': { local_lt: 'LT build' }, ...store },
+    })
+  const LT_KICKOFF = `[mm-link ${LT}] Leader Transcend (OW project ${LT}) has nothing on my list right now, and its pinned thread is in another Claude profile. Load the client's project skill first, then show me where it stands and wait for me. Send nothing without my go.\n\nThis client's last thread is in another Claude profile: thread local_lt ("LT build") for Leader Transcend. The session tools here cannot open it. Before anything else, read the last part of its transcript on this computer, /home/someone/.claude/projects/-work-lt/${CLI_LT}.jsonl (only its last 200 lines or so, never the whole file), and list anything left open in it: a question waiting on me, something promised and not done, a draft that was not sent. Keep that list to ten lines, then carry on from where that thread stopped.`
+
+  for (const [how, store] of [
+    ['its link in B from before', { 'mm.profileLinks': { [PROFILE_B]: { [ACME]: 'local_b1' } } }],
+    ['the thread in B that opened with its marker', { 'mm.marked': { local_b1: ACME }, 'mm.markedAt': { local_b1: NOW - 5 * DAYS } }],
+  ] as Array<[string, Record<string, unknown>]>) {
+    test(`A to B, the client has an older thread of its own in B (${how}): linked to it, pinned, and its update goes in by itself; no Start, no band, no kickoff`, LONG, async ($, on) => {
+      const w = inB(on, { threads: [thread('local_b1', 'Acme, last week', 5 * 24)], store })
+      await tickOnce($, w)
+      expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_b1' })
+      expect(w.threads.get('local_b1')?.pinned).toBe(true)
+      // each profile keeps its own link: A's is the one the way back takes
+      expect(w.stored['mm.profileLinks']).toEqual({ [PROFILE_B]: { [ACME]: 'local_b1' }, [PROFILE_A]: { [ACME]: 'local_a1' } })
+      const ui = await pane($)
+      expect(await buttonsOf(ui, ACME)).toEqual(['Update thread', 'Drafts'])
+      expect(await awayLine(ui)).toBeUndefined()
+      await ui.unmount()
+      expect(await kickoffsOf($)).toEqual([])
+      await minutesOn(w, 20)
+      await w.clock.advance(3_000)
+      expect(sends(w).map(c => c.args.session_id)).toEqual(['local_b1'])
+      expect(String(sends(w)[0]?.args.message).startsWith(`[mm-link ${ACME}] `)).toBe(true)
+      // ⛔ by itself: no start, no card, no words in the box
+      expect(sessionCalls(w)).toEqual([])
+      expect(w.fills).toEqual([])
+    })
+  }
+
+  test('A to B, no thread of its own in B: the pane\'s band names it with its reply time and one button; the press puts the words in the box; kickoffs gives its start with the old thread\'s id and transcript; nothing by itself', LONG, async ($, on) => {
+    const w = inB(on)
+    await tickOnce($, w)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a1' })
+    const ui = await pane($)
+    expect(await awayLine(ui)).toBe(ACME_AWAY)
+    expect((await buttons(ui)).filter(b => b[0] === 'mm-away-start')).toEqual([['mm-away-start', 'Start it here']])
+    const pressed = ui.press({ key: 'mm-away-start' })
+    await w.clock.advance(2_000)
+    await pressed
+    await ui.unmount()
+    expect(w.fills).toEqual([START_ALL])
+    expect(sessionCalls(w)).toEqual([])
+    const kicks = await kickoffsOf($)
+    expect(kicks.length).toBe(1)
+    const prompt = String(kicks[0]?.arguments.prompt)
+    expect(prompt.startsWith(`[mm-link ${ACME}] `)).toBe(true)
+    expect(prompt).toContain('This client\'s last thread is in another Claude profile: thread local_a1 ("Roof quote") for Acme Roofing Pat. The session tools here cannot open it.')
+    expect(prompt).toContain(`read the last part of its transcript on this computer, ${TRANSCRIPT} (only its last 200 lines or so, never the whole file)`)
+    await minutesOn(w, 30)
+    expect(sessionCalls(w)).toEqual([])
+    expect(sends(w)).toEqual([])
+  })
+
+  test('back to A, the store as the switch to B left it: linked to its thread in A again, pinned there; nothing started and no kickoff after the first visit', LONG, async ($, on) => {
+    const w = world(on, {
+      tools: 'start',
+      feed: acmeOnly(),
+      threads: [thread('local_other', 'Unrelated notes', 100), thread('local_a1', 'Roof quote', 30)],
+      files: { ...profileRec(PROFILE_A, SELF), ...profileRec(PROFILE_B, 'local_b1') },
+      store: {
+        'mm.links': { [ACME]: 'local_b1' },
+        'mm.auto': { [ACME]: { sid: 'local_b1', miss: 0, made: NOW - HOUR } },
+        'mm.profileLinks': { [PROFILE_B]: { [ACME]: 'local_b1' }, [PROFILE_A]: { [ACME]: 'local_a1' } },
+        'mm.profile': { dir: PROFILE_B, since: NOW - 2 * HOUR },
+      },
+    })
+    await tickOnce($, w)
+    expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_a1' })
+    expect(w.threads.get('local_a1')?.pinned).toBe(true)
+    expect(w.stored['mm.profile']).toMatchObject({ dir: PROFILE_A })
+    const ui = await pane($)
+    expect(await awayLine(ui)).toBeUndefined()
+    await ui.unmount()
+    expect(await kickoffsOf($)).toEqual([])
+    await minutesOn(w, 30)
+    expect(sessionCalls(w)).toEqual([])
+    expect(w.fills).toEqual([])
+  })
+
+  test('a client off the Needs-you list whose thread is pinned in A, and that wrote in the last six weeks: in the band and in kickoffs, with the hand-over', async ($, on) => {
+    const w = ltIn(on, { 'mm.activity': { [LT]: NOW - 3 * DAYS } })
+    await tickOnce($, w)
+    const ui = await pane($)
+    expect(await awayLine(ui)).toBe('You switched Claude profiles. 1 client thread is in the other one: Leader Transcend.')
+    expect((await buttons(ui)).filter(b => b[0] === 'mm-away-start')).toEqual([['mm-away-start', 'Start it here']])
+    await ui.unmount()
+    expect((await kickoffsOf($)).map(k => k.arguments.prompt)).toEqual([LT_KICKOFF])
+    expect(sessionCalls(w)).toEqual([])
+  })
+
+  test('two presses of Start, then kickoffs twice: the client is handed out once, and the second time it is named as pending', async ($, on) => {
+    const w = ltIn(on, { 'mm.activity': { [LT]: NOW - 3 * DAYS } })
+    await tickOnce($, w)
+    const ui = await pane($)
+    for (let i = 0; i < 2; i++) {
+      const pressed = ui.press({ key: 'mm-away-start' })
+      await w.clock.advance(2_000)
+      await pressed
+    }
+    await ui.unmount()
+    expect([...new Set(w.fills)]).toEqual([START_ALL])
+    expect(sessionCalls(w)).toEqual([])
+    expect((await kickoffsOf($)).map(k => k.client)).toEqual(['Leader Transcend'])
+    const again = await tool($, 'kickoffs')
+    expect(kicksIn(again)).toEqual([])
+    expect(again).toContain('Already handed out in the last 10 minutes and not linked yet: Leader Transcend. Do not start it again')
+  })
+
+  test('the first prompt the person types after a switch carries one line naming the clients in the other profile, once a switch; a later switch says it again; it starts nothing', async ($, on) => {
+    const LINE = `[mm-bridge] ${ACME_AWAY} Do not start any thread on this turn. At the end of your reply, offer the person one button that sends "${START_ALL}" (with no buttons, ask them to send those words).`
+    const w = inB(on)
+    await tickOnce($, w)
+    await $.prompt.submit({ text: 'morning', wait: false, origin: { kind: 'composer' } })
+    await $.prompt.submit({ text: 'and this', wait: false, origin: { kind: 'composer' } })
+    expect(w.prompts.map(p => p.text)).toEqual([`morning\n\n${LINE}`, 'and this'])
+    // the person went to A and came back: the sync finds this thread in B's folder again, after one in A's
+    w.stored['mm.profile'] = { dir: PROFILE_A, since: NOW - DAYS }
+    await w.clock.advance(60_000)
+    await mm($, '')
+    await $.prompt.submit({ text: 'back', wait: false, origin: { kind: 'composer' } })
+    expect(w.prompts.at(-1)?.text).toBe(`back\n\n${LINE}`)
+    expect(sessionCalls(w)).toEqual([])
+    expect(w.fills).toEqual([])
+    expect(sends(w)).toEqual([])
+  })
+})
+
+describe('0.7.11 (Rob, 10-30: "I don\'t think we need to be creating threads for people that haven\'t been active or sent us anything for more than a couple months"): only an ACTIVE client, or one with something due for the person, gets a new thread', () => {
+  const REM = '99999999-9999-4999-8999-999999999999'
+  const tid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-0000000000aa`
+  const undatedOn = (pid: string, name: string, n = 1): FeedTicket => ({ ticket_id: tid(n), project_id: pid, project_name: name, title: `Undated ${n}`, due_at: null, due_source: null, assignee_email: ME })
+  /** The founder: Bolt listed by an undated ticket of his alone (nothing from Bolt in the feed). */
+  const quietBolt = (over: Partial<Feed> = {}): Feed => ({ member: ME, role: 'founder', mail: [], drafts: [], tickets: { undated: [undatedOn(BOLT, 'Bolt Staffing (Sam)')] }, threads: [], ...over })
+  const recOf = (w: { stored: Record<string, unknown> }, pid: string) => (w.stored['mm.last'] as { recs: Record<string, Record<string, unknown>> }).recs[pid]
+  /** A teammate's ticket on Remver, its ETA needed four hours ago: Remver's only item on the founder's feed. */
+  const remverLate = (): Feed => ({
+    member: FOUNDER, role: 'founder', mail: [], drafts: [], threads: [],
+    tickets: { overdue: [{ ticket_id: tid(9), project_id: REM, project_name: 'Remver Consulting', title: 'Source the NDA', due_at: null, due_source: null, assignee_email: ME, eta_needed_by: new Date(NOW - 4 * HOUR).toISOString(), eta_ask: 'no ETA' } as FeedTicket] },
+  })
+
+  test('a client listed by undated tickets alone, with nothing from it in six weeks: its row stays with no Start; Start missing threads and kickoffs leave it out; a new message from it brings Start back on the next sync', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: quietBolt(), threads: [] })
+    await mm($, '')
+    expect(recOf(w, BOLT)).toMatchObject({ state: 'start', dormant: true })
+    const ui = await pane($)
+    await ui.press({ key: 'mm-fold:undated' })
+    expect(await buttonsOf(ui, BOLT)).toEqual(['Drafts'])
+    await ui.unmount()
+    expect(await kickoffsOf($)).toEqual([])
+    expect(await mm($, 'start all')).toBe('No client needs a new thread now.')
+    // Bolt writes: ACTIVE at once
+    w.setFeed(quietBolt({ mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 1)] }))
+    await mm($, '')
+    expect(recOf(w, BOLT)?.dormant).toBeUndefined()
+    const again = await pane($)
+    expect(await buttonsOf(again, BOLT)).toEqual(['Start thread', 'Drafts'])
+    await again.unmount()
+    expect((await kickoffsOf($)).map(k => k.client)).toEqual(['Bolt Staffing'])
+    expect(sessionCalls(w)).toEqual([])
+  })
+
+  test('the six weeks: a message five weeks ago (off the feed now, its time kept by the bridge) keeps Start; seven weeks ago, none', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: quietBolt(), threads: [], store: { 'mm.activity': { [BOLT]: NOW - 35 * DAYS } } })
+    await mm($, '')
+    expect(recOf(w, BOLT)?.dormant).toBeUndefined()
+    w.stored['mm.activity'] = { [BOLT]: NOW - 49 * DAYS }
+    await mm($, '')
+    expect(recOf(w, BOLT)).toMatchObject({ state: 'start', dormant: true })
+    // the time past the window is dropped from the record
+    expect(w.stored['mm.activity']).toEqual({})
+  })
+
+  test('OW\'s `client_activity` (any channel) counts and is kept: a text from the client last week gives it Start', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: quietBolt({ client_activity: [{ project_id: BOLT, at: ago(5 * 24) }] }), threads: [] })
+    await mm($, '')
+    expect(recOf(w, BOLT)?.dormant).toBeUndefined()
+    expect(w.stored['mm.activity']).toEqual({ [BOLT]: NOW - 5 * DAYS })
+    expect((await kickoffsOf($)).map(k => k.client)).toEqual(['Bolt Staffing'])
+  })
+
+  test('a teammate\'s late ticket is never a reason for a Start: that client, its thread in the other profile, is not in the band or kickoffs; once it wrote in the last six weeks, it is', async ($, on) => {
+    const w = world(on, { tools: 'start', feed: remverLate(), threads: [thread('local_other', 'Unrelated notes', 100)], files: { ...profileRec(PROFILE_B, SELF), ...profileRec(PROFILE_A, 'local_r1') }, store: { 'mm.links': { [REM]: 'local_r1' } } })
+    await mm($, '')
+    expect(recOf(w, REM)).toMatchObject({ state: 'start', away: true, dormant: true })
+    const ui = await pane($)
+    expect(await awayLine(ui)).toBeUndefined()
+    await ui.unmount()
+    expect(await kickoffsOf($)).toEqual([])
+    await $.prompt.submit({ text: 'morning', wait: false, origin: { kind: 'composer' } })
+    expect(w.prompts.map(p => p.text)).toEqual(['morning'])
+    // Remver wrote two days ago
+    w.stored['mm.activity'] = { [REM]: NOW - 2 * DAYS }
+    await mm($, '')
+    const again = await pane($)
+    expect(await awayLine(again)).toBe('You switched Claude profiles. 1 client thread is in the other one: Remver Consulting.')
+    await again.unmount()
+    expect((await kickoffsOf($)).map(k => k.client)).toEqual(['Remver Consulting'])
+    expect(sessionCalls(w)).toEqual([])
+  })
+
+  test('a quiet client\'s old thread is left alone on a profile switch: its link stays where it was, and its thread here is not linked or pinned', async ($, on) => {
+    const w = world(on, {
+      tools: 'start',
+      feed: quietBolt(),
+      threads: [thread('local_other', 'Unrelated notes', 100), thread('local_bb', 'Bolt, in B', 20)],
+      files: { ...profileRec(PROFILE_B, SELF), ...profileRec(PROFILE_A, 'local_ba') },
+      store: { 'mm.links': { [BOLT]: 'local_ba' }, 'mm.profileLinks': { [PROFILE_B]: { [BOLT]: 'local_bb' } } },
+    })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [BOLT]: 'local_ba' })
+    expect(w.threads.get('local_bb')).toMatchObject({ title: 'Bolt, in B', pinned: false })
+    expect(await kickoffsOf($)).toEqual([])
+  })
+})
+
+describe('0.7.11 (Rob, 10-30: "why are things not getting pinned"): an ACTIVE client\'s thread is pinned, and the count is what the sidebar shows', () => {
+  const LT = '88888888-8888-4888-8888-888888888888'
+  const tid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-0000000000bb`
+  /** The founder: Bolt listed by an undated ticket of his alone, as 26 clients were on 10-30; and Cedar's task due today. */
+  const undatedBolt = (): Feed => {
+    const base = feed()
+    return { ...base, role: 'founder', mail: [], drafts: [], tickets: { ...base.tickets, undated: [{ ticket_id: tid(1), project_id: BOLT, project_name: 'Bolt Staffing (Sam)', title: 'Undated 1', due_at: null, due_source: null, assignee_email: ME }] }, threads: [] }
+  }
+  const notOurs = { projectId: BOLT, client: 'Bolt Staffing', byUs: false }
+  const pinsOf = (w: { stored: Record<string, unknown> }) => w.stored['mm.pins'] as Record<string, unknown>
+
+  test('[10-30] Bolt wrote three days ago and its only items are undated tickets: its linked thread is pinned (until 0.7.11 it was named, never pinned, and its pin record, not ours, read as a pin)', async ($, on) => {
+    const w = world(on, { feed: undatedBolt(), threads: [thread('local_b', 'Bolt work', 20)], store: { 'mm.links': { [BOLT]: 'local_b' }, 'mm.pins': { local_b: notOurs }, 'mm.activity': { [BOLT]: NOW - 3 * DAYS } } })
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(true)
+    expect(pinsOf(w).local_b).toEqual({ ...notOurs, byUs: true })
+  })
+
+  test('the person unpinned it: it stays unpinned while nothing newer comes', async ($, on) => {
+    const w = world(on, {
+      feed: undatedBolt(),
+      threads: [thread('local_b', 'Bolt work', 20)],
+      store: { 'mm.links': { [BOLT]: 'local_b' }, 'mm.pins': { local_b: { ...notOurs, byUs: true } }, 'mm.activity': { [BOLT]: NOW - 3 * DAYS } },
+    })
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(false)
+    expect(w.writes().filter(c => c.startsWith('set_pinned | local_b'))).toEqual([])
+    expect((w.stored['mm.unpinned'] as Record<string, unknown>).local_b).toBeDefined()
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(false)
+  })
+
+  test('a quiet client (nothing from it in six weeks): its thread is not pinned for it, and our pin comes off', async ($, on) => {
+    const w = world(on, { feed: undatedBolt(), threads: [thread('local_b', 'Bolt work', 20, { pinned: true })], store: { 'mm.links': { [BOLT]: 'local_b' }, 'mm.pins': { local_b: { ...notOurs, byUs: true } } } })
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(false)
+  })
+
+  test('the count is the client threads this profile shows pinned: the person\'s own pin on a quiet client\'s thread counts; a pin record of a thread in another profile does not', async ($, on) => {
+    const w = world(on, {
+      feed: undatedBolt(),
+      threads: [thread('local_other', 'Unrelated notes', 100), thread('local_b', 'Bolt work', 20, { pinned: true })],
+      files: { ...profileRec(PROFILE_B, SELF), ...profileRec(PROFILE_A, 'local_lt', { isStarred: true }) },
+      store: { 'mm.links': { [BOLT]: 'local_b', [LT]: 'local_lt' }, 'mm.pins': { local_b: notOurs, local_lt: ourPin(LT, 'Leader Transcend') } },
+    })
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(true)
+    expect((w.stored['mm.last'] as { pinned: number }).pinned).toBe(1)
+    expect(String(w.statuses.at(-1) ?? '')).toMatch(/^MM: 1 need you · 1 pinned/)
   })
 })
