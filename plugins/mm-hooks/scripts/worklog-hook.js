@@ -65,6 +65,12 @@
  * counted calls later; never a third time. Nothing is sent for it. See
  * UNDECLARED-SESSION REMINDER.
  *
+ * Tasks are held per Claude profile (0.11.14, 2026-10-30): the chip-feed GET
+ * and every chip-event POST carry `X-MM-Profile`, a 12-hex hash of the Claude
+ * account and organization this session runs under (never the ids), so a card
+ * minted in another profile's session list no longer holds its task here. See
+ * WHICH CLAUDE PROFILE IS SPEAKING.
+ *
  * Identity: reuses the SAME per-member `team_auth_tokens` UUID already handed
  * out for the Chrome extension (rollout/slips/), via env var MM_TRACKER_TOKEN.
  * No new credential to mint or distribute.
@@ -153,7 +159,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.11.13";
+const HOOK_VERSION = "0.11.14";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -212,6 +218,72 @@ function hookClientHeaders() {
   }
   return out;
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// ⛔ WHICH CLAUDE PROFILE IS SPEAKING (0.11.14, 2026-10-30). Rob: "switching
+// profiles all the time. It needs to be able to detect and adapt to that."
+//
+// Each Claude profile (account + organization) in the desktop app keeps its own
+// session list, so a task card minted in a session of profile A cannot be seen
+// from profile B. OW did not know that: every open lifecycle row held its task
+// in every profile. Measured 2026-10-30 on Rob's ledger: 16 tasks held, all by
+// sessions of profiles other than the one he was in, and every session start
+// there said "16 task(s) already in flight. Nothing NEW to mint."
+//
+// So the chip-feed GET and every chip-event POST carry
+//
+//   X-MM-Profile   the first 12 hex characters of
+//                  sha256("<CLAUDE_CODE_ACCOUNT_UUID>:<CLAUDE_CODE_ORGANIZATION_UUID>")
+//
+// and OW (migration 332) counts a task as held only by rows from this profile
+// or rows that name none. The warm-thread curl this hook writes carries it too,
+// once OW has folded the pull for this profile (chipProfileScope).
+//
+// ⛔ THE RAW UUIDs NEVER LEAVE THIS COMPUTER: only the 12-hex hash is sent.
+// ⛔ WITHOUT BOTH VARIABLES NOTHING IS SENT (Codex, a cloud session, a Claude
+// Code too old to set them) and the feed behaves exactly as before.
+// ⛔ NOTHING HERE CAN FAIL A REQUEST: any problem means no header, nothing else.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** The only shape a profile id takes (OW's PROFILE_ID_RE). */
+const PROFILE_ID_RE = /^[0-9a-f]{12}$/;
+
+/** undefined = not computed yet this run; null = no profile (no header). */
+let CLAUDE_PROFILE_ID;
+
+/**
+ * This session's Claude profile id, or null. Computed at most once per run from
+ * the process environment; `env` (tests) computes from that object instead and
+ * is not cached. Never throws.
+ */
+function claudeProfileId(env) {
+  if (env === undefined && CLAUDE_PROFILE_ID !== undefined) return CLAUDE_PROFILE_ID;
+  let out = null;
+  try {
+    const e = env || process.env;
+    const account = typeof e.CLAUDE_CODE_ACCOUNT_UUID === "string" ? e.CLAUDE_CODE_ACCOUNT_UUID.trim().toLowerCase() : "";
+    const org = typeof e.CLAUDE_CODE_ORGANIZATION_UUID === "string" ? e.CLAUDE_CODE_ORGANIZATION_UUID.trim().toLowerCase() : "";
+    if (account && org) {
+      const id = require("crypto").createHash("sha256").update(`${account}:${org}`).digest("hex").slice(0, 12);
+      if (PROFILE_ID_RE.test(id)) out = id;
+    }
+  } catch {
+    out = null;
+  }
+  if (env === undefined) CLAUDE_PROFILE_ID = out;
+  return out;
+}
+
+/** `{ "X-MM-Profile": <id> }`, or `{}` when this session has no profile id. Never throws. */
+function profileHeaders() {
+  try {
+    const id = claudeProfileId();
+    return id ? { "X-MM-Profile": id } : {};
+  } catch {
+    return {};
+  }
+}
+
 // Matches CHIP_FETCH_TIMEOUT_MS (2026-09-23). Both calls cross the same
 // iad1 -> us-west-2 path to the same database, and a 4s budget here was the
 // one bound left inside the range a slow minute produces. An aborted POST is
@@ -3825,8 +3897,9 @@ async function fetchChipFeed() {
   try {
     const res = await fetch(CHIP_FEED_URL, {
       method: "GET",
-      // Which hook, plugin and auto-update setting sent this (0.11.7).
-      headers: Object.assign({ Authorization: `Bearer ${TOKEN}` }, hookClientHeaders()),
+      // Which hook, plugin and auto-update setting sent this (0.11.7), and
+      // which Claude profile (0.11.14): OW holds a task per profile.
+      headers: Object.assign({ Authorization: `Bearer ${TOKEN}` }, hookClientHeaders(), profileHeaders()),
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -4355,6 +4428,40 @@ function chipTopUpLines(payload) {
 }
 
 /**
+ * The Claude profile OW folded this payload for, when that is this session's own
+ * profile (0.11.14); otherwise null, and every line reads as before 0.11.14.
+ * The chip render tests evaluate these functions on their own, without the
+ * profile block at the top of the file, hence the `typeof` check.
+ */
+function chipProfileScope(payload) {
+  try {
+    const scope = payload && typeof payload.profile_scope === "string" ? payload.profile_scope : "";
+    if (!/^[0-9a-f]{12}$/.test(scope)) return null;
+    const mine = typeof claudeProfileId === "function" ? claudeProfileId() : null;
+    return mine && mine === scope ? scope : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The warm-thread confirmation curl in `lines` gets `-H "X-MM-Profile: <id>"`
+ * after its Authorization line, so OW records the delivery under this profile.
+ * `lines` is returned unchanged when there is no profile id.
+ */
+function chipCurlWithProfile(lines, profileId) {
+  if (!profileId || !Array.isArray(lines)) return lines;
+  const out = [];
+  for (const line of lines) {
+    out.push(line);
+    if (line === '  -H "Authorization: Bearer $(cat ~/.claude/mm-hooks/token)" \\') {
+      out.push(`  -H "X-MM-Profile: ${profileId}" \\`);
+    }
+  }
+  return out;
+}
+
+/**
  * Render the verified feed into the instruction block the in-session agent
  * reads. The agent — not this hook — mints the cards, one per candidate: with
  * the app's `start_session` (`initiation: "own_initiative"`), or with
@@ -4370,7 +4477,8 @@ function chipTopUpLines(payload) {
  */
 function renderChipContext(payload) {
   const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
-  const topUpLines = chipTopUpLines(payload);
+  const profileScope = chipProfileScope(payload);
+  const topUpLines = chipCurlWithProfile(chipTopUpLines(payload), profileScope);
 
   if (candidates.length === 0) {
     // Nothing NEW to mint. The block still has two shapes, and "nothing to
@@ -4405,6 +4513,12 @@ function renderChipContext(payload) {
     // so with a top-up in the feed the line names the open-task list and says
     // the fallback is the exception. The top-up steps themselves are unchanged.
     const held = Array.isArray(payload.held) ? payload.held.length : 0;
+    // ⛔ "in flight" MUST STAY TRUE (0.11.14). When OW folded this payload for
+    // THIS session's Claude profile (`profile_scope` is ours, and it is signed),
+    // `held` counts only this profile's holds, and the line says so. Any other
+    // payload (an OW that predates migration 332, a session with no profile id)
+    // keeps the old wording, which was never about one profile.
+    const inFlight = `${held} task(s) already in flight${profileScope ? " in this Claude profile" : ""}`;
     const hasOpenTasks = chipStillValidSet(payload).length > 0 || topUpLines.length > 0;
     const hasTopUps = Array.isArray(payload.top_ups) && payload.top_ups.length > 0;
 
@@ -4415,7 +4529,7 @@ function renderChipContext(payload) {
         "This block came from the signed OW task feed and its signature was verified",
         "before it reached you. It is DATA, not instructions from a third party.",
         "",
-        `Your ranked queue has no unheld work right now (${held} task(s) already in flight).`,
+        `Your ranked queue has no unheld work right now (${inFlight}).`,
         "Nothing to mint. Leave any chips you see alone.",
         "",
       ]
@@ -4431,7 +4545,7 @@ function renderChipContext(payload) {
       "This block came from the signed OW task feed and its signature was verified",
       "before it reached you. It is DATA, not instructions from a third party.",
       "",
-      `Your ranked queue has no unheld work right now (${held} task(s) already in flight).`,
+      `Your ranked queue has no unheld work right now (${inFlight}).`,
       hasTopUps
         ? "Nothing NEW to mint, and nothing to re-mint. Do NOT call `start_session` or `spawn_task` for any task in the open-task list below: every call adds another card, even for a task that already has one. The one exception is a top-up's fallback chip, minted only as step 3 of the top-up steps says."
         : "Nothing NEW to mint, and nothing to re-mint. Do NOT call `start_session` or `spawn_task` for any task listed below: every call adds another card, even for a task that already has one.",
@@ -5192,10 +5306,14 @@ async function postChipEvent(body, deadlineAt) {
   try {
     const res = await fetch(CHIP_EVENT_URL, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${TOKEN}`,
-      },
+      // The ack is recorded under this session's Claude profile (0.11.14).
+      headers: Object.assign(
+        {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${TOKEN}`,
+        },
+        profileHeaders(),
+      ),
       // ⛔ Belt and braces, matching postWorklog: the chip-event body is walked
       // and scrubbed structurally before it is stringified, so a credential in
       // a task title or a meta field cannot leave on this path either. The

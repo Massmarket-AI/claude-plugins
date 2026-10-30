@@ -16,6 +16,10 @@ const { spawn } = require("child_process");
 
 const up = require("./update-plugins.js");
 
+// The worklog hook's Claude-profile tests (hook 0.11.14) run with this file: CI and scripts/release.mjs name the
+// mm-hooks test files one by one, and both live outside plugins/mm-hooks.
+require("./worklog-hook-profile.test.js");
+
 const SCRIPTS = __dirname;
 const SCRIPT = path.join(SCRIPTS, "update-plugins.js");
 const HOUR = 60 * 60 * 1000;
