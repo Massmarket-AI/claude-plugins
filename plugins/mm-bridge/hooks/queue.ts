@@ -710,6 +710,17 @@ export type Lists = { queue: QueueItem[]; teammate: QueueItem[]; checking: Queue
 export const withTeammate = (it: QueueItem): boolean =>
   it.tasks === 0 && openAsks(it).length === 0 && queuedOf(it).length === 0 && (Boolean(it.theirs) || ((it.open ?? null)?.state === 'held_by_other' && it.kind !== 'ok'))
 
+/**
+ * (0.7.12, the coordinator for Rob, 2026-10-30: "the bridge never touches a pin you made") The clients in none of the lists
+ * only because of the cut: the feed still holds something of theirs that the lists would show if nothing were cut, and all
+ * of it was due before the cut. Such a client is clear (its thread is named `✓ <client> · clear` and the bridge takes its
+ * OWN pin off), but a pin the person put on its thread stays. Never used to list, count, pin or start anything.
+ */
+export function pastCutClients(feed: Feed, now: number): Set<string> {
+  const kept = new Set(build(feed, now).map(i => i.projectId))
+  return new Set(build(feed, now, -Infinity).map(i => i.projectId).filter(pid => !kept.has(pid)))
+}
+
 export function buildLists(feed: Feed, now: number): Lists {
   const current = build(feed, now)
   // (0.5.2, R8) a client whose package waits for the server's check of our newer send is in neither of the
@@ -1209,11 +1220,11 @@ export function asksMarkdown(it: Pick<QueueItem, 'asks'>, now: number, pages: Re
  * ahead, and what has no due time. (Until 2026-10-20 the cut was 3 business days back; Rob replaced it with
  * LIST_FLOOR_MS. Until 0.7.12 a second pass took what was due before the floor, for Older.)
  */
-function build(feed: Feed, now: number): QueueItem[] {
+function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueItem[] {
   // ⛔ (0.7.12) Not considered at all: due before the cut, and more than 3 business days ago (WINDOW_BACK_MS: from Sat
-  // 2026-10-17 12:00 AM ET on, everything due before the cut is, so the cut alone decides)
-  const cutoff = listCutoff(now)
-  const tooOld = (due: number): boolean => due < now && due < cutoff && !businessWithin(due, now, WINDOW_BACK_MS)
+  // 2026-10-17 12:00 AM ET on, everything due before the cut is, so the cut alone decides). `cut` is the cut itself;
+  // only `pastCutClients` passes another (none at all), to tell which clients the cut alone cleared.
+  const tooOld = (due: number): boolean => due < now && due < cut && !businessWithin(due, now, WINDOW_BACK_MS)
   // (0.5.2, R1) everything else with a due time is this pass's: overdue since the cut, or not due yet however far
   // ahead; whether it pins is `pinsNow`
   const inWindow = (due: number): boolean => Number.isFinite(due) && !tooOld(due)

@@ -3,7 +3,7 @@ import type { Elements, EngineInterface, Register } from 'claude-code'
 import type { MmBand, MmFolds, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTrack, MmTrackLine, MmView } from '../types'
 
 import {
-  INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pinsNow,
+  INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients, pinsNow,
   peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
   asksMarkdown, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText, undatedOnly,
   hasDue, clientActivity, isRecent, mayStart,
@@ -1607,6 +1607,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // the cutoff date") A client whose only items were due before the cut (`listCutoff`) is in none of them: as a client
   // with nothing, its thread clears. Until 0.7.12 it was listed under Older, its thread named with how late it was.
   const lists = buildLists(feed, now)
+  // ⛔ (0.7.12, the coordinator for Rob, 2026-10-30: "the bridge never touches a pin you made") the clients the cut alone
+  // cleared: their threads clear as any other's, but a pin the person put there stays. Used for that and nothing else.
+  const pastCut = pastCutClients(feed, now)
   const items = lists.queue
   const quiet = lists.teammate
   /** (R8) Clients whose package waits for the server's check of our newer send: in no list, their threads named for it and not pinned. */
@@ -2276,7 +2279,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // a client in none of the lists is clear, by any path the feed knows (no reply owed, a manual package, a
   // reply sent later by hand, a closed package): its linked thread is unpinned WHOEVER pinned it, and named
   // `✓ <client> · clear <time>`. A thread that is no longer the client's keeps the person's own pin (only ours
-  // comes off it), as before.
+  // comes off it), as before. ⛔ (0.7.12) So does the thread of a client the cut alone cleared (`pastCutClients`): it is
+  // named clear and our pin comes off, but the person's pin stays ("the bridge never touches a pin you made").
   // ⛔ The record of a thread that cannot be seen is kept: it is what lets a later sync take the pin off. So is
   // the record of a thread this sync had no writes left for: the next sync finishes it (0.5.1 dropped it, and
   // the thread kept its pin and its old name for good).
@@ -2297,7 +2301,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
       // stays (fix round 1, L8: the bridge takes off only a pin it put there), and once its item clears the
       // thread gets its own name back, not a tick
       const inside = internalPin(pin)
-      if ((pin.byUs || (clear && !inside)) && s.pinned) {
+      // ⛔ (0.7.12) a client the cut alone cleared (`pastCut`): only our own pin comes off; the person's stays
+      if ((pin.byUs || (clear && !inside && !pastCut.has(pin.projectId))) && s.pinned) {
         await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: sid, pinned: false })
         s.pinned = false
         writes++
@@ -2344,7 +2349,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const s = live.get(sid)
     // (an internal project with nothing waiting has no feed row to flag it: the known ids, and its pin record, say so)
     if (!s || internal.has(pid) || INTERNAL_PROJECTS.has(pid) || internalPin(was.pins[sid])) continue
-    if (s.pinned) {
+    // ⛔ (0.7.12) a thread pinned with no pin record of ours, whose client the cut alone cleared (`pastCut`): the pin is
+    // the person's, and it stays. (Our own pin there came off in the loop above, from its record.)
+    if (s.pinned && !pastCut.has(pid)) {
       if (writes >= MAX_WRITES) continue
       await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: sid, pinned: false })
       s.pinned = false

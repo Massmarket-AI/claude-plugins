@@ -4051,16 +4051,13 @@ describe('(s) (0.7.12) what was due before the cut is treated as done: no Older'
     expect(w.writes().filter(c => c.startsWith('set_pinned'))).toEqual(['set_pinned | local_a | false'])
   })
 
-  test('a pin the person put on that thread: taken off once, as for any client that clears (R14, 0.5.3); put back, it stays', async ($, on) => {
+  // (0.7.12, the coordinator for Rob, 10-30: "the bridge never touches a pin you made") unlike a client that clears by
+  // being answered (R14 unpins whoever pinned it), a client the cut alone cleared keeps the person's pin
+  test('a pin the person put on that thread stays: the thread is named clear, and nothing unpins it', async ($, on) => {
     const w = olderWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.pins': { local_a: { projectId: ACME, client: 'Acme Roofing', byUs: false } } } })
-    await mm($, '')
-    // (until 0.7.12 the client was under Older, still waiting, and the person's pin was left alone)
-    expect(w.threads.get('local_a')).toMatchObject({ title: CLEAR, pinned: false })
-    const t = w.threads.get('local_a')
-    if (t) t.pinned = true
     for (let i = 0; i < 3; i++) await mm($, '')
-    expect(w.threads.get('local_a')?.pinned).toBe(true)
-    expect(w.writes().filter(c => c.startsWith('set_pinned'))).toEqual(['set_pinned | local_a | false'])
+    expect(w.threads.get('local_a')).toMatchObject({ title: CLEAR, pinned: true })
+    expect(w.writes().filter(c => c.startsWith('set_pinned'))).toEqual([])
   })
 
   test('when the client writes again it is back on the list, from the new message alone', async ($, on) => {

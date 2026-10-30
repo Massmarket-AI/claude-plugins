@@ -2087,6 +2087,30 @@ describe('0.7.12: a pin needs a clock, late says when it was due, undated says s
       expect(w.app.get('local_c1')).toMatchObject({ title: `✓ ${KIN} · clear 10 AM`, pinned: false })
     })
 
+    // (0.7.12, the coordinator for Rob, 10-30: "the bridge never touches a pin you made")
+    test('a client the cut cleared: a pin the person made stays (with or without a record of it), and the bridge\'s own pin comes off', async () => {
+      const oct13 = () => builder({ tickets: { overdue: [task(1, KIN, '2026-10-13T15:00:00-04:00')] } })
+      const results: Array<[string, string, boolean | undefined, unknown[]]> = []
+      for (const [who, store] of [
+        ['the person, no record', {}],
+        ['the person, on record', { 'mm.pins': { local_c1: { projectId: pid(1), client: KIN, byUs: false } } }],
+        ['the bridge', ourPin(KIN)],
+      ] as Array<[string, Record<string, unknown>]>) {
+        const w = linked(oct13(), { pinned: true }, store, OCT30)
+        for (let i = 0; i < 3; i++) {
+          await mm(w.session('local_hub'), '')
+          await w.advance(6 * 60_000)
+        }
+        results.push([who, w.app.get('local_c1')?.title ?? '', w.app.get('local_c1')?.pinned, pinCalls(w, 'local_c1')])
+      }
+      expect(results).toEqual([
+        // with no record, the thread's own name is left as it is (the clear sweep never renames)
+        ['the person, no record', 'Client work', true, []],
+        ['the person, on record', `✓ ${KIN} · clear 10 AM`, true, []],
+        ['the bridge', `✓ ${KIN} · clear 10 AM`, false, [false]],
+      ])
+    })
+
     test('on Fri Oct 30 an item due Wed Oct 14 9 AM counts: listed, pinned, its name says when it was due', async () => {
       const w = linked(builder({ tickets: { overdue: [task(1, KIN, '2026-10-14T09:00:00-04:00')] } }), {}, {}, OCT30)
       await mm(w.session('local_hub'), '')
