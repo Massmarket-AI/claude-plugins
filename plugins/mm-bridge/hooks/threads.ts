@@ -19,8 +19,8 @@
 import type { MmRow } from '../types'
 
 import {
-  MAY_NEED_OK, NOBODY, checkingTitle, cleanText, cleanTitle, clockLead, clockText, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
-  pinsNow, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownQueue, shownText, skillFor, stillOpenTitle, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
+  MAY_NEED_OK, NOBODY, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
+  pinsNow, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
 } from './queue'
 import type { AskRef, FeedThread, QueueItem } from './queue'
 
@@ -1125,8 +1125,11 @@ export type AwayClient = {
   due?: number
   /** With `due`: `reply` or `task`. */
   what?: string
-  /** Where the sync listed it: Needs you (`items`), a closed group under it, or no list at all (`none`: its thread is pinned in the other profile). */
-  listed: 'items' | 'teammate' | 'older' | 'checking' | 'none'
+  /**
+   * Where the sync listed it: Needs you (`items`), a closed group under it, or no list at all (`none`: its thread is
+   * pinned in the other profile). ((0.7.12) `older` is gone with the Older group: a record that says it is dropped.)
+   */
+  listed: 'items' | 'teammate' | 'checking' | 'none'
   /** That thread's transcript on this computer, when its record names its session and folder (`transcriptPath`). */
   transcript?: string
   /** That thread's own title, as the bridge kept it before renaming it. */
@@ -1142,11 +1145,14 @@ export function awaySorted(list: readonly AwayClient[]): AwayClient[] {
   return list.map((a, i) => ({ a, i })).sort((x, y) => at(x.a) - at(y.a) || x.i - y.i).map(x => x.a)
 }
 
-/** (0.7.11) One away client as the band names it: `PlacementCorp (reply due 5:27 PM ET)`, `(reply 2h late)`, or the name alone. */
+/**
+ * (0.7.11) One away client as the band names it: `PlacementCorp (reply due 5:27 PM ET)`, `(reply 2h late, due 3 PM ET)`
+ * ((0.7.12) once late, when it was due as well), or the name alone. A due time is never shown on a weekend (`shownDue`).
+ */
 export function awayLabel(a: AwayClient, now: number): string {
   if (typeof a.due !== 'number' || !Number.isFinite(a.due) || !a.what) return a.client
-  if (a.due < now) return `${a.client} (${a.what} ${clockLead(a.due, now)})`
-  return `${a.client} (${a.what} due ${clockText(a.due, now)} ET)`
+  if (a.due < now) return `${a.client} (${a.what} ${clockAndDue(a.due, now)} ET)`
+  return `${a.client} (${a.what} due ${clockText(shownDue(a.due), now)} ET)`
 }
 
 /**
@@ -1286,7 +1292,7 @@ export type RowButton = keyof typeof LABEL
 
 /** R8: the sentence under the list. */
 export const PANE_SENTENCE =
-  'Pins: overdue (anything still open since Wed Oct 14), or due within the next 24 business hours. Weekends do not count. Threads for these clients link themselves; use Update or Start on a row to pick one up.'
+  'Pins: overdue in the last 3 weeks (never from before Wed Oct 14), or due within the next 24 business hours. Weekends do not count. Threads for these clients link themselves; use Update or Start on a row to pick one up.'
 
 /** A row of the Needs-you pane (the plugin's state contract holds the shape). */
 export type Row = MmRow
@@ -1431,29 +1437,28 @@ export function rowGroups(rows: readonly Row[]): Array<{ heading: string; rows: 
   ].filter(g => g.rows.length > 0)
 }
 
-export type Fold = 'checking' | 'teammate' | 'older' | 'undated'
+export type Fold = 'checking' | 'teammate' | 'undated'
 
 /** The groups under the list as a pane holds them. */
-export type Folds = { checking?: readonly Row[]; teammate?: readonly Row[]; older?: readonly Row[]; undated?: readonly Row[] }
+export type Folds = { checking?: readonly Row[]; teammate?: readonly Row[]; undated?: readonly Row[] }
 
 /**
  * The groups under the list, in the order they are drawn: (0.5.2, R8, Opus decision 2) `Checking your reply
- * (n)`, then `With a teammate (n)`, then `Older (n)`, then (0.7.5) `No due date (n)`: the viewer's own clients listed by
- * undated tickets alone. Each is closed until the person opens it, and one with nobody in it is not drawn. (0.7.5) Their
- * headings are drawn on one line, each its own button (`New people` first, where there is anyone). Their rows are
- * numbered on from the list's. Nobody in them is pinned, and the header does not count them.
+ * (n)`, then `With a teammate (n)`, then (0.7.5) `No due date (n)`: the viewer's own clients listed by undated tickets
+ * alone. Each is closed until the person opens it, and one with nobody in it is not drawn. (0.7.5) Their headings are
+ * drawn on one line, each its own button (`New people` first, where there is anyone). Their rows are numbered on from
+ * the list's. Nobody in them is pinned, and the header does not count them. ((0.7.12) No `Older (n)` any more: what
+ * was due before the cut is not considered at all, `listCutoff`. A pane an older version stored with one draws none.)
  */
 export function foldGroups(queue: { rows: readonly Row[] } & Folds): Array<{ key: Fold; heading: string; rows: Array<{ row: Row; n: number }> }> {
   const checking = Array.isArray(queue.checking) ? queue.checking : []
   const teammate = Array.isArray(queue.teammate) ? queue.teammate : []
-  const older = Array.isArray(queue.older) ? queue.older : []
   const undated = Array.isArray(queue.undated) ? queue.undated : []
   const numbered = (group: readonly Row[], from: number) => group.map((row, i) => ({ row, n: from + i + 1 }))
   const groups: Array<{ key: Fold; heading: string; rows: Array<{ row: Row; n: number }> }> = [
     { key: 'checking', heading: `Checking your reply (${checking.length})`, rows: numbered(checking, queue.rows.length) },
     { key: 'teammate', heading: `With a teammate (${teammate.length})`, rows: numbered(teammate, queue.rows.length + checking.length) },
-    { key: 'older', heading: `Older (${older.length})`, rows: numbered(older, queue.rows.length + checking.length + teammate.length) },
-    { key: 'undated', heading: `No due date (${undated.length})`, rows: numbered(undated, queue.rows.length + checking.length + teammate.length + older.length) },
+    { key: 'undated', heading: `No due date (${undated.length})`, rows: numbered(undated, queue.rows.length + checking.length + teammate.length) },
   ]
   return groups.filter(g => g.rows.length > 0)
 }
@@ -1555,8 +1560,8 @@ export type BandFacts = {
   update?: string | undefined
   /** The last sync failed, or is older than STALE_SYNC_MS: never an all-clear from it. */
   stale: boolean
-  /** (fix round 1, F6) The person's own clients listed under Older: their only items were due before the list's floor, Wed 2026-10-14 (until 2026-10-20 the cut was 3 business days back; Rob replaced it with LIST_FLOOR_MS). */
-  older?: number
+  // ((fix round 1, F6) to 0.7.11: `older`, how many of the person's clients waited under Older, said as `· N older
+  // overdue`. Gone in 0.7.12: what was due before the cut is not considered at all, `listCutoff`.)
 }
 
 /**
@@ -1581,17 +1586,15 @@ export type BandFacts = {
  */
 export function bandText(f: BandFacts): string {
   const out: string[] = []
-  const older = Number(f.older) || 0
   const elsewhere = f.chipsElsewhere ?? []
   let first = ''
   if (f.noThread.length) first = `Needs you: ${f.pinned} pinned · ${f.noThread.length} with no thread: ${f.noThread.map(n => n.client).join(', ')}.`
   else if (f.pinsNow || f.pinned > 0 || f.stillOpen) first = `Needs you: ${f.pinned} pinned.`
-  // (fix round 1, F6) never all clear while the person's own clients wait under Older
-  else if (!f.stale) first = older > 0 ? `Nothing due in the next 24 hours · ${older} older overdue.` : 'Nothing needs you in the next 24 hours.'
+  // ((fix round 1, F6) to 0.7.11 this said `· N older overdue` for the clients under Older; (0.7.12) nothing due before
+  // the cut is considered, so there are none)
+  else if (!f.stale) first = 'Nothing needs you in the next 24 hours.'
   // R8, when no client without a thread comes before it
   if (first && !f.noThread.length && f.stillOpen) first = `${first.replace(/\.$/, '')} · ${f.stillOpen} still open after your reply.`
-  // F6: the other forms say how many wait under Older
-  if (first.startsWith('Needs you:') && older > 0) first = `${first.replace(/\.$/, '')} · ${older} older overdue.`
   // (0.5.4, C2) where the chips of the person's clients with a thread are, when not here
   if (first.startsWith('Needs you:') && elsewhere.length) first = `${first.replace(/\.$/, '')} · ${elsewhere.length === 1 ? `a chip is ready in ${elsewhere[0]}` : `chips ready in ${elsewhere.length} threads`}.`
   // (0.5.5) a later mod installed on this machine

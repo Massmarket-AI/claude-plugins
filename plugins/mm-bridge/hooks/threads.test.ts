@@ -375,7 +375,8 @@ describe('R5: the kickoff and the row for a package that is not simply ready', (
   const itemOf = (f: Feed, projectId: string): QueueItem => {
     // (u) wherever the pane lists the client: a client whose drafts a teammate holds is under `With a teammate`
     const lists = buildLists(f, NOW)
-    const it = [...lists.queue, ...lists.teammate, ...lists.older].find(i => i.projectId === projectId)
+    // ((0.7.12) no Older list: what was due before the cut is in none)
+    const it = [...lists.queue, ...lists.teammate].find(i => i.projectId === projectId)
     if (!it) throw new Error(`no item for ${projectId}`)
     return it
   }
@@ -1016,23 +1017,26 @@ describe('a package the person picked up, in the thread that was given it: nothi
   })
 })
 
-describe('the two groups under the list: With a teammate, then Older', () => {
+// (0.7.12) the Older group is gone (what was due before the cut is considered nowhere): until 0.7.12 these tests drew
+// With a teammate, then Older; the row that stood under Older now stands under No due date, the last group
+describe('the groups under the list: With a teammate, then No due date ((0.7.12) no Older)', () => {
   // (0.7.5) the rows' one-line titles, as rowLine draws them
   const row = (client: string, over: Partial<ReturnType<typeof rowFor>> = {}) => ({ ...rowFor(item(CEDAR), recommend([], undefined, NOW), NOW), client, title: `🟡 ${client} · task · 2h left`, ...over })
   const theirs = row('Dune Freight', { title: '🟡 Dune Freight · reply · with J Smith', waiting: '1 message waiting, drafts with J Smith', note: 'J Smith picked up the reply drafts for this client and has 1 draft not sent yet. Ask J Smith before writing a second reply.' })
-  const old = row('Elm Travel', { title: '🔴 Elm Travel · reply · 5d late', waiting: '1 message waiting', state: 'update', reason: 'thread from Fri, Oct 9 exists', fresh: false, target: 'local_e' })
+  const old = row('Elm Travel', { title: '🟡 Elm Travel · task · no due date', waiting: '1 task', state: 'update', reason: 'thread from Fri, Oct 9 exists', fresh: false, target: 'local_e' })
 
   test('in that order, numbered on from the list, and one with nobody in it is not drawn', async () => {
     const rows = [row('Cedar Dental'), row('Acme Roofing')]
-    expect(foldGroups({ rows, teammate: [theirs], older: [old] }).map(g => [g.key, g.heading, g.rows.map(r => r.n)])).toEqual([['teammate', 'With a teammate (1)', [3]], ['older', 'Older (1)', [4]]])
-    expect(foldGroups({ rows, older: [old, old] }).map(g => [g.heading, g.rows.map(r => r.n)])).toEqual([['Older (2)', [3, 4]]])
+    expect(foldGroups({ rows, teammate: [theirs], undated: [old] }).map(g => [g.key, g.heading, g.rows.map(r => r.n)])).toEqual([['teammate', 'With a teammate (1)', [3]], ['undated', 'No due date (1)', [4]]])
+    expect(foldGroups({ rows, undated: [old, old] }).map(g => [g.heading, g.rows.map(r => r.n)])).toEqual([['No due date (2)', [3, 4]]])
     expect(foldGroups({ rows, teammate: [theirs] }).map(g => g.heading)).toEqual(['With a teammate (1)'])
     expect(foldGroups({ rows })).toEqual([])
-    // a queue an older version stored has neither
-    expect(foldGroups({ rows, teammate: undefined, older: 'x' as never })).toEqual([])
+    // a queue an older version stored has neither; (0.7.12) and 0.7.11's `older` group is not drawn
+    expect(foldGroups({ rows, teammate: undefined, undated: 'x' as never })).toEqual([])
+    expect(foldGroups({ rows, older: [old, old] } as Parameters<typeof foldGroups>[0])).toEqual([])
   })
 
-  test('a row under With a teammate: who has the drafts, the sentence, and Drafts alone; a row under Older keeps its one action', async () => {
+  test('a row under With a teammate: who has the drafts, the sentence, and Drafts alone; a row under No due date keeps its one action', async () => {
     expect(rowButtons(theirs)).toEqual(['drafts'])
     // (0.7.5) who has the drafts is in the row's one line, the sentence is its note; no second line repeats them
     expect(rowDetail(theirs)).toBe('')
@@ -1040,20 +1044,20 @@ describe('the two groups under the list: With a teammate, then Older', () => {
     // (0.7.5) the action's reason is not drawn: its button says what it does
     expect(rowDetail(old)).toBe('')
     // (0.7.5) the groups' headings on one line, then each group as it is opened
-    expect(paneText([row('Cedar Dental')], 'Needs you now (1)', 'note', { teammate: [theirs], older: [old] }).split('\n')).toEqual([
+    expect(paneText([row('Cedar Dental')], 'Needs you now (1)', 'note', { teammate: [theirs], undated: [old] }).split('\n')).toEqual([
       'Needs you now (1)',
       '◆ 1. 🟡 Cedar Dental · task · 2h left',
       '   [ Start thread ] [ Drafts ]',
       '',
-      'With a teammate (1) · Older (1)',
+      'With a teammate (1) · No due date (1)',
       '',
       'With a teammate (1)',
       '2. 🟡 Dune Freight · reply · with J Smith',
       '   J Smith picked up the reply drafts for this client and has 1 draft not sent yet. Ask J Smith before writing a second reply.',
       '   [ Drafts ]',
       '',
-      'Older (1)',
-      '3. 🔴 Elm Travel · reply · 5d late',
+      'No due date (1)',
+      '3. 🟡 Elm Travel · task · no due date',
       '   [ Update thread ] [ Drafts ]',
       '',
       'note',
@@ -1142,8 +1146,8 @@ describe('R1 and R2: a row under With a teammate, for the founder', () => {
     const row = rowOf(founderFeed([pkgOf()]), 'queue', due)
     expect(row.note).toBeUndefined()
     expect(row.theirs).toBeUndefined()
-    // (0.7.5) one line: `needs your OK` reads `your OK`, the clock after it
-    expect(row.title).toBe('🔴 Acme Roofing · your OK · 1h late')
+    // (0.7.5) one line: `needs your OK` reads `your OK`, the clock after it; (0.7.12) and when it was due (until 0.7.12: `1h late`)
+    expect(row.title).toBe('🔴 Acme Roofing · your OK · 1h late, due 8 AM')
     expect(row.waiting).toBe('needs your OK · Builder B sends, drafts ready')
     expect(rowButtons(row)).toEqual(['start', 'drafts'])
   })
@@ -1232,7 +1236,9 @@ describe('a teammate\'s own pane, for the same feed: who sees what is 0.5.0\'s, 
       "   drafts out of date",
       "   [ Start thread ] [ Drafts ]",
       "",
-      "With a teammate (2) · Older (1)",
+      // (0.7.12) no Older group: until 0.7.12 this line read "With a teammate (2) · Older (1)", and the pane ended with
+      // "Older (1)", "6. 🔴 Gale Clinic · reply · 5d late" and its buttons
+      "With a teammate (2)",
       "",
       "With a teammate (2)",
       "4. 🟡 Bolt Staffing · reply · with J Smith",
@@ -1241,10 +1247,6 @@ describe('a teammate\'s own pane, for the same feed: who sees what is 0.5.0\'s, 
       "5. 🟡 Fig Legal · reply · with Builder B",
       "   Builder B picked up the reply drafts for this client (Mon 9 AM) and has 1 draft not sent yet. Ask Builder B before writing a second reply.",
       "   [ Drafts ]",
-      "",
-      "Older (1)",
-      "6. 🔴 Gale Clinic · reply · 5d late",
-      "   [ Start thread ] [ Drafts ]",
       "",
       "N",
     ],
@@ -1255,15 +1257,22 @@ describe('a teammate\'s own pane, for the same feed: who sees what is 0.5.0\'s, 
     const rowsOf = (items: readonly QueueItem[]) => items.map(it => rowFor(it, recommend([], undefined, NOW), NOW))
     // (0.5.2) what is additive is set aside: each item's act-by time (R1), its newest send and its check (R8),
     // and the list of clients being checked, which is empty for this feed (nothing in it carries a send)
-    const { checking, ...three } = l
+    const { checking, ...two } = l
     expect(checking).toEqual([])
     const as050 = (items: readonly QueueItem[]) => items.map(({ actBy: _a, lastOut: _o, check: _c, ...rest }) => rest)
-    expect(JSON.stringify({ queue: as050(three.queue), teammate: as050(three.teammate), older: as050(three.older) })).toBe(TEAMMATE_050.lists)
+    // (0.7.12) 0.5.0's queue and teammate lists exactly; its third list, Older, held only Gale Clinic (mail of Oct 2,
+    // its reply due before the cut), which is now in no list at all
+    const was050 = JSON.parse(TEAMMATE_050.lists) as { queue: unknown[]; teammate: unknown[]; older: Array<{ projectId: string }> }
+    expect(JSON.stringify({ queue: as050(two.queue), teammate: as050(two.teammate) })).toBe(JSON.stringify({ queue: was050.queue, teammate: was050.teammate }))
+    expect(was050.older.map(i => i.projectId)).toEqual([pid(7)])
+    expect(Object.keys(l).sort()).toEqual(['checking', 'queue', 'teammate'])
+    expect([...l.queue, ...l.teammate, ...l.checking].some(i => i.projectId === pid(7))).toBe(false)
     // every item acts by its due time (no task here has a start-by time)
-    for (const it of [...l.queue, ...l.teammate, ...l.older]) expect(it.actBy).toBe(it.dueAt)
-    // (0.7.5) the rows and the pane in the redesign's layout, for the same clients in the same lists
-    expect(JSON.stringify({ queue: rowsOf(l.queue), teammate: rowsOf(l.teammate), older: rowsOf(l.older) })).toBe(TEAMMATE_075.rows)
-    expect(paneText(rowsOf(l.queue), 'H', 'N', { teammate: rowsOf(l.teammate), older: rowsOf(l.older) }).split('\n')).toEqual(TEAMMATE_075.pane)
+    for (const it of [...l.queue, ...l.teammate]) expect(it.actBy).toBe(it.dueAt)
+    // (0.7.5) the rows and the pane in the redesign's layout, for the same clients in the same lists ((0.7.12) less Older)
+    const was075 = JSON.parse(TEAMMATE_075.rows) as { queue: unknown[]; teammate: unknown[] }
+    expect(JSON.stringify({ queue: rowsOf(l.queue), teammate: rowsOf(l.teammate) })).toBe(JSON.stringify({ queue: was075.queue, teammate: was075.teammate }))
+    expect(paneText(rowsOf(l.queue), 'H', 'N', { teammate: rowsOf(l.teammate) }).split('\n')).toEqual(TEAMMATE_075.pane)
   })
 })
 
@@ -1363,20 +1372,24 @@ describe('R4 and R8: the rows', () => {
 
 // ---------------------------------------------------------------- fix round 1 (review of e832775b)
 
-describe('F6: the band counts the person\'s clients under Older', () => {
+// (0.7.12) F6 is withdrawn: until 0.7.12 the band counted the clients under Older (`· 2 older overdue`, and never all clear
+// while any were). What was due before the cut is considered nowhere now, the band included; an `older` count handed to
+// it (as 0.7.11 did) says nothing.
+describe('F6 (withdrawn in 0.7.12): the band says nothing of what was due before the cut', () => {
   const base = { pinned: 0, pinsNow: false, noThread: [], stale: false }
-  test('nothing due in the window, older overdue: never all clear', async () => {
-    expect(bandText({ ...base, older: 2 })).toBe('Nothing due in the next 24 hours · 2 older overdue.')
+  const stale011 = (facts: Record<string, unknown>) => facts as Parameters<typeof bandText>[0]
+  test('nothing due in the window: all clear, whatever went late before the cut', async () => {
+    expect(bandText(stale011({ ...base, older: 2 }))).toBe('Nothing needs you in the next 24 hours.')
   })
-  test('the other forms say it at the end of their first line', async () => {
-    expect(bandText({ ...base, pinned: 1, pinsNow: true, older: 3 })).toBe('Needs you: 1 pinned · 3 older overdue.')
-    expect(bandText({ ...base, pinned: 1, pinsNow: true, stillOpen: 'Cedar Dental', older: 1 })).toBe('Needs you: 1 pinned · Cedar Dental still open after your reply · 1 older overdue.')
-    expect(bandText({ ...base, noThread: [{ client: 'Acme Roofing', due: '3 PM', chipIn: 'Morning hub', chipHere: true }], older: 1 })).toBe(
-      'Needs you: 0 pinned · 1 with no thread: Acme Roofing · 1 older overdue. 🔴 Acme Roofing has no thread (due 3 PM): its chip is in Morning hub.',
+  test('the other forms end their first line where they did before F6', async () => {
+    expect(bandText(stale011({ ...base, pinned: 1, pinsNow: true, older: 3 }))).toBe('Needs you: 1 pinned.')
+    expect(bandText(stale011({ ...base, pinned: 1, pinsNow: true, stillOpen: 'Cedar Dental', older: 1 }))).toBe('Needs you: 1 pinned · Cedar Dental still open after your reply.')
+    expect(bandText(stale011({ ...base, noThread: [{ client: 'Acme Roofing', due: '3 PM', chipIn: 'Morning hub', chipHere: true }], older: 1 }))).toBe(
+      'Needs you: 0 pinned · 1 with no thread: Acme Roofing. 🔴 Acme Roofing has no thread (due 3 PM): its chip is in Morning hub.',
     )
   })
   test('a stale read: the refresh-failed line, never an all-clear', async () => {
-    expect(bandText({ ...base, older: 2, stale: true })).toBe(REFRESH_FAILED)
+    expect(bandText({ ...base, stale: true })).toBe(REFRESH_FAILED)
   })
 })
 
@@ -1387,9 +1400,10 @@ describe('0.5.4 (Rob, 10-14, "yes chips"): the band says where a client\'s one c
   test('C2: a chip in another thread, for a client with a thread: on the first line; more than one: how many threads', async () => {
     expect(bandText({ ...base, pinned: 2, pinsNow: true, chipsElsewhere: ['Acme Roofing'] })).toBe('Needs you: 2 pinned · a chip is ready in Acme Roofing.')
     expect(bandText({ ...base, pinned: 3, pinsNow: true, chipsElsewhere: ['Acme Roofing', 'Bolt Staffing'] })).toBe('Needs you: 3 pinned · chips ready in 2 threads.')
-    // after what the first line already says
-    expect(bandText({ ...base, pinned: 1, pinsNow: true, stillOpen: 'Cedar Dental', older: 1, chipsElsewhere: ['Acme Roofing'] })).toBe(
-      'Needs you: 1 pinned · Cedar Dental still open after your reply · 1 older overdue · a chip is ready in Acme Roofing.',
+    // after what the first line already says ((0.7.12) which no longer counts older overdue: until 0.7.12 it read
+    // `· 1 older overdue` before the chip)
+    expect(bandText({ ...base, pinned: 1, pinsNow: true, stillOpen: 'Cedar Dental', chipsElsewhere: ['Acme Roofing'] })).toBe(
+      'Needs you: 1 pinned · Cedar Dental still open after your reply · a chip is ready in Acme Roofing.',
     )
     // never on an all-clear line
     expect(bandText({ ...base, chipsElsewhere: ['Acme Roofing'] })).toBe('Nothing needs you in the next 24 hours.')

@@ -3893,10 +3893,10 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     await w.clock.advance(PAST_DUE)
     expect(await mm($, '')).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
     const ui = await pane($)
-    // (0.7.5) one line (`needs your OK` reads `your OK`), then who sends it; one clock
+    // (0.7.12) the late clock says when it was due (until 0.7.12: `1h late`). (0.7.5) one line (`needs your OK` reads `your OK`), then who sends it; one clock
     expect(await lines(ui)).toEqual([
       'Needs you now (1)',
-      '◆ 1. 🔴 Acme Roofing · your OK · 1h late · no thread',
+      '◆ 1. 🔴 Acme Roofing · your OK · 1h late, due 8 AM · no thread',
       'Builder B sends',
       `Updated ${localClock(NOW + PAST_DUE)}`,
     ])
@@ -3906,7 +3906,8 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     expect(w.acted().map(c => [c.tool, c.args.title])).toEqual([['spawn_task', 'Acme Roofing: needs your OK']])
     expect(String(w.acted()[0]?.args.prompt)).toContain('reply package aaaaaaaa is flagged for my OK, and Builder B sends it.')
     expect(String(w.acted()[0]?.args.prompt)).toContain('Do not pick the package up and do not draft a second reply. Send nothing without my go.')
-    expect(String(w.acted()[0]?.args.tldr)).toBe('Acme Roofing needs you: Acme Roofing · needs your OK overdue 1h. Start this to open a thread for that client with the drafts or the messages waiting.')
+    // (0.7.12) the chip's line says when it was due as well (until 0.7.12: `overdue 1h.`)
+    expect(String(w.acted()[0]?.args.tldr)).toBe('Acme Roofing needs you: Acme Roofing · needs your OK overdue 1h, due 8 AM. Start this to open a thread for that client with the drafts or the messages waiting.')
   })
 
   for (const flagged of [true, false]) {
@@ -3991,7 +3992,8 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     expect(w.threads.get('local_a')).toMatchObject({ title: '🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides', pinned: false })
     await w.clock.advance(PAST_DUE)
     expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
-    expect(w.threads.get('local_a')).toMatchObject({ title: '🔴 1h late · Acme Roofing · needs your OK', pinned: true })
+    // (0.7.12) with when it was due (until 0.7.12: `🔴 1h late · Acme Roofing · needs your OK`)
+    expect(w.threads.get('local_a')).toMatchObject({ title: '🔴 1h late, due 8 AM · Acme Roofing · needs your OK', pinned: true })
   })
 
   test('a builder with the same feed sees no such row', async ($, on) => {
@@ -4000,7 +4002,11 @@ describe('(r) for the founder: a package that waits for his OK', () => {
   })
 })
 
-describe('(s) nothing drops off silently: Older', () => {
+// (0.7.12, Rob 10-30: "We shouldn't be considering anything that's older than the cutoff date") Until 0.7.12 a client whose
+// only items went late before the list's floor was kept under a closed Older group, counted on the band as `older overdue`,
+// with its own row, Update and Start. Now what was due before the cut (the floor, or 3 weeks back once that is later) is
+// treated as done: in no list, no row, no count, no pin, no Start. These tests were `(s) nothing drops off silently: Older`.
+describe('(s) (0.7.12) what was due before the cut is treated as done: no Older', () => {
   /** Acme wrote ten days ago and nobody answered; Bolt wrote this morning. Acme's thread was pinned by us while its mail was in the window. */
   const olderWorld = (on: On, more: WorldOptions = {}) =>
     world(on, {
@@ -4009,89 +4015,73 @@ describe('(s) nothing drops off silently: Older', () => {
       store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.pins': { local_a: ourPin(ACME, 'Acme Roofing') }, 'mm.titles': { local_a: 'Roof quote' } },
       ...more,
     })
-  // (it arrived on Friday Oct 2, was due Monday Oct 5, and this is Monday Oct 12: five business days)
-  const OLD_TITLE = '🔴 5d late · Acme Roofing · reply'
+  // (it arrived on Friday Oct 2, was due Monday Oct 5, and this is Monday Oct 12: five business days, past the 3 business
+  // days the list reached back before the floor took over)
+  const CLEAR = '✓ Acme Roofing · clear 11 AM'
 
-  test('the client is listed under Older, closed, never counted; its row has the one action', async ($, on) => {
+  test('the client is in no list: no row, no Older group, not counted on the band', async ($, on) => {
     const w = olderWorld(on)
     expect(await mm($, '')).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
     const ui = await pane($)
-    // closed: the heading is there as a button, the row is not drawn; (0.7.5) the list's rows one line each, one clock
     expect(await lines(ui)).toEqual([
       'Needs you now (1)',
       '◆ 1. 🔴 Bolt Staffing · reply · 22h left · no thread',
       UPDATED,
     ])
-    expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([['mm-fold:older', 'Older (1)']])
+    // no group to open (until 0.7.12: [['mm-fold:older', 'Older (1)']])
+    expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([])
     expect(await buttonsOf(ui, ACME)).toEqual([])
-    await ui.press({ key: 'mm-fold:older' })
-    // (0.7.5) opened: its heading, then its row in one line (its Update button says the rest)
-    expect((await lines(ui)).slice(2, 5)).toEqual(['Older (1)', '2. 🔴 Acme Roofing · reply · 5d late', UPDATED])
-    expect(await buttonsOf(ui, ACME)).toEqual(['Update thread', 'Drafts'])
-    // pressed again it closes; opening it called nothing
-    const calls = w.calls.length
-    await ui.press({ key: 'mm-fold:older' })
-    expect(await buttonsOf(ui, ACME)).toEqual([])
-    expect(w.calls.length).toBe(calls)
     await ui.unmount()
-    // the band counts the one that needs the person now (R9: by name, with no thread, its chip here)
+    const last = w.stored['mm.last'] as Record<string, unknown>
+    expect(last.older).toBeUndefined()
+    // the band counts the one that needs the person now, and nothing older (until 0.7.12: ` · 1 older overdue`)
     await tickOnce($, w)
     const band = await bandOf($)
-    // (fix round 1, F6: and how many wait under Older)
-    expect(await lines(band)).toEqual([`Needs you: 0 pinned · 1 with no thread: Bolt Staffing · 1 older overdue. ${chipIn('Bolt Staffing', 'Tue 9 AM')}`])
+    expect(await lines(band)).toEqual([`Needs you: 0 pinned · 1 with no thread: Bolt Staffing. ${chipIn('Bolt Staffing', 'Tue 9 AM')}`])
     await band.unmount()
   })
 
-  test('never pinned and never ticked while it is unanswered: our pin comes off, and the name says how late it is', async ($, on) => {
+  test('its thread is cleared: our pin comes off and it is named clear, sync after sync', async ($, on) => {
     const w = olderWorld(on)
     await mm($, '')
-    expect(w.threads.get('local_a')).toMatchObject({ title: OLD_TITLE, pinned: false })
-    // the record is kept, as not ours: it is what gives the thread its tick later
-    expect((w.stored['mm.pins'] as Record<string, unknown>).local_a).toEqual({ projectId: ACME, client: 'Acme Roofing', byUs: false })
-    expect(w.stored['mm.unpinned']).toEqual({})
+    // (until 0.7.12: named '🔴 5d late · Acme Roofing · reply', and not pinned)
+    expect(w.threads.get('local_a')).toMatchObject({ title: CLEAR, pinned: false })
     for (let i = 0; i < 3; i++) await mm($, '')
-    expect(w.threads.get('local_a')).toMatchObject({ title: OLD_TITLE, pinned: false })
-    // answered at last: nothing is left in play for that client, and only now is it clear
-    w.setFeed(feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 2)] }))
-    await mm($, '')
-    expect(w.threads.get('local_a')).toMatchObject({ title: '✓ Acme Roofing · clear 11 AM', pinned: false })
+    expect(w.threads.get('local_a')).toMatchObject({ title: CLEAR, pinned: false })
+    expect(w.writes().filter(c => c.startsWith('set_pinned'))).toEqual(['set_pinned | local_a | false'])
   })
 
-  test('a pin the person put on that thread themselves is left alone', async ($, on) => {
+  // (0.7.12, the coordinator for Rob, 10-30: "the bridge never touches a pin you made") unlike a client that clears by
+  // being answered (R14 unpins whoever pinned it), a client the cut alone cleared keeps the person's pin
+  test('a pin the person put on that thread stays: the thread is named clear, and nothing unpins it', async ($, on) => {
     const w = olderWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.pins': { local_a: { projectId: ACME, client: 'Acme Roofing', byUs: false } } } })
-    await mm($, '')
-    expect(w.threads.get('local_a')).toMatchObject({ title: OLD_TITLE, pinned: true })
+    for (let i = 0; i < 3; i++) await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: CLEAR, pinned: true })
     expect(w.writes().filter(c => c.startsWith('set_pinned'))).toEqual([])
   })
 
-  test('the row\'s button works: Update sends into its thread, and /mm update <client> finds it', async ($, on) => {
+  test('when the client writes again it is back on the list, from the new message alone', async ($, on) => {
     const w = olderWorld(on)
     await mm($, '')
-    const ui = await pane($)
-    await ui.press({ key: 'mm-fold:older' })
-    await ui.press({ key: `update:${ACME}` })
-    expect(w.acted().map(c => [c.tool, c.args.session_id])).toEqual([['send_message', 'local_a']])
-    expect(w.toasts).toEqual(['Sent to Acme Roofing\'s thread.'])
-    expect(await buttonsOf(ui, ACME)).toEqual(['Open thread', 'Drafts'])
-    await ui.unmount()
-    expect(await mm($, 'update acme roofing')).toContain('Acme Roofing\'s thread already has this.')
-    // the person acted on it, and it is still not pinned: an older client never is
-    expect(w.threads.get('local_a')?.pinned).toBe(false)
+    expect(w.threads.get('local_a')?.title).toBe(CLEAR)
+    w.setFeed(feed({ drafts: [], tickets: {}, mail: [mailFor(ACME, 'Acme Roofing — Pat', 10 * 24), mailFor(ACME, 'Acme Roofing — Pat', 1), mailFor(BOLT, 'Bolt Staffing (Sam)', 2)] }))
+    expect(await mm($, '')).toBe('2 clients need you; 1 thread pinned. The list is in the side pane.')
+    // one message counts: the one of ten days ago does not
+    expect(w.threads.get('local_a')).toMatchObject({ title: '🟡 23h left · Acme Roofing · reply', pinned: true })
   })
 
-  test('an older client with no thread: its row is Start, and its chip is not withdrawn for being off the list that pins', async ($, on) => {
+  test('a client with nothing due since the cut and no thread: no row, no Start, no chip', async ($, on) => {
     const w = world(on, { feed: feed({ drafts: [], tickets: {}, mail: [mailFor(ACME, 'Acme Roofing — Pat', 10 * 24)] }) })
     await tickOnce($, w)
     expect(await mm($, '')).toBe('Nothing needs you right now.')
     const ui = await pane($)
     expect((await lines(ui))[0]).toBe('Nothing needs you right now.')
-    await ui.press({ key: 'mm-fold:older' })
-    expect(await buttonsOf(ui, ACME)).toEqual(['Start thread', 'Drafts'])
-    await ui.press({ key: `start:${ACME}` })
+    expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([])
+    expect(await buttonsOf(ui, ACME)).toEqual([])
     await ui.unmount()
-    expect(w.acted().map(c => c.tool)).toEqual(['spawn_task'])
     for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
-    expect(w.dismissed()).toEqual([])
+    expect(w.acted()).toEqual([])
+    expect(w.minted()).toEqual([])
   })
 })
 
@@ -4263,6 +4253,7 @@ describe('(t) a pin the person took off by hand stays off', () => {
   })
 })
 
+// (0.7.12) a late name here says when it was due, `<1h late, due 12 PM` (until 0.7.12: `<1h late`)
 describe('(t2) 0.5.14: a pin taken off by hand stays off only while the item is ahead of its time (Rob, 2026-10-16)', () => {
   /** Monday noon in New York: Bolt's reply is due an hour from NOW. */
   const DUE = NOW + HOUR
@@ -4301,7 +4292,7 @@ describe('(t2) 0.5.14: a pin taken off by hand stays off only while the item is 
     expect(pinsOn(w)).toEqual([])
     // noon passes with nothing new: the timer's next sync pins it again, as ours, and the record goes
     await w.clock.advance(15 * 60_000)
-    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 <1h late · Bolt Staffing · reply', pinned: true })
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 <1h late, due 12 PM · Bolt Staffing · reply', pinned: true })
     expect(pinsOn(w)).toEqual(['set_pinned | local_b | true'])
     expect(off(w)).toEqual([])
     expect(ours(w)).toBe(true)
@@ -4309,7 +4300,7 @@ describe('(t2) 0.5.14: a pin taken off by hand stays off only while the item is 
     setPin(w, false)
     await w.clock.advance(2 * HOUR)
     await mm($, '')
-    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 2h late · Bolt Staffing · reply', pinned: false })
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 2h late, due 12 PM · Bolt Staffing · reply', pinned: false })
     expect(pinsOn(w)).toHaveLength(1)
     expect(off(w)).toEqual(['local_b'])
     expect(await mm($, 'status')).toContain('pins you took off: 1')
@@ -4328,7 +4319,7 @@ describe('(t2) 0.5.14: a pin taken off by hand stays off only while the item is 
     setPin(w, false)
     await w.clock.advance(3 * HOUR)
     await mm($, '')
-    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 4h late · Bolt Staffing · reply', pinned: false })
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 4h late, due 10:30 AM · Bolt Staffing · reply', pinned: false })
     expect(pinsOn(w)).toEqual([])
     expect(off(w)).toEqual(['local_b'])
   })
@@ -4350,7 +4341,7 @@ describe('(t2) 0.5.14: a pin taken off by hand stays off only while the item is 
     expect(w.threads.get('local_b')?.pinned).toBe(false)
     expect(off(w)).toEqual(['local_b'])
     await w.clock.advance(70 * 60_000)
-    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 <1h late · Bolt Staffing · reply', pinned: true })
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 <1h late, due 12 PM · Bolt Staffing · reply', pinned: true })
     expect(pinsOn(w)).toEqual(['set_pinned | local_b | true'])
     expect(off(w)).toEqual([])
   })
@@ -4442,16 +4433,17 @@ describe('(u) a client whose reply drafts a teammate holds: not pinned, not coun
     expect(w.threads.get('local_b')).toMatchObject({ title: '✓ Bolt Staffing · clear 11 AM', pinned: false })
   })
 
-  test('the two groups under the list are drawn in this order: With a teammate, then Older', async ($, on) => {
+  // (0.7.12) until 0.7.12 Acme's ten-day-old mail stood under a second group, Older, after With a teammate. What was due
+  // before the cut is considered nowhere now: one group.
+  test('the group under the list: With a teammate; (0.7.12) no Older, and mail due before the cut is in no group', async ($, on) => {
     const w = handedOver(on, {}, { mail: [...(feed().mail ?? []), mailFor(ACME, 'Acme Roofing — Pat', 10 * 24)] })
     expect(await mm($, '')).toBe('Nothing needs you right now.')
     const ui = await pane($)
-    expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([['mm-fold:teammate', 'With a teammate (1)'], ['mm-fold:older', 'Older (1)']])
-    await ui.press({ key: 'mm-fold:older' })
+    expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([['mm-fold:teammate', 'With a teammate (1)']])
     await ui.press({ key: 'mm-fold:teammate' })
     const all = await lines(ui)
     // (0.7.5) each row in one line
-    expect(all.filter(l => /^\d+\. /.test(l))).toEqual([`1. ${WITH_ROW}`, '2. 🔴 Acme Roofing · reply · 5d late'])
+    expect(all.filter(l => /^\d+\. /.test(l))).toEqual([`1. ${WITH_ROW}`])
     await ui.unmount()
     expect(w.acted()).toEqual([])
   })
@@ -4984,18 +4976,18 @@ describe('B3: a thread is linked by itself only to the one client its sessions d
 // ======================================================================== 0.5.2 (Rob, 2026-10-13 evening)
 
 describe('R1: a pin means "needs you": pinned while something must be acted on within 24 business hours', () => {
-  test('a reply due in 30 business hours is on the list, its thread named; (0.7.11) and pinned at once: the client wrote today, so it is ACTIVE', async ($, on) => {
+  test('a reply due in 30 business hours is on the list, its thread named and not pinned, though the client wrote today; it pins itself once within 24', async ($, on) => {
     const due = new Date(NOW + 30 * HOUR).toISOString() // Tuesday 5 PM: 13 business hours today, 17 tomorrow
     const w = world(on, {
       feed: feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 1, { reply_due_at: due })], threads: [declared(BOLT, 'cli-bolt', 20)] }),
       threads: [thread('local_b', 'Staffing plan', 20)],
       store: { 'mm.threads': PAIRS },
     })
-    // (0.7.11, Rob 10-27 "always pin the most recent thread from that client", 10-30 "why are things not getting pinned")
-    // an ACTIVE client's thread is pinned whatever its time; until 0.7.11 this waited for the 24 business hours. R1's
-    // window still decides for a client that is not active (the 0.7.11 tests: a dated task and no client message).
-    expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
-    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 1d left · Bolt Staffing · reply', pinned: true })
+    // (0.7.12, Rob 10-30: "It usually says 'due in XYZ hours'") a pin needs a clock: R1's 24 business hours decide for every
+    // client again. 0.7.11 pinned an ACTIVE client's thread at once, whatever its time; this is 0.7.10's test again.
+    expect(await mm($, '')).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 1d left · Bolt Staffing · reply', pinned: false })
+    // six hours on, it is 24 business hours away: pinned
     await w.clock.advance(6 * HOUR)
     expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
     expect(w.threads.get('local_b')?.pinned).toBe(true)
@@ -5556,28 +5548,30 @@ describe('R16: a row and its thread\'s name, from one pass, always agree', () =>
     })
     await mm($, '')
     const name = w.threads.get('local_b')?.title
-    expect(name).toBe('🔴 1d late · Bolt Staffing · reply')
+    // (0.7.12) and both say when it was due (until 0.7.12: `1d late` alone)
+    expect(name).toBe('🔴 1d late, due Thu 11 PM · Bolt Staffing · reply')
     const ui = await pane($)
     // (0.7.5) the row has its own one-line order (the thread's name keeps its own); from the same pass, the same clock
-    expect(await lines(ui)).toContain('1. 🔴 Bolt Staffing · reply · 1d late')
+    expect(await lines(ui)).toContain('1. 🔴 Bolt Staffing · reply · 1d late, due Thu 11 PM')
     await ui.unmount()
   })
 })
 
 describe('R17: a client with nothing due', () => {
-  test('listed last with no clock; no NO THREAD row, no chip by itself, and the band counts it nowhere; (0.7.11) its thread pinned: the client wrote today', async ($, on) => {
+  test('listed last with no clock and `no due date`; never pinned, though the client wrote today; no NO THREAD row, no chip by itself, and the band counts it nowhere', async ($, on) => {
     const w = world(on, {
       feed: feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 1, { reply_due_at: null })], threads: [declared(BOLT, 'cli-bolt', 20)] }),
       threads: [thread('local_b', 'Staffing plan', 20)],
       store: { 'mm.threads': PAIRS, 'mm.lease': { owner: 'x', until: 0 } },
     })
     await tickOnce($, w)
-    // (0.7.11, Rob 10-27/10-30) an ACTIVE client's thread is pinned, with or without a clock (until 0.7.11: never pinned)
-    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 Bolt Staffing · reply', pinned: true })
+    // (0.7.12, Rob 10-30) a pin needs a clock: never pinned, as until 0.7.11 (0.7.11 pinned an ACTIVE client's thread with
+    // no clock); and the name says `no due date` where the clock would be (until 0.7.12: '🟡 Bolt Staffing · reply')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 Bolt Staffing · reply · no due date', pinned: false })
     expect(w.acted()).toEqual([])
     const band = await bandOf($)
-    // (0.7.11) the band counts the pinned thread (until 0.7.11: 'Nothing needs you in the next 24 hours.')
-    expect(await lines(band)).toEqual(['Needs you: 1 pinned.'])
+    // (0.7.12) as until 0.7.11 (0.7.11: 'Needs you: 1 pinned.')
+    expect(await lines(band)).toEqual(['Nothing needs you in the next 24 hours.'])
     await band.unmount()
   })
 
@@ -5586,8 +5580,9 @@ describe('R17: a client with nothing due', () => {
     await tickOnce($, w)
     const ui = await pane($)
     await mm($, '')
-    // (0.7.5) its one line ends ` · no thread`, never red and with no clock: nothing is due
-    expect(await lines(ui)).toContain('◆ 1. 🟡 Cedar Dental · reply · no thread')
+    // (0.7.5) its one line ends ` · no thread`, never red and with no clock: nothing is due; (0.7.12) and it says so
+    // (until 0.7.12: '◆ 1. 🟡 Cedar Dental · reply · no thread')
+    expect(await lines(ui)).toContain('◆ 1. 🟡 Cedar Dental · reply · no due date · no thread')
     await ui.unmount()
     expect(w.acted()).toEqual([])
   })
@@ -5604,7 +5599,8 @@ describe('R18: an internal project\'s thread is the person\'s to pin', () => {
       store: { 'mm.links': { [CORE]: 'local_core' } },
     })
     await mm($, '')
-    expect(w.threads.get('local_core')).toMatchObject({ title: '🟡 Massmarket Core Snapshot · task', pinned: true })
+    // (0.7.12) `no due date` (until 0.7.12: '🟡 Massmarket Core Snapshot · task'); the person's pin stays
+    expect(w.threads.get('local_core')).toMatchObject({ title: '🟡 Massmarket Core Snapshot · task · no due date', pinned: true })
     expect((w.stored['mm.pins'] as Record<string, unknown>).local_core).toEqual({ projectId: CORE, client: 'Massmarket Core Snapshot', byUs: false, internal: true })
     w.setFeed(feed({ drafts: [], mail: [], tickets: {} }))
     await mm($, '')
@@ -5655,11 +5651,13 @@ describe('fix round 1: the reviewer\'s findings', () => {
     expect(w.stored['mm.links']).toEqual({ [CEDAR]: SELF })
   })
 
-  test('F6 (P7a): with the person\'s own clients under Older, the band never reads all clear', async ($, on) => {
+  // (0.7.12) F6 is withdrawn: until 0.7.12 the band read 'Nothing due in the next 24 hours · 1 older overdue.' here. What was
+  // due before the cut is considered nowhere now, so the band is all clear.
+  test('F6 (P7a, withdrawn in 0.7.12): a client whose only mail was due before the cut leaves the band all clear', async ($, on) => {
     world(on, { feed: feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 24 * 8)] as never }), store: { 'mm.lease': { owner: 'x', until: NOW + 24 * HOUR } } })
     await mm($, '')
     const band = await bandOf($)
-    expect(await lines(band)).toEqual(['Nothing due in the next 24 hours · 1 older overdue.'])
+    expect(await lines(band)).toEqual(['Nothing needs you in the next 24 hours.'])
     await band.unmount()
   })
 
@@ -5849,7 +5847,9 @@ describe('0.5.3: a cleared client\'s thread is unpinned once per clear, whatever
   })
 
   for (const [label, read] of [
-    ['under Older', feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 24 * 8)] as never })],
+    // (0.7.12) until 0.7.12 the first case was a client under Older (mail of 8 days ago); what was due before the cut is
+    // treated as done now, so that client clears (the (s) tests). A client whose only item has no due date stands in for it.
+    ['with no due date', feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 2, { reply_due_at: null })] as never })],
     [
       'on the list, further out than the pin\'s window',
       feed({ drafts: [], mail: [], tickets: { due_soon: [{ ticket_id: 'tb', project_id: BOLT, project_name: 'Bolt Staffing', title: 'Plan', due_at: new Date(NOW + 96 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME }] } }),
@@ -7066,7 +7066,8 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     ['a package someone else holds, on a client listed for a task of the person\'s own', { feed: feed({ drafts: [packageFor(CEDAR, 'Cedar Dental', heldBy(TEAMMATE_B))], mail: [] }), threads: [thread('local_c', 'Dental intake', 20)], store: { 'mm.links': { [CEDAR]: 'local_c' } } }],
     ['a client whose reply the server is checking', { feed: acmeOnly({ last_outbound_at: ago(0.5), checked_send_at: ago(2) }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.links': { [ACME]: 'local_a' } } }],
     ['a client still open after our reply (Claim is the person\'s)', { feed: acmeOnly({ last_outbound_at: SENT, checked_send_at: SENT, checked_at: ago(0.1), still_open: ['the logo file'], answered: [] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.links': { [ACME]: 'local_a' } } }],
-    ['a client under Older alone', { feed: feed({ drafts: [], tickets: {}, mail: [mailFor(ACME, 'Acme Roofing — Pat', 10 * 24)] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.links': { [ACME]: 'local_a' } } }],
+    // (0.7.12) until 0.7.12 this client was under Older; it is in no list now, and still never updated by itself
+    ['a client whose only mail was due before the cut', { feed: feed({ drafts: [], tickets: {}, mail: [mailFor(ACME, 'Acme Roofing — Pat', 10 * 24)] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.links': { [ACME]: 'local_a' } } }],
     ['a client whose linked thread is the one running the sync', { feed: acmeOnly(), store: { 'mm.links': { [ACME]: SELF } } }],
     ['a client whose linked thread the sync could not see', { feed: acmeOnly(), threads: [thread('local_a', 'Roof quote', 30)], unlisted: ['local_a'], lookupFails: 'no answer', store: { 'mm.links': { [ACME]: 'local_a' } } }],
     ['a client whose row only suggests a thread by its title', { feed: acmeOnly(), threads: [thread('local_t', 'Acme Roofing: roof quote', 30)] }],
@@ -10186,7 +10187,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.11', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.12', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10255,7 +10256,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.11', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.12', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10321,7 +10322,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.11', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.12', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
@@ -10570,8 +10571,9 @@ describe('(0.7.5) the pane: Needs you now, then Your build queue, then the group
     await ui.press({ key: 'mm-fold:undated' })
     const open = await lines(ui)
     // (0.7.11, Rob 10-30) Bolt's only items are undated tickets and nothing came from Bolt in six weeks: its row stays,
-    // says so, and offers no Start (until 0.7.11 it offered Start thread)
-    expect(open.slice(open.indexOf('No due date (1)'))).toEqual(['No due date (1)', '2. 🟡 Bolt Staffing · task · no thread', '2 tasks with no date · nothing from them in 6 weeks', UPDATED])
+    // says so, and offers no Start (until 0.7.11 it offered Start thread); (0.7.12) its line says `no due date` where the
+    // clock would be (until 0.7.12: '2. 🟡 Bolt Staffing · task · no thread')
+    expect(open.slice(open.indexOf('No due date (1)'))).toEqual(['No due date (1)', '2. 🟡 Bolt Staffing · task · no due date · no thread', '2 tasks with no date · nothing from them in 6 weeks', UPDATED])
     expect(await buttonsOf(ui, BOLT)).toEqual(['Drafts'])
     expect(sends(w)).toEqual([])
     await ui.unmount()
@@ -11297,7 +11299,10 @@ describe('0.7.11 (Rob, 10-30: "I don\'t think we need to be creating threads for
   })
 })
 
-describe('0.7.11 (Rob, 10-30: "why are things not getting pinned"): an ACTIVE client\'s thread is pinned, and the count is what the sidebar shows', () => {
+// (0.7.12, Rob 10-30: "It usually says 'due in XYZ hours.' ... I'm not sure why they were pinned in the first place") 0.7.11
+// pinned an ACTIVE client's thread whatever its time, undated rows included. A pin needs a clock again: overdue since the
+// cut, or due within the next 24 business hours. The count that matches the sidebar (0.7.11) is kept.
+describe('0.7.11, as 0.7.12 has it: an ACTIVE client\'s thread with nothing dated is NOT pinned; the count is what the sidebar shows', () => {
   const LT = '88888888-8888-4888-8888-888888888888'
   const tid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-0000000000bb`
   /** The founder: Bolt listed by an undated ticket of his alone, as 26 clients were on 10-30; and Cedar's task due today. */
@@ -11306,13 +11311,38 @@ describe('0.7.11 (Rob, 10-30: "why are things not getting pinned"): an ACTIVE cl
     return { ...base, role: 'founder', mail: [], drafts: [], tickets: { ...base.tickets, undated: [{ ticket_id: tid(1), project_id: BOLT, project_name: 'Bolt Staffing (Sam)', title: 'Undated 1', due_at: null, due_source: null, assignee_email: ME }] }, threads: [] }
   }
   const notOurs = { projectId: BOLT, client: 'Bolt Staffing', byUs: false }
-  const pinsOf = (w: { stored: Record<string, unknown> }) => w.stored['mm.pins'] as Record<string, unknown>
 
-  test('[10-30] Bolt wrote three days ago and its only items are undated tickets: its linked thread is pinned (until 0.7.11 it was named, never pinned, and its pin record, not ours, read as a pin)', async ($, on) => {
+  test('[10-30] Bolt wrote three days ago and its only items are undated tickets: (0.7.12) its linked thread is named `no due date` and not pinned (0.7.11 pinned it)', async ($, on) => {
     const w = world(on, { feed: undatedBolt(), threads: [thread('local_b', 'Bolt work', 20)], store: { 'mm.links': { [BOLT]: 'local_b' }, 'mm.pins': { local_b: notOurs }, 'mm.activity': { [BOLT]: NOW - 3 * DAYS } } })
     await mm($, '')
-    expect(w.threads.get('local_b')?.pinned).toBe(true)
-    expect(pinsOf(w).local_b).toEqual({ ...notOurs, byUs: true })
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 Bolt Staffing · task · no due date', pinned: false })
+    expect(w.writes().filter(c => c.startsWith('set_pinned | local_b'))).toEqual([])
+  })
+
+  test('(0.7.12) a pin the bridge put on that active client\'s undated thread comes off', async ($, on) => {
+    const w = world(on, {
+      feed: undatedBolt(),
+      threads: [thread('local_b', 'Bolt work', 20, { pinned: true })],
+      store: { 'mm.links': { [BOLT]: 'local_b' }, 'mm.pins': { local_b: { ...notOurs, byUs: true } }, 'mm.activity': { [BOLT]: NOW - 3 * DAYS } },
+    })
+    await mm($, '')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 Bolt Staffing · task · no due date', pinned: false })
+    expect(w.writes().filter(c => c.startsWith('set_pinned | local_b'))).toEqual(['set_pinned | local_b | false'])
+    // and it stays off, sync after sync: nothing pins it again
+    for (let i = 0; i < 3; i++) await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(false)
+    expect(w.writes().filter(c => c.startsWith('set_pinned | local_b'))).toEqual(['set_pinned | local_b | false'])
+  })
+
+  test('(0.7.12) a pin the person put on that active client\'s undated thread stays', async ($, on) => {
+    const w = world(on, {
+      feed: undatedBolt(),
+      threads: [thread('local_b', 'Bolt work', 20, { pinned: true })],
+      store: { 'mm.links': { [BOLT]: 'local_b' }, 'mm.pins': { local_b: notOurs }, 'mm.activity': { [BOLT]: NOW - 3 * DAYS } },
+    })
+    for (let i = 0; i < 3; i++) await mm($, '')
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 Bolt Staffing · task · no due date', pinned: true })
+    expect(w.writes().filter(c => c.startsWith('set_pinned'))).toEqual([])
   })
 
   test('the person unpinned it: it stays unpinned while nothing newer comes', async ($, on) => {
@@ -11324,7 +11354,6 @@ describe('0.7.11 (Rob, 10-30: "why are things not getting pinned"): an ACTIVE cl
     await mm($, '')
     expect(w.threads.get('local_b')?.pinned).toBe(false)
     expect(w.writes().filter(c => c.startsWith('set_pinned | local_b'))).toEqual([])
-    expect((w.stored['mm.unpinned'] as Record<string, unknown>).local_b).toBeDefined()
     await mm($, '')
     expect(w.threads.get('local_b')?.pinned).toBe(false)
   })

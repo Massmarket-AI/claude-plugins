@@ -1,9 +1,11 @@
 // Pure queue logic for the Massmarket bridge: no `$`, so tests can call it directly.
 //
 // What is listed (Rob, 2026-10-20: "everything since last Thursday that wasn't closed should always show up
-// now, and we can keep it clean going forward"): everything still open whose due time is on or after
-// LIST_FLOOR_MS (Wed 2026-10-14 12:00 AM ET), however overdue, and everything not due yet, however far ahead.
-// (Until 2026-10-20 the cut was 3 business days back; Rob replaced it with LIST_FLOOR_MS.) That is:
+// now, and we can keep it clean going forward"): everything still open whose due time is on or after the cut,
+// `listCutoff` (LIST_FLOOR_MS, Wed 2026-10-14 12:00 AM ET, or (0.7.12) 3 weeks back once that is later), however
+// overdue, and everything not due yet, however far ahead. (Until 2026-10-20 the cut was 3 business days back; Rob
+// replaced it with LIST_FLOOR_MS.) ⛔ (0.7.12, Rob 2026-10-30: "We shouldn't be considering anything that's older than
+// the cutoff date") What was due before the cut is not considered anywhere. That is:
 //   - an unanswered client message (its reply is due 24 business hours after it arrived)
 //   - a prepared reply package (drafts ready)
 //   - a reply package the viewer picked up, with a draft not sent, like a prepared one
@@ -24,8 +26,8 @@
 // Work that must start now at 1.5 h a day waits for real hour estimates (quote line items).
 //
 // Two more lists are built beside that one (buildLists), and neither pins or is counted: clients whose
-// reply drafts a teammate holds (not the viewer's to act on), and clients whose only items were due before
-// the floor (so that nothing drops off silently).
+// reply drafts a teammate holds (not the viewer's to act on), and (R8) clients whose reply the server is checking.
+// (Until 0.7.12 a third, Older, held clients whose only items were due before the floor.)
 //
 // Every client clock here counts business time (Rob, 2026-10-12: "the weekends don't count as days towards
 // the 24-hour response time... We're only counting business days in our timelines for clients"): Saturday
@@ -33,7 +35,7 @@
 
 import type { MmPerson, MmProject } from '../types'
 
-import { businessDaysBetween, businessDeadline, businessMsBetween, subtractBusinessMs } from './business-time'
+import { businessDaysBetween, businessDeadline, businessMsBetween, isBusinessTime, subtractBusinessMs } from './business-time'
 
 export type FeedMail = {
   message_id_key: string
@@ -518,19 +520,16 @@ export const clientWaiting = (it: QueueItem): boolean => it.messages > 0 || Bool
 export const dueForViewer = (it: QueueItem): boolean => it.messages > 0 || it.tasks - etaAsksOf(it).length - undatedCount(it) > 0
 
 /**
- * (0.7.11) Whether a client may be offered a new thread (Start), have its thread pinned for it being active, or be
- * followed to its own thread on a profile switch: an internal project (its own rules, unchanged), a client with
- * something of theirs waiting now or a message from them in the last ACTIVE_WINDOW_MS (`lastFrom`, the newest the bridge
- * knows), or something due for the viewer. Every other client keeps its row, with no Start and no thread.
+ * (0.7.11) Whether a client may be offered a new thread (Start), or be followed to its own thread on a profile switch:
+ * an internal project (its own rules, unchanged), a client with something of theirs waiting now or a message from them
+ * in the last ACTIVE_WINDOW_MS (`lastFrom`, the newest the bridge knows), or something due for the viewer. Every other
+ * client keeps its row, with no Start and no thread. ⛔ (0.7.12) Never whether its thread is pinned: a pin needs a clock
+ * (R1, `pinsNow`). 0.7.11 also pinned an active client's thread whatever its time (`isActive`, gone in 0.7.12), and
+ * threads with nothing dated were pinned with no clock.
  */
 export function mayStart(it: QueueItem, lastFrom: number | undefined, now: number, internal = false): boolean {
   if (internal || it.internal === true || it.kind === 'queue') return true
   return clientWaiting(it) || isRecent(lastFrom, now) || dueForViewer(it)
-}
-
-/** (0.7.11) ACTIVE: something of the client's waits now, or they wrote to us in the last ACTIVE_WINDOW_MS. */
-export function isActive(it: QueueItem, lastFrom: number | undefined, now: number): boolean {
-  return clientWaiting(it) || isRecent(lastFrom, now)
 }
 
 /** (0.7.11) A time inside the active window (a time ahead of now counts: a clock a little off is no reason to drop a client). */
@@ -562,12 +561,25 @@ const HOUR = 3_600_000
 const DAY = 24 * HOUR
 /**
  * The list's floor (Rob, 2026-10-20: "everything since last Thursday that wasn't closed should always show up
- * now, and we can keep it clean going forward"). Replaces the rolling 3-business-day cut of 2026-10-08. Anything
- * still open whose due time is on or after it stays on the Needs-you list however overdue; only what was due
- * before it goes under Older. Wed 2026-10-14 12:00 AM ET: the week the team installed the bridge.
- * (Until 2026-10-21 the floor was Thu 2026-10-15; Rob moved it to Wed 2026-10-14: "it should actually be last Wednesday".)
+ * now, and we can keep it clean going forward"). Replaces the rolling 3-business-day cut of 2026-10-08. Wed 2026-10-14
+ * 12:00 AM ET: the week the team installed the bridge. (Until 2026-10-21 the floor was Thu 2026-10-15; Rob moved it to
+ * Wed 2026-10-14: "it should actually be last Wednesday".) The cut itself is `listCutoff`: this floor, or 3 weeks back
+ * once that is later. (Until 0.7.12 what was due before the floor was listed under Older.)
  */
 export const LIST_FLOOR_MS = Date.parse('2026-10-14T04:00:00Z')
+/**
+ * (0.7.12, Rob 2026-10-30: "We shouldn't be considering anything that's older than the cutoff date from the week before
+ * the team left") How far back the cut rolls: 21 days, the same 3 weeks after which the nightly stale-ticket job
+ * (launchd com.massmarket.stale-ticket-rule) closes a quiet ticket, so what the bridge ignores and what gets closed line
+ * up. Calendar days, not business days: it matches that job. The one number to change.
+ */
+export const CUTOFF_WINDOW_MS = 21 * DAY
+/**
+ * (0.7.12) The cut, at `now`: the later of the floor (LIST_FLOOR_MS) and 3 weeks back (CUTOFF_WINDOW_MS). Anything still
+ * open that was due before it is not considered anywhere: no row, no clock, no pin, no count, no band, no kickoff, no
+ * Start and no update by itself; the client is as if it had nothing. Until Wed 2026-11-04 the floor decides; then it rolls.
+ */
+export const listCutoff = (now: number): number => (Number.isFinite(now) ? Math.max(LIST_FLOOR_MS, now - CUTOFF_WINDOW_MS) : LIST_FLOOR_MS)
 /**
  * The pin's window, in business time: 24 business hours ahead (`pinsNow`). A client's thread pins while
  * something of it must be acted on within them, or already should have been. (0.5.2, R1) The list itself holds
@@ -598,7 +610,8 @@ export const MAIL_LOOKBACK_MAX_HOURS = 720
  *
  * A reply is due 24 business hours after a message, so every message whose reply is due on or after the floor
  * arrived on or after `subtractBusinessMs(LIST_FLOOR_MS, DAY)` (Tue 2026-10-13 12:00 AM ET). Mail OW sends from
- * further back is read the same way, and goes under Older. The 168 (the look-back since 2026-10-13, review of
+ * further back is read the same way, and (0.7.12) left out when its reply was due before the cut (`listCutoff`; until
+ * 0.7.12 it went under Older). The cut never reaches further back than the floor, so this always covers it. The 168 (the look-back since 2026-10-13, review of
  * 79cbc596, F1) is the least: it is what this asks for until Thu 2026-10-22 12:00 AM ET, so it is safe to ship
  * before OW's 720 cap deploys; from then on it asks for more than 168, which an OW that still caps at 168
  * refuses (HTTP 400). Past 720 (from Tue 2026-11-24) mail due just after the floor starts to fall out of the
@@ -672,19 +685,20 @@ function businessWithin(fromMs: number, toMs: number, limit: number): boolean {
 }
 
 /**
- * Every client the feed has something of the viewer's for, in the three lists the pane draws. A client is
- * in exactly one.
+ * Every client the feed has something of the viewer's for, in the lists the pane draws. A client is in
+ * exactly one.
  *   queue     needs the viewer now: what pins and what the header counts. Soonest due first.
  *   teammate  a teammate holds its reply drafts and the viewer has no task of their own due there: not the
  *             viewer's to act on (Rob, 2026-10-12: "They should only be seeing theirs... when you pass it
  *             to somebody else, it should show up for only the person who's passed it"). Never pinned,
  *             never counted. The pane lists them under `With a teammate (n)`.
- *   older     its only items were due before the floor, LIST_FLOOR_MS (Rob, 2026-10-12: two clients with
- *             unanswered mail from ten and six days ago were not shown at all). Never pinned, never
- *             counted. The pane lists them last, under `Older (n)`, most overdue first. (Until 2026-10-20
- *             the cut was 3 business days back; Rob replaced it with LIST_FLOOR_MS.)
+ *   checking  (0.5.2, R8) its package waits for the server's check of our newer send.
+ * ⛔ (0.7.12, Rob 2026-10-30: "We shouldn't be considering anything that's older than the cutoff date") Nothing due
+ * before the cut (`listCutoff`) is in any of them: a client whose only items were due before it is in none, as a client
+ * with nothing is. Until 0.7.12 a fourth list, `older`, held those clients under `Older (n)`, and the band counted them
+ * (`· N older overdue`).
  */
-export type Lists = { queue: QueueItem[]; teammate: QueueItem[]; older: QueueItem[]; checking: QueueItem[] }
+export type Lists = { queue: QueueItem[]; teammate: QueueItem[]; checking: QueueItem[] }
 
 /**
  * A teammate holds this client's reply drafts and nothing else keeps it in the viewer's list: no committed
@@ -696,18 +710,26 @@ export type Lists = { queue: QueueItem[]; teammate: QueueItem[]; older: QueueIte
 export const withTeammate = (it: QueueItem): boolean =>
   it.tasks === 0 && openAsks(it).length === 0 && queuedOf(it).length === 0 && (Boolean(it.theirs) || ((it.open ?? null)?.state === 'held_by_other' && it.kind !== 'ok'))
 
+/**
+ * (0.7.12, the coordinator for Rob, 2026-10-30: "the bridge never touches a pin you made") The clients in none of the lists
+ * only because of the cut: the feed still holds something of theirs that the lists would show if nothing were cut, and all
+ * of it was due before the cut. Such a client is clear (its thread is named `✓ <client> · clear` and the bridge takes its
+ * OWN pin off), but a pin the person put on its thread stays. Never used to list, count, pin or start anything.
+ */
+export function pastCutClients(feed: Feed, now: number): Set<string> {
+  const kept = new Set(build(feed, now).map(i => i.projectId))
+  return new Set(build(feed, now, -Infinity).map(i => i.projectId).filter(pid => !kept.has(pid)))
+}
+
 export function buildLists(feed: Feed, now: number): Lists {
-  const current = build(feed, now, false)
-  const inCurrent = new Set(current.map(i => i.projectId))
-  const past = build(feed, now, true).filter(i => !inCurrent.has(i.projectId))
-  // (0.5.2, R8) a client whose package waits for the server's check of our newer send is in none of the
-  // three lists: off the Needs-you list, not pinned, not counted. Its thread is named for it (`checkingTitle`).
+  const current = build(feed, now)
+  // (0.5.2, R8) a client whose package waits for the server's check of our newer send is in neither of the
+  // other lists: off the Needs-you list, not pinned, not counted. Its thread is named for it (`checkingTitle`).
   const checks = (i: QueueItem): boolean => fastState(i, now)?.state === 'checking'
   return {
     queue: current.filter(i => !withTeammate(i) && !checks(i)),
-    teammate: [...current, ...past].filter(withTeammate),
-    older: past.filter(i => !withTeammate(i) && !checks(i)),
-    checking: [...current, ...past].filter(i => !withTeammate(i) && checks(i)),
+    teammate: current.filter(withTeammate),
+    checking: current.filter(i => !withTeammate(i) && checks(i)),
   }
 }
 
@@ -1193,18 +1215,19 @@ export function asksMarkdown(it: Pick<QueueItem, 'asks'>, now: number, pages: Re
 }
 
 /**
- * One pass over the feed. `older` false: everything still open that was due on or after the floor
- * (LIST_FLOOR_MS), however overdue, and everything not due yet, however far ahead. `older` true: only what was
- * due before the floor, by the same rules of whose it is. (Until 2026-10-20 the cut was 3 business days back;
- * Rob replaced it with LIST_FLOOR_MS.)
+ * One pass over the feed: everything still open that was due on or after the cut (`listCutoff`: the floor,
+ * LIST_FLOOR_MS, or (0.7.12) 3 weeks back once that is later), however overdue, everything not due yet, however far
+ * ahead, and what has no due time. (Until 2026-10-20 the cut was 3 business days back; Rob replaced it with
+ * LIST_FLOOR_MS. Until 0.7.12 a second pass took what was due before the floor, for Older.)
  */
-function build(feed: Feed, now: number, older: boolean): QueueItem[] {
-  // Under Older: due before the floor, and more than 3 business days ago (WINDOW_BACK_MS: from Sat 2026-10-17
-  // 12:00 AM ET on, everything due before the floor is, so the floor alone decides)
-  const tooOld = (due: number): boolean => due < now && due < LIST_FLOOR_MS && !businessWithin(due, now, WINDOW_BACK_MS)
-  // (0.5.2, R1) everything else with a due time is the current pass's: overdue since the floor, or not due yet
-  // however far ahead; whether it pins is `pinsNow`
-  const inWindow = (due: number): boolean => Number.isFinite(due) && (older ? tooOld(due) : !tooOld(due))
+function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueItem[] {
+  // ⛔ (0.7.12) Not considered at all: due before the cut, and more than 3 business days ago (WINDOW_BACK_MS: from Sat
+  // 2026-10-17 12:00 AM ET on, everything due before the cut is, so the cut alone decides). `cut` is the cut itself;
+  // only `pastCutClients` passes another (none at all), to tell which clients the cut alone cleared.
+  const tooOld = (due: number): boolean => due < now && due < cut && !businessWithin(due, now, WINDOW_BACK_MS)
+  // (0.5.2, R1) everything else with a due time is this pass's: overdue since the cut, or not due yet however far
+  // ahead; whether it pins is `pinsNow`
+  const inWindow = (due: number): boolean => Number.isFinite(due) && !tooOld(due)
   /** (R8) Our newest send to each client, from every row of it the feed gives one on. */
   const lastOut = lastOutbound(feed)
   /** (R18) The internal projects: by the feed's own flag on any row, else by id. */
@@ -1264,7 +1287,6 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     if (!isMine(m.project_owner_email, feed)) continue
     const due = replyDue(m)
     if (due === Infinity) {
-      if (older) continue
       const it = item(m.project_id, m.project_name)
       countMail(it, m, due)
       undated(it)
@@ -1313,8 +1335,8 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     // (R17, R18) no reply time for a package the feed gives none, or on an internal project: Infinity
     const noDue = d.due_at === null || internal.has(d.project_id)
     const due = noDue ? Infinity : typeof d.due_at === 'string' && Number.isFinite(ms(d.due_at)) ? ms(d.due_at) : Number.isFinite(ms(d.covers_through)) ? businessDeadline(ms(d.covers_through), DAY) : now
-    // (this pass's side of the floor: its reply time on or after LIST_FLOOR_MS, or only what was due before it)
-    const inReach = noDue ? !older : older ? tooOld(due) : !tooOld(due)
+    // (its reply time on or after the cut, or none; (0.7.12) one due before the cut is not considered)
+    const inReach = noDue || !tooOld(due)
     // `by`: the teammate who holds it; for the founder, also the teammate a stale package is with (R1), so
     // that its pane names them instead of inviting him to pick it up
     const open = (state: OpenPackage['state']): OpenPackage => ({
@@ -1437,7 +1459,8 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
       // a ticket is in one of the feed's lists only; counted once whatever a feed sends
       if (typeof tk.ticket_id === 'string' && counting.has(tk.ticket_id)) continue
       const due = etaAsk ? neededBy : undatedRow ? Infinity : ms(tk.due_at)
-      if (undatedRow && !etaAsk ? older : !inWindow(due)) continue
+      // (a ticket nobody dated has no due time to cut by: it lists, undated)
+      if (!(undatedRow && !etaAsk) && !inWindow(due)) continue
       // (0.7.4, ETA asks) the ticket id goes into the kickoff, for its ETA to be recorded against: a lower-case uuid
       if (etaAsk && !isUuid(tk.ticket_id)) continue
       if (typeof tk.ticket_id === 'string') counting.add(tk.ticket_id)
@@ -1495,7 +1518,7 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
   // never counted in `tasks`, and one the feed also lists with a date is counted there alone. A viewer with no queue
   // of their own: nothing here at all.
   // (0.7.4) The founder's alone, on the internal-ops item whichever internal project a ticket is on (`queueHome`).
-  const queued = older ? [] : ownQueueRows(feed).filter(q => !counting.has(q.ticket_id))
+  const queued = ownQueueRows(feed).filter(q => !counting.has(q.ticket_id))
   const home = queueHome(feed)
   if (queued.length && home) {
     const it = item(home.projectId, home.projectName)
@@ -1563,15 +1586,21 @@ function build(feed: Feed, now: number, older: boolean): QueueItem[] {
     }
   }
 
-  // (R17) a client with nothing dated is listed too, in the current pass, last
+  // (R17) a client with nothing dated is listed too, last
   return [...byProject.values()]
-    .filter(i => Number.isFinite(i.dueAt) || (!older && i.noDue === true))
+    .filter(i => Number.isFinite(i.dueAt) || i.noDue === true)
     .sort(byDue)
 }
 
 // ---------------------------------------------------------------- names
 
-function etParts(t: number): { day: string; date: string; time: string } {
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/**
+ * A moment in New York: its weekday (`Mon`), its calendar date as a key, its time (`3 PM`, `3:30 PM`), and (0.7.12) its
+ * month and day (`Oct 14`) and its date as a whole number of days (`serial`), to count calendar days back by.
+ */
+function etParts(t: number): { day: string; date: string; time: string; md: string; serial: number } {
   try {
     const d = new Date(t)
     const date = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d)
@@ -1579,24 +1608,55 @@ function etParts(t: number): { day: string; date: string; time: string } {
     const time = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' })
       .format(d)
       .replace(':00', '')
-    return { day, date, time }
+    const [m = 1, dd = 1, y = 1970] = date.split('/').map(Number)
+    return { day, date, time, md: `${MONTHS[m - 1] ?? ''} ${dd}`, serial: Math.round(Date.UTC(y, m - 1, dd) / DAY) }
   } catch {
     // No Intl time zones: Eastern daylight time, which covers the weeks this ships in.
     const d = new Date(t - 4 * HOUR)
     const h = d.getUTCHours()
     const mm = d.getUTCMinutes()
     const time = `${h % 12 || 12}${mm ? `:${String(mm).padStart(2, '0')}` : ''} ${h < 12 ? 'AM' : 'PM'}`
-    return { day: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getUTCDay()] ?? '', date: d.toISOString().slice(0, 10), time }
+    return {
+      day: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getUTCDay()] ?? '', date: d.toISOString().slice(0, 10), time,
+      md: `${MONTHS[d.getUTCMonth()] ?? ''} ${d.getUTCDate()}`, serial: Math.floor(d.getTime() / DAY),
+    }
   }
 }
 
+/**
+ * (0.7.12) A due time as it is shown: never on a Saturday or a Sunday (Rob, 2026-10-12: only business days count in a
+ * client's timeline). One that falls there is shown as 11:59 PM of the Friday before, as `businessDeadline` gives a
+ * deadline that ends with a business day: no later in business time, so how late it reads does not change.
+ */
+export function shownDue(due: number): number {
+  return Number.isFinite(due) && !isBusinessTime(due) ? subtractBusinessMs(due, 0) - 60_000 : due
+}
+
+/**
+ * (0.7.12, Rob 2026-10-30: "If there's something the system thinks is overdue, it should also say that when it was")
+ * When a late item was due, in New York time: `3 PM` earlier today, `Mon 3 PM` one to six days back, `Oct 14` before
+ * that (a weekday name further back would read as this week's). Never a weekend day (`shownDue`).
+ */
+export function dueWhen(due: number, now: number): string {
+  const a = etParts(shownDue(due))
+  const back = etParts(now).serial - a.serial
+  return back <= 0 ? a.time : back <= 6 ? `${a.day} ${a.time}` : a.md
+}
+
+/** How late, as `overdue` and `late` say it: `6h`, `2d`. Business time: weekends do not count. */
+function lateSpan(due: number, now: number): string {
+  const late = businessMsBetween(due, now) // weekends do not count toward how late
+  // R16 (0.5.2): whole business days COMPLETED, so 1.5 days late is `1d` everywhere, never `2d` in one place
+  return late < DAY ? `${Math.max(1, Math.round(late / HOUR))}h` : `${Math.floor(late / DAY)}d`
+}
+
+/**
+ * When something is due, as a chip and a recommendation say it: `due 3 PM`, `due tomorrow 3 PM`, `due Fri 3 PM`; once
+ * late, how late and (0.7.12) when it was due: `overdue 6h, due Mon 3 PM`.
+ */
 export function whenText(due: number, now: number): string {
-  if (due < now) {
-    const late = businessMsBetween(due, now) // weekends do not count toward how late
-    // R16 (0.5.2): whole business days COMPLETED, so 1.5 days late is `1d` everywhere, never `2d` in one place
-    return late < DAY ? `overdue ${Math.max(1, Math.round(late / HOUR))}h` : `overdue ${Math.floor(late / DAY)}d`
-  }
-  const a = etParts(due)
+  if (due < now) return `overdue ${lateSpan(due, now)}, due ${dueWhen(due, now)}`
+  const a = etParts(shownDue(due))
   const today = etParts(now)
   const tomorrow = etParts(now + DAY)
   if (a.date === today.date) return `due ${a.time}`
@@ -1668,8 +1728,35 @@ export function clockLead(due: number, now: number): string {
 }
 
 /**
- * The pinned thread's name: `🔴 3d late · Acme Legal · reply · 17 new`. It leads with the hours (Rob,
- * 2026-10-12: "hours before overdue or something like that, as the first part of the message").
+ * (0.7.12, Rob 2026-10-30) The clock a thread's name and a pane row give: the time left (`10h left`), or, once late, how
+ * late with when it was due after it, the hours first (Rob, 2026-10-12): `3h late, due 3 PM`, `2d late, due Mon 3 PM`,
+ * `12d late, due Oct 14` (`dueWhen`).
+ */
+export function clockAndDue(due: number, now: number): string {
+  return due < now ? `${clockLead(due, now)}, due ${dueWhen(due, now)}` : clockLead(due, now)
+}
+
+/**
+ * (0.7.12, Rob 2026-10-30: "I saw some things that were pinned with no hours left or hours overdue ... I'm not sure why
+ * they were pinned in the first place") What a thread's name and a row say where the clock would be, when nothing of the
+ * client's is dated: a missing clock is never a mystery.
+ */
+export const NO_DUE_DATE = 'no due date'
+
+/**
+ * (0.7.12) Whether a name or a row says `no due date`: an item with no due time that is the viewer's own. Not one a
+ * teammate holds (who has it stands where the clock would), and not the internal queue (never dated, and it says so).
+ */
+const saysNoDue = (it: QueueItem, theirs: boolean): boolean => !theirs && !hasDue(it) && it.kind !== 'queue'
+
+/** (0.7.12) The most characters a thread's name keeps its `N new` count within: past it, the count goes first, never the clock or the client. */
+export const THREAD_TITLE_MAX = 60
+
+/**
+ * The pinned thread's name: `🔴 3d late, due Fri 3 PM · Acme Legal · reply · 17 new`. It leads with the hours (Rob,
+ * 2026-10-12: "hours before overdue or something like that, as the first part of the message"), and (0.7.12) once late
+ * it says when it was due (`clockAndDue`). Nothing dated: `🟡 Acme Legal · task · no due date`. A name longer than
+ * THREAD_TITLE_MAX drops its `N new` count; the clock and the client always stay.
  */
 export function titleFor(it: QueueItem, now: number): string {
   // A client whose drafts a teammate holds, and that is not the viewer's to act on: who has it stands where
@@ -1677,21 +1764,25 @@ export function titleFor(it: QueueItem, now: number): string {
   const theirs = withTeammate(it)
   // (`your draft` for a package the viewer holds, and `with <Name>` when a teammate holds it: 0.4.1; for the
   // founder, the teammate it is with when it is theirs to see through: 0.5.1)
-  // (R17) nothing due: `🟡 <client> · <what>`, no clock and never red
-  const lead = theirs ? `🟡 with ${it.theirs ?? it.open?.by ?? ''}` : hasDue(it) ? `${isRed(it, now) ? '🔴' : '🟡'} ${clockLead(it.dueAt, now)}` : ''
-  const parts = lead ? [lead, it.client, whatOf(it)] : [`🟡 ${it.client}`, whatOf(it)]
-  if (it.messages > 1) parts.push(`${it.messages} new`)
-  if (it.open?.state === 'held_by_other' && !theirs) parts.push(`with ${it.open.by}`)
-  if (it.flagged) parts.push('flagged')
-  return parts.join(' · ')
+  // (R17) nothing due: `🟡 <client> · <what>`, no clock and never red; (0.7.12) and `no due date` after it
+  const lead = theirs ? `🟡 with ${it.theirs ?? it.open?.by ?? ''}` : hasDue(it) ? `${isRed(it, now) ? '🔴' : '🟡'} ${clockAndDue(it.dueAt, now)}` : ''
+  const parts = lead ? [lead, it.client, whatOf(it)] : [`🟡 ${it.client}`, whatOf(it), ...(saysNoDue(it, theirs) ? [NO_DUE_DATE] : [])]
+  const count = it.messages > 1 ? `${it.messages} new` : ''
+  const rest: string[] = []
+  if (it.open?.state === 'held_by_other' && !theirs) rest.push(`with ${it.open.by}`)
+  if (it.flagged) rest.push('flagged')
+  const full = [...parts, ...(count ? [count] : []), ...rest].join(' · ')
+  // (0.7.12, "keep titles short") the count goes before anything that says what is due, when, or for whom
+  return count && [...full].length > THREAD_TITLE_MAX ? [...parts, ...rest].join(' · ') : full
 }
 
 /**
  * (0.7.5, the panel redesign; Rob, 2026-10-27: "queue first, one merged time list, plain numbers") A row of the pane in
- * ONE line: the chip, the client, what is needed, then the time left: `🔴 ReGen Society · your OK · 1d late`, and after
- * it what else the thread's name says (`3 new`, `with <Name>`, `flagged`). A client whose drafts a teammate holds and
- * that is not the viewer's: no clock, `with <Name>`. Nothing due: no clock (R17). `fresh`: the client has no thread at
- * all (` · no thread` last), red when it pins now (R4).
+ * ONE line: the chip, the client, what is needed, then the time left: `🔴 ReGen Society · your OK · 1d late, due Wed 3 PM`
+ * ((0.7.12) once late, with when it was due), and after it what else the thread's name says (`3 new`, `with <Name>`,
+ * `flagged`). A client whose drafts a teammate holds and that is not the viewer's: no clock, `with <Name>`. Nothing due:
+ * no clock (R17), and (0.7.12) `no due date` where it would be. `fresh`: the client has no thread at all (` · no thread`
+ * last), red when it pins now (R4).
  */
 export function rowLine(it: QueueItem, now: number, opts: { fresh?: boolean; pins?: boolean } = {}): string {
   const theirs = withTeammate(it)
@@ -1699,7 +1790,9 @@ export function rowLine(it: QueueItem, now: number, opts: { fresh?: boolean; pin
   const what = whatOf(it)
   const red = opts.pins === true || (due && isRed(it, now))
   const parts = [`${red ? '🔴' : '🟡'} ${it.client}`, what === 'needs your OK' ? 'your OK' : what]
-  if (due) parts.push(clockLead(it.dueAt, now))
+  // (0.7.12) once late, when it was due as well (`6h late, due Mon 3 PM`); nothing dated, `no due date`
+  if (due) parts.push(clockAndDue(it.dueAt, now))
+  else if (saysNoDue(it, theirs)) parts.push(NO_DUE_DATE)
   if (it.messages > 1) parts.push(`${it.messages} new`)
   if (theirs) parts.push(`with ${it.theirs ?? it.open?.by ?? ''}`)
   else if (it.open?.state === 'held_by_other') parts.push(`with ${it.open.by}`)
@@ -1742,18 +1835,18 @@ export function clearedTitle(client: string, now: number): string {
 
 /**
  * The client a thread name of the bridge's names, whichever shape it has: today's
- * (`🔴 3d late · Acme Legal · reply`, or `🟡 with J Smith · Acme Legal · reply` when a teammate holds its
- * drafts), the one before it (`🔴 Acme Legal · reply overdue 6h`), the cleared one
- * (`✓ Acme Legal · clear 11 AM`), with or without a two-digit rank in front. For any other title, what
- * stands before its first ` · `.
+ * (`🔴 3d late, due Fri 3 PM · Acme Legal · reply`, or `🟡 with J Smith · Acme Legal · reply` when a teammate holds
+ * its drafts, or `🟡 Acme Legal · task · no due date`), those before it (`🔴 3d late · Acme Legal · reply` until
+ * 0.7.12, `🔴 Acme Legal · reply overdue 6h`), the cleared one (`✓ Acme Legal · clear 11 AM`), with or without a
+ * two-digit rank in front. For any other title, what stands before its first ` · `.
  */
 export function clientInTitle(title: string): string {
   const marked = /^[🔴🟡✓]\s/u.test(title.replace(/^\d{2}\s+/, ''))
   const parts = title.replace(/^\d{2}\s+/, '').replace(/^[🔴🟡✓]\s*/u, '').replace(/^client:\s*/i, '').split(' · ')
   const first = parts[0]?.trim() ?? ''
-  // what leads the name: the clock, or (in a name of the bridge's only) who holds the drafts, or (0.5.2) that
-  // the client has no thread
-  const lead = /^(?:<1h|\d+[hd]) (?:late|left)$/.test(first) || (marked && parts.length > 2 && /^with \S/.test(first)) || (marked && first === 'NO THREAD')
+  // what leads the name: the clock ((0.7.12) once late, with when it was due: `3h late, due Mon 3 PM`), or (in a name
+  // of the bridge's only) who holds the drafts, or (0.5.2) that the client has no thread
+  const lead = /^(?:<1h|\d+[hd]) (?:late|left)(?:, due \S.*)?$/.test(first) || (marked && parts.length > 2 && /^with \S/.test(first)) || (marked && first === 'NO THREAD')
   return lead ? (parts[1]?.trim() ?? '') : first
 }
 
@@ -1989,7 +2082,8 @@ export function matesMarkdown(it: QueueItem, now: number): string {
 
 /** (0.7.4) How late something is, as the pane says it: `3h late`, `2d late` (business time, R16). */
 function lateText(since: number, now: number): string {
-  return `${whenText(since, now).replace(/^overdue /, '')} late`
+  // ((0.7.12) no longer from whenText, which now says when it was due as well)
+  return `${lateSpan(since, now)} late`
 }
 
 // ---------------------------------------------------------------- a route call that can close something

@@ -36,10 +36,11 @@ const none = recommend([], undefined, NOW)
 describe('0.7.5: a row is one line: the chip, the client, what is needed, the time left', () => {
   test('due today, late, nothing due, the founder\'s OK', async () => {
     expect(rowLine(acme(), NOW)).toBe('🔴 Acme Roofing · task · 5h left')
-    expect(rowLine(acme({ dueAt: et('2026-10-09 11:00') }), NOW)).toBe('🔴 Acme Roofing · task · 1d late')
+    // (0.7.12) late says when it was due, and undated says so (until 0.7.12: `1d late`, and nothing for undated)
+    expect(rowLine(acme({ dueAt: et('2026-10-09 11:00') }), NOW)).toBe('🔴 Acme Roofing · task · 1d late, due Fri 11 AM')
     expect(rowLine(acme({ dueAt: et('2026-10-13 09:00') }), NOW)).toBe('🟡 Acme Roofing · task · 22h left')
-    expect(rowLine(acme({ noDue: true, dueAt: Number.NaN }), NOW)).toBe('🟡 Acme Roofing · task')
-    expect(rowLine(acme({ kind: 'ok', messages: 1, tasks: 0, dueAt: et('2026-10-09 11:00') }), NOW)).toBe('🔴 Acme Roofing · your OK · 1d late')
+    expect(rowLine(acme({ noDue: true, dueAt: Number.NaN }), NOW)).toBe('🟡 Acme Roofing · task · no due date')
+    expect(rowLine(acme({ kind: 'ok', messages: 1, tasks: 0, dueAt: et('2026-10-09 11:00') }), NOW)).toBe('🔴 Acme Roofing · your OK · 1d late, due Fri 11 AM')
   })
 
   test('then what else the thread\'s name says: how many new, with whom, flagged; and no thread yet', async () => {
@@ -143,11 +144,12 @@ describe('0.7.5: Your build queue, and the groups on one line', () => {
   test('No due date is the last group; the headings are drawn on one line in the plain text', async () => {
     const row = rowFor(acme(), update, NOW, { needsYou: true })
     const old = rowFor(acme({ client: 'Bolt' }), update, NOW)
-    const groups = foldGroups({ rows: [row], older: [old], undated: [old, old] })
-    expect(groups.map(g => g.heading)).toEqual(['Older (1)', 'No due date (2)'])
+    // (0.7.12) the Older group is gone: With a teammate stands where it stood (until 0.7.12: `older: [old]`, 'Older (1)')
+    const groups = foldGroups({ rows: [row], teammate: [old], undated: [old, old] })
+    expect(groups.map(g => g.heading)).toEqual(['With a teammate (1)', 'No due date (2)'])
     expect(groups[1]?.rows.map(r => r.n)).toEqual([3, 4])
     const it = queued(10)
-    const text = paneText([row], 'Needs you now (1)', 'Updated 11:00 AM', { older: [old], build: buildOf(it, rowFor(it, update, NOW)) })
+    const text = paneText([row], 'Needs you now (1)', 'Updated 11:00 AM', { teammate: [old], build: buildOf(it, rowFor(it, update, NOW)) })
     expect(text.split('\n').slice(3, 10)).toEqual([
       '',
       'Your build queue · 257',
@@ -157,7 +159,11 @@ describe('0.7.5: Your build queue, and the groups on one line', () => {
       ' + 254 more in your Massmarket AI thread',
       `   [ ${LABEL.open} ]`,
     ])
-    expect(text).toContain('\n\nOlder (1)\n')
+    expect(text).toContain('\n\nWith a teammate (1)\n')
+    // (0.7.12) a pane stored by 0.7.11 with an `older` group draws no such group
+    const stale = paneText([row], 'Needs you now (1)', 'Updated 11:00 AM', { older: [old] } as Parameters<typeof paneText>[3])
+    expect(stale).not.toContain('Older')
+    expect(foldGroups({ rows: [row], older: [old] } as Parameters<typeof foldGroups>[0])).toEqual([])
   })
 })
 
