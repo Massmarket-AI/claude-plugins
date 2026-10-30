@@ -1867,9 +1867,10 @@ function noteBody(it: QueueItem, member: string): string {
  * (0.7.3, internal queue) Then the viewer's internal queue (`queueMarkdown`); the same holds for an item listed by its
  * asks and its queue alone.
  */
-export function clientMarkdown(it: QueueItem, now: number, pages: Readonly<Record<string, string>> = {}): string {
+export function clientMarkdown(it: QueueItem, now: number, pages: Readonly<Record<string, string>> = {}, self = ''): string {
   const asks = [asksMarkdown(it, now, pages), queueMarkdown(it)].filter(Boolean).join('\n\n')
-  const out = [`## ${it.projectName}`, `${titleFor(it, now)}`]
+  // (0.7.9, Rob 10-29) when its thread is due to be updated by itself, under the title: `This thread updates itself ...`
+  const out = [`## ${it.projectName}`, self ? `${titleFor(it, now)}\n\nThis thread ${self}.` : `${titleFor(it, now)}`]
   if (it.mail.length) {
     out.push('', '### Waiting on our reply')
     for (const m of it.mail.sort((a, b) => a.at.localeCompare(b.at))) {
