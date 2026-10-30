@@ -1155,16 +1155,23 @@ export function awayLabel(a: AwayClient, now: number): string {
   return `${a.client} (${a.what} due ${clockText(shownDue(a.due), now)} ET)`
 }
 
-/**
- * (0.7.11) The pane's band, at the very top, while any client is away with no thread here: `You switched Claude profiles.
- * 3 client threads are in the other one: PlacementCorp (reply due 5:27 PM ET), It's Under It All, Remver Consulting.`
- */
-export function awayBandText(list: readonly AwayClient[], now: number): string {
+/** (0.7.13) The away clients as the band and the prompt lines name them: due first, AWAY_NAMES_MAX at most, then `and N more`. */
+function awayNames(list: readonly AwayClient[], now: number): string {
   const sorted = awaySorted(list)
   const shown = sorted.slice(0, AWAY_NAMES_MAX).map(a => awayLabel(a, now))
   const more = sorted.length - shown.length
-  const names = more > 0 ? `${shown.join(', ')}, and ${more} more` : shown.join(', ')
-  return `You switched Claude profiles. ${sorted.length} client thread${sorted.length === 1 ? ' is' : 's are'} in the other one: ${names}.`
+  return more > 0 ? `${shown.join(', ')}, and ${more} more` : shown.join(', ')
+}
+
+/**
+ * (0.7.11) The pane's band, at the very top, while any client is away with no thread here. ⛔ (0.7.13, Rob 2026-10-30: "its
+ * saying i have 15 missing client threads which cant be right, all those should exist") Only a client that needs the
+ * person by the pin rule is away now (`pinsNow`), and the band says its thread is there, not missing: `You switched
+ * Claude profiles. 1 client that needs you has its thread in the other one: Roman Seges (reply due Mon 3:06 PM ET).`
+ */
+export function awayBandText(list: readonly AwayClient[], now: number): string {
+  const n = list.length
+  return `You switched Claude profiles. ${n} client${n === 1 ? ' that needs you has its' : 's that need you have their'} thread in the other one: ${awayNames(list, now)}.`
 }
 
 /** (0.7.11) The band's one button: it puts START_ALL_WORDS in the prompt box, as Start missing threads does. */
@@ -1177,6 +1184,21 @@ export const awayButton = (n: number): string => (n === 1 ? 'Start it here' : 'S
  */
 export function awayPromptLine(list: readonly AwayClient[], now: number): string {
   return `[mm-bridge] ${awayBandText(list, now)} Do not start any thread on this turn. At the end of your reply, offer the person one button that sends "${START_ALL_WORDS}" (with no buttons, ask them to send those words).`
+}
+
+/**
+ * ⛔ (0.7.13, Rob 2026-10-30: "i would want all threads pinned unpinned and then only unfinished threads from previous 24
+ * hrs (consolidated when appropriate) and clients that need me per usual bridge procedure repinned") The one line the
+ * first prompt the person types after a switch of Claude profiles carries for Claude, in place of `awayPromptLine`: run
+ * the profile-switch skill's switch routine on this turn. The app starts a thread (start_session `user_asked`) only on a
+ * turn the person typed, so the routine rides on that turn; the bridge itself still starts nothing. `since` is when the
+ * sync first ran in this profile: the plan's switch time (`--at`), the end of its 24 hours.
+ */
+export function switchPromptLine(list: readonly AwayClient[], since: number, now: number): string {
+  const clients = list.length
+    ? `${list.length} client${list.length === 1 ? ' that needs you has its' : 's that need you have their'} thread in the other profile: ${awayNames(list, now)}`
+    : 'no client that needs you has its thread in the other profile'
+  return `[mm-bridge] You switched Claude profiles (this one since ${clockText(since, now)} ET). Standing rule (Rob, 2026-10-30): before anything else on this turn, load the profile-switch skill and run its "Automatic switch routine" with --at ${since}. It unpins every thread pinned here before the switch, starts and pins only the threads left unfinished in the 24 hours before it (one session for threads that belong together), and starts the client threads that need you with the mm tool's kickoffs (${clients}). Then answer the message above. Where start_session or that skill is not available, start nothing and say so in one line.`
 }
 
 /** (0.7.11) A Claude Code session id as a record names it: a uuid. */
