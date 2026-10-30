@@ -244,7 +244,16 @@ export type Feed = {
   person_alerts?: FeedPersonAlert[]
   /** (0.5.28, internal asks) The caller's open internal asks. Absent on a server that does not send them yet. */
   asks?: FeedAsk[]
+  /**
+   * (0.7.11) The newest message FROM each client on any channel (email, text, Discord, a call transcript with them), one
+   * row a project, for the clients the caller has. Absent on a server that does not send it yet: the bridge then knows a
+   * client's activity from the mail and packages the feed lists, and from what it saw of them before (`mm.activity`).
+   */
+  client_activity?: FeedActivity[]
 }
+
+/** (0.7.11) A row of the feed's `client_activity`: when the client last wrote to us, or spoke with us. */
+export type FeedActivity = { project_id: string; at: string }
 
 /**
  * The client's open reply package when it is not simply "ready for you" (Rob, 2026-10-12: a thread that
@@ -470,6 +479,62 @@ export const heldInternal = (it: Pick<QueueItem, 'projectId' | 'asks' | 'interna
 
 /** (R17) Whether a client has a due time at all (an item stored by the bridge keeps Infinity as null). */
 export const hasDue = (it: Pick<QueueItem, 'dueAt'>): boolean => typeof it.dueAt === 'number' && Number.isFinite(it.dueAt)
+
+// ---------------------------------------------------------------- (0.7.11) active clients
+
+/**
+ * (0.7.11, Rob 2026-10-30: "I don't think we need to be creating threads for people that haven't been active or sent us
+ * anything for more than a couple months ... maybe we could even say a few weeks before that") How far back a message
+ * from the client keeps the client ACTIVE: six weeks, rolling. The one number to change.
+ */
+export const ACTIVE_WINDOW_MS = 42 * 24 * 60 * 60 * 1000
+
+/**
+ * (0.7.11) The newest message FROM each client that the feed shows, in ms: every mail row of the client (each is a message
+ * the client sent us, answered or not), what each open reply package covers (the newest client message it answers), and
+ * the feed's `client_activity` when OW sends it (every channel). Never our own sends, a ticket, a phase date or a
+ * teammate's work.
+ */
+export function clientActivity(feed: Feed): Map<string, number> {
+  const out = new Map<string, number>()
+  const add = (pid: unknown, at: unknown): void => {
+    const t = typeof at === 'string' ? ms(at) : NaN
+    if (!isUuid(pid) || !Number.isFinite(t)) return
+    out.set(pid, Math.max(out.get(pid) ?? 0, t))
+  }
+  for (const m of Array.isArray(feed.mail) ? feed.mail : []) add(m?.project_id, m?.received_at)
+  for (const d of Array.isArray(feed.drafts) ? feed.drafts : []) add(d?.project_id, d?.covers_through)
+  for (const a of Array.isArray(feed.client_activity) ? feed.client_activity : []) add(a?.project_id, a?.at)
+  return out
+}
+
+/** (0.7.11) Something of the client's waits now: a message of theirs with no reply, or a reply package. */
+export const clientWaiting = (it: QueueItem): boolean => it.messages > 0 || Boolean(it.packageId) || Boolean(it.open ?? null)
+
+/**
+ * (0.7.11) Something due for the viewer himself: a client's reply, or a dated ticket of his own. Never a teammate's
+ * ticket past its ETA (`mates`, `theirs`), a ticket with no date, one that only owes an ETA, or an internal ask.
+ */
+export const dueForViewer = (it: QueueItem): boolean => it.messages > 0 || it.tasks - etaAsksOf(it).length - undatedCount(it) > 0
+
+/**
+ * (0.7.11) Whether a client may be offered a new thread (Start), have its thread pinned for it being active, or be
+ * followed to its own thread on a profile switch: an internal project (its own rules, unchanged), a client with
+ * something of theirs waiting now or a message from them in the last ACTIVE_WINDOW_MS (`lastFrom`, the newest the bridge
+ * knows), or something due for the viewer. Every other client keeps its row, with no Start and no thread.
+ */
+export function mayStart(it: QueueItem, lastFrom: number | undefined, now: number, internal = false): boolean {
+  if (internal || it.internal === true || it.kind === 'queue') return true
+  return clientWaiting(it) || isRecent(lastFrom, now) || dueForViewer(it)
+}
+
+/** (0.7.11) ACTIVE: something of the client's waits now, or they wrote to us in the last ACTIVE_WINDOW_MS. */
+export function isActive(it: QueueItem, lastFrom: number | undefined, now: number): boolean {
+  return clientWaiting(it) || isRecent(lastFrom, now)
+}
+
+/** (0.7.11) A time inside the active window (a time ahead of now counts: a clock a little off is no reason to drop a client). */
+export const isRecent = (at: number | undefined, now: number): boolean => typeof at === 'number' && Number.isFinite(at) && at > 0 && now - at <= ACTIVE_WINDOW_MS
 
 /** Soonest due first; a client with no due time last (R17). */
 export const byDue = (a: Pick<QueueItem, 'dueAt'>, b: Pick<QueueItem, 'dueAt'>): number => {

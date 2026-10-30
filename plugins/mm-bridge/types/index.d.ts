@@ -59,6 +59,11 @@ export type MmRow = {
    * asks the app to unarchive this thread, never Start.
    */
   archived?: string
+  /**
+   * (0.7.11) A client with no message in the last six weeks, nothing of theirs waiting and nothing due for the viewer: the
+   * row stays, with no Start (Drafts alone), and no thread is started for it.
+   */
+  dormant?: true
 }
 
 /**
@@ -97,6 +102,12 @@ export type MmQueue = {
   undated?: MmRow[]
   /** (0.7.5) The viewer's internal queue, drawn under the list as `Your build queue · N`. Absent for a viewer with none. */
   build?: MmBuild
+  /**
+   * (0.7.11) The band at the very top of the pane while any client's thread is in another Claude profile and the client has
+   * no thread of its own here: its words (`You switched Claude profiles. ...`) and how many clients, for its one button,
+   * which puts "Start the missing client threads" in the prompt box. Absent when there are none.
+   */
+  away?: { text: string; count: number }
 }
 
 /**
