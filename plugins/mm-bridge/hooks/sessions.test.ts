@@ -25,7 +25,8 @@ const mail = (n: number, name: string, hoursAgo = 2) => ({
   project_id: pid(n), project_name: name, reply_status: 'unanswered', project_owner_email: ME,
 })
 
-describe('F1: the feed is asked for mail far enough back for Older to hold any', () => {
+// (0.7.12) Older is gone: what was due before the cut is considered nowhere. These tests asked for Older until 0.7.12.
+describe('F1: the feed is asked for mail far enough back for the list to hold any ((0.7.12) no Older)', () => {
   test('the closeout feed is asked for 168 business hours of mail on a clock before Thu Oct 22 (the least, mailLookbackHours)', async () => {
     const feed: Feed = { member: ME, role: 'founder', mail: [mail(1, 'Client One')], tickets: {}, threads: [] }
     const w = fakeApp(feed, [{ sessionId: 'local_hub' }])
@@ -35,18 +36,19 @@ describe('F1: the feed is asked for mail far enough back for Older to hold any',
     expect(closeout[0]).toBe('https://onboarding-wizard.massmarket.ai/api/ext/closeout?mail_hours=168')
   })
 
-  test('a client whose only mail is a week old is listed under Older, not dropped', async () => {
+  test('a client whose only mail is a week old, its reply due before the cut: (0.7.12) in no list (until 0.7.12: under Older)', async () => {
     // received last Tuesday morning: 168 hours ago, five business days
     const feed: Feed = { member: ME, role: 'founder', mail: [mail(1, 'Client One', 7 * 24 - 1)], tickets: {}, threads: [] }
     const w = fakeApp(feed, [{ sessionId: 'local_hub' }])
     const hub = w.session('local_hub')
     expect(await mm(hub, '')).toBe('Nothing needs you right now.')
-    const last = w.stored('mm.last') as { items: unknown[]; older?: Array<{ projectId: string }> }
+    const last = w.stored('mm.last') as Record<string, unknown> & { items: unknown[]; pinned: number }
     expect(last.items).toEqual([])
-    expect(last.older?.map(i => i.projectId)).toEqual([pid(1)])
+    expect(last.older).toBeUndefined()
+    expect(last.pinned).toBe(0)
   })
 
-  test('(0.5.20, Rob 2026-10-20) on Mon Nov 2 the feed is asked for mail back to the floor, and mail since the floor is on the list however late', async () => {
+  test('(0.5.20, Rob 2026-10-20) on Mon Nov 2 the feed is asked for mail back to the floor, and mail since the floor is on the list however late; (0.7.12) mail due before it is in no list', async () => {
     // Mon Nov 2, 9 AM in New York (standard time). From Tue Oct 13 12:00 AM (24 business hours before the floor) to
     // then: Oct 13, 14, 15, 16 (96) + Oct 19 to 23 (120) + Oct 26 to 30 (120) + Nov 2 to 9 AM (9) = 345 business hours
     const now = Date.parse('2026-11-02T09:00:00-05:00')
@@ -62,9 +64,10 @@ describe('F1: the feed is asked for mail far enough back for Older to hold any',
     const w = fakeApp(feed, [{ sessionId: 'local_hub' }], [], { now })
     await mm(w.session('local_hub'), '')
     expect(w.fetched.filter(u => u.includes('/closeout'))).toEqual(['https://onboarding-wizard.massmarket.ai/api/ext/closeout?mail_hours=345'])
-    const last = w.stored('mm.last') as { items: Array<{ projectId: string }>; older?: Array<{ projectId: string }> }
+    const last = w.stored('mm.last') as Record<string, unknown> & { items: Array<{ projectId: string }> }
     expect(last.items.map(i => i.projectId)).toEqual([pid(1)])
-    expect(last.older?.map(i => i.projectId)).toEqual([pid(2)])
+    // (0.7.12) until 0.7.12 Client Two was under Older; it is in no list now
+    expect(last.older).toBeUndefined()
   })
 })
 
@@ -1947,4 +1950,168 @@ describe('(0.7.6, Rob 10-27) a client\'s own archived thread comes back, once pe
       expect(linksOf(w)).toEqual({ [pid(1)]: 'local_ua_own' })
     })
   }
+})
+
+// ======================================================================== 0.7.12
+// Rob, 2026-10-30: "I think I may have unpinned some threads that didn't have a due date. It usually says 'due in XYZ
+// hours.' If there's something the system thinks is overdue, it should also say that when it was. I saw some things that
+// were pinned with no hours left or hours overdue, and they're yellow icons. I'd assumed I could unpin them. I'm not sure
+// why they were pinned in the first place." And: "We shouldn't be considering anything that's older than the cutoff date
+// from the week before the team left." A pin needs a clock again (R1: overdue since the cut, or due within the next 24
+// business hours); a late name says when it was due; an undated one says `no due date`; and what was due before the cut
+// (the later of Wed Oct 14 12:00 AM ET and 3 weeks back) is treated as done.
+describe('0.7.12: a pin needs a clock, late says when it was due, undated says so, and nothing before the cut counts', () => {
+  /** An ET wall-clock time (the zone's offset given) as the feed's ISO text. */
+  const iso = (local: string) => new Date(Date.parse(local)).toISOString()
+  const KIN = 'Kin Properties'
+  const ACME = 'Acme Legal'
+  /** A client message received at `received`, its reply due at `due` (null: no due date). */
+  const msg = (n: number, name: string, received: string, due: string | null) => ({ ...mail(n, name), message_id_key: `m${n}-${received}`, received_at: iso(received), reply_due_at: due === null ? null : iso(due) })
+  /** One of my tickets on the client: dated by a commitment, or (null) undated, which no due source makes a promise. */
+  const task = (n: number, name: string, due: string | null) => ({ ticket_id: `t${n}-${due ?? 'none'}`, project_id: pid(n), project_name: name, title: 'Send the plan', due_at: due === null ? null : iso(due), due_source: due === null ? null : 'commitment', assignee_email: ME })
+  const builder = (over: Partial<Feed>): Feed => ({ member: ME, role: 'builder', mail: [], drafts: [], tickets: {}, threads: [], ...over })
+  type Row = { projectId: string; title: string }
+  type Queue = { header: string; rows: Row[]; undated?: Row[]; teammate?: Row[]; checking?: Row[] } & Record<string, unknown>
+  const queueOf = (w: ReturnType<typeof fakeApp>) => w.view('local_hub', 'queue') as Queue
+  const bandOf = (w: ReturnType<typeof fakeApp>) => (w.view('local_hub', 'band') as { text: string } | undefined)?.text ?? ''
+  const allRows = (q: Queue) => [...q.rows, ...(q.undated ?? []), ...(q.teammate ?? []), ...(q.checking ?? [])]
+  const pinCalls = (w: ReturnType<typeof fakeApp>, sid: string) => w.calls.filter(c => c.tool === 'set_pinned' && c.args.session_id === sid).map(c => c.args.pinned)
+  /** The client's linked thread, beside the hub thread the sync runs in. */
+  const linked = (feed: Feed, thread: Partial<FakeThread>, store: Record<string, unknown> = {}, now?: number) => {
+    const w = fakeApp(feed, [{ sessionId: 'local_hub', title: 'Hub' }, { sessionId: 'local_c1', title: 'Client work', ...thread }], [], now === undefined ? {} : { now })
+    w.put('mm.links', { [pid(1)]: 'local_c1' })
+    for (const [k, v] of Object.entries(store)) w.put(k, v)
+    return w
+  }
+  const ourPin = (client: string) => ({ 'mm.pins': { local_c1: { projectId: pid(1), client, byUs: true } } })
+  /** Kin wrote three days ago (an ACTIVE client by 0.7.11's six-week rule); its only item is an undated task of mine. */
+  const kinUndated = () => builder({ tickets: { due_soon: [task(1, KIN, null)] }, client_activity: [{ project_id: pid(1), at: ago(72) }] })
+
+  test('an ACTIVE client whose only item is undated: its thread is NOT pinned, a pin the bridge put on it comes off, and it stays off', async () => {
+    const w = linked(kinUndated(), { pinned: true }, ourPin(KIN))
+    await mm(w.session('local_hub'), '')
+    expect(w.app.get('local_c1')).toMatchObject({ title: `🟡 ${KIN} · task · no due date`, pinned: false })
+    expect(pinCalls(w, 'local_c1')).toEqual([false])
+    for (let i = 0; i < 3; i++) {
+      await w.advance(6 * 60_000)
+      await mm(w.session('local_hub'), '')
+    }
+    expect(w.app.get('local_c1')?.pinned).toBe(false)
+    expect(pinCalls(w, 'local_c1')).toEqual([false])
+    // and never pinned to begin with, when nothing pinned it
+    const fresh = linked(kinUndated(), { pinned: false })
+    await mm(fresh.session('local_hub'), '')
+    expect(fresh.app.get('local_c1')?.pinned).toBe(false)
+    expect(pinCalls(fresh, 'local_c1')).toEqual([])
+  })
+
+  test('a pin the person put on that undated thread stays, sync after sync', async () => {
+    const w = linked(kinUndated(), { pinned: true })
+    for (let i = 0; i < 3; i++) {
+      await mm(w.session('local_hub'), '')
+      await w.advance(6 * 60_000)
+    }
+    expect(w.app.get('local_c1')).toMatchObject({ title: `🟡 ${KIN} · task · no due date`, pinned: true })
+    expect(pinCalls(w, 'local_c1')).toEqual([])
+  })
+
+  test('an undated row and title say `no due date`', async () => {
+    const w = linked(kinUndated(), {})
+    await mm(w.session('local_hub'), '')
+    expect(w.app.get('local_c1')?.title).toBe(`🟡 ${KIN} · task · no due date`)
+    expect(allRows(queueOf(w)).find(r => r.projectId === pid(1))?.title).toBe(`🟡 ${KIN} · task · no due date`)
+  })
+
+  test('an item due in 10 business hours pins, and the name starts `🟡 10h left` (Friday 9 PM to Monday 7 AM)', async () => {
+    const now = Date.parse('2026-10-16T21:00:00-04:00')
+    const w = linked(builder({ mail: [msg(1, KIN, '2026-10-16T16:00:00-04:00', '2026-10-19T07:00:00-04:00')] }), {}, {}, now)
+    await mm(w.session('local_hub'), '')
+    expect(w.app.get('local_c1')).toMatchObject({ title: `🟡 10h left · ${KIN} · reply`, pinned: true })
+  })
+
+  for (const [label, now, due, title, row] of [
+    ['3h late the same day: the time alone', '2026-10-30T18:00:00-04:00', '2026-10-30T15:00:00-04:00', `🔴 3h late, due 3 PM · ${ACME} · reply`, `🔴 ${ACME} · reply · 3h late, due 3 PM`],
+    ['2d late this week: the day and time', '2026-10-28T15:00:00-04:00', '2026-10-26T15:00:00-04:00', `🔴 2d late, due Mon 3 PM · ${ACME} · reply`, `🔴 ${ACME} · reply · 2d late, due Mon 3 PM`],
+    ['12d late, more than a week back: the date', '2026-10-30T15:00:00-04:00', '2026-10-14T15:00:00-04:00', `🔴 12d late, due Oct 14 · ${ACME} · reply`, `🔴 ${ACME} · reply · 12d late, due Oct 14`],
+  ] as Array<[string, string, string, string, string]>) {
+    test(`overdue pins, and its name and row say when it was due: ${label}`, async () => {
+      const w = linked(builder({ mail: [msg(1, ACME, '2026-10-13T09:00:00-04:00', due)] }), {}, {}, Date.parse(now))
+      await mm(w.session('local_hub'), '')
+      expect(w.app.get('local_c1')).toMatchObject({ title, pinned: true })
+      expect(queueOf(w).rows.map(r => r.title)).toEqual([row])
+    })
+  }
+
+  test('due Friday 3 PM, checked Monday 10 AM: 19 business hours late (9 Friday, 10 Monday), the weekend not counted', async () => {
+    const w = linked(builder({ mail: [msg(1, ACME, '2026-10-22T15:00:00-04:00', '2026-10-23T15:00:00-04:00')] }), {}, {}, Date.parse('2026-10-26T10:00:00-04:00'))
+    await mm(w.session('local_hub'), '')
+    expect(w.app.get('local_c1')).toMatchObject({ title: `🔴 19h late, due Fri 3 PM · ${ACME} · reply`, pinned: true })
+    expect(queueOf(w).rows.map(r => r.title)).toEqual([`🔴 ${ACME} · reply · 19h late, due Fri 3 PM`])
+  })
+
+  test('the Massmarket AI internal-queue thread pins exactly as in 0.7.10: never by the bridge; a person\'s pin stays; its name has no clock', async () => {
+    const OPS = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
+    const qt = (n: number) => ({ ticket_id: `${String(n).padStart(8, '0')}-0000-4000-8000-000000000000`, project_id: OPS, project_name: 'Massmarket AI', title: `Ticket ${n}`, severity: 'high', internal: true, assignee_email: ME, queue_tier: 'now', queue_rank: n, queue_reason: `reason ${n}` })
+    const founder = { member: ME, role: 'founder', mail: [], drafts: [], tickets: { internal_queue: [qt(1), qt(2)] }, summary: { internal_queue_total: 2 }, threads: [] } as unknown as Feed
+    const seen: Array<[string, unknown, unknown]> = []
+    for (const [pinned, pins] of [[false, undefined], [true, undefined], [true, { local_ops: { projectId: OPS, client: 'Massmarket AI', byUs: true } }]] as Array<[boolean, unknown]>) {
+      const w = fakeApp(founder, [{ sessionId: 'local_hub', title: 'Hub' }, { sessionId: 'local_ops', title: 'Tracker', pinned }])
+      w.put('mm.links', { [OPS]: 'local_ops' })
+      if (pins) w.put('mm.pins', pins)
+      for (let i = 0; i < 2; i++) {
+        await mm(w.session('local_hub'), '')
+        await w.advance(6 * 60_000)
+      }
+      seen.push([w.app.get('local_ops')?.title ?? '', w.app.get('local_ops')?.pinned, pinCalls(w, 'local_ops')])
+    }
+    expect(seen).toEqual([
+      ['🟡 Massmarket AI · internal queue', false, []],
+      ['🟡 Massmarket AI · internal queue', true, []],
+      ['🟡 Massmarket AI · internal queue', false, [false]],
+    ])
+  })
+
+  describe('the cut: the later of Wed Oct 14 12:00 AM ET and 3 weeks back; what was due before it is treated as done', () => {
+    const OCT30 = Date.parse('2026-10-30T10:00:00-04:00')
+
+    test('on Fri Oct 30 an item due Tue Oct 13 is invisible everywhere: no row, no group, no count, no pin, the band all clear', async () => {
+      const w = linked(builder({ tickets: { overdue: [task(1, KIN, '2026-10-13T15:00:00-04:00')] } }), { pinned: true }, ourPin(KIN), OCT30)
+      expect(await mm(w.session('local_hub'), '')).toBe('Nothing needs you right now.')
+      const q = queueOf(w)
+      expect(q.header).toBe('Nothing needs you right now.')
+      expect(allRows(q)).toEqual([])
+      expect(q.older).toBeUndefined()
+      expect(bandOf(w)).toBe('Nothing needs you in the next 24 hours.')
+      expect((w.stored('mm.last') as { items: unknown[] }).items).toEqual([])
+      // treated as done: our pin comes off and the thread is named clear
+      expect(w.app.get('local_c1')).toMatchObject({ title: `✓ ${KIN} · clear 10 AM`, pinned: false })
+    })
+
+    test('on Fri Oct 30 an item due Wed Oct 14 9 AM counts: listed, pinned, its name says when it was due', async () => {
+      const w = linked(builder({ tickets: { overdue: [task(1, KIN, '2026-10-14T09:00:00-04:00')] } }), {}, {}, OCT30)
+      await mm(w.session('local_hub'), '')
+      expect(w.app.get('local_c1')).toMatchObject({ title: `🔴 12d late, due Oct 14 · ${KIN} · task`, pinned: true })
+      expect(queueOf(w).rows.map(r => r.title)).toEqual([`🔴 ${KIN} · task · 12d late, due Oct 14`])
+    })
+
+    test('a client with a ticket late since Sat Oct 10 and a reply due in 5 hours: the name shows `5h left`, from the reply alone', async () => {
+      const feed = builder({ tickets: { overdue: [task(1, ACME, '2026-10-10T12:00:00-04:00')] }, mail: [msg(1, ACME, '2026-10-29T15:00:00-04:00', '2026-10-30T15:00:00-04:00')] })
+      const w = linked(feed, {}, {}, OCT30)
+      await mm(w.session('local_hub'), '')
+      expect(w.app.get('local_c1')).toMatchObject({ title: `🔴 5h left · ${ACME} · reply`, pinned: true })
+      expect(queueOf(w).rows.map(r => r.title)).toEqual([`🔴 ${ACME} · reply · 5h left`])
+    })
+
+    test('it rolls: on Fri Nov 20 an item due Sun Oct 25 is invisible, and one due Sun Nov 1 counts (shown as the end of Fri Oct 30, no weekend)', async () => {
+      const NOV20 = Date.parse('2026-11-20T10:00:00-05:00')
+      const gone = linked(builder({ tickets: { overdue: [task(1, KIN, '2026-10-25T12:00:00-04:00')] } }), {}, {}, NOV20)
+      expect(await mm(gone.session('local_hub'), '')).toBe('Nothing needs you right now.')
+      expect(allRows(queueOf(gone))).toEqual([])
+      expect(gone.app.get('local_c1')?.pinned).toBe(false)
+      const counts = linked(builder({ tickets: { overdue: [task(1, KIN, '2026-11-01T12:00:00-05:00')] } }), {}, {}, NOV20)
+      await mm(counts.session('local_hub'), '')
+      // Mon Nov 2 to Fri Nov 20 10 AM: 14 business days and 10 hours
+      expect(counts.app.get('local_c1')).toMatchObject({ title: `🔴 14d late, due Oct 30 · ${KIN} · task`, pinned: true })
+    })
+  })
 })

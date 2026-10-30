@@ -67,17 +67,16 @@ export type MmRow = {
 }
 
 /**
- * `rows` are the clients that need the viewer now. `teammate` and `older` are the two groups under them,
- * closed until the person opens one: clients whose drafts a teammate holds, and clients whose only items
- * were due before the list's floor, Wed 2026-10-14 (until 2026-10-20 the cut was 3 business days back; Rob
- * replaced it with LIST_FLOOR_MS). Neither is pinned or counted in the header.
+ * `rows` are the clients that need the viewer now. `teammate` is a group under them, closed until the person opens
+ * it: clients whose drafts a teammate holds. It is not pinned or counted in the header. ((0.7.12) Until 0.7.12 an
+ * `older` group held clients whose only items were due before the list's floor; nothing due before the cut is
+ * considered now, and a pane stored with one draws no such group.)
  */
 export type MmQueue = {
   header: string
   rows: MmRow[]
   note: string
   teammate?: MmRow[]
-  older?: MmRow[]
   /** (0.5.2, R8) Clients whose reply the server is checking: a closed group `Checking your reply (n)`, never pinned or counted. */
   checking?: MmRow[]
   /**
@@ -156,10 +155,9 @@ export type MmProject = { projectId: string; name: string }
  */
 export type MmPeople = { open?: string; pick?: string; page?: number; busy?: Record<string, number>; errors?: Record<string, string> }
 
-/** Which of the two groups under the list the person has opened. */
+/** Which of the groups under the list the person has opened. ((0.7.12) No `older`: that group is gone.) */
 export type MmFolds = {
   teammate?: boolean
-  older?: boolean
   checking?: boolean
   /** (0.7.5) `New people` is closed until opened, as the other groups are. */
   people?: boolean

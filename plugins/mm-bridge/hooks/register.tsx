@@ -6,7 +6,7 @@ import {
   INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pinsNow,
   peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
   asksMarkdown, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText, undatedOnly,
-  hasDue, clientActivity, isActive, isRecent, mayStart,
+  hasDue, clientActivity, isRecent, mayStart,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
@@ -166,7 +166,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.7.11'
+const VERSION = '0.7.12'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -421,9 +421,8 @@ type Last = {
   member: string
   /** The clients that need the person now: what pins, and what the header and the band count. */
   items: QueueItem[]
-  /** Clients whose reply drafts a teammate holds, and clients whose only items were due before the list's floor (LIST_FLOOR_MS, Wed 2026-10-14): listed, never pinned, never counted. */
+  /** Clients whose reply drafts a teammate holds: listed, never pinned, never counted. ((0.7.12) No `older` any more: a record an older version stored with one is read without it.) */
   teammate?: QueueItem[]
-  older?: QueueItem[]
   /** (0.5.2, R8) Clients whose package waits for the server's check of our newer send: off the list, not pinned, not counted. */
   checking?: QueueItem[]
   pinned: number
@@ -448,7 +447,8 @@ type Last = {
  */
 function stillAway(last: Pick<Last, 'away'> | null | undefined, links: Readonly<Record<string, string>>): AwayClient[] {
   const all = Array.isArray(last?.away) ? last.away : []
-  const kinds = new Set(['items', 'teammate', 'older', 'checking', 'none'])
+  // ((0.7.12) not `older`: that group is gone, and a client a sync found only there is no away client any more)
+  const kinds = new Set(['items', 'teammate', 'checking', 'none'])
   return all.filter(
     (a): a is AwayClient =>
       Boolean(a) && typeof a === 'object' && isUuid(a.projectId) && typeof a.sid === 'string' && THREAD_ID.test(a.sid) && typeof a.client === 'string' && a.client !== '' && kinds.has(a.listed) && links[a.projectId] === a.sid,
@@ -468,7 +468,6 @@ const awayOffList = (last: Last | null | undefined, links: Readonly<Record<strin
 const listedIn = (last: Last | null | undefined): QueueItem[] => [
   ...(Array.isArray(last?.items) ? last.items : []),
   ...(Array.isArray(last?.teammate) ? last.teammate : []),
-  ...(Array.isArray(last?.older) ? last.older : []),
   ...(Array.isArray(last?.checking) ? last.checking : []),
 ]
 /**
@@ -1603,19 +1602,18 @@ async function knownActivity($: EngineInterface, feed: Feed, now: number): Promi
  */
 async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise<Pass> {
   const now = await $.clock.now()
-  // Three lists, a client in exactly one. Only `items` pins and is counted. The other two are listed
-  // under the list, closed: clients whose reply drafts a teammate holds, and clients whose only items were
-  // due before the list's floor, Wed 2026-10-14 (nothing drops off silently). (Until 2026-10-20 the cut was
-  // 3 business days back; Rob replaced it with LIST_FLOOR_MS.)
+  // Lists, a client in exactly one. Only `items` pins and is counted. Clients whose reply drafts a teammate holds are
+  // listed under the list, closed. ⛔ (0.7.12, Rob 2026-10-30: "We shouldn't be considering anything that's older than
+  // the cutoff date") A client whose only items were due before the cut (`listCutoff`) is in none of them: as a client
+  // with nothing, its thread clears. Until 0.7.12 it was listed under Older, its thread named with how late it was.
   const lists = buildLists(feed, now)
   const items = lists.queue
-  const quiet = [...lists.teammate, ...lists.older]
+  const quiet = lists.teammate
   /** (R8) Clients whose package waits for the server's check of our newer send: in no list, their threads named for it and not pinned. */
   const checking = lists.checking
   /** The other lists as the sync record keeps them: only when somebody is in them. */
   const also = {
     ...(lists.teammate.length ? { teammate: lists.teammate } : {}),
-    ...(lists.older.length ? { older: lists.older } : {}),
     ...(checking.length ? { checking } : {}),
   }
   const member = memberText(feed.member)
@@ -1667,7 +1665,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const last: Last = { at: now, member, items, ...also, pinned: before?.pinned ?? 0, recs, projects, ...newPeople, ...(Array.isArray(before?.away) && before.away.length ? { away: before.away } : {}) }
     await storeLast($, feed, last)
     const rowsOf = (list: readonly QueueItem[], needsYou = false): Row[] => list.map(it => rowFor(it, recs[it.projectId] as Recommendation, now, { needsYou }))
-    await showQueue($, member, items, rowsOf(items, true), last.pinned, now, { teammate: rowsOf(lists.teammate), older: rowsOf(lists.older), checking: rowsOf(checking) }, now, last)
+    await showQueue($, member, items, rowsOf(items, true), last.pinned, now, { teammate: rowsOf(lists.teammate), checking: rowsOf(checking) }, now, last)
     // (0.6.0) a terminal session's own current project, by the feed's rows for its session: no thread is touched
     if (!known) await currentPass($, { now, links: {}, was: {}, moved: [], live, gone: new Set(), feedThreads, pairs: {}, complete: false, lookups: LOOKUPS_PER_SYNC }).catch(() => {})
     return { last, live, pairs: known ?? {}, listed: false, unseen: new Set() }
@@ -2150,16 +2148,18 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const sid = links[it.projectId]
     if (sid && live.has(sid) && !named.has(sid)) named.set(sid, { it, unpin: unpinFor(it, 'ours'), title: titleFor(it, now) })
   }
-  // (0.7.11, Rob 2026-10-27: "we should always pin the most recent thread from that client"; 10-30: "why are things not
-  // getting pinned") And the linked thread of every ACTIVE client on the list (something of theirs waiting now, or a
-  // message from them in the last ACTIVE_WINDOW_MS), however far out its time is: until 0.7.11 only R1's 24 business hours
-  // pinned, so a client whose only items were undated tickets was named and never pinned, while its pin record (not
-  // ours) read as a pin. A quiet client's thread is not pinned for this; the person's own unpin stands (`staysOff`, above).
-  const internalItem = (it: QueueItem): boolean => it.internal === true || it.kind === 'queue' || internal.has(it.projectId) || INTERNAL_PROJECTS.has(it.projectId)
+  // R1: a linked thread is pinned only while something of its client has a clock for the viewer: overdue (since the cut,
+  // `listCutoff`) or due within the next 24 business hours (`pinsNow`). Every other one is named, and the bridge takes its
+  // OWN pin off it, never the person's (`unpin: 'ours'`); the person's own unpin stands (`staysOff`, above).
+  // ⛔ (0.7.12, Rob 2026-10-30: "I saw some things that were pinned with no hours left or hours overdue, and they're yellow
+  // icons. I'd assumed I could unpin them. I'm not sure why they were pinned in the first place.") 0.7.11 also pinned the
+  // thread of every ACTIVE client whatever its time, so threads named only `🟡 <client> · task`, whose items were undated
+  // tickets, were pinned with no clock. A pin needs a clock again: an undated client is never pinned, active or not, and
+  // the pins 0.7.11 put on such threads come off here (they are ours). The internal queue was never pinned that way.
   for (const it of items) {
     const sid = links[it.projectId]
     if (!sid || !live.has(sid) || want.has(sid) || named.has(sid)) continue
-    if (pinsNow(it, now) || (!internalItem(it) && isActive(it, lastFrom.get(it.projectId), now))) want.set(sid, it)
+    if (pinsNow(it, now)) want.set(sid, it)
     else named.set(sid, { it, unpin: unpinFor(it, 'ours'), title: threadTitle(it, now) })
   }
 
@@ -2328,8 +2328,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
 
   // The clear sweep (0.5.3, Opus 10-14: two threads cleared under 0.5.1 stayed pinned with no pin record left,
   // and R14 acts only on a clear it sees through one). On every sync, a linked thread whose client is in none
-  // of the lists (nothing waiting for this member: not on the Needs-you list, not a teammate's, not Older,
-  // not being checked), that the app shows pinned and that is not an internal project's (R18), is unpinned
+  // of the lists (nothing waiting for this member: not on the Needs-you list, not a teammate's, not being
+  // checked; (0.7.12) nothing due before the cut counts, `listCutoff`), that the app shows pinned and that is not an internal project's (R18), is unpinned
   // ONCE per clear. The clear is recorded (`mm.cleared`) the first time a sync sees it, pinned or not, and the
   // thread is not unpinned again until its client has something waiting again (the record goes) and clears
   // again: a thread the person pins again after its client cleared stays pinned. Its name is left as it is.
@@ -2408,7 +2408,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   }
   const rows = items.map(it => rowOf(it, true))
   // (R8, Opus decision 2) a client being checked is under `Checking your reply`, with a recommendation on record
-  const folds = { teammate: lists.teammate.map(it => rowOf(it)), older: lists.older.map(it => rowOf(it)), checking: checking.map(it => rowOf(it)) }
+  const folds = { teammate: lists.teammate.map(it => rowOf(it)), checking: checking.map(it => rowOf(it)) }
 
   await patchStore<string[]>($, 'mm.released', [], fresh => applyListChanges(fresh, was.released, waiting))
 
@@ -2490,7 +2490,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const h = await home($)
     const where = new Map<string, { it: QueueItem; listed: AwayClient['listed'] }>()
     for (const it of items) where.set(it.projectId, { it, listed: 'items' })
-    for (const [group, name] of [[lists.teammate, 'teammate'], [lists.older, 'older'], [checking, 'checking']] as const) for (const it of group) if (!where.has(it.projectId)) where.set(it.projectId, { it, listed: name })
+    for (const [group, name] of [[lists.teammate, 'teammate'], [checking, 'checking']] as const) for (const it of group) if (!where.has(it.projectId)) where.set(it.projectId, { it, listed: name })
     const found: AwayClient[] = []
     for (const [pid, sid] of Object.entries(links)) {
       if (!away.has(sid) || !isUuid(pid) || !THREAD_ID.test(sid) || restore.has(pid)) continue
@@ -2582,7 +2582,7 @@ async function showQueue(
   rows: Row[],
   pinned: number,
   now: number,
-  folds: { teammate: Row[]; older: Row[]; checking?: Row[] },
+  folds: { teammate: Row[]; checking?: Row[] },
   syncedAt = now,
   found: Pick<Last, 'people' | 'routeTo' | 'away'> = {},
 ): Promise<void> {
@@ -2613,7 +2613,6 @@ async function showQueue(
     note: `Updated ${localClock(syncedAt)}`,
     syncedAt,
     ...(folds.teammate.length ? { teammate: folds.teammate } : {}),
-    ...(folds.older.length ? { older: folds.older } : {}),
     ...(folds.checking?.length ? { checking: folds.checking } : {}),
     ...(undated.length ? { undated } : {}),
     ...(build ? { build: { total: build.total, top: [...build.top], row: build.row, ...(build.late ? { late: build.late } : {}) } } : {}),
@@ -2738,7 +2737,7 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
       return rowFor(it, rec ?? recommend([], undefined, at), at, { needsYou, ...(needsYou ? { self: selfOf(it, rec) } : {}) })
     })
   const items = list(last.items)
-  await showQueue($, memberText(last.member), items, rowsOf(items, true), Number(last.pinned) || 0, now, { teammate: rowsOf(list(last.teammate)), older: rowsOf(list(last.older)), checking: rowsOf(list(last.checking)) }, at, last)
+  await showQueue($, memberText(last.member), items, rowsOf(items, true), Number(last.pinned) || 0, now, { teammate: rowsOf(list(last.teammate)), checking: rowsOf(list(last.checking)) }, at, last)
 }
 
 /** The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that waits for his OK. */
@@ -3098,7 +3097,6 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
     stillOpen: stillOpen ? cleanName(stillOpen.client) : undefined,
     update: update ? cleanName(update.client) : undefined,
     stale: Boolean(last.error) || !(Number.isFinite(last.at) && now - last.at <= STALE_SYNC_MS) || ownFailed,
-    older: Array.isArray(last.older) ? last.older.length : 0,
     // (0.5.5) what this session's last look found (`checkVersions`): no call from here
     newer: newerMod.get(await instanceId($))?.version || undefined,
     // (0.5.7) the notes of the last NOTE_SHOW_MS
@@ -3951,8 +3949,8 @@ async function ownWork($: EngineInterface, it: QueueItem, sid: string, signature
 
 /**
  * (0.5.11, Rob 10-15) Once for each sync on record, in every running thread, while auto is on (`/mm auto`, the switch
- * auto-start has): each client on the person's OWN list (the Needs-you list: never a client under With a teammate,
- * Older or Checking your reply) whose row says Update, on its linked thread (never a thread its row only suggests;
+ * auto-start has): each client on the person's OWN list (the Needs-you list: never a client under With a teammate
+ * or Checking your reply) whose row says Update, on its linked thread (never a thread its row only suggests;
  * (0.5.23) an old one too, updated, not replaced; (0.7.6) its row says Update however old it is, and so does that of a
  * thread the sync brought back from the archive: `autoUpdateTarget`), once it is time (`autoUpdateDue`, from what this
  * bridge has seen, `mm.firstSeen`), and never one a teammate has, whose package someone else holds, or that is still
@@ -5320,7 +5318,7 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
     }
     guard = read
     const lists = buildLists(read, await $.clock.now())
-    const fresh = [...lists.queue, ...lists.teammate, ...lists.older].find(i => i.projectId === it.projectId)
+    const fresh = [...lists.queue, ...lists.teammate].find(i => i.projectId === it.projectId)
     if (!fresh) return { said: `${it.client} has nothing waiting now. The list has been refreshed.`, after: async () => void (await reconcile($, read)) }
     cur = fresh
     if (!(await stillTheClients($, it.projectId, target, linked, links, read, pass))) return { said: THREAD_GONE, after: async () => void (await reconcile($, read)) }
@@ -6108,7 +6106,7 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
   // (any client the pane lists, in the list or in one of the two groups under it; for `link`, any client
   // the feed knows, by name or by id: `linkable`)
   const lists = buildLists(feed, await $.clock.now())
-  const queue = [...lists.queue, ...lists.teammate, ...lists.older]
+  const queue = [...lists.queue, ...lists.teammate]
   const found = verb === 'link' ? linkable(arg, queue, feed) : clientsNamed(arg, queue)
   // a client the feed knows only by its id gets its name before any sentence uses it
   for (const [n, f] of found.entries()) if (!f.client) found[n] = { ...f, client: await nameOfId($, f.projectId) }
@@ -7833,8 +7831,8 @@ export const register: Register = on => {
   // it does not: no part of a pane scrolls by itself), so it is one scrolling pane, the client part first
   // and the list after it in full.
   // The list: the clients with no thread yet first, marked, then the ones in a thread; ONE action a row.
-  // Under it, two groups that are closed until the person opens one (each heading is its own button):
-  // `With a teammate (n)`, then `Older (n)`. Nobody in them is pinned or counted in the header.
+  // Under it, the groups that are closed until the person opens one (each heading is its own button, `foldGroups`).
+  // Nobody in them is pinned or counted in the header. ((0.7.12) No `Older (n)` any more.)
   // (New people) For the founder and a PM, above the list: `New people (n)`, open, newest first. Each row is who
   // wrote, the subject, when and how long they have waited, what we know of them, what to check first, the Source
   // link and three buttons. A surface with no Select (the mobile app) has no picker, so it offers no Route. A HighLevel

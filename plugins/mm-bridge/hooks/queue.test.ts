@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { businessMsBetween, subtractBusinessMs } from './business-time'
 import {
-  LIST_FLOOR_MS, NOBODY, WINDOW_AHEAD_MS, buildLists, buildQueue, cleanName, cleanText, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockLead, clockText, draftsLine, dueLine, holdBanner,
+  CUTOFF_WINDOW_MS, LIST_FLOOR_MS, NO_DUE_DATE, NOBODY, THREAD_TITLE_MAX, WINDOW_AHEAD_MS, buildLists, clockAndDue, dueWhen, listCutoff, rowLine, shownDue, buildQueue, cleanName, cleanText, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockLead, clockText, draftsLine, dueLine, holdBanner,
   CHECK_WAIT_MS, checkingTitle, fastState, internalProjects, whenText, holdSentence, holderName, isClosingRoute, isDraftDone, isUuid, mailLookbackHours, needsLine, noteText, pinsNow, shortName, stillOpenTitle, threadTitle, titleFor, titleNames, withTeammate,
   ROUTE_PAGE, dateText, peopleRows, routeChoices, routePage, routedText, seesPeople, shownText, sourceLink, waitedText,
   INTERNAL_OPS, INTERNAL_PROJECTS, askLine, asksMarkdown, feedClients, heldInternal, internalAskThread, openAsks,
@@ -112,9 +112,10 @@ describe('feed text is data: ids must be uuids, names and titles are cleaned', (
 })
 
 describe('thread names', () => {
-  test('overdue is red and says how late', async () => {
+  test('overdue is red and says how late, and (0.7.12) when it was due', async () => {
     const [it] = buildQueue(feed({ mail: [mail(P1, 'Contoso Cooling — Sam', -30), mail(P1, 'Contoso Cooling — Sam', -2)] }), NOW)
-    expect(it && titleFor(it, NOW)).toBe('🔴 6h late · Contoso Cooling · reply · 2 new')
+    // (0.7.12) `, due 5 AM` after the clock (until 0.7.12: '🔴 6h late · Contoso Cooling · reply · 2 new')
+    expect(it && titleFor(it, NOW)).toBe('🔴 6h late, due 5 AM · Contoso Cooling · reply · 2 new')
   })
 
   test('due tomorrow is yellow', async () => {
@@ -168,10 +169,11 @@ describe('the name leads with the hours (Rob, 2026-10-12)', () => {
     const at = (s: string) => new Date(t(s)).toISOString()
     const many = feed({ mail: Array.from({ length: 17 }, (_, i) => ({ ...mail(P1, 'Cedar Dental — Pat', 0), message_id_key: `m${i}`, received_at: at('2026-10-06 15:00'), reply_due_at: at('2026-10-07 15:00') })) })
     const [reply] = buildQueue(many, t('2026-10-12 15:00'))
-    expect(reply && titleFor(reply, t('2026-10-12 15:00'))).toBe('🔴 3d late · Cedar Dental · reply · 17 new')
+    // (0.7.12) once late, when it was due follows the clock (until 0.7.12: '🔴 3d late · Cedar Dental · reply · 17 new')
+    expect(reply && titleFor(reply, t('2026-10-12 15:00'))).toBe('🔴 3d late, due Wed 3 PM · Cedar Dental · reply · 17 new')
     const ready = feed({ drafts: [{ package_id: 'aaaaaaaa-1111-4111-8111-111111111111', project_id: P1, project_name: 'Acme Roofing — Pat', status: 'prepared', covers_through: at('2026-10-09 15:00'), drafts_ready: 1, flagged_for_rob: true, project_owner_email: 'builder-a@example.com' }] })
     const [pkg] = buildQueue(ready, t('2026-10-12 20:00'))
-    expect(pkg && titleFor(pkg, t('2026-10-12 20:00'))).toBe('🔴 5h late · Acme Roofing · reply ready · flagged')
+    expect(pkg && titleFor(pkg, t('2026-10-12 20:00'))).toBe('🔴 5h late, due 3 PM · Acme Roofing · reply ready · flagged')
     const task = feed({ tickets: { due_today: [{ ticket_id: 't', project_id: P2, project_name: 'Bolt Staffing (Sam)', title: 'x', due_at: at('2026-10-13 12:00'), due_source: 'commitment', assignee_email: 'builder-a@example.com' }] } })
     const [due] = buildQueue(task, t('2026-10-13 09:00'))
     expect(due && titleFor(due, t('2026-10-13 09:00'))).toBe('🔴 3h left · Bolt Staffing · task')
@@ -212,6 +214,13 @@ describe('the name leads with the hours (Rob, 2026-10-12)', () => {
     expect(clientInTitle('🔴 <1h late · Acme Roofing · reply')).toBe('Acme Roofing')
     expect(clientInTitle('🔴 <1h left · Bolt Staffing · task')).toBe('Bolt Staffing')
     expect(titleNames('🔴 <1h late · Acme Roofing · reply', 'Acme Roofing')).toBe(true)
+    // (0.7.12) the late clock with when it was due, in all three forms, and the undated name
+    for (const lead of ['3h late, due 3 PM', '2d late, due Mon 3 PM', '12d late, due Oct 14', '<1h late, due 9:52 AM', '9h late, due Fri 11:59 PM']) {
+      expect(clientInTitle(`🔴 ${lead} · Acme Legal · reply`), lead).toBe('Acme Legal')
+      expect(titleNames(`🔴 ${lead} · Acme Legal · reply`, 'Acme Legal'), lead).toBe(true)
+    }
+    expect(clientInTitle('🟡 Kin Properties · task · no due date')).toBe('Kin Properties')
+    expect(titleNames('🟡 Kin Properties · task · no due date', 'Kin Properties')).toBe(true)
   })
 
   test('a time as the pane writes it: alone when it is today, with the weekday when it is not', async () => {
@@ -231,6 +240,7 @@ describe('the name leads with the hours (Rob, 2026-10-12)', () => {
 const et = (s: string) => Date.parse(`${s.replace(' ', 'T')}:00-04:00`)
 const at = (s: string) => new Date(et(s)).toISOString()
 const ME = feed().member
+const HOUR = 3_600_000
 
 /** An unanswered client message. With no `replyDue` the feed gives no reply time and the plugin works it out. */
 const mailAt = (pid: string, name: string, received: string, replyDue?: string) => ({
@@ -261,20 +271,22 @@ describe('client clocks count business days (Rob, 2026-10-12: weekends do not co
     expect(titleAt(friday, '2026-10-12 09:00')).toBe('🔴 6h left · Acme Roofing · reply')
   })
 
+  // (0.7.12) every late name below says when it was due after the clock (until 0.7.12: the clock alone)
   test('Tuesday 3 PM it reads overdue 1d', async () => {
-    expect(titleAt(friday, '2026-10-12 16:00')).toBe('🔴 1h late · Acme Roofing · reply')
-    expect(titleAt(friday, '2026-10-13 15:00')).toBe('🔴 1d late · Acme Roofing · reply')
+    expect(titleAt(friday, '2026-10-12 16:00')).toBe('🔴 1h late, due 3 PM · Acme Roofing · reply')
+    expect(titleAt(friday, '2026-10-13 15:00')).toBe('🔴 1d late, due Mon 3 PM · Acme Roofing · reply')
   })
 
   test('since the floor a late reply stays on the list: 3d late Thursday 3 PM, still there at 3:01 PM, and pinned two weeks on', async () => {
     // arrived Friday Oct 16 at 3 PM, due Monday Oct 19 at 3 PM (Rob, 2026-10-20: no 3-business-day cut any more)
     const f = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-16 15:00')] })
-    expect(titleAt(f, '2026-10-22 15:00')).toBe('🔴 3d late · Acme Roofing · reply')
-    expect(titleAt(f, '2026-10-22 15:01')).toBe('🔴 3d late · Acme Roofing · reply')
+    expect(titleAt(f, '2026-10-22 15:00')).toBe('🔴 3d late, due Mon 3 PM · Acme Roofing · reply')
+    expect(titleAt(f, '2026-10-22 15:01')).toBe('🔴 3d late, due Mon 3 PM · Acme Roofing · reply')
     // Monday Nov 2 at 3 PM (standard time): Oct 19 9 h + Oct 20 to 23 96 h + Oct 26 to 30 120 h + Nov 2 15 h = 240 h
+    // ((0.7.12) the cut is still the floor that day: 3 weeks back is Oct 12)
     const nov2 = Date.parse('2026-11-02T15:00:00-05:00')
     const [it] = buildQueue(f, nov2)
-    expect(it && titleFor(it, nov2)).toBe('🔴 10d late · Acme Roofing · reply')
+    expect(it && titleFor(it, nov2)).toBe('🔴 10d late, due Oct 19 · Acme Roofing · reply')
     expect(pinsNow(it as QueueItem, nov2)).toBe(true)
   })
 
@@ -289,19 +301,20 @@ describe('client clocks count business days (Rob, 2026-10-12: weekends do not co
   test('a message that arrived Thursday 3 PM is still pinned Monday 3:01 PM', async () => {
     const thursday = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-08 15:00')] })
     expect(buildQueue(thursday, et('2026-10-12 15:01'))[0]?.dueAt).toBe(et('2026-10-09 15:00'))
-    expect(titleAt(thursday, '2026-10-12 15:01')).toBe('🔴 1d late · Acme Roofing · reply')
+    expect(titleAt(thursday, '2026-10-12 15:01')).toBe('🔴 1d late, due Fri 3 PM · Acme Roofing · reply')
   })
 
   test('a ticket we committed for Friday Oct 16 5 PM reads overdue 16h Monday 9 AM, and stays listed and pinned however late', async () => {
     const f = feed({ tickets: { overdue: [committed(P1, 'Acme Roofing — Pat', at('2026-10-16 17:00'))] } })
-    expect(titleAt(f, '2026-10-19 09:00')).toBe('🔴 16h late · Acme Roofing · task')
-    expect(titleAt(f, '2026-10-19 17:01')).toBe('🔴 1d late · Acme Roofing · task')
-    expect(titleAt(f, '2026-10-21 17:00')).toBe('🔴 3d late · Acme Roofing · task')
-    expect(titleAt(f, '2026-10-21 17:01')).toBe('🔴 3d late · Acme Roofing · task')
+    // (0.7.12, the brief's case) Friday 5 PM to Monday 9 AM: 7 h Friday + 9 h Monday, no weekend hours
+    expect(titleAt(f, '2026-10-19 09:00')).toBe('🔴 16h late, due Fri 5 PM · Acme Roofing · task')
+    expect(titleAt(f, '2026-10-19 17:01')).toBe('🔴 1d late, due Fri 5 PM · Acme Roofing · task')
+    expect(titleAt(f, '2026-10-21 17:00')).toBe('🔴 3d late, due Fri 5 PM · Acme Roofing · task')
+    expect(titleAt(f, '2026-10-21 17:01')).toBe('🔴 3d late, due Fri 5 PM · Acme Roofing · task')
     // Monday Nov 2 at 9 AM (standard time): Oct 16 7 h + Oct 19 to 23 120 h + Oct 26 to 30 120 h + Nov 2 9 h = 256 h
     const nov2 = Date.parse('2026-11-02T09:00:00-05:00')
     const [it] = buildQueue(f, nov2)
-    expect(it && titleFor(it, nov2)).toBe('🔴 10d late · Acme Roofing · task')
+    expect(it && titleFor(it, nov2)).toBe('🔴 10d late, due Oct 16 · Acme Roofing · task')
     expect(pinsNow(it as QueueItem, nov2)).toBe(true)
   })
 
@@ -310,7 +323,7 @@ describe('client clocks count business days (Rob, 2026-10-12: weekends do not co
       drafts: [{ package_id: 'aaaaaaaa-1111-4111-8111-111111111111', project_id: P1, project_name: 'Acme Roofing — Pat', status: 'prepared', covers_through: at('2026-10-09 15:00'), drafts_ready: 1, project_owner_email: ME }],
     })
     expect(titleAt(f, '2026-10-12 09:00')).toBe('🔴 6h left · Acme Roofing · reply ready')
-    expect(titleAt(f, '2026-10-15 15:00')).toBe('🔴 3d late · Acme Roofing · reply ready')
+    expect(titleAt(f, '2026-10-15 15:00')).toBe('🔴 3d late, due Mon 3 PM · Acme Roofing · reply ready')
     expect(buildQueue(f, et('2026-10-15 15:01'))).toEqual([])
   })
 
@@ -321,7 +334,9 @@ describe('client clocks count business days (Rob, 2026-10-12: weekends do not co
     // a server that still counts real hours says Saturday 3 PM: pinned all the same, and the weekend adds no lateness
     const real = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-09 15:00', '2026-10-10 15:00')] })
     expect(titleAt(real, '2026-10-09 16:00')).toBe('🟡 8h left · Acme Roofing · reply')
-    expect(titleAt(real, '2026-10-12 09:00')).toBe('🔴 9h late · Acme Roofing · reply')
+    // (0.7.12) and a due time is never shown on a weekend: Saturday 3 PM reads as the end of Friday, which is the same
+    // in business time (Friday 4 PM it read 8h left, to Friday midnight)
+    expect(titleAt(real, '2026-10-12 09:00')).toBe('🔴 9h late, due Fri 11:59 PM · Acme Roofing · reply')
   })
 
   test('a message with no usable date is skipped and does not hide the client\'s other message', async () => {
@@ -336,37 +351,38 @@ describe('client clocks count business days (Rob, 2026-10-12: weekends do not co
   // PIN's window is 24 business hours ahead (and everything overdue that is listed). From Sat Oct 17 12:00 AM ET
   // on, the list's edge is the floor exactly: listed unless due before both now and the floor.
   test('the list\'s edge is the floor at every moment from Sat Oct 17 on, and the pin\'s 24 business hours ahead, across weekends and the clock change', { timeoutMs: 30_000 }, async () => {
-    const HOUR = 3_600_000
+    // (HOUR at the top of the file since 0.7.12)
     const nows = [
       et('2026-10-17 00:00'), et('2026-10-20 00:00'), et('2026-10-20 09:00'), et('2026-10-22 13:37'), et('2026-10-24 11:00'), et('2026-10-25 23:30'),
       Date.UTC(2026, 9, 31, 16), Date.UTC(2026, 10, 1, 12), Date.UTC(2026, 10, 2, 14), Date.UTC(2026, 10, 5, 5), // the weekend the clocks go back
     ]
     let checked = 0
     let pinned = 0
-    let older = 0
+    let cut = 0
     for (const now of nows) {
       // dues around the floor, and around now
       const dues: number[] = []
       for (let off = -100 * HOUR; off <= 100 * HOUR; off += 121 * 60_000) dues.push(LIST_FLOOR_MS + off)
       for (let off = -130 * HOUR; off <= 80 * HOUR; off += 127 * 60_000) dues.push(now + off)
       for (const due of dues) {
-        const listed = !(due < now && due < LIST_FLOOR_MS)
+        // (0.7.12) the cut is the floor, or 3 weeks back once that is later (Thu Nov 5 here)
+        const listed = !(due < now && due < listCutoff(now))
         const want = listed && (due <= now || businessMsBetween(now, due) <= WINDOW_AHEAD_MS)
         const l = buildLists(feed({ tickets: { overdue: [committed(P1, 'Acme Roofing — Pat', new Date(due).toISOString())] } }), now)
         expect(l.queue.length === 1, `listed: now ${new Date(now).toISOString()} due ${new Date(due).toISOString()}`).toBe(listed)
-        // nothing drops off: what is not listed is under Older
-        expect(l.older.length === 1, `older: now ${new Date(now).toISOString()} due ${new Date(due).toISOString()}`).toBe(!listed)
+        // ⛔ (0.7.12) what is not listed is in no list at all (until 0.7.12: under Older)
+        expect([...l.teammate, ...l.checking].length, `nowhere: now ${new Date(now).toISOString()} due ${new Date(due).toISOString()}`).toBe(0)
         const got = l.queue.length === 1 && pinsNow(l.queue[0] as QueueItem, now)
         expect(got, `now ${new Date(now).toISOString()} due ${new Date(due).toISOString()}`).toBe(want)
         checked++
         if (got) pinned++
-        if (!listed) older++
+        if (!listed) cut++
       }
     }
     expect(checked).toBe(nows.length * 200)
     expect(pinned).toBeGreaterThan(nows.length * 80)
-    expect(pinned).toBeLessThan(checked - older)
-    expect(older).toBeGreaterThan(nows.length * 40)
+    expect(pinned).toBeLessThan(checked - cut)
+    expect(cut).toBeGreaterThan(nows.length * 40)
   })
 
   test('a date far in the past or the future does not pin, and is decided without walking the calendar', async () => {
@@ -643,7 +659,7 @@ describe('(m) a package the caller holds is the caller\'s, whatever the owner on
   test('the holder is asked before the owner: the same package, not picked up, is the owner\'s and not the founder\'s', async () => {
     const f = asFounder({ drafts: [draft(P1, 'Acme Roofing — Pat', { project_owner_email: TEAMMATE_B })] })
     const l = buildLists(f, MON)
-    expect([l.queue, l.teammate, l.older]).toEqual([[], [], []])
+    expect([l.queue, l.teammate]).toEqual([[], []])
   })
 
   test('a feed that names no owner at all (a member\'s feed): a package the member holds is still theirs', async () => {
@@ -682,7 +698,8 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
     expect(due).toMatchObject({ projectId: P1, kind: 'ok', ok: { sends: 'Builder B' } })
     expect(due?.theirs).toBeUndefined()
     expect(waitingText(due as QueueItem)).toBe('needs your OK · Builder B sends, drafts ready')
-    expect(titleFor(due as QueueItem, TUE)).toBe('🔴 <1h late · Acme Roofing · needs your OK') // (0.5.14) eight minutes late
+    // (0.5.14) eight minutes late; (0.7.12) and when it was due
+    expect(titleFor(due as QueueItem, TUE)).toBe('🔴 <1h late, due 9:52 AM · Acme Roofing · needs your OK')
   })
 
   test('nobody else gets such a row: for a builder or a pm the same feed lists nothing', async () => {
@@ -703,11 +720,12 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
     expect(NOBODY).toBe('nobody on record')
     expect(waitingText(it as QueueItem)).toBe('needs your OK · nobody on record sends, drafts with J Smith')
     expect(withTeammate(it as QueueItem)).toBe(false)
-    expect(titleFor(it as QueueItem, TUE)).toBe('🔴 <1h late · Acme Roofing · needs your OK · with J Smith')
+    // ((0.7.12) with when it was due after the clock)
+    expect(titleFor(it as QueueItem, TUE)).toBe('🔴 <1h late, due 9:52 AM · Acme Roofing · needs your OK · with J Smith')
   })
 
   test('a stale one a teammate sends is no such row (R1); the words a stale package has stay for the kickoff', async () => {
-    for (const now of [MON, TUE]) expect(buildLists(asFounder({ drafts: [flagged({ status: 'stale' })] }), now)).toEqual({ queue: [], teammate: [], older: [], checking: [] })
+    for (const now of [MON, TUE]) expect(buildLists(asFounder({ drafts: [flagged({ status: 'stale' })] }), now)).toEqual({ queue: [], teammate: [], checking: [] })
     // (a package that waits for his OK and is marked out of date, as the kickoff words it)
     const [it] = buildQueue(asFounder({ drafts: [flagged()] }), TUE)
     const stale = { ...(it as QueueItem), open: { ...((it as QueueItem).open as NonNullable<QueueItem['open']>), state: 'stale' as const } }
@@ -715,7 +733,7 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
     expect(kickoffText(stale)).toContain('reply package aaaaaaaa is flagged for my OK and is marked out of date, and Builder B sends it.')
   })
 
-  test('it sorts by its due time with the rest, and one more than 3 business days past it goes under Older', async () => {
+  test('it sorts by its due time with the rest, and (0.7.12) one past the cut is in no list', async () => {
     const f = asFounder({
       drafts: [flagged(), draft(P3, 'Cedar Dental', { package_id: PKG_B, flagged_for_rob: true, project_owner_email: TEAMMATE_B, covers_through: at('2026-10-01 09:52') })],
       mail: [{ ...mailAt(P2, 'Bolt Staffing', '2026-10-12 08:00'), project_owner_email: null }],
@@ -724,12 +742,13 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
     const mon = buildLists(f, MON)
     expect(mon.queue.map(i => [i.projectId, i.kind])).toEqual([[P2, 'reply']])
     expect(mon.teammate.map(i => [i.projectId, i.kind])).toEqual([[P1, 'ok']])
-    expect(mon.older.map(i => [i.projectId, i.kind])).toEqual([[P3, 'ok']])
+    // ⛔ (0.7.12, Rob 10-30) Cedar's, due Fri Oct 2, is past the cut: in no list (until 0.7.12: under Older)
+    expect([...mon.queue, ...mon.teammate, ...mon.checking].map(i => i.projectId)).not.toContain(P3)
     // Tuesday 10 AM: Bolt's reply was due 8 AM, Acme's OK 9:52 AM
     const l = buildLists(f, TUE)
     expect(l.queue.map(i => [i.projectId, i.kind])).toEqual([[P2, 'reply'], [P1, 'ok']])
     expect(l.teammate).toEqual([])
-    expect(l.older.map(i => [i.projectId, i.kind])).toEqual([[P3, 'ok']])
+    expect(l.checking).toEqual([])
   })
 
   test('the founder\'s own flagged package is not this kind: it is his reply, flagged, as before', async () => {
@@ -764,7 +783,7 @@ describe('B4: a package flagged for the founder lists for him whoever owns the c
   const lists = (f: Feed) => buildLists(f, MON)
   const where = (f: Feed) => {
     const l = lists(f)
-    return { queue: ids(l.queue), teammate: ids(l.teammate), older: ids(l.older) }
+    return { queue: ids(l.queue), teammate: ids(l.teammate) }
   }
 
   test('flagged, current, on a client a teammate owns: under With a teammate until its reply is due, then in his Needs-you list (0.5.1, R2)', async () => {
@@ -774,27 +793,29 @@ describe('B4: a package flagged for the founder lists for him whoever owns the c
       ['another teammate holds it', pickedUp('J.Smith@example.com'), 'J Smith'],
     ] as const) {
       const f = asFounder({ drafts: [flagged(over)] })
-      expect(where(f), name).toEqual({ queue: [], teammate: [P1], older: [] })
+      expect(where(f), name).toEqual({ queue: [], teammate: [P1] })
       // with whoever holds it, else the one who sends it
       expect(lists(f).teammate[0], name).toMatchObject({ kind: 'ok', ok: { sends: 'Builder B' }, theirs: holder })
       const due = buildLists(f, TUE)
-      expect({ queue: ids(due.queue), teammate: ids(due.teammate), older: ids(due.older) }, name).toEqual({ queue: [P1], teammate: [], older: [] })
+      expect({ queue: ids(due.queue), teammate: ids(due.teammate) }, name).toEqual({ queue: [P1], teammate: [] })
       expect(due.queue[0], name).toMatchObject({ kind: 'ok', ok: { sends: 'Builder B' } })
     }
     // with mail of the teammate's own waiting there too (not his to answer), the same
     const withMail = asFounder({ drafts: [flagged(pickedUp(TEAMMATE_B))], mail: [{ ...mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 10:30'), project_owner_email: TEAMMATE_B }] })
-    expect(where(withMail)).toEqual({ queue: [], teammate: [P1], older: [] })
+    expect(where(withMail)).toEqual({ queue: [], teammate: [P1] })
     expect(ids(buildLists(withMail, TUE).queue)).toEqual([P1])
   })
 
   test('flagged and out of date, on a client a teammate owns: listed nowhere, before its reply time or after (0.5.1, R1)', async () => {
-    for (const now of [MON, TUE]) expect(buildLists(asFounder({ drafts: [flagged({ status: 'stale' })] }), now)).toEqual({ queue: [], teammate: [], older: [], checking: [] })
+    for (const now of [MON, TUE]) expect(buildLists(asFounder({ drafts: [flagged({ status: 'stale' })] }), now)).toEqual({ queue: [], teammate: [], checking: [] })
   })
 
-  test('the 3-business-day cut stays as it is: one further past its reply time is listed under Older, never dropped', async () => {
+  test('the 3-business-day cut stays as it is: (0.7.12) one further past its reply time is in no list', async () => {
     const f = asFounder({ drafts: [flagged({ covers_through: at('2026-10-01 09:52') })] })
-    expect(where(f)).toEqual({ queue: [], teammate: [], older: [P1] })
-    expect(lists(f).older[0]?.kind).toBe('ok')
+    // ⛔ (0.7.12, Rob 10-30: "We shouldn't be considering anything that's older than the cutoff date") until 0.7.12 it
+    // was listed under Older, never dropped
+    expect(where(f)).toEqual({ queue: [], teammate: [] })
+    expect(lists(f).checking).toEqual([])
   })
 
   test('the same package in a teammate\'s pane is as it was: the owner\'s to send, flagged; nobody else\'s', async () => {
@@ -805,18 +826,18 @@ describe('B4: a package flagged for the founder lists for him whoever owns the c
     expect(held).toMatchObject({ kind: 'ready', flagged: true, ok: null })
     expect(held?.open?.state).toBe('held_by_me')
     // a third teammate, and a pm, see no row for it
-    for (const role of ['builder', 'pm']) expect(where({ member: 'someone-else@example.com', role, drafts: [flagged()] }), role).toEqual({ queue: [], teammate: [], older: [] })
+    for (const role of ['builder', 'pm']) expect(where({ member: 'someone-else@example.com', role, drafts: [flagged()] }), role).toEqual({ queue: [], teammate: [] })
   })
 
   test('not flagged, on a client a teammate owns: for him as it was, nothing listed; a hold by the owner is not his either', async () => {
-    expect(where(asFounder({ drafts: [flagged({ flagged_for_rob: false })] }))).toEqual({ queue: [], teammate: [], older: [] })
-    expect(where(asFounder({ drafts: [flagged({ flagged_for_rob: false, ...pickedUp(TEAMMATE_B) })] }))).toEqual({ queue: [], teammate: [], older: [] })
+    expect(where(asFounder({ drafts: [flagged({ flagged_for_rob: false })] }))).toEqual({ queue: [], teammate: [] })
+    expect(where(asFounder({ drafts: [flagged({ flagged_for_rob: false, ...pickedUp(TEAMMATE_B) })] }))).toEqual({ queue: [], teammate: [] })
   })
 
   test('his own client\'s (or an unowned client\'s) stale flagged package with no client message waiting stays unlisted: a second reply is not invited (10-13 meeting, M1)', async () => {
     for (const owner of [FOUNDER, null]) {
       const stale = flagged({ status: 'stale', project_owner_email: owner })
-      expect(where(asFounder({ drafts: [stale] })), String(owner)).toEqual({ queue: [], teammate: [], older: [] })
+      expect(where(asFounder({ drafts: [stale] })), String(owner)).toEqual({ queue: [], teammate: [] })
       // a client message waiting lists it, as any message does, with the kickoff that rebuilds the drafts
       const withMail = asFounder({ drafts: [stale], mail: [{ ...mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 10:30'), project_owner_email: owner }] })
       const [it] = lists(withMail).queue
@@ -849,17 +870,17 @@ describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the 
   const theirMail = (received: string) => ({ ...mailAt(P1, 'Acme Roofing — Pat', received), project_owner_email: SENT_BY })
   const where = (f: Feed, now: number) => {
     const l = buildLists(f, now)
-    return { queue: ids(l.queue), teammate: ids(l.teammate), older: ids(l.older) }
+    return { queue: ids(l.queue), teammate: ids(l.teammate) }
   }
 
   for (const flagged of [true, false]) {
     test(`R1, ${flagged ? 'flagged' : 'not flagged'}: a stale package a teammate sends never reaches his Needs-you list; a message after its drafts lists the client under With a teammate`, async () => {
       const stale = pkg({ status: 'stale', flagged_for_rob: flagged })
       // no message waiting: unlisted, before its reply time and after
-      for (const now of [MON, TUE]) expect(where(asFounder({ drafts: [stale] }), now)).toEqual({ queue: [], teammate: [], older: [] })
+      for (const now of [MON, TUE]) expect(where(asFounder({ drafts: [stale] }), now)).toEqual({ queue: [], teammate: [] })
       // a message waiting that arrived after its drafts (they cover through 9:52): With a teammate, never the list that pins
       const after = asFounder({ drafts: [stale], mail: [theirMail('2026-10-12 10:30')] })
-      for (const now of [MON, TUE]) expect(where(after, now)).toEqual({ queue: [], teammate: [P1], older: [] })
+      for (const now of [MON, TUE]) expect(where(after, now)).toEqual({ queue: [], teammate: [P1] })
       const [it] = buildLists(after, MON).teammate
       expect(it).toMatchObject({ kind: 'reply', messages: 1, theirs: 'Builder B' })
       expect(it?.open?.state).toBe('stale')
@@ -869,24 +890,24 @@ describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the 
       expect(draftsLine(it as QueueItem)).toBe('_Builder B has these drafts. Their reminder lists what is still open._')
       expect(clientMarkdown(it as QueueItem, MON)).not.toContain('Pick up')
       // a message its drafts already covered (the team answered it by hand) lists nothing
-      expect(where(asFounder({ drafts: [stale], mail: [theirMail('2026-10-12 09:00')] }), MON)).toEqual({ queue: [], teammate: [], older: [] })
+      expect(where(asFounder({ drafts: [stale], mail: [theirMail('2026-10-12 09:00')] }), MON)).toEqual({ queue: [], teammate: [] })
     })
 
     test(`R2, ${flagged ? 'flagged' : 'not flagged'}: a current package a teammate sends`, async () => {
       const f = asFounder({ drafts: [pkg({ flagged_for_rob: flagged })] })
       if (!flagged) {
         // not flagged: his as it always was, which is nothing (the teammate's own client and package)
-        for (const now of [MON, TUE]) expect(where(f, now)).toEqual({ queue: [], teammate: [], older: [] })
+        for (const now of [MON, TUE]) expect(where(f, now)).toEqual({ queue: [], teammate: [] })
         return
       }
       // flagged: theirs to decide before its reply time, his once it has passed (the same due time the row shows)
-      expect(where(f, MON)).toEqual({ queue: [], teammate: [P1], older: [] })
+      expect(where(f, MON)).toEqual({ queue: [], teammate: [P1] })
       const [mine] = buildLists(f, TUE).queue
-      expect(where(f, TUE)).toEqual({ queue: [P1], teammate: [], older: [] })
+      expect(where(f, TUE)).toEqual({ queue: [P1], teammate: [] })
       expect(mine?.dueAt).toBe(et('2026-10-13 09:52'))
       // the line exactly at the due time: still theirs a minute before it, his a minute after
-      expect(where(f, et('2026-10-13 09:51'))).toEqual({ queue: [], teammate: [P1], older: [] })
-      expect(where(f, et('2026-10-13 09:53'))).toEqual({ queue: [P1], teammate: [], older: [] })
+      expect(where(f, et('2026-10-13 09:51'))).toEqual({ queue: [], teammate: [P1] })
+      expect(where(f, et('2026-10-13 09:53'))).toEqual({ queue: [P1], teammate: [] })
     })
   }
 
@@ -898,32 +919,32 @@ describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the 
     ] as const) {
       for (const flagged of [true, false]) {
         const f = asFounder({ drafts: [pkg({ flagged_for_rob: flagged, ...over })] })
-        expect(where(f, MON), `${name} ${flagged}`).toEqual({ queue: [P1], teammate: [], older: [] })
+        expect(where(f, MON), `${name} ${flagged}`).toEqual({ queue: [P1], teammate: [] })
         expect(buildLists(f, MON).queue[0]?.theirs, name).toBeUndefined()
       }
     }
     // his own client's stale package, with a message waiting: the message lists it, in his list, as before
     for (const owner of [FOUNDER, null]) {
       const f = asFounder({ drafts: [pkg({ status: 'stale', flagged_for_rob: true, project_owner_email: owner })], mail: [{ ...mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 10:30'), project_owner_email: owner }] })
-      expect(where(f, MON), String(owner)).toEqual({ queue: [P1], teammate: [], older: [] })
+      expect(where(f, MON), String(owner)).toEqual({ queue: [P1], teammate: [] })
     }
   })
 
   test('the holder counts (Opus, 10-13): a package a teammate picked up is theirs for R2, even on his own client or a client with no owner', async () => {
     for (const owner of [FOUNDER, null]) {
       const held = asFounder({ drafts: [pkg({ flagged_for_rob: true, project_owner_email: owner, ...pickedUp('J.Smith@example.com') })] })
-      expect(where(held, MON), String(owner)).toEqual({ queue: [], teammate: [P1], older: [] })
+      expect(where(held, MON), String(owner)).toEqual({ queue: [], teammate: [P1] })
       const [it] = buildLists(held, MON).teammate
       expect(it, String(owner)).toMatchObject({ kind: 'ok', theirs: 'J Smith' })
       expect(titleFor(it as QueueItem, MON)).toBe('🟡 with J Smith · Acme Roofing · may need your OK · J Smith decides')
       // his once its reply is due, as the `ok` kind always was
-      expect(where(held, TUE), String(owner)).toEqual({ queue: [P1], teammate: [], older: [] })
+      expect(where(held, TUE), String(owner)).toEqual({ queue: [P1], teammate: [] })
       // not flagged: a reply a teammate holds, With a teammate as in 0.5.0 (with the client's mail his)
       const plain = asFounder({ drafts: [pkg({ project_owner_email: owner, ...pickedUp('J.Smith@example.com') })], mail: [{ ...mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 10:30'), project_owner_email: owner }] })
-      expect(where(plain, MON), String(owner)).toEqual({ queue: [], teammate: [P1], older: [] })
+      expect(where(plain, MON), String(owner)).toEqual({ queue: [], teammate: [P1] })
     }
     // with no holder, the owner on record decides whose it is, as built: his own client's package is his
-    expect(where(asFounder({ drafts: [pkg({ flagged_for_rob: true, project_owner_email: FOUNDER })] }), MON)).toEqual({ queue: [P1], teammate: [], older: [] })
+    expect(where(asFounder({ drafts: [pkg({ flagged_for_rob: true, project_owner_email: FOUNDER })] }), MON)).toEqual({ queue: [P1], teammate: [] })
   })
 
   test('R1: a stale package a teammate has, on a client in his list for a task of his own: its pane names them and does not invite him to pick it up', async () => {
@@ -946,7 +967,7 @@ describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the 
       mail: [theirMail('2026-10-12 10:30')],
       tickets: { due_today: [{ ...committed(P1, 'Acme Roofing — Pat', at('2026-10-12 18:00')), assignee_email: FOUNDER }] },
     })
-    expect(where(f, MON)).toEqual({ queue: [P1], teammate: [], older: [] })
+    expect(where(f, MON)).toEqual({ queue: [P1], teammate: [] })
     const it = buildLists(f, MON).queue[0] as QueueItem
     expect(it).toMatchObject({ kind: 'task', tasks: 1, messages: 0, mail: [] })
     expect(it.theirs).toBeUndefined()
@@ -1027,11 +1048,11 @@ describe('(0.7.8) the founder sending or approving a teammate\'s client\'s last 
   const spotlight = (last: unknown = lastPkg(), over: Record<string, unknown> = {}) => asFounder({ mail: [clientMail(last)], drafts: [nextPkg(last, over)] })
   const where = (f: Feed, now: number) => {
     const l = buildLists(f, now)
-    return { queue: ids(l.queue), teammate: ids(l.teammate), older: ids(l.older) }
+    return { queue: ids(l.queue), teammate: ids(l.teammate) }
   }
   /** R2: under With a teammate, the teammate decides, and none of the client's mail counts for him. */
   const r2 = (f: Feed, why: string) => {
-    expect(where(f, READY), why).toEqual({ queue: [], teammate: [P1], older: [] })
+    expect(where(f, READY), why).toEqual({ queue: [], teammate: [P1] })
     const it = buildLists(f, READY).teammate[0] as QueueItem
     expect(it, why).toMatchObject({ kind: 'ok', messages: 0, theirs: 'Builder B', ok: { sends: 'Builder B' } })
     expect(noteText(it, FOUNDER), why).toContain('0 client messages waiting on our reply')
@@ -1046,13 +1067,13 @@ describe('(0.7.8) the founder sending or approving a teammate\'s client\'s last 
   })
 
   test('before the package is ready, the client\'s message is not his to answer, whoever sent the last package', async () => {
-    expect(where(asFounder({ mail: [clientMail()] }), MAIL_IN)).toEqual({ queue: [], teammate: [], older: [] })
-    expect(where(asFounder({ mail: [clientMail(ABSENT)] }), MAIL_IN)).toEqual({ queue: [], teammate: [], older: [] })
+    expect(where(asFounder({ mail: [clientMail()] }), MAIL_IN)).toEqual({ queue: [], teammate: [] })
+    expect(where(asFounder({ mail: [clientMail(ABSENT)] }), MAIL_IN)).toEqual({ queue: [], teammate: [] })
   })
 
   test('a package he picks up himself is his, as on any client a teammate owns', async () => {
     const f = spotlight(lastPkg(), pickedUp(FOUNDER))
-    expect(where(f, READY)).toEqual({ queue: [P1], teammate: [], older: [] })
+    expect(where(f, READY)).toEqual({ queue: [P1], teammate: [] })
     expect(buildLists(f, READY).queue[0]?.open?.state).toBe('held_by_me')
   })
 
@@ -1072,8 +1093,9 @@ describe('(0.7.8) the founder sending or approving a teammate\'s client\'s last 
 // ---------------------------------------------------------------- the list's floor
 // Rob, 2026-10-20: "everything since last Thursday that wasn't closed should always show up now, and we can keep it
 // clean going forward." LIST_FLOOR_MS is Wed 2026-10-14 12:00 AM in New York. It replaces the 3-business-day cut of
-// 2026-10-08: anything still open whose due time is on or after it stays on the Needs-you list however overdue,
-// and only what was due before it goes under Older.
+// 2026-10-08: anything still open whose due time is on or after it stays on the Needs-you list however overdue.
+// ⛔ (0.7.12, Rob 2026-10-30: "We shouldn't be considering anything that's older than the cutoff date") What was due
+// before it is in no list at all (until 0.7.12: under Older), and from Wed Nov 4 the cut rolls to 3 weeks back.
 
 /** A New York wall time in November 2026, after the clocks go back (standard time, UTC-5), as an instant. */
 const est = (s: string) => Date.parse(`${s.replace(' ', 'T')}:00-05:00`)
@@ -1083,7 +1105,7 @@ describe('the list\'s floor: everything still open since Wed Oct 14 stays on the
   const NOV2 = est('2026-11-02 09:00')
   const where = (f: Feed, now: number) => {
     const l = buildLists(f, now)
-    return { queue: ids(l.queue), teammate: ids(l.teammate), older: ids(l.older) }
+    return { queue: ids(l.queue), teammate: ids(l.teammate) }
   }
 
   test('the floor is Wed 2026-10-14 12:00 AM in New York', async () => {
@@ -1091,7 +1113,7 @@ describe('the list\'s floor: everything still open since Wed Oct 14 stays on the
     expect(new Date(LIST_FLOOR_MS).toISOString()).toBe('2026-10-14T04:00:00.000Z')
   })
 
-  test('(Rob, 2026-10-21) an item due Wed Oct 14 10 AM, still open, is on the Needs-you list on Thu Oct 22; the same due Tue Oct 13 10 AM is under Older', async () => {
+  test('(Rob, 2026-10-21) an item due Wed Oct 14 10 AM, still open, is on the Needs-you list on Thu Oct 22; (0.7.12) the same due Tue Oct 13 10 AM is in no list', async () => {
     // a reply (mail received Tue Oct 13 10 AM), a ticket we committed to, and a prepared reply package, each due Wed Oct 14 10 AM
     const onFloorDay = feed({
       mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-13 10:00')],
@@ -1105,46 +1127,42 @@ describe('the list\'s floor: everything still open since Wed Oct 14 stays on the
       [P3, 'ready', et('2026-10-14 10:00')],
     ])
     expect(l.queue.map(i => pinsNow(i, THU22))).toEqual([true, true, true])
-    expect([l.teammate, l.older]).toEqual([[], []])
-    // the same three due a day earlier, Tue Oct 13 10 AM (mail received Mon Oct 12 10 AM): under Older, not dropped
+    expect(l.teammate).toEqual([])
+    // the same three due a day earlier, Tue Oct 13 10 AM (mail received Mon Oct 12 10 AM): ⛔ (0.7.12) in no list at
+    // all (until 0.7.12: under Older, not dropped)
     const dayBefore = feed({
       mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 10:00')],
       tickets: { overdue: [committed(P2, 'Bolt Staffing', at('2026-10-13 10:00'))] },
       drafts: [draft(P3, 'Cedar Dental', { due_at: at('2026-10-13 10:00') })],
     })
-    const o = buildLists(dayBefore, THU22)
-    expect(o.queue).toEqual([])
-    expect(o.teammate).toEqual([])
-    expect(ids(o.older).sort()).toEqual([P1, P2, P3])
-    expect(o.older.map(i => i.dueAt)).toEqual([et('2026-10-13 10:00'), et('2026-10-13 10:00'), et('2026-10-13 10:00')])
+    expect(buildLists(dayBefore, THU22)).toEqual({ queue: [], teammate: [], checking: [] })
   })
 
   test('mail received Fri Oct 16 10 AM, unanswered: on the Needs-you list (not Older) on Thu Oct 22 9 AM and on Mon Nov 2 9 AM, pinned', async () => {
     const f = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-16 10:00')] })
     for (const now of [THU22, NOV2]) {
-      expect(where(f, now)).toEqual({ queue: [P1], teammate: [], older: [] })
+      expect(where(f, now)).toEqual({ queue: [P1], teammate: [] })
       const it = buildQueue(f, now)[0] as QueueItem
       expect(it.dueAt).toBe(et('2026-10-19 10:00'))
       expect(pinsNow(it, now)).toBe(true)
     }
-    // Thu Oct 22: Oct 19 14 h + Oct 20, 21 48 h + Oct 22 9 h = 71 business hours late
-    expect(titleFor(buildQueue(f, THU22)[0] as QueueItem, THU22)).toBe('🔴 2d late · Acme Roofing · reply')
-    // Mon Nov 2: Oct 19 14 h + Oct 20 to 23 96 h + Oct 26 to 30 120 h + Nov 2 9 h = 239 business hours late
-    expect(titleFor(buildQueue(f, NOV2)[0] as QueueItem, NOV2)).toBe('🔴 9d late · Acme Roofing · reply')
+    // Thu Oct 22: Oct 19 14 h + Oct 20, 21 48 h + Oct 22 9 h = 71 business hours late; (0.7.12) due Mon, 3 days back
+    expect(titleFor(buildQueue(f, THU22)[0] as QueueItem, THU22)).toBe('🔴 2d late, due Mon 10 AM · Acme Roofing · reply')
+    // Mon Nov 2: Oct 19 14 h + Oct 20 to 23 96 h + Oct 26 to 30 120 h + Nov 2 9 h = 239 business hours late; (0.7.12)
+    // due two weeks back: the date
+    expect(titleFor(buildQueue(f, NOV2)[0] as QueueItem, NOV2)).toBe('🔴 9d late, due Oct 19 · Acme Roofing · reply')
   })
 
-  test('mail received Mon Oct 12 10 AM (its reply due Tue Oct 13 10 AM, before the floor): under Older on Thu Oct 22, and after', async () => {
+  test('mail received Mon Oct 12 10 AM (its reply due Tue Oct 13 10 AM, before the floor): (0.7.12) in no list on Thu Oct 22, and after', async () => {
     const f = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 10:00')] })
-    for (const now of [THU22, NOV2]) {
-      expect(where(f, now)).toEqual({ queue: [], teammate: [], older: [P1] })
-      expect(buildLists(f, now).older[0]?.dueAt).toBe(et('2026-10-13 10:00'))
-    }
+    // ⛔ (0.7.12) until 0.7.12: under Older, its due time kept
+    for (const now of [THU22, NOV2]) expect(buildLists(f, now), String(now)).toEqual({ queue: [], teammate: [], checking: [] })
   })
 
   test('mail received Tue Oct 13 10 AM (its reply due Wed Oct 14 10 AM, on or after the floor): on the list', async () => {
     const f = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-13 10:00')] })
     for (const now of [THU22, NOV2]) {
-      expect(where(f, now)).toEqual({ queue: [P1], teammate: [], older: [] })
+      expect(where(f, now)).toEqual({ queue: [P1], teammate: [] })
       expect(buildQueue(f, now)[0]?.dueAt).toBe(et('2026-10-14 10:00'))
     }
   })
@@ -1162,22 +1180,23 @@ describe('the list\'s floor: everything still open since Wed Oct 14 stays on the
         [P2, 'ready', 'held_by_me', et('2026-10-16 12:00')],
         [P1, 'ready', null, et('2026-10-16 15:00')],
       ])
-      expect([l.teammate, l.older]).toEqual([[], []])
+      expect(l.teammate).toEqual([])
       expect(l.queue.map(i => pinsNow(i, now))).toEqual([true, true])
     }
-    // the same packages due Tue Oct 13, before the floor: under Older, not dropped
+    // the same packages due Tue Oct 13, before the floor: ⛔ (0.7.12) in no list (until 0.7.12: under Older)
     const before = feed({
       drafts: [
         draft(P1, 'Acme Roofing', { due_at: at('2026-10-13 15:00') }),
         draft(P2, 'Bolt Staffing', { package_id: PKG_B, ...pickedUp(ME), due_at: at('2026-10-13 12:00') }),
       ],
     })
-    expect(where(before, NOV2)).toEqual({ queue: [], teammate: [], older: [P2, P1] })
+    expect(buildLists(before, NOV2)).toEqual({ queue: [], teammate: [], checking: [] })
   })
 
-  test('a ticket we committed to, overdue since Fri Oct 16: on the list on Mon Nov 2, pinned; one due Tue Oct 13 is under Older', async () => {
+  test('a ticket we committed to, overdue since Fri Oct 16: on the list on Mon Nov 2, pinned; (0.7.12) one due Tue Oct 13 is in no list', async () => {
     const f = feed({ tickets: { overdue: [committed(P1, 'Acme Roofing — Pat', at('2026-10-16 17:00')), committed(P2, 'Bolt Staffing', at('2026-10-13 17:00'))] } })
-    expect(where(f, NOV2)).toEqual({ queue: [P1], teammate: [], older: [P2] })
+    expect(where(f, NOV2)).toEqual({ queue: [P1], teammate: [] })
+    expect(buildLists(f, NOV2).checking).toEqual([])
     const it = buildQueue(f, NOV2)[0] as QueueItem
     expect(it).toMatchObject({ tasks: 1, dueAt: et('2026-10-16 17:00'), actBy: et('2026-10-16 17:00') })
     expect(pinsNow(it, NOV2)).toBe(true)
@@ -1194,15 +1213,16 @@ describe('the list\'s floor: everything still open since Wed Oct 14 stays on the
 
   test('before Sat Oct 17 the floor only widened the list: it still reached 3 business days back (WINDOW_BACK_MS)', async () => {
     // a reply due Tue Oct 13 10 AM, before the floor: listed Fri Oct 16 9 AM (Oct 13 14 h + Oct 14, 15 48 h + Oct 16
-    // 9 h = 71 business hours late), under Older from Sat Oct 17 12:00 AM (86), when the floor alone is the cut
+    // 9 h = 71 business hours late), and (0.7.12) in no list from Sat Oct 17 12:00 AM (86), when the floor alone is the
+    // cut (until 0.7.12: under Older)
     const f = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 10:00')] })
     expect(where(f, et('2026-10-16 09:00')).queue).toEqual([P1])
-    expect(where(f, et('2026-10-17 00:00')).older).toEqual([P1])
+    expect(buildLists(f, et('2026-10-17 00:00'))).toEqual({ queue: [], teammate: [], checking: [] })
   })
 })
 
 describe('the mail look-back reaches the floor (mailLookbackHours): 168 business hours at least, 720 at most', () => {
-  const HOUR = 3_600_000
+  // (HOUR at the top of the file since 0.7.12)
   /** Tue Oct 13 12:00 AM: 24 business hours before the floor, when mail whose reply is due on the floor arrived. */
   const FROM = et('2026-10-13 00:00')
 
@@ -1228,7 +1248,7 @@ describe('the mail look-back reaches the floor (mailLookbackHours): 168 business
     expect(mailLookbackHours(Number.NaN)).toBe(168)
   })
 
-  test('until OW\'s cap, the look-back holds every message the list can hold, and mail OW sends from further back goes under Older', async () => {
+  test('until OW\'s cap, the look-back holds every message the list can hold, and (0.7.12) mail whose reply was due before the cut is in no list', async () => {
     const oldMail = (receivedMs: number) => ({
       message_id_key: `m-${receivedMs}`, received_at: new Date(receivedMs).toISOString(), sender: 'client@example.com', subject: 'Hi', snippet: 'hello',
       project_id: P1, project_name: 'Acme Roofing', reply_status: 'unanswered', project_owner_email: ME,
@@ -1242,59 +1262,62 @@ describe('the mail look-back reaches the floor (mailLookbackHours): 168 business
       days++
       const start = subtractBusinessMs(now, mailLookbackHours(now) * HOUR)
       expect(start, new Date(now).toISOString()).toBeLessThanOrEqual(FROM)
-      // the first message the list can hold (its reply due a minute after the floor) is inside it, and listed
-      const first = buildLists(feed({ mail: [oldMail(FROM + 60_000)] }), now)
-      expect([ids(first.queue), ids(first.older)], new Date(now).toISOString()).toEqual([[P1], []])
-      // mail from before that, as OW sends it from further back, is under Older, never nowhere
-      const earlier = buildLists(feed({ mail: [oldMail(start - 60_000)] }), now)
-      expect([ids(earlier.queue), ids(earlier.older)], new Date(now).toISOString()).toEqual([[], [P1]])
+      // (0.7.12) the first message the list can hold has its reply due a minute after the cut: the floor until Wed Nov
+      // 4, then 3 weeks back. It is inside the look-back (the cut is never before the floor), and listed
+      const from = subtractBusinessMs(listCutoff(now), 24 * HOUR)
+      expect(start, new Date(now).toISOString()).toBeLessThanOrEqual(from)
+      const first = buildLists(feed({ mail: [oldMail(from + 60_000)] }), now)
+      expect(ids(first.queue), new Date(now).toISOString()).toEqual([P1])
+      // ⛔ (0.7.12) its reply due a minute before the cut, or mail OW sends from further back: in no list (until 0.7.12:
+      // under Older, never nowhere)
+      for (const received of [from - 60_000, start - 60_000]) {
+        expect(buildLists(feed({ mail: [oldMail(received)] }), now), new Date(now).toISOString()).toEqual({ queue: [], teammate: [], checking: [] })
+      }
     }
     expect(days).toBe(25)
   })
 })
 
-describe('(s) nothing drops off silently: a client whose only items were due before the list\'s floor', () => {
-  test('unanswered mail from ten and six days ago: not in the list that pins, and listed under Older, most overdue first', async () => {
+// ⛔ (0.7.12, Rob 2026-10-30: "We shouldn't be considering anything that's older than the cutoff date from the week before
+// the team left") Until 0.7.12 these clients were listed under Older ("nothing drops off silently", Rob 2026-10-12). Now
+// what was due before the cut is not considered at all: in no list, so no row, no clock and no pin.
+describe('(s) (0.7.12) a client whose only items were due before the cut is in no list', () => {
+  test('unanswered mail from ten and six days ago: in no list at all (until 0.7.12: under Older, most overdue first)', async () => {
     const f = feed({ mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-06 10:00'), mailAt(P2, 'Bolt Staffing', '2026-10-02 10:00')] })
-    const l = buildLists(f, MON)
-    expect(l.queue).toEqual([])
+    expect(buildLists(f, MON)).toEqual({ queue: [], teammate: [], checking: [] })
     expect(buildQueue(f, MON)).toEqual([])
-    expect(l.older.map(i => [i.projectId, i.kind, i.messages])).toEqual([[P2, 'reply', 1], [P1, 'reply', 1]])
-    expect(l.older.map(i => titleFor(i, MON))).toEqual(['🔴 5d late · Bolt Staffing · reply', '🔴 3d late · Acme Roofing · reply'])
   })
 
-  test('the line between the two is the floor, Wed Oct 14 12:00 AM: due on it is listed however late, due a minute before it is Older', async () => {
+  test('the line is the floor, Wed Oct 14 12:00 AM, until it rolls: due on it is listed however late, due a minute before it is in no list', async () => {
     // replies due (the feed's reply times) Wed Oct 14 12:00 AM and Tue Oct 13 11:59 PM, seen Thu Oct 22 and Mon Nov 2
     const on = feed({ mail: [mailAt(P1, 'Acme Roofing', '2026-10-13 00:00', '2026-10-14 00:00')] })
     const before = feed({ mail: [mailAt(P1, 'Acme Roofing', '2026-10-12 23:59', '2026-10-13 23:59')] })
     expect(et('2026-10-14 00:00')).toBe(LIST_FLOOR_MS)
     for (const now of [et('2026-10-22 09:00'), est('2026-11-02 09:00')]) {
+      expect(listCutoff(now)).toBe(LIST_FLOOR_MS)
       expect(ids(buildLists(on, now).queue)).toEqual([P1])
-      expect(buildLists(on, now).older).toEqual([])
-      expect(buildLists(before, now).queue).toEqual([])
-      expect(ids(buildLists(before, now).older)).toEqual([P1])
+      expect(buildLists(before, now)).toEqual({ queue: [], teammate: [], checking: [] })
     }
   })
 
-  test('a client with something inside the window is in the list, once, whatever else of its is older', async () => {
+  test('a client with something inside the window is in the list, once, and nothing older of its counts', async () => {
     const l = buildLists(feed({ mail: [mailAt(P1, 'Acme Roofing', '2026-10-02 10:00'), mailAt(P1, 'Acme Roofing', '2026-10-12 10:00')] }), MON)
-    expect(l.queue.map(i => [i.projectId, i.messages])).toEqual([[P1, 1]])
-    expect(l.older).toEqual([])
+    expect(l.queue.map(i => [i.projectId, i.messages, i.mail.length])).toEqual([[P1, 1, 1]])
+    expect([l.teammate, l.checking]).toEqual([[], []])
   })
 
-  test('an old task we committed to, an old package that is mine, and one I picked up long ago: each is listed, none is dropped', async () => {
+  test('an old task we committed to, an old package that is mine, and one I picked up long ago: (0.7.12) none is listed', async () => {
     const l = buildLists(feed({
       tickets: { overdue: [committed(P1, 'Acme Roofing', at('2026-10-01 12:00'))] },
       drafts: [draft(P2, 'Bolt Staffing', { covers_through: at('2026-10-01 09:52') }), draft(P3, 'Cedar Dental', { package_id: PKG_B, ...pickedUp(ME), covers_through: at('2026-09-30 09:52') })],
     }), MON)
-    expect(l.queue).toEqual([])
-    expect(l.older.map(i => [i.projectId, i.kind, i.open?.state ?? null])).toEqual([[P3, 'ready', 'held_by_me'], [P1, 'task', null], [P2, 'ready', null]])
+    expect(l).toEqual({ queue: [], teammate: [], checking: [] })
   })
 
-  test('only what is the viewer\'s: another owner\'s old mail is not listed, and an unowned client\'s is the founder\'s', async () => {
+  test('another owner\'s old mail and an unowned client\'s: (0.7.12) in no list, for a builder or the founder', async () => {
     const f = feed({ mail: [{ ...mailAt(P1, 'Theirs', '2026-10-02 10:00'), project_owner_email: TEAMMATE_B }, { ...mailAt(P2, 'Nobody', '2026-10-02 10:00'), project_owner_email: null }] })
-    expect(buildLists(f, MON).older).toEqual([])
-    expect(ids(buildLists({ ...f, member: FOUNDER, role: 'founder' }, MON).older)).toEqual([P2])
+    expect(buildLists(f, MON)).toEqual({ queue: [], teammate: [], checking: [] })
+    expect(buildLists({ ...f, member: FOUNDER, role: 'founder' }, MON)).toEqual({ queue: [], teammate: [], checking: [] })
   })
 })
 
@@ -1305,7 +1328,7 @@ describe('(u) a client whose reply drafts a teammate holds is not the viewer\'s 
   test('my client, a message waiting, a teammate holds the drafts: under With a teammate, not in the list that pins', async () => {
     const l = buildLists(feed({ drafts: [held()], mail: [myMail()] }), MON)
     expect(l.queue).toEqual([])
-    expect(l.older).toEqual([])
+    expect(l.checking).toEqual([])
     expect(ids(l.teammate)).toEqual([P1])
     const it = l.teammate[0] as QueueItem
     expect(withTeammate(it)).toBe(true)
@@ -1332,12 +1355,14 @@ describe('(u) a client whose reply drafts a teammate holds is not the viewer\'s 
 
   test('a task of mine that is itself more than 3 business days overdue is not that exception', async () => {
     const l = buildLists(feed({ drafts: [held()], mail: [myMail()], tickets: { overdue: [committed(P1, 'Acme Roofing — Pat', at('2026-10-01 12:00'))] } }), MON)
-    expect([ids(l.queue), ids(l.teammate), ids(l.older)]).toEqual([[], [P1], []])
+    expect([ids(l.queue), ids(l.teammate)]).toEqual([[], [P1]])
   })
 
-  test('only old mail of mine there: still With a teammate, not Older', async () => {
+  // (0.7.12) until 0.7.12 such a client stayed under With a teammate (not Older); now what was due before the cut is
+  // considered nowhere, so with nothing of the client due since, it is in no list
+  test('only old mail of mine there: (0.7.12) in no list, With a teammate included', async () => {
     const l = buildLists(feed({ drafts: [held()], mail: [mailAt(P1, 'Acme Roofing — Pat', '2026-10-02 10:00')] }), MON)
-    expect([ids(l.queue), ids(l.teammate), ids(l.older)]).toEqual([[], [P1], []])
+    expect([ids(l.queue), ids(l.teammate), ids(l.checking)]).toEqual([[], [], []])
   })
 
   test('when the hold ends the client is wherever the feed then puts it', async () => {
@@ -1352,11 +1377,11 @@ describe('(u) a client whose reply drafts a teammate holds is not the viewer\'s 
       expect(after.teammate).toEqual([])
     }
     // and with nothing else of mine there, it is in no list at all
-    expect(buildLists(feed({ drafts: [] }), MON)).toEqual({ queue: [], teammate: [], older: [], checking: [] })
+    expect(buildLists(feed({ drafts: [] }), MON)).toEqual({ queue: [], teammate: [], checking: [] })
   })
 
   test('a teammate\'s hold on a client with nothing of mine waiting lists nothing, as before', async () => {
-    expect(buildLists(feed({ drafts: [held()] }), MON)).toEqual({ queue: [], teammate: [], older: [], checking: [] })
+    expect(buildLists(feed({ drafts: [held()] }), MON)).toEqual({ queue: [], teammate: [], checking: [] })
   })
 
   test('a client named "with ..." is still read as the client in a thread name of the shape before this one', async () => {
@@ -1565,7 +1590,7 @@ describe('R8: a send being checked, and what is still open after it', () => {
 
   test('a teammate\'s package is never "still open after your reply" for me, and the founder\'s OK package is somebody else\'s send', async () => {
     const theirs = prepared({ project_owner_email: 'builder-b@example.com', status: 'stale', checked_send_at: at('2026-10-12 14:30'), last_outbound_at: at('2026-10-12 14:30'), still_open: ['x'] })
-    expect(buildLists(feed({ drafts: [theirs] }), NOW8)).toEqual({ queue: [], teammate: [], older: [], checking: [] })
+    expect(buildLists(feed({ drafts: [theirs] }), NOW8)).toEqual({ queue: [], teammate: [], checking: [] })
   })
 })
 
@@ -1603,7 +1628,8 @@ describe('R16: days late or left are whole business days completed', () => {
     for (const [days, lead, when] of [[1.49, '1d late', 'overdue 1d'], [1.51, '1d late', 'overdue 1d'], [2.0, '2d late', 'overdue 2d'], [0.6, '14h late', 'overdue 14h']] as Array<[number, string, string]>) {
       const due = subtractBusinessMs(now, days * DAY)
       expect(clockLead(due, now), String(days)).toBe(lead)
-      expect(whenText(due, now), String(days)).toBe(when)
+      // (0.7.12) followed by when it was due (until 0.7.12 the text ended at the span)
+      expect(whenText(due, now), String(days)).toBe(`${when}, due ${dueWhen(due, now)}`)
     }
   })
   test('ahead the same: 1.6 business days left is 1d', async () => {
@@ -1620,16 +1646,18 @@ describe('R17: an item with no due time', () => {
     expect(l.queue.map(i => i.projectId)).toEqual([P2, P1])
     const it = l.queue[1] as QueueItem
     expect(it).toMatchObject({ noDue: true, messages: 1, dueAt: Infinity })
-    expect(titleFor(it, now)).toBe('🟡 Acme Roofing · reply')
+    // (0.7.12) `no due date` where the clock would be (until 0.7.12: '🟡 Acme Roofing · reply')
+    expect(titleFor(it, now)).toBe('🟡 Acme Roofing · reply · no due date')
     expect(dueLine(it, now)).toBe('reply')
     expect(pinsNow(it, now)).toBe(false)
     expect(kickoffText(it)).toContain('needs a reply: 1 client message(s) waiting. Load the client')
-    expect(l.older).toEqual([])
+    expect(l.checking).toEqual([])
   })
   test('a task with due_at null (no due source): listed, `🟡 <client> · task`, never pins; the kickoff says no due', async () => {
     const f = feed({ tickets: { due_soon: [{ ticket_id: 't1', project_id: P1, project_name: 'Acme Roofing — Pat', title: 'x', due_at: null, due_source: null, assignee_email: ME }] } })
     const [it] = buildQueue(f, now)
-    expect(titleFor(it as QueueItem, now)).toBe('🟡 Acme Roofing · task')
+    // (0.7.12) `no due date` where the clock would be (until 0.7.12: '🟡 Acme Roofing · task')
+    expect(titleFor(it as QueueItem, now)).toBe('🟡 Acme Roofing · task · no due date')
     expect(pinsNow(it as QueueItem, now)).toBe(false)
     // (0.7.4) and never calls it committed: nobody dated it
     expect(kickoffText(it as QueueItem)).toContain('has 1 open ticket(s) of mine with no due date. Load the client')
@@ -1640,7 +1668,8 @@ describe('R17: an item with no due time', () => {
     const f = feed({ mail: [{ ...mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 09:00'), reply_due_at: null }] })
     const stored = JSON.parse(JSON.stringify(buildQueue(f, now)[0])) as QueueItem
     expect(stored.dueAt).toBeNull()
-    expect(titleFor(stored, now)).toBe('🟡 Acme Roofing · reply')
+    // (0.7.12) `no due date` (until 0.7.12: '🟡 Acme Roofing · reply')
+    expect(titleFor(stored, now)).toBe('🟡 Acme Roofing · reply · no due date')
     expect(pinsNow(stored, now)).toBe(false)
   })
 })
@@ -1653,7 +1682,8 @@ describe('R18: an internal project', () => {
     const f = feed({ mail: [mailAt(CORE, 'Massmarket Core Snapshot', '2026-10-12 09:00'), mailAt(P3, 'Cedar Dental', '2026-10-12 10:00')] })
     const q = buildQueue(f, now)
     expect(q.map(i => [i.projectId, Boolean(i.internal), Boolean(i.noDue)])).toEqual([[P3, false, false], [CORE, true, true]])
-    expect(titleFor(q[1] as QueueItem, now)).toBe('🟡 Massmarket Core Snapshot · reply')
+    // (0.7.12) `no due date` (until 0.7.12: '🟡 Massmarket Core Snapshot · reply')
+    expect(titleFor(q[1] as QueueItem, now)).toBe('🟡 Massmarket Core Snapshot · reply · no due date')
   })
 
   test('L9: once a row carries the flag, the feed alone says: internal:false on the internal-ops id is a client', async () => {
@@ -1868,7 +1898,7 @@ describe('(0.5.28, internal asks) an ask lists on the asked person\'s item for i
   test('an ask for me lists on the client\'s item, with its clock as the due and act-by time, and pins it', async () => {
     const lists = buildLists(robFeed({ asks: [ask()] }), fri)
     expect(lists.teammate).toEqual([])
-    expect(lists.older).toEqual([])
+    expect(lists.checking).toEqual([])
     const [it] = lists.queue
     if (!it) throw new Error('no item')
     expect(lists.queue.length).toBe(1)
@@ -1894,7 +1924,7 @@ describe('(0.5.28, internal asks) an ask lists on the asked person\'s item for i
 
   test('an ask for a teammate does not list for me, in any list', async () => {
     const lists = buildLists(robFeed({ asks: [ask({ asked_email: 'mahfuz@massmarket.ai' })] }), fri)
-    expect(lists).toEqual({ queue: [], teammate: [], older: [], checking: [] })
+    expect(lists).toEqual({ queue: [], teammate: [], checking: [] })
     // and the teammate sees it on their own item
     expect(buildQueue({ member: 'mahfuz@massmarket.ai', role: 'builder', asks: [ask({ asked_email: 'mahfuz@massmarket.ai' })] }, fri).map(i => i.kind)).toEqual(['ask'])
   })
@@ -1939,7 +1969,7 @@ describe('(0.5.28, internal asks) an ask lists on the asked person\'s item for i
     const base = feed({ mail: [mail(P2, 'Bolt Staffing (Sam)', -2)], drafts: [d], tickets: { due_today: [t] } })
     const lists = buildLists(base, NOW)
     expect(lists.queue.map(i => i.projectId).sort()).toEqual([P1, P2, P3])
-    for (const it of [...lists.queue, ...lists.teammate, ...lists.older]) {
+    for (const it of [...lists.queue, ...lists.teammate]) {
       expect(Object.hasOwn(it, 'asks')).toBe(false)
       expect(kickoffText(it)).not.toContain('Internal ask')
       expect(waitingText(it)).not.toContain('internal ask')
@@ -2087,7 +2117,7 @@ describe('(0.7.3, internal queue) the viewer\'s queued internal tickets list on 
 
   test('a queue of mine lists the internal-ops item, undated and in rank order, with the feed\'s total: never pinned, never a clock', async () => {
     const lists = buildLists(queueFeed([qt(3), qt(1), qt(2)], 314), tue)
-    expect([lists.teammate, lists.older, lists.checking]).toEqual([[], [], []])
+    expect([lists.teammate, lists.checking]).toEqual([[], []])
     const [it] = lists.queue
     if (!it) throw new Error('no item')
     expect(lists.queue.length).toBe(1)
@@ -2355,11 +2385,12 @@ describe('(0.7.4) a teammate\'s internal tickets owe an ETA and list with a cloc
       due_today: [eta(2, { project_id: CLIENT, project_name: 'Acme Legal', eta_needed_by: '2026-10-28T16:00:00Z' })],
       due_soon: [eta(3, { project_id: INTERNAL_DISCORD, project_name: DISCORD_NAME, eta_needed_by: '2026-10-29T21:00:00Z' })],
     }), wed)
-    expect([lists.teammate, lists.older, lists.checking]).toEqual([[], [], []])
+    expect([lists.teammate, lists.checking]).toEqual([[], []])
     expect(lists.queue.map(i => i.projectId)).toEqual([INTERNAL_OPS, CLIENT, INTERNAL_DISCORD])
     const [ops, acme, discord] = lists.queue as [QueueItem, QueueItem, QueueItem]
-    expect(titleFor(ops, wed)).toBe('🔴 4h late · Massmarket AI · ETA needed')
-    expect(titleFor(acme, wed)).toBe('🔴 3h late · Acme Legal · ETA needed')
+    // (0.7.12) with when it was due (until 0.7.12: the clock alone)
+    expect(titleFor(ops, wed)).toBe('🔴 4h late, due 11 AM · Massmarket AI · ETA needed')
+    expect(titleFor(acme, wed)).toBe('🔴 3h late, due 12 PM · Acme Legal · ETA needed')
     expect(pinsNow(ops, wed)).toBe(true)
     expect(clientMarkdown(ops, wed)).toContain('- Ticket 1 (ticket 00000001) · ETA was needed by ')
     expect(clientMarkdown(ops, wed)).toContain(', 4h late')
@@ -2451,7 +2482,7 @@ describe('(0.7.4) a teammate\'s internal tickets owe an ETA and list with a cloc
     expect(titleFor(discord, wed)).toContain('past ETA')
     expect(noteText(beta, ROB)).toContain(`${nayan} owes an ETA on 1 internal ticket (late); the side pane lists them. They are the teammate's to answer, not Rob's.`)
     // ⛔ the client ticket nothing marks internal reaches him nowhere
-    expect([...lists.queue, ...lists.teammate, ...lists.older].map(i => i.projectId)).not.toContain(CLIENT)
+    expect([...lists.queue, ...lists.teammate].map(i => i.projectId)).not.toContain(CLIENT)
     // ⛔ a teammate's own feed never gets anyone else's
     const mine = buildLists(asifFeed({ overdue: [eta(7, { assignee_email: 'nayan@massmarket.ai', eta_needed_by: '2026-10-28T15:00:00Z' })] }), wed)
     expect([mine.queue, mine.teammate]).toEqual([[], []])
@@ -2539,5 +2570,76 @@ describe('(0.7.4) a teammate\'s internal tickets owe an ETA and list with a cloc
     expect(etaAsksOf(stored as QueueItem)).toEqual([])
     expect(matesOf(stored as QueueItem)).toEqual([])
     expect(undatedCount(stored as QueueItem)).toBe(0)
+  })
+})
+
+// ======================================================================== 0.7.12
+// Rob, 2026-10-30: "If there's something the system thinks is overdue, it should also say that when it was."
+describe('0.7.12: when a late item was due, in New York time, and never on a weekend', () => {
+  test('the three forms: the time the same day, the day and time within the week, the date further back', async () => {
+    expect(clockAndDue(et('2026-10-30 15:00'), et('2026-10-30 18:00'))).toBe('3h late, due 3 PM')
+    expect(clockAndDue(et('2026-10-26 15:00'), et('2026-10-28 15:00'))).toBe('2d late, due Mon 3 PM')
+    expect(clockAndDue(et('2026-10-14 15:00'), et('2026-10-30 15:00'))).toBe('12d late, due Oct 14')
+    // minutes when the time has them; ahead of its time, the clock alone
+    expect(dueWhen(et('2026-10-30 09:52'), et('2026-10-30 10:00'))).toBe('9:52 AM')
+    expect(clockAndDue(et('2026-10-30 20:00'), et('2026-10-30 10:00'))).toBe('10h left')
+  })
+
+  test('a due time on a weekend is shown as the end of the Friday before, which is the same in business time', async () => {
+    // Sat Oct 24 3 PM and Sun Oct 25 noon both read Fri 11:59 PM; a weekday time is shown as it is
+    expect(dueWhen(et('2026-10-24 15:00'), et('2026-10-27 09:00'))).toBe('Fri 11:59 PM')
+    expect(dueWhen(et('2026-10-25 12:00'), et('2026-10-27 09:00'))).toBe('Fri 11:59 PM')
+    expect(shownDue(et('2026-10-23 15:00'))).toBe(et('2026-10-23 15:00'))
+    expect(businessMsBetween(shownDue(et('2026-10-24 15:00')), et('2026-10-26 09:00'))).toBe(businessMsBetween(et('2026-10-24 15:00'), et('2026-10-26 09:00')) + 60_000)
+    // and in no form does a weekday name of the weekend appear
+    for (let h = 0; h < 48; h++) {
+      const due = et('2026-10-24 00:00') + h * HOUR
+      expect(clockAndDue(due, et('2026-10-27 09:00'))).not.toMatch(/Sat|Sun/)
+    }
+  })
+
+  test('the row says `<n> late, due <when>`; the chip\'s line says `overdue <n>, due <when>`', async () => {
+    const now = et('2026-10-28 15:00')
+    const [it] = buildQueue(feed({ mail: [mailAt(P1, 'Acme Legal', '2026-10-23 10:00', '2026-10-26 15:00')] }), now)
+    expect(rowLine(it as QueueItem, now)).toBe('🔴 Acme Legal · reply · 2d late, due Mon 3 PM')
+    expect(needsLine(it as QueueItem, now)).toBe('Acme Legal · reply overdue 2d, due Mon 3 PM')
+    expect(whenText((it as QueueItem).dueAt, now)).toBe('overdue 2d, due Mon 3 PM')
+  })
+
+  test('an undated item: `no due date` on its name and its row, never on the internal queue or a teammate\'s', async () => {
+    const now = et('2026-10-12 11:00')
+    const f = feed({ tickets: { due_soon: [{ ticket_id: 't1', project_id: P1, project_name: 'Kin Properties', title: 'x', due_at: null, due_source: null, assignee_email: ME }] } })
+    const [it] = buildQueue(f, now)
+    expect(titleFor(it as QueueItem, now)).toBe(`🟡 Kin Properties · task · ${NO_DUE_DATE}`)
+    expect(rowLine(it as QueueItem, now)).toBe(`🟡 Kin Properties · task · ${NO_DUE_DATE}`)
+    expect(pinsNow(it as QueueItem, now)).toBe(false)
+  })
+
+  test('a name past 60 characters drops its count first: the clock, when it was due, and the client stay', async () => {
+    const now = et('2026-10-30 15:00')
+    const mail = [1, 2, 3].map(n => mailAt(P1, 'Acme Roofing and Restoration', `2026-10-13 0${n}:00`, '2026-10-14 15:00'))
+    const [it] = buildQueue(feed({ mail }), now)
+    const full = `🔴 12d late, due Oct 14 · Acme Roofing and Restoration · reply · 3 new`
+    expect([...full].length).toBeGreaterThan(THREAD_TITLE_MAX)
+    expect(titleFor(it as QueueItem, now)).toBe('🔴 12d late, due Oct 14 · Acme Roofing and Restoration · reply')
+    // a short one keeps its count
+    const [short] = buildQueue(feed({ mail: [1, 2].map(n => mailAt(P1, 'Acme', `2026-10-13 0${n}:00`, '2026-10-14 15:00')) }), now)
+    expect(titleFor(short as QueueItem, now)).toBe('🔴 12d late, due Oct 14 · Acme · reply · 2 new')
+  })
+
+  test('the cut is the later of the floor and 3 weeks back (one constant, CUTOFF_WINDOW_MS)', async () => {
+    expect(CUTOFF_WINDOW_MS).toBe(21 * 24 * HOUR)
+    expect(listCutoff(et('2026-10-30 10:00'))).toBe(LIST_FLOOR_MS)
+    expect(listCutoff(et('2026-11-04 00:00'))).toBe(LIST_FLOOR_MS)
+    expect(listCutoff(Date.parse('2026-11-20T10:00:00-05:00'))).toBe(Date.parse('2026-11-20T10:00:00-05:00') - 21 * 24 * HOUR)
+    // on Nov 20: due Oct 25 is in no list, due Nov 1 is
+    const nov20 = Date.parse('2026-11-20T10:00:00-05:00')
+    const old = buildLists(feed({ tickets: { overdue: [committed(P1, 'Kin Properties', at('2026-10-25 12:00'))] } }), nov20)
+    expect([old.queue, old.teammate, old.checking]).toEqual([[], [], []])
+    const recent = buildLists(feed({ tickets: { overdue: [committed(P1, 'Kin Properties', new Date(Date.parse('2026-11-01T12:00:00-05:00')).toISOString())] } }), nov20)
+    expect(recent.queue.map(i => i.projectId)).toEqual([P1])
+    // on Oct 30: due Oct 13 is in no list (the floor decides)
+    const oct13 = buildLists(feed({ tickets: { overdue: [committed(P1, 'Kin Properties', at('2026-10-13 15:00'))] } }), et('2026-10-30 10:00'))
+    expect([oct13.queue, oct13.teammate, oct13.checking]).toEqual([[], [], []])
   })
 })
