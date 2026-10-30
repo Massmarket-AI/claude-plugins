@@ -905,7 +905,7 @@ describe('0.5.3 claim in place, as 0.5.4 has it: the long thread\'s own fresh-th
       await w.advance(60_000)
       await settle()
     }
-    // (0.5.11, review of PR #15, F3) mail and no drafts: nothing yet, until 120 minutes after the mail was first seen
+    // (0.5.11, review of PR #15, F3) nothing yet: the bridge has not seen the client for 10 minutes
     expect(w.sends()).toEqual([])
     for (let i = 0; i < 120; i++) {
       await w.advance(60_000)
@@ -914,12 +914,15 @@ describe('0.5.3 claim in place, as 0.5.4 has it: the long thread\'s own fresh-th
     expect(spawned(w).filter(c => String(c.args.title).startsWith('Start a fresh thread'))).toEqual([])
     expect(w.calls.filter(c => c.tool === 'start_session')).toEqual([])
     expect(w.stored('mm.claimedHere')).toBeUndefined()
-    expect(w.sends().map(c => c.args.session_id)).toEqual([LINKED])
+    // (0.7.14) mail and no drafts: the update by itself, saying the drafts follow, then (none came in the 120 minutes
+    // after the mail was first seen) the follow-up that asks for prep
+    expect(w.sends().map(c => c.args.session_id)).toEqual([LINKED, LINKED])
     // (review of PR #15, F4) the marker first
     expect(String(w.sends()[0]?.args.message)).toMatch(new RegExp(`^\\[mm-link ${pid(71)}\\] New since this thread last worked on this client: 1 message waiting\\.\\n`))
+    expect(String(w.sends()[1]?.args.message)).toMatch(new RegExp(`^\\[mm-link ${pid(71)}\\] .*no package exists yet, so run prep \\(§2\\)`))
     const done = (w.stored('mm.autoupdates') ?? []) as Array<{ pid: string; sid: string; ok: boolean | null; by: string }>
-    expect(done.map(t => [t.pid, t.sid, t.ok])).toEqual([[pid(71), LINKED, true]])
-    expect(done[0]?.by).not.toBe(LINKED)
+    expect(done.map(t => [t.pid, t.sid, t.ok])).toEqual([[pid(71), LINKED, true], [pid(71), LINKED, true]])
+    for (const t of done) expect(t.by).not.toBe(LINKED)
     expect(linksOf(w)).toEqual({ [pid(71)]: LINKED })
   })
 
@@ -1582,17 +1585,20 @@ describe('0.5.11: a client\'s thread updated by itself is sent once, whoever cho
     await settleAll()
     await w.advance(3_100)
     await settleAll()
-    // (0.5.11, review of PR #15, F3) mail and no drafts: it goes 120 minutes after this bridge first saw the mail
+    // (0.7.14) mail and no drafts: it goes once this bridge has seen it for 10 minutes, saying the drafts follow, and
+    // with none 120 minutes after the mail was first seen, the follow-up that asks for prep; each sent once
     for (let i = 1; i <= 125; i++) {
       await w.advance(60_000)
       await settleAll()
       if (i % 5 === 0) await mm(a, '')
-      if (i === 115) expect(w.sends()).toEqual([])
+      if (i === 5) expect(w.sends()).toEqual([])
+      if (i === 20) expect(w.sends().map(c => c.args.session_id)).toEqual(['local_ut'])
+      if (i === 115) expect(w.sends().length).toBe(1)
     }
-    expect(w.sends().map(c => c.args.session_id)).toEqual(['local_ut'])
-    const done = (w.stored('mm.autoupdates') ?? []) as Array<{ by: string; ok: boolean | null; sid: string }>
-    expect(done.map(r => [r.sid, r.ok])).toEqual([['local_ut', true]])
-    expect(['local_ua', 'local_ub']).toContain(done[0]?.by)
+    expect(w.sends().map(c => c.args.session_id)).toEqual(['local_ut', 'local_ut'])
+    const done = (w.stored('mm.autoupdates') ?? []) as Array<{ by: string; ok: boolean | null; sid: string; sig: string }>
+    expect(done.map(r => [r.sid, r.ok, r.sig.endsWith('+prep')])).toEqual([['local_ut', true, false], ['local_ut', true, true]])
+    for (const r of done) expect(['local_ua', 'local_ub']).toContain(r.by)
     expect(w.stored('mm.updating')).toEqual({})
   })
 })

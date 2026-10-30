@@ -4,7 +4,8 @@ import { buildLists, buildQueue, openAsks, threadTitleShort, titleFor } from './
 import type { AskRef, Feed, FeedAsk, FeedQueueTicket, FeedThread, QueueItem } from './queue'
 import {
   AUTO_NO_DRAFTS_MS, AUTO_QUIET_MS, LABEL, NEW_MARK, OPENERS, THREAD_ID,
-  asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, ownPackage, seenNow, selfUpdateAt, selfUpdateText,
+  asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, draftsComing, ownPackage, prepDue, seenNow, selfUpdateAt, selfUpdateText,
+  FRESH_THREAD_BYTES, freshParagraph,
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLink, titleLooksLike, titleSuggestion, waitingText,
   newerThreadFor, threadStart, markedThreads, ownThreads, AWAY_REASON,
@@ -624,71 +625,82 @@ describe('(0.5.11) a client\'s thread updated by itself: which clients, and when
   /** What this bridge has seen of a client: unchanged for `quiet` minutes, its mail waiting for `mail` minutes (0: none). */
   const seen = (quiet: number, mail = 0) => ({ sig: 'x', at: NOW - quiet * MIN, mail: mail ? NOW - mail * MIN : 0 })
 
-  test('(review of PR #15, F3) the waits: 10 minutes since the bridge first saw it unchanged, then drafts ready or 120 minutes since it first saw the oldest waiting message', async () => {
+  test('(review of PR #15, F3) the wait: 10 minutes since the bridge first saw it unchanged; (0.7.14) 120 minutes is when a thread whose drafts never came is asked for prep', async () => {
     expect([AUTO_QUIET_MS, AUTO_NO_DRAFTS_MS]).toEqual([10 * MIN, 120 * MIN])
     // nothing seen yet is never due
-    for (const pid of [ACME, BOLT, CEDAR]) expect(autoUpdateDue(item(pid), NOW, undefined)).toBe(false)
+    expect(autoUpdateDue(undefined, NOW)).toBe(false)
   })
 
   test('(review of PR #15, F3) drafts ready: it goes once the bridge has seen them unchanged for 10 minutes, whatever the feed\'s own times say', async () => {
-    expect(autoUpdateDue(item(ACME), NOW, seen(9))).toBe(false)
-    expect(autoUpdateDue(item(ACME), NOW, seen(10))).toBe(true)
-    // the feed's times are not asked: a package the feed dates an hour back, seen 5 minutes ago, waits; one it dates
-    // a minute back (or not at all, as the live feed gives none), seen 10 minutes ago, goes
-    expect(autoUpdateDue({ ...item(ACME), packageUpdatedAt: new Date(NOW - 60 * MIN).toISOString() }, NOW, seen(5))).toBe(false)
-    expect(autoUpdateDue({ ...item(ACME), packageUpdatedAt: new Date(NOW - MIN).toISOString(), newest: { mail: NOW - MIN, pkg: NOW - MIN, task: 0 } }, NOW, seen(10))).toBe(true)
-    expect(autoUpdateDue({ ...item(ACME), packageUpdatedAt: null }, NOW, seen(10))).toBe(true)
+    expect(autoUpdateDue(seen(9), NOW)).toBe(false)
+    expect(autoUpdateDue(seen(10), NOW)).toBe(true)
   })
 
-  test('(review of PR #15, F3) messages and no drafts: it goes 120 minutes after the bridge first saw the oldest waiting message, or once drafts are ready, whichever comes first', async () => {
-    // Bolt: two messages, no package
-    expect(autoUpdateDue(item(BOLT), NOW, seen(10, 119))).toBe(false)
-    expect(autoUpdateDue(item(BOLT), NOW, seen(10, 120))).toBe(true)
-    // still the 10 quiet minutes first: a second message seen 5 minutes ago holds it back, mail waiting or not
-    expect(autoUpdateDue(item(BOLT), NOW, seen(5, 180))).toBe(false)
-    // the feed's own mail times are not asked: mail the feed dates three hours back, first seen 15 minutes ago, waits
-    expect(autoUpdateDue({ ...item(BOLT), newest: { mail: NOW - 180 * MIN, pkg: 0, task: 0 } }, NOW, seen(15, 15))).toBe(false)
-    // drafts ready (prepared, or held by the person) do not wait the 120 minutes; drafts out of date do
-    expect(autoUpdateDue({ ...item(BOLT), open: pkg('prepared') }, NOW, seen(10, 15))).toBe(true)
-    expect(autoUpdateDue({ ...item(BOLT), open: pkg('held_by_me') }, NOW, seen(10, 15))).toBe(true)
-    expect(autoUpdateDue({ ...item(BOLT), kind: 'ready', packageId: PKG }, NOW, seen(10, 15))).toBe(true)
-    expect(autoUpdateDue({ ...item(BOLT), open: pkg('stale') }, NOW, seen(10, 15))).toBe(false)
-    expect(autoUpdateDue({ ...item(BOLT), open: pkg('stale') }, NOW, seen(10, 120))).toBe(true)
-    // no record of the mail's wait (it cannot be: a record with mail waiting has it) is never due on mail alone
-    expect(autoUpdateDue(item(BOLT), NOW, seen(300, 0))).toBe(false)
+  test('(0.7.14, Rob 10-30: "It should automatically update") messages and no drafts: due after the same 10 minutes, saying the drafts follow; asked for prep 120 minutes after the oldest waiting message was first seen', async () => {
+    // Bolt: two messages, no package: due once seen unchanged for 10 minutes, however long its mail has waited
+    expect(autoUpdateDue(seen(9, 9), NOW)).toBe(false)
+    expect(autoUpdateDue(seen(10, 10), NOW)).toBe(true)
+    // still the 10 quiet minutes first: a second message seen 5 minutes ago holds it back
+    expect(autoUpdateDue(seen(5, 180), NOW)).toBe(false)
+    // the drafts may still come while the oldest waiting message was first seen less than 120 minutes ago
+    expect(draftsComing(item(BOLT), NOW, seen(10, 119))).toBe(true)
+    expect(draftsComing(item(BOLT), NOW, seen(10, 120))).toBe(false)
+    // the feed's own mail times are not asked: mail the feed dates three hours back, first seen 15 minutes ago, may
+    expect(draftsComing({ ...item(BOLT), newest: { mail: NOW - 180 * MIN, pkg: 0, task: 0 } }, NOW, seen(15, 15))).toBe(true)
+    // with no record of the wait, they may come
+    expect(draftsComing(item(BOLT), NOW, undefined)).toBe(true)
+    // a package of any kind, or no mail: never "the drafts follow"
+    for (const it of [{ ...item(BOLT), open: pkg('prepared') }, { ...item(BOLT), open: pkg('held_by_me') }, { ...item(BOLT), open: pkg('stale') }, { ...item(BOLT), kind: 'ready' as const, packageId: PKG }, item(ACME), item(CEDAR)]) {
+      expect(draftsComing(it, NOW, seen(10, 15))).toBe(false)
+    }
+    // its words: the drafts follow, no prep; case 6's own words otherwise
+    const wait = kickoffText(item(BOLT), { update: true, auto: true, wait: true })
+    expect(wait).toContain('Lane-2 is building the reply drafts, and they come into this thread as a second update once they are ready.')
+    expect(wait).toContain('Do not run prep before the drafts come unless I ask you to. Send nothing without my go.')
+    expect(wait).not.toContain('run prep (§2)')
+    expect(kickoffText(item(BOLT), { update: true, auto: true })).toContain('no package exists yet, so run prep (§2) to build one')
+    // ⛔ never in the signature: what the thread must hold is the same either way
+    expect(signatureOf(item(BOLT))).not.toContain('Lane-2')
+  })
+
+  test('(0.7.14) the follow-up that asks for prep: only for a thread told its drafts follow, with what the client has now, still with no package, once the 120 minutes passed', async () => {
+    const sig = signatureOf(item(BOLT))
+    const told = { sid: 'local_b', sig, at: NOW - 100 * MIN, wait: true as const }
+    expect(prepDue(told, 'local_b', item(BOLT), NOW, seen(110, 120))).toBe(true)
+    expect(prepDue(told, 'local_b', item(BOLT), NOW, seen(110, 119))).toBe(false)
+    // not this thread, not told the drafts follow, or asked for prep already: none
+    expect(prepDue(told, 'local_x', item(BOLT), NOW, seen(110, 120))).toBe(false)
+    expect(prepDue({ sid: 'local_b', sig, at: NOW }, 'local_b', item(BOLT), NOW, seen(110, 120))).toBe(false)
+    expect(prepDue({ sid: 'local_b', sig, at: NOW, prep: true }, 'local_b', item(BOLT), NOW, seen(110, 120))).toBe(false)
+    expect(prepDue(undefined, 'local_b', item(BOLT), NOW, seen(110, 120))).toBe(false)
+    // the drafts came (something new for the thread), or a new message did: none here
+    expect(prepDue(told, 'local_b', { ...item(BOLT), kind: 'ready', packageId: PKG }, NOW, seen(110, 120))).toBe(false)
+    expect(prepDue(told, 'local_b', { ...item(BOLT), messages: 3 }, NOW, seen(110, 120))).toBe(false)
   })
 
   test('a task alone: it goes once the bridge has seen it for 10 minutes; its due time is not asked', async () => {
     expect(item(CEDAR).messages).toBe(0)
-    expect(autoUpdateDue(item(CEDAR), NOW, seen(9))).toBe(false)
-    expect(autoUpdateDue(item(CEDAR), NOW, seen(10))).toBe(true)
+    expect(autoUpdateDue(seen(9), NOW)).toBe(false)
+    expect(autoUpdateDue(seen(10), NOW)).toBe(true)
   })
 
-  test('(0.7.9, Rob 10-29: "It seems like the threads aren\'t auto-updating anymore") when it goes, and what the row says meanwhile: the same waits, never a new one', async () => {
-    // Bolt: mail and no drafts, first seen 5 minutes ago: once the drafts are ready, by 120 minutes after its mail was first seen
-    expect(selfUpdateAt(item(BOLT), seen(5, 5))).toEqual({ at: NOW + 115 * MIN, drafts: true })
-    expect(selfUpdateText(selfUpdateAt(item(BOLT), seen(5, 5)), NOW)).toBe('updates itself when the drafts are ready (by 12:55 PM)')
-    // a second message seen since does not move the 120 minutes (they count from the oldest waiting one)
-    expect(selfUpdateAt(item(BOLT), seen(1, 60))).toEqual({ at: NOW + 60 * MIN, drafts: true })
-    // drafts ready (prepared, held by the person, or a package ready for them): 10 minutes after they were first seen
-    for (const it of [{ ...item(BOLT), open: pkg('prepared') }, { ...item(BOLT), open: pkg('held_by_me') }, item(ACME)]) {
-      expect(selfUpdateAt(it, seen(3, 30))).toEqual({ at: NOW + 7 * MIN, drafts: false })
-      expect(selfUpdateText(selfUpdateAt(it, seen(3, 30)), NOW)).toBe('updates itself at about 11:07 AM')
-    }
-    // drafts out of date are not ready: they wait as no drafts do
-    expect(selfUpdateAt({ ...item(BOLT), open: pkg('stale') }, seen(3, 30)).drafts).toBe(true)
-    // a task alone: 10 minutes after it was first seen
-    expect(selfUpdateAt(item(CEDAR), seen(2))).toEqual({ at: NOW + 8 * MIN, drafts: false })
-    // its time passed (the next sync sends it, or the thread is in use and it waits): shortly, drafts or none
-    expect(selfUpdateText({ at: NOW, drafts: false }, NOW)).toBe('updates itself shortly')
-    expect(selfUpdateText({ at: NOW - MIN, drafts: true }, NOW)).toBe('updates itself shortly')
-    // ⛔ the same moments `autoUpdateDue` goes at: due at the time said, not a minute before
-    for (const [it, s] of [[item(BOLT), seen(5, 5)], [item(ACME), seen(3)], [item(CEDAR), seen(2)]] as const) {
-      const when = selfUpdateAt(it, s).at
-      const later = { ...s, at: s.at - (when - NOW), mail: s.mail ? s.mail - (when - NOW) : 0 }
-      const sooner = { ...s, at: s.at - (when - NOW) + MIN, mail: s.mail ? s.mail - (when - NOW) + MIN : 0 }
-      expect(autoUpdateDue(it, NOW, later)).toBe(true)
-      expect(autoUpdateDue(it, NOW, sooner)).toBe(false)
+  test('(0.7.9, Rob 10-29: "It seems like the threads aren\'t auto-updating anymore") when it goes, and what the row says meanwhile: (0.7.14) 10 minutes after it was first seen, drafts or none', async () => {
+    // 10 minutes after it was first seen unchanged: Bolt's mail with no drafts, Acme's drafts, Cedar's task alike
+    expect(selfUpdateAt(seen(5, 5))).toBe(NOW + 5 * MIN)
+    expect(selfUpdateText(selfUpdateAt(seen(3, 30)), NOW)).toBe('updates itself at about 11:07 AM')
+    expect(selfUpdateAt(seen(2))).toBe(NOW + 8 * MIN)
+    // ⛔ never "when the drafts are ready" any more
+    expect(selfUpdateText(selfUpdateAt(seen(5, 5)), NOW)).toBe('updates itself at about 11:05 AM')
+    // its time passed (the next sync sends it, or the thread is in use and it waits): shortly
+    expect(selfUpdateText(NOW, NOW)).toBe('updates itself shortly')
+    expect(selfUpdateText(NOW - MIN, NOW)).toBe('updates itself shortly')
+    // ⛔ the same moment `autoUpdateDue` goes at: due at the time said, not a minute before
+    for (const s of [seen(5, 5), seen(3), seen(2)]) {
+      const when = selfUpdateAt(s)
+      const later = { ...s, at: s.at - (when - NOW) }
+      const sooner = { ...s, at: s.at - (when - NOW) + MIN }
+      expect(autoUpdateDue(later, NOW)).toBe(true)
+      expect(autoUpdateDue(sooner, NOW)).toBe(false)
     }
     // an Update row carries it as its second line, after what is waiting; a row that only suggests a thread by its title,
     // and a row that says Open or Start, never do
@@ -797,6 +809,24 @@ describe('(0.5.23, Rob 10-21: "change auto-starts to update the older thread") w
     const rec = recommend([linkedRecent], undefined, NOW)
     expect(rec.state).toBe('update')
     expect(autoUpdateTarget(rec, 'local_a')).toEqual({ sid: 'local_a' })
+  })
+
+  test('(0.7.14) a row that says the thread has it (current) is a target only for the follow-up that asks for prep', async () => {
+    const sig = signatureOf(item(BOLT))
+    const rec = recommend([linkedRecent], undefined, NOW, { sent: { sid: 'local_a', sig, at: NOW }, signature: sig })
+    expect(rec.state).toBe('current')
+    expect(autoUpdateTarget(rec, 'local_a')).toBeUndefined()
+    expect(autoUpdateTarget(rec, 'local_a', true)).toEqual({ sid: 'local_a' })
+    // never a thread that is not the linked one, nor a row that only suggests one
+    expect(autoUpdateTarget(rec, 'local_x', true)).toBeUndefined()
+    expect(autoUpdateTarget({ ...rec, target: { sid: 'local_a', title: 'Roof quote', suggested: true } }, 'local_a', true)).toBeUndefined()
+    expect(autoUpdateTarget({ state: 'start', reason: 'no thread yet', fresh: true }, 'local_a', true)).toBeUndefined()
+  })
+
+  test('(0.7.14) a long thread\'s paragraph: the transcript\'s size, kickoffs by the client\'s name, a card that waits (own_initiative), never a second one', async () => {
+    expect(FRESH_THREAD_BYTES).toBe(12 * 1_048_576)
+    const text = freshParagraph('Acme Roofing Pat', 20 * 1_048_576)
+    expect(text).toBe('This thread is long (its transcript is 20 MB), so a fresh thread would cost less from here on. Unless this thread already shows a card for one, call mm with "kickoffs Acme Roofing Pat" and propose that thread with start_session using exactly the title, prompt, background and cwd it gives, but with initiation "own_initiative", so the card waits here for my click. If kickoffs says it is pending, a card is up already: propose nothing. Started, the new thread gets this thread\'s hand-over and takes over the client\'s link and pin. Then carry on with the update above.')
   })
 
   test('no thread yet: none ((0.7.6) and nothing is started by itself: the row waits for the person\'s Start)', async () => {
@@ -1946,7 +1976,7 @@ describe('(0.7.3, internal queue) the kickoff and Update text for the internal q
   test('the Massmarket internal thread with a queue is updated by itself like a client\'s; its row has no clock', async () => {
     const it = itemOf([qt(1)], 3)
     expect(autoUpdatable(it, tue)).toBe(true)
-    expect(autoUpdateDue(it, tue, { sig: 'x', at: tue - AUTO_QUIET_MS, mail: 0 })).toBe(true)
+    expect(autoUpdateDue({ sig: 'x', at: tue - AUTO_QUIET_MS, mail: 0 }, tue)).toBe(true)
     // no thread yet: a Start, with the item's own name and (0.7.5) ` · no thread`, never a clock: it is never due
     const row = rowFor(it, recommend([], undefined, tue), tue, { needsYou: true })
     expect(row).toMatchObject({ title: '🟡 Massmarket AI · internal queue · no thread', waiting: '3 tickets in the internal queue', state: 'start' })
