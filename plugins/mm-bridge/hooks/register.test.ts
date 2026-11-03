@@ -9130,6 +9130,54 @@ describe('(0.7.4) a teammate\'s internal ticket owes an ETA: listed with its clo
   })
 })
 
+// (0.7.15) Rob, 2026-11-03: a released client's team post hands the build task to H9, "pinned in his bridge, with a clock
+// to assign a teammate". OW lists it as a commitment whose `commitment_basis` is `assign_by` and prints no label for it.
+describe('(0.7.15) a ticket on an `assign_by` clock: chipped, pinned and named as an owner to assign, never a delivery', () => {
+  const TID = '0000a551-0000-4000-8000-000000000001'
+  /** A ticket a team post handed the viewer to give an owner, its clock two hours ahead (1 PM ET). */
+  const ownerRow = (over: Record<string, unknown> = {}) => ({
+    ticket_id: TID, project_id: ACME, project_name: 'Acme Roofing — Pat', title: 'Build the booking page', due_at: new Date(NOW + 2 * HOUR).toISOString(),
+    due_source: 'commitment', assignee_email: ME, commitment_basis: 'assign_by', ...over,
+  })
+  const pmFeed = (rows = [ownerRow()]) => ({ member: ME, role: 'pm', mail: [], drafts: [], tickets: { due_today: rows } })
+
+  test('no thread yet: its chip asks for an owner, and its kickoff says to assign one in OW by the clock; nothing is sent', async ($, on) => {
+    const w = world(on, { feed: pmFeed(), threads: [] })
+    await tickOnce($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(chipTitles(w)).toEqual(['Acme Roofing: assign an owner'])
+    const prompt = String(w.minted().at(-1)?.args.prompt)
+    expect(prompt.startsWith(`[mm-link ${ACME}] Acme Roofing Pat (OW project ${ACME}) has 1 ticket(s) of mine that need an owner, the first by Mon, Oct 12 1 PM ET.`)).toBe(true)
+    expect(prompt).toContain('The time on each is when it needs an owner in OW, not when the work is due.')
+    expect(prompt).toContain(`1. Build the booking page (ticket ${TID}) · owner needed by Mon, Oct 12 1 PM ET`)
+    expect(prompt).not.toContain('committed task')
+    expect(sends(w)).toEqual([])
+  })
+
+  test('linked to this thread: pinned on the clock, named for an owner, and the pane lists it apart from committed dates', async ($, on) => {
+    const w = world(on, { feed: pmFeed(), threads: [], store: { 'mm.links': { [ACME]: SELF } } })
+    await mm($, '')
+    expect(w.threads.get(SELF)).toMatchObject({ title: '🔴 2h left · Acme Roofing · assign an owner', pinned: true })
+    const ui = await pane($)
+    const md = String((await ui.find({ type: 'Markdown' }))?.text)
+    expect(md).toContain('### Needs an owner: assign one in OW, or take it and give the ETA\n\n- Build the booking page (ticket 0000a551) · owner needed by ')
+    expect(md).not.toContain('Due (dates we committed to)')
+    expect(sends(w)).toEqual([])
+    await ui.unmount()
+  })
+
+  test('⛔ any other basis is the committed task it always was', async ($, on) => {
+    const w = world(on, { feed: pmFeed([ownerRow({ commitment_basis: 'eta_commit' })]), threads: [], store: { 'mm.links': { [ACME]: SELF } } })
+    await mm($, '')
+    expect(w.threads.get(SELF)).toMatchObject({ title: '🔴 2h left · Acme Roofing · task', pinned: true })
+    const ui = await pane($)
+    const md = String((await ui.find({ type: 'Markdown' }))?.text)
+    expect(md).toContain('### Due (dates we committed to)\n- Build the booking page')
+    expect(md).not.toContain('Needs an owner')
+    await ui.unmount()
+  })
+})
+
 // ======================================================================== 0.6.0: every client thread linked, the pane always open
 // Rob, 2026-10-25: "I think we need the side panel to be open on all bridge-connected threads... anytime a team member
 // is talking about a client, the bridge connects, even if there's more than one thread per client... It also gives them
@@ -10287,7 +10335,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.14', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.15', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10356,7 +10404,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.14', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.15', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10422,7 +10470,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.14', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.15', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
