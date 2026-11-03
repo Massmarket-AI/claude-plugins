@@ -114,6 +114,13 @@ export type FeedTicket = {
   eta_needed_by?: string | null
   /** (0.7.4, ETA asks) OW's words for it, `⏳ NO ETA — give one in Claude Code`: present only on such a row. Never shown as given (ETA_ASK_TEXT is). */
   eta_ask?: string | null
+  /**
+   * (0.7.15, owner asks) The ticket's `details.commitment_basis` as OW stores it (OW closeout.ts, 2026-10-28): what its
+   * `due_at` is. `assign_by` (ASSIGN_BY_BASIS) is H9's clock to give a ticket a team post handed him an owner, 12
+   * business hours after the post; "OW prints no label for it: the bridge does". Every other value, and none, is read
+   * as before.
+   */
+  commitment_basis?: string | null
 }
 
 /**
@@ -361,6 +368,13 @@ export type QueueItem = {
    */
   etaAsks?: EtaRef[]
   /**
+   * (0.7.15, owner asks) The viewer's own tickets on this client whose date is an `assign_by` clock: a team post handed
+   * them over to be given an owner by then, not delivered by then (Rob, 2026-11-03: H9 "gets the build task, pinned in
+   * his bridge, with a clock to assign a teammate"). Each is also counted in `tasks`, and is due at that clock. Absent
+   * when there are none, and on an item an older version stored: read `assignAsksOf(it)`.
+   */
+  assignAsks?: AssignRef[]
+  /**
    * (0.7.4, for the founder alone) His teammates' internal tickets on this client that are late: past their ETA, or past
    * when their ETA was needed with none given (Rob, 2026-10-27: "it holds them accountable to that"). Never counted in
    * `tasks` and never in the kickoff: the row and the pane show them. Read `matesOf(it)`.
@@ -381,11 +395,20 @@ export type QueueItem = {
 /** (0.7.4, ETA asks) A ticket of the viewer's that owes an ETA: its id (a lower-case uuid), its title, and when the ETA is needed by. */
 export type EtaRef = { id: string; title: string; neededBy: number }
 
+/** (0.7.15, owner asks) A ticket of the viewer's to give an owner: its id (a lower-case uuid), its title, and the `assign_by` clock. */
+export type AssignRef = { id: string; title: string; assignBy: number }
+
 /** (0.7.4) A teammate's late internal ticket, for the founder: whose (their name), its id, title and since when it is late; `eta` when no ETA was ever given. */
 export type MateRef = { by: string; id: string; title: string; lateSince: number; eta: boolean }
 
 /** (0.7.4, ETA asks) What a ticket that owes an ETA says, in OW's words (ETA_ASK_TEXT): the feed's own copy of it is never shown. */
 export const ETA_ASK_TEXT = '⏳ NO ETA — give one in Claude Code'
+
+/** (0.7.15, owner asks) OW's `details.commitment_basis` for H9's clock to give a handed-off ticket an owner. */
+export const ASSIGN_BY_BASIS = 'assign_by'
+
+/** (0.7.15, owner asks) What a ticket on an `assign_by` clock says, the bridge's own words: OW prints none. */
+export const ASSIGN_ASK_TEXT = 'Needs an owner: assign one in OW, or take it and give the ETA'
 
 /**
  * (0.5.28, internal asks; Rob, 2026-10-23: "there should be massmarket internal thread in bridge as well") Massmarket's
@@ -415,12 +438,19 @@ export const openAsks = (it: Pick<QueueItem, 'asks'>): AskRef[] => (Array.isArra
 /** (0.7.4, ETA asks) The viewer's tickets on a client that owe an ETA, as its item holds them: none on an item an older version stored. */
 export const etaAsksOf = (it: Pick<QueueItem, 'etaAsks'>): EtaRef[] => (Array.isArray(it.etaAsks) ? it.etaAsks : [])
 
+/** (0.7.15, owner asks) The viewer's tickets on a client to give an owner, as its item holds them: none on an item an older version stored. */
+export const assignAsksOf = (it: Pick<QueueItem, 'assignAsks'>): AssignRef[] => (Array.isArray(it.assignAsks) ? it.assignAsks : [])
+
 /** (0.7.4) The founder's teammates' late internal tickets on a client, as its item holds them. */
 export const matesOf = (it: Pick<QueueItem, 'mates'>): MateRef[] => (Array.isArray(it.mates) ? it.mates : [])
 
 /** (0.7.4, ETA asks) A client listed by tickets that owe an ETA and nothing else: no client message, no package, no ask. */
 export const etaOnly = (it: QueueItem): boolean =>
   etaAsksOf(it).length > 0 && etaAsksOf(it).length === it.tasks && it.messages === 0 && !it.packageId && !(it.open ?? null) && openAsks(it).length === 0
+
+/** (0.7.15, owner asks) A client listed by tickets to give an owner and nothing else: no client message, no package, no ask. */
+export const assignOnly = (it: QueueItem): boolean =>
+  assignAsksOf(it).length > 0 && assignAsksOf(it).length === it.tasks && it.messages === 0 && !it.packageId && !(it.open ?? null) && openAsks(it).length === 0
 
 /**
  * (0.7.4) A client listed by the founder's undated client tickets alone (`tickets.undated`): nothing dated, no client
@@ -432,10 +462,18 @@ export const undatedOnly = (it: QueueItem): boolean =>
 
 /**
  * (0.7.4) How many of a client's tasks have no date at all (R17's rows and `tickets.undated`), never more than the tasks
- * that owe no ETA: what the note, the row and the kickoff call `with no due date`, never `committed`.
+ * that owe no ETA (and, 0.7.15, need no owner): what the note, the row and the kickoff call `with no due date`, never
+ * `committed`.
  */
-export const undatedCount = (it: Pick<QueueItem, 'tasks' | 'etaAsks' | 'undatedTitles'>): number =>
-  Math.max(0, Math.min(Array.isArray(it.undatedTitles) ? it.undatedTitles.length : 0, it.tasks - etaAsksOf(it).length))
+export const undatedCount = (it: Pick<QueueItem, 'tasks' | 'etaAsks' | 'assignAsks' | 'undatedTitles'>): number =>
+  Math.max(0, Math.min(Array.isArray(it.undatedTitles) ? it.undatedTitles.length : 0, it.tasks - etaAsksOf(it).length - assignAsksOf(it).length))
+
+/**
+ * (0.7.15) How many of a client's tasks are dates we committed to: not one that owes an ETA, one to give an owner, or
+ * one with no date. What the note, the row and the kickoff call `committed` or `due`.
+ */
+export const committedCount = (it: Pick<QueueItem, 'tasks' | 'etaAsks' | 'assignAsks' | 'undatedTitles'>): number =>
+  it.tasks - etaAsksOf(it).length - assignAsksOf(it).length - undatedCount(it)
 
 /** (0.7.4) The skill a kickoff loads first: massmarket-internal-ops for an internal project's tickets, else the client's. */
 export const skillFor = (it: Pick<QueueItem, 'projectId'>): string =>
@@ -1461,24 +1499,31 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
       const due = etaAsk ? neededBy : undatedRow ? Infinity : ms(tk.due_at)
       // (a ticket nobody dated has no due time to cut by: it lists, undated)
       if (!(undatedRow && !etaAsk) && !inWindow(due)) continue
-      // (0.7.4, ETA asks) the ticket id goes into the kickoff, for its ETA to be recorded against: a lower-case uuid
-      if (etaAsk && !isUuid(tk.ticket_id)) continue
+      // (0.7.15, owner asks) a dated ticket on H9's `assign_by` clock: due then, to be given an owner by then (or taken
+      // and given an ETA), never delivered by then. OW prints no label for it: the row, the pane and the kickoff do.
+      const assignAsk = !undatedRow && tk.commitment_basis === ASSIGN_BY_BASIS
+      // (0.7.4, ETA asks) the ticket id goes into the kickoff, for its ETA to be recorded against: a lower-case uuid;
+      // (0.7.15) so does an owner ask's, for an ETA if the viewer takes it
+      if ((etaAsk || assignAsk) && !isUuid(tk.ticket_id)) continue
       if (typeof tk.ticket_id === 'string') counting.add(tk.ticket_id)
       const it = item(tk.project_id, tk.project_name)
       it.tasks += 1
       it.dueAt = Math.min(it.dueAt, due)
       // R1: a task acts by its start-by time when the feed gives one (OW's `start_by_at`, from the ticket's
-      // estimate), else by its due time
-      const startBy = ms(tk.start_by_at)
+      // estimate), else by its due time. (0.7.15) An owner ask acts by its clock: the estimate is the work's, not the
+      // assigning's.
+      const startBy = assignAsk ? NaN : ms(tk.start_by_at)
       act(it, Number.isFinite(startBy) && startBy < due ? startBy : due)
       if (undatedRow && !etaAsk) undated(it)
       if (k === 'undated') it.undatedTasks = (it.undatedTasks ?? 0) + 1
       if (etaAsk) it.etaAsks = [...etaAsksOf(it), { id: tk.ticket_id, title: cleanText(tk.title, MATE_TITLE_MAX) || 'Untitled ticket', neededBy }].sort((a, b) => a.neededBy - b.neededBy)
+      if (assignAsk) it.assignAsks = [...assignAsksOf(it), { id: tk.ticket_id, title: cleanText(tk.title, MATE_TITLE_MAX) || 'Untitled ticket', assignBy: due }].sort((a, b) => a.assignBy - b.assignBy)
       // (0.7.4, ETA asks) a ticket of a teammate's own on an internal project: the item is theirs to work as a client's
       if (!founder && internal.has(tk.project_id)) it.assigned = true
-      // the pane lists each task under what it is: a committed date, an ETA owed (`etaAsks`), or no date at all
+      // the pane lists each task under what it is: a committed date, an ETA owed (`etaAsks`), an owner to give
+      // (`assignAsks`), or no date at all
       if (undatedRow && !etaAsk) it.undatedTitles = [...(it.undatedTitles ?? []), tk.title]
-      else if (!etaAsk) it.taskTitles.push(tk.title)
+      else if (!etaAsk && !assignAsk) it.taskTitles.push(tk.title)
       seen(it, 'task', Number.isFinite(ms(tk.created_at)) ? ms(tk.created_at) : due)
     }
   }
@@ -1682,7 +1727,7 @@ export function clockText(t: number, now: number): string {
  * <teammate> decides` (R2). (0.5.28) A client listed by the viewer's internal asks alone: `internal ask`. (0.7.3) The
  * internal-ops item listed by the viewer's internal queue alone: `internal queue`. (0.7.4) A client whose only tasks owe
  * an ETA: `ETA needed`; for the founder, a client listed by a teammate's late tickets alone: `no ETA` while one of them
- * never had an ETA, else `past ETA`.
+ * never had an ETA, else `past ETA`. (0.7.15) A client whose only tasks are to give an owner: `assign an owner`.
  */
 const whatOf = (it: QueueItem): string =>
   it.open?.state === 'held_by_me'
@@ -1693,6 +1738,8 @@ const whatOf = (it: QueueItem): string =>
 function taskWhat(it: QueueItem): string {
   const asks = etaAsksOf(it).length
   if (asks > 0 && asks === it.tasks) return 'ETA needed'
+  const owners = assignAsksOf(it).length
+  if (owners > 0 && owners === it.tasks) return 'assign an owner'
   const mates = matesOf(it)
   if (it.tasks === 0 && mates.length) return mates.some(m => m.eta) ? 'no ETA' : 'past ETA'
   return 'task'
@@ -1935,10 +1982,14 @@ export function noteText(it: QueueItem, member: string): string {
   // (0.7.4, ETA asks) and the tickets that owe an ETA: which, so it can be recorded against each
   const eta = etaAsksOf(it).filter(a => isUuid(a?.id))
   const etas = eta.length ? ` ${eta.length} ticket${eta.length === 1 ? '' : 's'} of ${holderName(member)}'s need${eta.length === 1 ? 's' : ''} an ETA (ticket ${eta.map(a => a.id.slice(0, 8)).join(', ')}): record each as task-chip-flow §5.3 says, with task_fingerprint "ticket:<id>".` : ''
+  // (0.7.15, owner asks) and the tickets to give an owner: which, and that the date is for the owner, not the delivery
+  const own = assignAsksOf(it).filter(a => isUuid(a?.id))
+  const one = own.length === 1
+  const owners = own.length ? ` ${own.length} ticket${one ? '' : 's'} of ${holderName(member)}'s need${one ? 's' : ''} an owner (ticket ${own.map(a => a.id.slice(0, 8)).join(', ')}): a team post handed ${one ? 'it' : 'them'} over to be assigned in OW by ${one ? 'its due time' : 'their due times'}, which ${one ? 'is not a delivery date' : 'are not delivery dates'}. A ticket ${holderName(member)} takes instead needs an ETA, recorded as task-chip-flow §5.3 says, with task_fingerprint "ticket:<id>".` : ''
   // (0.7.4, for the founder) and his teammates' late internal tickets: whose, never his to do
   const late = lateSentence(matesOf(it))
   const mates = late ? ` ${late} (late); the side pane lists them. They are the teammate's to answer, not ${holderName(member)}'s.` : ''
-  return `${noteBody(it, member)}${more}${queue}${etas}${mates}`
+  return `${noteBody(it, member)}${more}${queue}${etas}${owners}${mates}`
 }
 
 /** (0.7.3, internal queue) The queued tickets an item lists, each checked again (an item an older version stored, or a store edited by hand, is read as data). */
@@ -1983,16 +2034,19 @@ export function queueMarkdown(it: Pick<QueueItem, 'queue'>): string {
 
 /**
  * (0.7.4) The tasks as the bridge note says them: `2 committed tasks due`, as it always has, unless some owe an ETA or
- * have no date: `1 committed task due, 1 ticket that needs an ETA, 3 tasks with no due date`.
+ * have no date: `1 committed task due, 1 ticket that needs an ETA, 3 tasks with no due date`. (0.7.15) And the tickets to
+ * give an owner: `1 ticket that needs an owner`.
  */
 function taskPhrase(it: QueueItem): string {
   const eta = etaAsksOf(it).length
+  const owners = assignAsksOf(it).length
   const nodate = undatedCount(it)
-  const dated = it.tasks - eta - nodate
-  if (!eta && !nodate) return `${it.tasks} committed task${it.tasks === 1 ? '' : 's'} due`
+  const dated = committedCount(it)
+  if (!eta && !owners && !nodate) return `${it.tasks} committed task${it.tasks === 1 ? '' : 's'} due`
   return [
     dated > 0 ? `${dated} committed task${dated === 1 ? '' : 's'} due` : '',
     eta > 0 ? `${eta} ticket${eta === 1 ? ' that needs' : 's that need'} an ETA` : '',
+    owners > 0 ? `${owners} ticket${owners === 1 ? ' that needs' : 's that need'} an owner` : '',
     nodate > 0 ? `${nodate} task${nodate === 1 ? '' : 's'} with no due date` : '',
   ].filter(Boolean).join(', ')
 }
@@ -2043,6 +2097,9 @@ export function clientMarkdown(it: QueueItem, now: number, pages: Readonly<Recor
   // (0.7.4, ETA asks) the viewer's tickets that owe an ETA, each with when it is needed by
   const eta = etaMarkdown(it, now)
   if (eta) out.push('', eta)
+  // (0.7.15, owner asks) the viewer's tickets to give an owner, each with its clock
+  const owners = assignMarkdown(it, now)
+  if (owners) out.push('', owners)
   // (0.7.4) the tasks nobody dated, apart from the committed ones
   const undatedTitles = Array.isArray(it.undatedTitles) ? it.undatedTitles : []
   if (undatedTitles.length) {
@@ -2070,6 +2127,14 @@ export function etaMarkdown(it: QueueItem, now: number): string {
   if (!asks.length) return ''
   const lines = asks.map(a => `- ${cleanText(a.title, MATE_TITLE_MAX)} (ticket ${a.id.slice(0, 8)}) · ${a.neededBy < now ? `ETA was needed by ${clockText(a.neededBy, now)}, ${lateText(a.neededBy, now)}` : `ETA needed by ${clockText(a.neededBy, now)}`}`)
   return [`### ${ETA_ASK_TEXT}`, '', ...lines].join('\n')
+}
+
+/** (0.7.15, owner asks) The pane's part for the viewer's tickets to give an owner: what to do, then each with its clock. '' with none. */
+export function assignMarkdown(it: QueueItem, now: number): string {
+  const asks = assignAsksOf(it).filter(a => a && isUuid(a.id) && Number.isFinite(a.assignBy))
+  if (!asks.length) return ''
+  const lines = asks.map(a => `- ${cleanText(a.title, MATE_TITLE_MAX)} (ticket ${a.id.slice(0, 8)}) · ${a.assignBy < now ? `owner was needed by ${clockText(a.assignBy, now)}, ${lateText(a.assignBy, now)}` : `owner needed by ${clockText(a.assignBy, now)}`}`)
+  return [`### ${ASSIGN_ASK_TEXT}`, '', ...lines].join('\n')
 }
 
 /** (0.7.4, for the founder) The pane's part for his teammates' late internal tickets on the client. '' with none. */

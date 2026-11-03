@@ -19,7 +19,7 @@
 import type { MmRow } from '../types'
 
 import {
-  MAY_NEED_OK, NOBODY, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
+  MAY_NEED_OK, NOBODY, assignAsksOf, assignOnly, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, committedCount, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
   pinsNow, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
 } from './queue'
 import type { AskRef, FeedThread, QueueItem } from './queue'
@@ -719,13 +719,15 @@ export function waitingText(it: QueueItem): string {
   // for the founder, a package that waits for his OK: that first, and who sends it once he has given it; one a
   // teammate decides on, before its reply is due, says so instead (R2)
   const ok = it.kind === 'ok' ? (it.theirs ? decidesText(it.theirs) : `needs your OK · ${(it.ok ?? null)?.sends ?? NOBODY} sends`) : ''
-  // (0.7.4) the tasks as what they are: committed and due, owing an ETA, or with no date at all
+  // (0.7.4) the tasks as what they are: committed and due, owing an ETA, (0.7.15) to give an owner, or with no date at all
   const eta = etaAsksOf(it).length
+  const owners = assignAsksOf(it).length
   const nodate = undatedCount(it)
-  const dated = it.tasks - eta - nodate
+  const dated = committedCount(it)
   const tasks = [
     dated > 0 ? `${dated} task${dated > 1 ? 's' : ''} due` : '',
     eta > 0 ? `${eta} need${eta > 1 ? '' : 's'} an ETA` : '',
+    owners > 0 ? `${owners} need${owners > 1 ? '' : 's'} an owner` : '',
     nodate > 0 ? `${nodate} task${nodate > 1 ? 's' : ''} with no date` : '',
   ]
   const parts = [ok, it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', ...tasks, drafts]
@@ -759,13 +761,15 @@ export function rowExtra(it: QueueItem): string {
   // one client message where the first line names no reply or draft for it (two or more: its `N new`)
   const forMail = it.kind === 'reply' || it.kind === 'ready' || it.kind === 'ok' || o?.state === 'held_by_me'
   if (it.messages === 1 && !forMail) parts.push('1 message waiting')
-  // the tasks as what they are, unless the first line's `task` or `ETA needed` is the one there is
+  // the tasks as what they are, unless the first line's `task`, `ETA needed` or `assign an owner` is the one there is
   const eta = etaAsksOf(it).length
+  const owners = assignAsksOf(it).length
   const nodate = undatedCount(it)
-  const dated = it.tasks - eta - nodate
+  const dated = committedCount(it)
   if (!(it.kind === 'task' && it.tasks === 1)) {
     if (dated > 0) parts.push(`${dated} task${dated > 1 ? 's' : ''} due`)
     if (eta > 0) parts.push(`${eta} need${eta > 1 ? '' : 's'} an ETA`)
+    if (owners > 0) parts.push(`${owners} need${owners > 1 ? '' : 's'} an owner`)
     if (nodate > 0) parts.push(`${nodate} task${nodate > 1 ? 's' : ''} with no date`)
   }
   // the drafts, where the first line does not say them (`your draft`, `reply ready`, `with <Name>`)
@@ -793,6 +797,22 @@ export function etaParagraph(it: QueueItem): string {
   const lines = asks.map((a, i) => `${i + 1}. ${cleanText(a.title, 120) || 'Untitled ticket'} (ticket ${a.id}) · ETA needed by ${dueText(a.neededBy)}`)
   return [
     `My tickets with no ETA yet (⏳ NO ETA). For each, ask me when it will be delivered, then record it as task-chip-flow §5.3 says: POST /api/ext/eta-commit with task_fingerprint "ticket:<its id>". Do not draft a client email for these.`,
+    ...lines,
+  ].join('\n')
+}
+
+/**
+ * (0.7.15, owner asks; Rob, 2026-11-03: H9 "gets the build task, pinned in his bridge, with a clock to assign a
+ * teammate") The paragraph a kickoff and an Update carry for the viewer's tickets on an `assign_by` clock: each is to be
+ * given an owner in OW by then, never delivered by then; one the viewer takes instead gets an ETA (task-chip-flow §5.3).
+ * '' with none. ⛔ Every id is checked again: it goes into the call Claude makes.
+ */
+export function assignParagraph(it: QueueItem): string {
+  const asks = assignAsksOf(it).filter(a => a && isUuid(a.id) && Number.isFinite(a.assignBy))
+  if (!asks.length) return ''
+  const lines = asks.map((a, i) => `${i + 1}. ${cleanText(a.title, 120) || 'Untitled ticket'} (ticket ${a.id}) · owner needed by ${dueText(a.assignBy)}`)
+  return [
+    `My tickets that need an owner: a team post handed them to me to assign. The time on each is when it needs an owner in OW, not when the work is due. For each, ask me who will own it, and I assign them in OW. If I take one myself, ask me when it will be delivered and record it as task-chip-flow §5.3 says: POST /api/ext/eta-commit with task_fingerprint "ticket:<its id>". Do not draft a client email for these.`,
     ...lines,
   ].join('\n')
 }
@@ -919,11 +939,14 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
                     : etaOnly(it)
                       ? // (0.7.4, ETA asks) listed by tickets that owe an ETA alone: a first line that names them, then their paragraph
                         `[mm-link ${id}] ${who} has ${etaAsksOf(it).length} ticket(s) of mine that need an ETA${due ? `, the first needed by ${due}` : ''}. Load ${skillFor(it)} first, then ask me for the ETA of each ticket below and record it. Send nothing else without my go.`
-                      : tasksLead(it, who, tasksDue)
+                      : assignOnly(it)
+                        ? // (0.7.15, owner asks) listed by tickets to give an owner alone: a first line that names them, then their paragraph
+                          `[mm-link ${id}] ${who} has ${assignAsksOf(it).length} ticket(s) of mine that need an owner${due ? `, the first by ${due}` : ''}. Load ${skillFor(it)} first, then ask me who should own each ticket below and wait for me. Send nothing without my go.`
+                        : tasksLead(it, who, tasksDue)
   // (0.5.28, internal asks) once per open ask, after the body and before any hand-over: `askParagraph`, verbatim;
-  // (0.7.4, ETA asks) then the tickets that owe an ETA (`etaParagraph`); (0.7.3, internal queue) then the queue, in rank
-  // order (`queueParagraph`)
-  const body = [lead, ...asks.map(askParagraph), etaParagraph(it), queue].filter(Boolean).join('\n\n')
+  // (0.7.4, ETA asks) then the tickets that owe an ETA (`etaParagraph`); (0.7.15, owner asks) then the tickets to give an
+  // owner (`assignParagraph`); (0.7.3, internal queue) then the queue, in rank order (`queueParagraph`)
+  const body = [lead, ...asks.map(askParagraph), etaParagraph(it), assignParagraph(it), queue].filter(Boolean).join('\n\n')
   const news = `New since this thread last worked on this client: ${waitingText(it)}.`
   // ⛔ (0.5.11, review of PR #15, F4) sent by itself: the marker first, at the very start of the text, as every hook
   // that tells the person's time from the bridge's reads it (a time-tracking hook too old to read the app's own
@@ -939,13 +962,19 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
 /**
  * (0.7.4) The kickoff's first line for a client listed by its tasks: the committed ones with their due time, as it always
  * was, then the tickets nobody dated, never called committed (Rob, 2026-10-27, of those: "It doesn't necessarily create
- * the need for a new reply").
+ * the need for a new reply"). (0.7.15) Tickets that need an owner have their own paragraph and are never called
+ * committed: with no committed or undated task beside them, the first line names them (and any that owe an ETA).
  */
 function tasksLead(it: QueueItem, who: string, tasksDue: string): string {
   const id = it.projectId
   const nodate = undatedCount(it)
-  const dated = it.tasks - etaAsksOf(it).length - nodate
+  const dated = committedCount(it)
   const open = `${nodate} open ticket(s) of mine with no due date`
+  const owners = assignAsksOf(it).length
+  if (!nodate && dated <= 0 && owners > 0) {
+    const eta = etaAsksOf(it).length
+    return `[mm-link ${id}] ${who} has ${owners} ticket(s) of mine that need an owner${eta ? ` and ${eta} that need an ETA` : ''}${tasksDue ? `, the first${tasksDue}` : ''}. Load ${skillFor(it)} first, then go through each ticket below and wait for me. Send nothing without my go.`
+  }
   if (!nodate) return `[mm-link ${id}] ${who} has ${dated} committed task(s)${tasksDue}. Load ${skillFor(it)} first, then show me what is due and wait for me. Send nothing without my go.`
   if (dated <= 0) return `[mm-link ${id}] ${who} has ${open}. Load ${skillFor(it)} first, then show me what is open and wait for me. Send nothing without my go.`
   return `[mm-link ${id}] ${who} has ${dated} committed task(s)${tasksDue}, and ${open}. Load ${skillFor(it)} first, then show me what is due and wait for me. Send nothing without my go.`

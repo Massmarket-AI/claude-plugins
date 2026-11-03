@@ -5,7 +5,7 @@ import type { MmBand, MmFolds, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPe
 import {
   INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients, pinsNow,
   peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
-  asksMarkdown, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText, undatedOnly,
+  asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText, undatedOnly,
   hasDue, clientActivity, isRecent, mayStart,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
@@ -3037,10 +3037,11 @@ function partSig(it: QueueItem): string {
   const withAsks = asks.length ? `${base}:asks:${asks.map(a => `${a.id}/${a.hasDraft ? 1 : 0}`).join(',')}` : base
   const queued = queuedOf(it)
   const withQueue = queued.length ? `${withAsks}:queue:${queueTotal(it)}:${queued.map(q => `${q?.id}/${q?.tier}/${q?.reason}`).join(',')}` : withAsks
-  // (0.7.4) the tickets that owe an ETA, and (for the founder) his teammates' late ones
+  // (0.7.4) the tickets that owe an ETA, (0.7.15) the tickets to give an owner, and (for the founder) his teammates' late ones
   const eta = etaAsksOf(it)
+  const owners = assignAsksOf(it)
   const mates = matesOf(it)
-  return `${withQueue}${eta.length ? `:eta:${eta.map(a => `${a?.id}/${a?.neededBy}`).join(',')}` : ''}${mates.length ? `:mates:${mates.map(m => `${m?.id}/${m?.lateSince}`).join(',')}` : ''}`
+  return `${withQueue}${eta.length ? `:eta:${eta.map(a => `${a?.id}/${a?.neededBy}`).join(',')}` : ''}${owners.length ? `:owner:${owners.map(a => `${a?.id}/${a?.assignBy}`).join(',')}` : ''}${mates.length ? `:mates:${mates.map(m => `${m?.id}/${m?.lateSince}`).join(',')}` : ''}`
 }
 
 /** The client part as the state holds it; a session an older version left its view in held plain text there. */
@@ -3689,10 +3690,10 @@ function startTitle(it: QueueItem): string {
  * internal asks) A client listed by the viewer's internal asks alone: `<client>: reply to the internal ask`. (0.7.3) The
  * internal-ops item listed by the viewer's internal queue alone: `<client>: work the internal queue`. (0.7.4) Listed by
  * tickets that owe an ETA alone: `<client>: give your ETA`; a teammate's own internal tasks: `<client>: work the internal
- * task`, never a reply.
+ * task`, never a reply. (0.7.15) Listed by tickets to give an owner alone: `<client>: assign an owner`.
  */
 function startWhat(it: QueueItem): string {
-  return `${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : it.kind === 'ask' ? 'reply to the internal ask' : etaOnly(it) ? 'give your ETA' : it.kind === 'queue' ? 'work the internal queue' : it.internal === true && it.messages === 0 ? 'work the internal task' : 'reply to the client'}`
+  return `${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : it.kind === 'ask' ? 'reply to the internal ask' : etaOnly(it) ? 'give your ETA' : assignOnly(it) ? 'assign an owner' : it.kind === 'queue' ? 'work the internal queue' : it.internal === true && it.messages === 0 ? 'work the internal task' : 'reply to the client'}`
 }
 
 /** 0.5.1's line under that title. */
