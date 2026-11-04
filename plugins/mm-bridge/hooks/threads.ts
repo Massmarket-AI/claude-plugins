@@ -1142,12 +1142,14 @@ export const KICKOFF_PENDING_MS = 10 * 60_000
  * (0.5.25) What the mm tool's `kickoffs` answers: how to use what follows, the threads to start (one JSON line), the
  * clients it skipped and why, and how many more need a thread after START_ALL_MAX. (0.7.10) And the clients held back:
  * `pending`, whose kickoff went out in the last KICKOFF_PENDING_MS, and `restore`, whose own thread is archived.
+ * (0.7.20) And `here`: each client the sync `kickoffs` ran first found a thread of its own in this profile for and linked
+ * it to, with that thread's name.
  */
 export function kickoffsAnswer(
   kicks: readonly Kickoff[],
   skipped: ReadonlyArray<{ client: string; why: string }>,
   left: number,
-  held: { pending?: readonly string[]; restore?: readonly string[] } = {},
+  held: { pending?: readonly string[]; restore?: readonly string[]; here?: readonly string[] } = {},
 ): string {
   const out: string[] = []
   if (kicks.length) {
@@ -1167,6 +1169,14 @@ export function kickoffsAnswer(
   if (restore.length) {
     out.push(
       `Own thread archived: ${restore.join(', ')}. Never start a new thread for ${restore.length === 1 ? 'it' : 'them'}: bring ${restore.length === 1 ? 'it' : 'each'} back with mm ${restore.map(c => `"restore ${c}"`).join(', ')} (the app may ask the person first).`,
+    )
+  }
+  // (0.7.20, 11-04: Agile Process Solutions and Legacy Law were handed out with an open thread of their own here) a client
+  // whose thread here the sync before the hand-out found and linked: named with its thread, never started again
+  const here = held.here ?? []
+  if (here.length) {
+    out.push(
+      `Already has a thread in this profile, now linked: ${here.join(', ')}. Never start a new thread for ${here.length === 1 ? 'it' : 'them'}: its work goes on in that thread.`,
     )
   }
   if (left > 0) out.push(`${left} more need${left === 1 ? 's' : ''} a thread: once these have started, call mm with "kickoffs" again.`)
