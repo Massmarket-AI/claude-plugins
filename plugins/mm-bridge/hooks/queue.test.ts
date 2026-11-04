@@ -8,9 +8,11 @@ import {
   INTERNAL_OPS, INTERNAL_PROJECTS, askLine, asksMarkdown, feedClients, heldInternal, internalAskThread, openAsks,
   QUEUE_SHOWN_MAX, internalQueueThread, ownQueueRows, queueMarkdown, queueTotal, queuedOf,
   ETA_ASK_TEXT, INTERNAL_DISCORD, etaAsksOf, etaOnly, lateSentence, matesOf, queueHome, undatedCount, undatedOnly, whoseLate,
+  ASSIGN_ASK_TEXT, ASSIGN_BY_BASIS, assignAsksOf, assignMarkdown, assignOnly, committedCount,
+  FOUNDER_CHECK_AHEAD_MS, PM_CHECK_AHEAD_MS, STILL_NEEDS_YOU, checkAheadOf, checkNow, ownActBy, pinTitle, pinsFor, watchMarkdown, watchOf,
 } from './queue'
 import type { Feed, FeedAsk, FeedQueueTicket, FeedTicket, QueueItem } from './queue'
-import { autoUpdatable, etaParagraph, handoverText, kickoffText, signatureOf, waitingText } from './threads'
+import { assignParagraph, autoUpdatable, etaParagraph, handoverText, kickoffText, rowExtra, signatureOf, waitingText } from './threads'
 
 // Most tests here run on clocks in early October 2026, before the list's floor (LIST_FLOOR_MS, Wed Oct 14 12:00 AM
 // ET). On such a clock the list still reaches 3 business days back (WINDOW_BACK_MS), as it did when they were
@@ -2641,5 +2643,279 @@ describe('0.7.12: when a late item was due, in New York time, and never on a wee
     // on Oct 30: due Oct 13 is in no list (the floor decides)
     const oct13 = buildLists(feed({ tickets: { overdue: [committed(P1, 'Kin Properties', at('2026-10-13 15:00'))] } }), et('2026-10-30 10:00'))
     expect([oct13.queue, oct13.teammate, oct13.checking]).toEqual([[], [], []])
+  })
+})
+
+// (0.7.15) Rob, 2026-11-03: a released client's team post hands the build task to H9, "pinned in his bridge, with a clock
+// to assign a teammate". OW lists it as a commitment whose `commitment_basis` is `assign_by` (12 business hours after the
+// post) and "prints no label for it: the bridge does". Until 0.7.15 the bridge showed it as a plain committed task.
+describe('(0.7.15) an `assign_by` commitment asks for an owner by its clock, never a delivery; every other commitment is as before', () => {
+  /** Wed 2026-10-28 3 PM in New York. */
+  const wed = Date.parse('2026-10-28T19:00:00Z')
+  const H9 = 'has9@example.com'
+  const MATE = 'builder-b@example.com'
+  const CLIENT = 'aaaaaaaa-0000-4000-8000-000000000000'
+  const CLOCK = Date.parse('2026-10-28T21:00:00Z')
+  const tid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-000000000000`
+  /** A ticket a team post handed H9, as OW's closeout feed lists it: a commitment on his `assign_by` clock (here 5 PM ET). */
+  const handed = (n: number, over: Partial<FeedTicket> = {}): FeedTicket => ({
+    ticket_id: tid(n), project_id: CLIENT, project_name: 'Acme Legal', title: `Build ${n}`, due_at: '2026-10-28T21:00:00Z', due_source: 'commitment',
+    assignee_email: H9, commitment_basis: ASSIGN_BY_BASIS, ...over,
+  })
+  const h9Feed = (tickets: Feed['tickets'], over: Partial<Feed> = {}): Feed => ({ member: H9, role: 'pm', tickets, ...over })
+  const one = (f: Feed): QueueItem => {
+    const [it] = buildQueue(f, wed)
+    if (!it) throw new Error('no item')
+    return it
+  }
+
+  test('its row, name, pane, note and kickoff ask H9 to assign an owner in OW by the clock (or take it and give the ETA); it pins on that clock', async () => {
+    const it = one(h9Feed({ due_soon: [handed(1)] }))
+    expect(it).toMatchObject({ projectId: CLIENT, kind: 'task', tasks: 1, dueAt: CLOCK, taskTitles: [] })
+    expect(assignAsksOf(it)).toEqual([{ id: tid(1), title: 'Build 1', assignBy: CLOCK }])
+    expect(assignOnly(it)).toBe(true)
+    expect(etaAsksOf(it)).toEqual([])
+    expect(committedCount(it)).toBe(0)
+    expect(pinsNow(it, wed)).toBe(true)
+    expect(autoUpdatable(it, wed)).toBe(true)
+    // the thread's name and the row: what is asked, never `task`
+    expect(titleFor(it, wed)).toBe('🔴 2h left · Acme Legal · assign an owner')
+    expect(rowLine(it, wed)).toBe('🔴 Acme Legal · assign an owner · 2h left')
+    expect(waitingText(it)).toBe('1 needs an owner')
+    expect(rowExtra(it)).toBe('')
+    // the pane: what to do, then the ticket and its clock; no `Due (dates we committed to)`, no word of reply drafts
+    const md = clientMarkdown(it, wed)
+    expect(md).toBe(['## Acme Legal', '🔴 2h left · Acme Legal · assign an owner', '', `### ${ASSIGN_ASK_TEXT}`, '', `- Build 1 (ticket 00000001) · owner needed by ${clockText(CLOCK, wed)}`].join('\n'))
+    expect(md).not.toContain('committed')
+    // the kickoff: an owner by the clock, assigned in OW; an ETA through §5.3 only for one taken
+    expect(kickoffText(it)).toBe(
+      [
+        `[mm-link ${CLIENT}] Acme Legal (OW project ${CLIENT}) has 1 ticket(s) of mine that need an owner, the first by Wed, Oct 28 5 PM ET. Load the client's project skill first, then ask me who should own each ticket below and wait for me. Send nothing without my go.`,
+        '',
+        'My tickets that need an owner: a team post handed them to me to assign. The time on each is when it needs an owner in OW, not when the work is due. For each, ask me who will own it, and I assign them in OW. If I take one myself, ask me when it will be delivered and record it as task-chip-flow §5.3 says: POST /api/ext/eta-commit with task_fingerprint "ticket:<its id>". Do not draft a client email for these.',
+        `1. Build 1 (ticket ${tid(1)}) · owner needed by Wed, Oct 28 5 PM ET`,
+      ].join('\n'),
+    )
+    expect(kickoffText(it)).not.toContain('committed task')
+    expect(noteText(it, H9)).toBe(
+      `0 client messages waiting on our reply and 1 ticket that needs an owner; no client message is waiting, so there is no reply to prepare. 1 ticket of Has9's needs an owner (ticket 00000001): a team post handed it over to be assigned in OW by its due time, which is not a delivery date. A ticket Has9 takes instead needs an ETA, recorded as task-chip-flow §5.3 says, with task_fingerprint "ticket:<id>".`,
+    )
+  })
+
+  test('late: past its clock it is late as any task is, and the pane says when the owner was needed', async () => {
+    const it = one(h9Feed({ overdue: [handed(1, { due_at: '2026-10-28T16:00:00Z' })] }))
+    expect(titleFor(it, wed)).toBe('🔴 3h late, due 12 PM · Acme Legal · assign an owner')
+    expect(pinsNow(it, wed)).toBe(true)
+    expect(assignMarkdown(it, wed)).toBe([`### ${ASSIGN_ASK_TEXT}`, '', `- Build 1 (ticket 00000001) · owner was needed by ${clockText(Date.parse('2026-10-28T16:00:00Z'), wed)}, 3h late`].join('\n'))
+  })
+
+  test('it acts by its clock, not by the start-by time of the work\'s estimate; a committed task still acts by its start-by', async () => {
+    const startBy = '2026-10-28T13:00:00Z'
+    const owner = one(h9Feed({ due_soon: [handed(1, { due_at: '2026-11-03T21:00:00Z', start_by_at: startBy })] }))
+    expect(owner.actBy ?? owner.dueAt).toBe(Date.parse('2026-11-03T21:00:00Z'))
+    const plain = one(h9Feed({ due_soon: [handed(1, { due_at: '2026-11-03T21:00:00Z', start_by_at: startBy, commitment_basis: 'eta_commit' })] }))
+    expect(plain.actBy).toBe(Date.parse(startBy))
+  })
+
+  test('every other commitment is as before: any other basis, or none, is a committed task', async () => {
+    for (const basis of ['eta_commit', 'client_eta', 'eta_owed', 'Assign_By', null, undefined]) {
+      const it = one(h9Feed({ due_soon: [handed(1, { commitment_basis: basis })] }))
+      expect(it).toMatchObject({ kind: 'task', tasks: 1, taskTitles: ['Build 1'] })
+      expect(assignAsksOf(it)).toEqual([])
+      expect(assignOnly(it)).toBe(false)
+      expect(titleFor(it, wed)).toBe('🔴 2h left · Acme Legal · task')
+      expect(waitingText(it)).toBe('1 task due')
+      expect(assignMarkdown(it, wed)).toBe('')
+      expect(assignParagraph(it)).toBe('')
+      expect(kickoffText(it)).toBe(`[mm-link ${CLIENT}] Acme Legal (OW project ${CLIENT}) has 1 committed task(s) due Wed, Oct 28 5 PM ET. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`)
+      expect(clientMarkdown(it, wed)).toContain('### Due (dates we committed to)\n- Build 1')
+    }
+  })
+
+  test('beside other tasks: each is said as what it is, and the owner ask is never counted as committed', async () => {
+    const etaRow: FeedTicket = { ...handed(3), due_at: null, due_source: null, commitment_basis: null, eta_needed_by: '2026-10-29T15:00:00Z', eta_ask: ETA_ASK_TEXT, title: 'Quote 3' }
+    const mixed = one(h9Feed({ due_soon: [handed(1), handed(2, { due_at: '2026-10-29T21:00:00Z', commitment_basis: 'eta_commit', title: 'Page 2' }), etaRow] }))
+    expect(mixed).toMatchObject({ tasks: 3, taskTitles: ['Page 2'] })
+    expect(committedCount(mixed)).toBe(1)
+    expect(waitingText(mixed)).toBe('1 task due, 1 needs an ETA, 1 needs an owner')
+    expect(rowExtra(mixed)).toBe('1 task due · 1 needs an ETA · 1 needs an owner')
+    expect(titleFor(mixed, wed)).toBe('🔴 2h left · Acme Legal · task')
+    const md = clientMarkdown(mixed, wed)
+    expect(md).toContain('### Due (dates we committed to)\n- Page 2')
+    expect(md).toContain(`### ${ASSIGN_ASK_TEXT}\n\n- Build 1 (ticket 00000001) · owner needed by `)
+    expect(md).toContain(`### ${ETA_ASK_TEXT}\n\n- Quote 3 (ticket 00000003) · ETA needed by `)
+    const kick = kickoffText(mixed)
+    expect(kick.startsWith(`[mm-link ${CLIENT}] Acme Legal (OW project ${CLIENT}) has 1 committed task(s) due Wed, Oct 28 5 PM ET.`)).toBe(true)
+    expect(kick).toContain(`\n\nMy tickets with no ETA yet (⏳ NO ETA).`)
+    expect(kick).toContain(`\n\nMy tickets that need an owner: a team post handed them to me to assign.`)
+    expect(kick).toContain(`1. Build 1 (ticket ${tid(1)}) · owner needed by Wed, Oct 28 5 PM ET`)
+    expect(noteText(mixed, H9).startsWith('0 client messages waiting on our reply and 1 committed task due, 1 ticket that needs an ETA, 1 ticket that needs an owner;')).toBe(true)
+    // an owner ask and an ETA ask alone: the first line names both, never `0 committed task(s)`
+    const asks = one(h9Feed({ due_soon: [handed(1), etaRow] }))
+    expect(assignOnly(asks)).toBe(false)
+    expect(etaOnly(asks)).toBe(false)
+    expect(kickoffText(asks).split('\n')[0]).toBe(`[mm-link ${CLIENT}] Acme Legal (OW project ${CLIENT}) has 1 ticket(s) of mine that need an owner and 1 that need an ETA, the first due Wed, Oct 28 5 PM ET. Load the client's project skill first, then go through each ticket below and wait for me. Send nothing without my go.`)
+    // with a client message waiting, the reply leads and the owner ask follows in its own paragraph
+    const waiting = { ...mail(CLIENT, 'Acme Legal', -2, H9), received_at: new Date(wed - 2 * 3_600_000).toISOString(), reply_due_at: new Date(wed + 22 * 3_600_000).toISOString() }
+    const withMail = one(h9Feed({ due_soon: [handed(1)] }, { mail: [waiting] }))
+    expect(waitingText(withMail)).toBe('1 message waiting, 1 needs an owner')
+    expect(kickoffText(withMail)).toContain('needs a reply: 1 client message(s) waiting')
+    expect(kickoffText(withMail)).toContain('\n\nMy tickets that need an owner:')
+  })
+
+  test('⛔ not one of the viewer\'s: a teammate\'s, a malformed id, or a row with no date; and the founder never sees H9\'s', async () => {
+    // a teammate's ticket on H9's feed: theirs, as before
+    expect(buildQueue(h9Feed({ due_soon: [handed(1, { assignee_email: MATE })] }), wed)).toEqual([])
+    // the ticket id goes into the kickoff: a ticket whose id is not a uuid is dropped, as an ETA ask's is
+    expect(buildQueue(h9Feed({ due_soon: [handed(1, { ticket_id: 'not-a-uuid' })] }), wed)).toEqual([])
+    // a row with no due time is no owner ask (there is no clock): undated, as before
+    const undatedRow = one(h9Feed({ due_soon: [handed(1, { due_at: null, due_source: null })] }))
+    expect(assignAsksOf(undatedRow)).toEqual([])
+    expect(undatedRow.undatedTitles).toEqual(['Build 1'])
+    // on the founder's feed H9's client ticket is a teammate's, never an internal one: nothing lists
+    expect(buildQueue({ member: 'rob@massmarket.ai', role: 'founder', tickets: { overdue: [handed(1, { due_at: '2026-10-28T16:00:00Z' })] } }, wed)).toEqual([])
+  })
+
+  test('the signature changes when an owner ask comes or goes, so the thread is updated for it', async () => {
+    const plain = one(h9Feed({ due_soon: [handed(2, { commitment_basis: 'eta_commit', title: 'Page 2' })] }))
+    const withOwner = one(h9Feed({ due_soon: [handed(1), handed(2, { commitment_basis: 'eta_commit', title: 'Page 2' })] }))
+    expect(signatureOf(withOwner)).not.toBe(signatureOf(plain))
+    expect(signatureOf(withOwner)).toContain(`1. Build 1 (ticket ${tid(1)}) · owner needed by`)
+  })
+})
+
+describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you") a teammate\'s part pins only once the founder or the PM should check on them', () => {
+  /** Wed 2026-10-28 3 PM in New York. */
+  const wed = Date.parse('2026-10-28T19:00:00Z')
+  const H = 3_600_000
+  const at = (h: number) => new Date(wed + h * H).toISOString()
+  const ROB = 'rob@massmarket.ai'
+  const H9 = 'has9@example.com'
+  const ASIF = 'asif@example.com'
+  const CLIENT = 'bbbbbbbb-0000-4000-8000-000000000718'
+  const PKG = 'cccccccc-0000-4000-8000-000000000718'
+  const tid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-000000000718`
+  /** A package flagged for the founder's OK that Asif sends (R2), its reply due in `dueH` hours. */
+  const flagged = (dueH: number) => ({ package_id: PKG, project_id: CLIENT, project_name: 'Acme Legal', status: 'prepared', covers_through: at(-2), due_at: at(dueH), drafts_ready: 2, flagged_for_rob: true, project_owner_email: ASIF })
+  /** A ticket of `who`'s on the client, committed, due in `dueH` hours. */
+  const ticket = (n: number, who: string, dueH: number, over: Partial<FeedTicket> = {}): FeedTicket => ({
+    ticket_id: tid(n), project_id: CLIENT, project_name: 'Acme Legal', title: `Build ${n}`, due_at: at(dueH), due_source: 'commitment', assignee_email: who, ...over,
+  })
+  const listed = (f: Feed, now = wed): QueueItem => {
+    const l = buildLists(f, now)
+    const it = [...l.queue, ...l.teammate][0]
+    if (!it) throw new Error('nothing listed')
+    return it
+  }
+
+  test('the numbers: 5 business hours for the PM, 2 for the founder, none for anyone else', async () => {
+    expect(PM_CHECK_AHEAD_MS).toBe(5 * H)
+    expect(FOUNDER_CHECK_AHEAD_MS).toBe(2 * H)
+    expect(checkAheadOf('pm')).toBe(5 * H)
+    expect(checkAheadOf('founder')).toBe(2 * H)
+    expect(checkAheadOf('builder')).toBeNull()
+    expect(STILL_NEEDS_YOU).toBe('still needs you')
+  })
+
+  test('[11-03] the founder: "may need your OK · Asif decides" with 19 hours left does not pin, his own undated task beside it or not; 1 hour left, it pins to check on Asif; late, it is his', async () => {
+    const f = (dueH: number): Feed => ({ member: ROB, role: 'founder', drafts: [flagged(dueH)], tickets: { undated: [ticket(1, ROB, 0, { due_at: null, due_source: null })] } })
+    const far = listed(f(19))
+    expect(far.theirs).toBe('Asif')
+    expect(titleFor(far, wed)).toBe('🟡 19h left · Acme Legal · may need your OK · Asif decides')
+    // before 0.7.18 it pinned on the package's clock (R1: within 24 business hours)
+    expect(pinsNow(far, wed)).toBe(true)
+    expect(ownActBy(far)).toBe(Infinity)
+    expect(pinsFor(far, wed)).toBe(false)
+    expect(watchOf(far)).toEqual([{ by: 'Asif', due: wed + 19 * H, what: 'reply' }])
+    // 3 hours left: still Asif's to see through; 2 hours (FOUNDER_CHECK_AHEAD_MS) or less: check on him
+    expect(pinsFor(listed(f(3)), wed)).toBe(false)
+    const near = listed(f(1))
+    expect(pinsFor(near, wed)).toBe(true)
+    expect(checkNow(near, wed)).toMatchObject({ by: 'Asif', late: false, notStarted: false })
+    expect(pinTitle(near, wed)).toBe('🔴 Acme Legal · check on Asif · reply due 4 PM')
+    expect(pinTitle(near, wed, true)).toBe('🔴 Acme Legal · check on Asif · reply due 4 PM · still needs you')
+    // the row in the pane is as it was
+    expect(rowLine(near, wed)).toBe(rowLine(near, wed))
+    // once its reply is due it is his (R2): his own clock pins it, and the name is what is due, as always
+    const late = listed(f(-1))
+    expect(late.theirs).toBeUndefined()
+    expect(pinsFor(late, wed)).toBe(true)
+    expect(pinTitle(late, wed)).toBe(titleFor(late, wed))
+    expect(pinTitle(late, wed)).toContain('needs your OK')
+  })
+
+  test('a reply whose drafts a teammate holds: the PM checks on them 5 business hours out, the founder 2; a teammate never; nothing of the viewer\'s own is lost', async () => {
+    const held = { package_id: PKG, project_id: CLIENT, project_name: 'Acme Legal', status: 'picked_up', picked_up_by: ASIF, picked_up_at: at(-1), covers_through: at(-3), drafts_ready: 1, drafts_unsent: 1, project_owner_email: H9 }
+    const msg = (dueH: number, owner: string) => ({ ...mail(CLIENT, 'Acme Legal', -3, owner), reply_due_at: at(dueH) })
+    const pm = (dueH: number): Feed => ({ member: H9, role: 'pm', mail: [msg(dueH, H9)], drafts: [held] })
+    expect(withTeammate(listed(pm(4)))).toBe(true)
+    expect(pinsFor(listed(pm(6)), wed)).toBe(false)
+    expect(pinsFor(listed(pm(4)), wed)).toBe(true)
+    expect(pinTitle(listed(pm(4)), wed)).toBe('🔴 Acme Legal · check on Asif · reply due 7 PM')
+    expect(pinTitle(listed(pm(-2)), wed)).toBe('🔴 Acme Legal · check on Asif · reply 2h late')
+    // a teammate who owns the client: never pinned for it, late or not (it was never pinned for them before either)
+    const mate = (dueH: number): Feed => ({ member: 'builder-a@example.com', role: 'builder', mail: [msg(dueH, 'builder-a@example.com')], drafts: [{ ...held, project_owner_email: 'builder-a@example.com' }] })
+    expect(pinsFor(listed(mate(-2)), wed)).toBe(false)
+    // with a task of the viewer's own: it pins on that task (R1, 24 business hours) and never on the reply Asif holds
+    const both = (taskH: number): Feed => ({ ...mate(20), tickets: { due_soon: [ticket(1, 'builder-a@example.com', taskH)] } })
+    expect(withTeammate(listed(both(72)))).toBe(false)
+    expect(pinsNow(listed(both(72)), wed)).toBe(true)
+    expect(pinsFor(listed(both(72)), wed)).toBe(false)
+    expect(ownActBy(listed(both(72)))).toBe(wed + 72 * H)
+    expect(pinsFor(listed(both(10)), wed)).toBe(true)
+    expect(pinTitle(listed(both(10)), wed)).toBe(titleFor(listed(both(10)), wed))
+  })
+
+  test('the PM and a teammate\'s ticket: listed and pinned only once late, within 5 business hours, or past its start-by with no sign it started', async () => {
+    const pm = (...tickets: FeedTicket[]): Feed => ({ member: H9, role: 'pm', tickets: { due_soon: tickets } })
+    // 3 days out, its start-by still ahead: nothing, as before
+    expect(buildLists(pm(ticket(1, ASIF, 72, { start_by_at: at(30) })), wed).teammate).toEqual([])
+    // due in 4 hours
+    const soon = listed(pm(ticket(1, ASIF, 4)))
+    expect(withTeammate(soon)).toBe(true)
+    expect(soon).toMatchObject({ theirs: 'Asif', tasks: 0, dueAt: wed + 4 * H })
+    expect(pinsFor(soon, wed)).toBe(true)
+    expect(pinTitle(soon, wed)).toBe('🔴 Acme Legal · check on Asif · task due 7 PM')
+    // start-by missed (OW's start_by_at at 1.5 h a day, as it sends it), the work not started
+    const notStarted = listed(pm(ticket(1, ASIF, 50, { start_by_at: at(-1), status: 'open' })))
+    expect(pinsFor(notStarted, wed)).toBe(true)
+    expect(checkNow(notStarted, wed)).toMatchObject({ notStarted: true, late: false })
+    expect(pinTitle(notStarted, wed)).toBe('🔴 Acme Legal · check on Asif · task not started, due Fri 5 PM')
+    expect(watchMarkdown(notStarted, wed)).toBe(`### Check on a teammate (1)\n\n- Asif · Build 1 (ticket ${tid(1).slice(0, 8)}) · not started, due Fri 5 PM`)
+    expect(clientMarkdown(notStarted, wed)).toContain('### Check on a teammate (1)')
+    // started (OW: in_progress): nothing until it is nearly due
+    expect(buildLists(pm(ticket(1, ASIF, 50, { start_by_at: at(-1), status: 'in_progress' })), wed).teammate).toEqual([])
+    // late
+    expect(pinTitle(listed(pm(ticket(1, ASIF, -3))), wed)).toBe('🔴 Acme Legal · check on Asif · task 3h late')
+    // ⛔ not for the founder (his teammates' client tickets are not his to see), nor a teammate, nor the PM's own ticket
+    expect(buildLists({ member: ROB, role: 'founder', tickets: { due_soon: [ticket(1, ASIF, 4)] } }, wed).teammate).toEqual([])
+    expect(buildLists({ member: 'builder-a@example.com', role: 'builder', tickets: { due_soon: [ticket(1, ASIF, 4)] } }, wed).teammate).toEqual([])
+    const own = listed(pm(ticket(1, H9, 30)))
+    expect(withTeammate(own)).toBe(false)
+    expect(own.watch).toBeUndefined()
+    // with a ticket of his own on the client too: his row, pinned for his own when it is due, else to check on Asif
+    const mixed = listed(pm(ticket(1, H9, 72), ticket(2, ASIF, -1)))
+    expect(withTeammate(mixed)).toBe(false)
+    expect(pinsFor(mixed, wed)).toBe(true)
+    expect(pinTitle(mixed, wed)).toBe('🔴 Acme Legal · check on Asif · task 1h late')
+  })
+
+  test('the founder\'s teammates\' late internal tickets (0.7.4) are late: he checks on them', async () => {
+    const f: Feed = { member: ROB, role: 'founder', tickets: { overdue: [ticket(1, ASIF, 0, { due_at: null, due_source: null, eta_needed_by: at(-4), eta_ask: 'x' })] } }
+    const it = listed(f)
+    expect(withTeammate(it)).toBe(true)
+    expect(pinsFor(it, wed)).toBe(true)
+    expect(pinTitle(it, wed)).toBe('🔴 Acme Legal · check on Asif · task 4h late')
+  })
+
+  test('an item an older version stored (no `own`) pins as R1 always read it', async () => {
+    const it = listed({ member: H9, role: 'pm', tickets: { due_soon: [ticket(1, H9, 10)] } })
+    const { own: _o, watch: _w, checkAhead: _c, ...older } = it
+    expect(ownActBy(older as QueueItem)).toBe(wed + 10 * H)
+    expect(pinsFor(older as QueueItem, wed)).toBe(pinsNow(it, wed))
+    // stored and read back: Infinity is null, and still none
+    const back = JSON.parse(JSON.stringify(listed({ member: 'builder-a@example.com', role: 'builder', mail: [{ ...mail(CLIENT, 'Acme Legal', -3), reply_due_at: at(2) }], drafts: [{ package_id: PKG, project_id: CLIENT, project_name: 'Acme Legal', status: 'picked_up', picked_up_by: ASIF, drafts_ready: 1, project_owner_email: 'builder-a@example.com' }] }))) as QueueItem
+    expect(back.own).toBeNull()
+    expect(pinsFor(back, wed)).toBe(false)
   })
 })

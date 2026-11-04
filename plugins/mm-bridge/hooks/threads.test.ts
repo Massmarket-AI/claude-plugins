@@ -1287,9 +1287,10 @@ describe('a teammate\'s own pane, for the same feed: who sees what is 0.5.0\'s, 
     const rowsOf = (items: readonly QueueItem[]) => items.map(it => rowFor(it, recommend([], undefined, NOW), NOW))
     // (0.5.2) what is additive is set aside: each item's act-by time (R1), its newest send and its check (R8),
     // and the list of clients being checked, which is empty for this feed (nothing in it carries a send)
+    // ((0.7.18) and whose each act-by is: its own part's (`own`), and the teammates' parts watched, for a teammate none)
     const { checking, ...two } = l
     expect(checking).toEqual([])
-    const as050 = (items: readonly QueueItem[]) => items.map(({ actBy: _a, lastOut: _o, check: _c, ...rest }) => rest)
+    const as050 = (items: readonly QueueItem[]) => items.map(({ actBy: _a, lastOut: _o, check: _c, own: _w, watch: _t, checkAhead: _k, ...rest }) => rest)
     // (0.7.12) 0.5.0's queue and teammate lists exactly; its third list, Older, held only Gale Clinic (mail of Oct 2,
     // its reply due before the cut), which is now in no list at all
     const was050 = JSON.parse(TEAMMATE_050.lists) as { queue: unknown[]; teammate: unknown[]; older: Array<{ projectId: string }> }

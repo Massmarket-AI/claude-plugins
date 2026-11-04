@@ -283,16 +283,21 @@ describe('F2: a write the engine refuses midway leaves nothing half done', () =>
     expect(w.app.get('local_tt')).toMatchObject({ title: 'My own name', pinned: false })
   })
 
+  // (0.7.18, B; Rob 2026-11-03: "Our bridge should repin it if there's still something needed") a pin the person takes off
+  // while its client still pins is pinned again by the next pass (register.test.ts, `0.7.18 B`); the unpin stands, and is
+  // recorded, once nothing pins the client: here its task moved out to later in the week as the pin came off
   test('F7: a pin the person took off stays off when the sync that saw it could not record it', async () => {
-    const feed: Feed = { member: ME, role: 'founder', mail: [mail(1, 'Client One')], tickets: {}, threads: [] }
+    const task = (hours: number) => ({ ticket_id: 'tf7', project_id: pid(1), project_name: 'Client One', title: 'Send the plan', due_at: new Date(NOW + hours * 3_600_000).toISOString(), due_source: 'commitment', assignee_email: ME })
+    const feed: Feed = { member: ME, role: 'founder', mail: [], tickets: { due_today: [task(5)] }, threads: [] } as Feed
     const w = fakeApp(feed, [{ sessionId: 'local_f7hub' }, { sessionId: 'local_f7', title: 'Client One work' }])
     w.put('mm.links', { [pid(1)]: 'local_f7' })
     const hub = w.session('local_f7hub')
     await mm(hub, '')
     expect(w.app.get('local_f7')?.pinned).toBe(true)
-    // the person takes our pin off; the sync that sees it cannot record that
+    // the person takes our pin off as the task moves out; the sync that sees it cannot record that
     const thread = w.app.get('local_f7')
     if (thread) thread.pinned = false
+    feed.tickets = { due_soon: [task(4 * 24)] } as Feed['tickets']
     w.refuse('mm.unpinned', 1)
     await w.advance(6 * 60_000)
     await mm(hub, '').catch(() => undefined)
