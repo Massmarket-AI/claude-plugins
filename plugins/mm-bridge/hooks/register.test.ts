@@ -10287,7 +10287,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.14', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.16', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10356,7 +10356,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.14', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.16', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10422,7 +10422,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.14', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.16', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
@@ -11531,5 +11531,212 @@ describe('0.7.11, as 0.7.12 has it: an ACTIVE client\'s thread with nothing date
     expect(w.threads.get('local_b')?.pinned).toBe(true)
     expect((w.stored['mm.last'] as { pinned: number }).pinned).toBe(1)
     expect(String(w.statuses.at(-1) ?? '')).toMatch(/^MM: 1 need you · 1 pinned/)
+  })
+})
+
+// ======================================================================== 0.7.16 (Rob, 2026-11-03)
+
+// (0.7.16, Rob 2026-11-03: "The profile switch routine is supposed to work in conjunction with the bridge and shouldn't
+// prevent the bridge from pinning or unpinning anything that should be pinned. I never pinned it myself. Of course, if I
+// pin something myself, it should stay there until I unpin it, except for when I'm switching profiles.") At the switch of
+// 11-03 the switch routine pinned a new Roman Seges thread; the bridge first saw it pinned, recorded the pin as his, and
+// with no clock for that client the thread stayed pinned for good. A switch now hands the client threads' pins to the
+// bridge once, and a brand-new kickoff thread's first pin is the bridge's.
+describe('0.7.16 (Rob, 11-03: "We always clear out all the pins and then figure out the best way to reorganize"): after a profile switch the bridge decides the pins on client threads', () => {
+  const ROMAN = 'abcdabcd-0000-4000-8000-000000000716'
+  const CORE = '3e439f40-a17f-48e2-bcfe-723af5b741fc'
+  const tid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-0000000000cc`
+  /** When the switch into B was recorded: ten minutes ago. */
+  const SINCE = NOW - 10 * 60_000
+  const switched = (since = SINCE) => ({ dir: PROFILE_B, since, from: PROFILE_A })
+  /** The founder's feed: Roman Seges listed only by a teammate's ticket past its ETA (no clock for him), as on 11-03. */
+  const romanLate = (): Feed => ({
+    member: FOUNDER, role: 'founder', mail: [], drafts: [], threads: [],
+    tickets: { overdue: [{ ticket_id: tid(1), project_id: ROMAN, project_name: 'Roman Seges', title: 'Send the onboarding form', due_at: null, due_source: null, assignee_email: ME, eta_needed_by: new Date(NOW - 4 * HOUR).toISOString(), eta_ask: 'no ETA' } as FeedTicket] },
+  })
+  /** The founder's feed: Bolt listed only by an undated ticket of his (no clock), and Cedar's task due in 5 hours (a clock). */
+  const boltAndCedar = (cedarDue = NOW + 5 * HOUR): Feed => {
+    const base = feed()
+    const cedar = { ticket_id: 't1', project_id: CEDAR, project_name: 'Cedar Dental', title: 'Send the intake form', due_at: new Date(cedarDue).toISOString(), due_source: 'commitment', assignee_email: ME }
+    return { ...base, role: 'founder', mail: [], drafts: [], threads: [], tickets: { ...(cedarDue - NOW < 24 * HOUR ? { due_today: [cedar] } : { due_soon: [cedar] }), undated: [{ ticket_id: tid(2), project_id: BOLT, project_name: 'Bolt Staffing (Sam)', title: 'Undated 1', due_at: null, due_source: null, assignee_email: ME }] } } as Feed
+  }
+  /** His own pin on a thread, as the bridge recorded it when it first saw the thread pinned. */
+  const hisPin = (projectId: string, client: string) => ({ projectId, client, byUs: false })
+  /** In profile B, the switch from A on record (`switch`), with these threads and this store. */
+  const inB = (on: On, f: Feed, threads: Thread[], store: Record<string, unknown>, profile: unknown = switched()) =>
+    world(on, {
+      feed: f,
+      threads: [thread('local_other', 'Unrelated notes', 100), ...threads],
+      files: { ...profileRec(PROFILE_B, SELF), ...profileRec(PROFILE_A, 'local_away', { isStarred: true }) },
+      store: { ...(profile ? { 'mm.profile': profile } : {}), ...store },
+    })
+  const pinsOf = (w: { stored: Record<string, unknown> }) => (w.stored['mm.pins'] ?? {}) as Record<string, { byUs: boolean }>
+  const pinCalls = (w: { writes: () => string[] }, sid: string) => w.writes().filter(c => c.startsWith(`set_pinned | ${sid} `))
+
+  for (const [what, f, pid, client] of [
+    ['[Roman Seges, 11-03] a teammate\'s late ticket', romanLate(), ROMAN, 'Roman Seges'],
+    ['undated tickets only', boltAndCedar(), BOLT, 'Bolt Staffing'],
+  ] as Array<[string, Feed, string, string]>) {
+    test(`(a) a switch hands his recorded pin on a client thread with no clock to the bridge, and the pass takes it off (${what}); with no switch on record it stays, as before`, async ($, on) => {
+      const w = inB(on, f, [thread('local_c1', 'Client work', 1, { pinned: true })], { 'mm.links': { [pid]: 'local_c1' }, 'mm.pins': { local_c1: hisPin(pid, client) } })
+      await mm($, '')
+      expect(w.threads.get('local_c1')?.pinned).toBe(false)
+      expect(pinCalls(w, 'local_c1')).toEqual(['set_pinned | local_c1 | false'])
+      expect(w.stored['mm.switchPins']).toEqual({ since: SINCE, at: NOW })
+      // the switch stays where it was: this pass did not see a new one
+      expect(w.stored['mm.profile']).toEqual(switched())
+    })
+
+    test(`(a) control: the same thread with no switch on record keeps his pin (${what})`, async ($, on) => {
+      const w = inB(on, f, [thread('local_c1', 'Client work', 1, { pinned: true })], { 'mm.links': { [pid]: 'local_c1' }, 'mm.pins': { local_c1: hisPin(pid, client) } }, { dir: PROFILE_B, since: SINCE })
+      await mm($, '')
+      expect(w.threads.get('local_c1')?.pinned).toBe(true)
+      expect(pinCalls(w, 'local_c1')).toEqual([])
+      expect(pinsOf(w).local_c1?.byUs).toBe(false)
+      expect(w.stored['mm.switchPins']).toBeUndefined()
+    })
+  }
+
+  test('(b) a switch hands his pin on a client thread with a clock to the bridge: it stays pinned, now as ours, and comes off once the client has no clock', async ($, on) => {
+    const w = inB(on, boltAndCedar(), [thread('local_c', 'Cedar work', 1, { pinned: true })], { 'mm.links': { [CEDAR]: 'local_c' }, 'mm.pins': { local_c: hisPin(CEDAR, 'Cedar Dental') } })
+    await mm($, '')
+    expect(w.threads.get('local_c')).toMatchObject({ title: CEDAR_TITLE, pinned: true })
+    expect(pinCalls(w, 'local_c')).toEqual([])
+    expect(pinsOf(w).local_c).toEqual({ projectId: CEDAR, client: 'Cedar Dental', byUs: true })
+    // the task moves out to next week: the pin is ours, so it comes off (his would have stayed)
+    w.setFeed(boltAndCedar(NOW + 7 * DAYS))
+    await mm($, '')
+    expect(w.threads.get('local_c')?.pinned).toBe(false)
+    expect(pinCalls(w, 'local_c')).toEqual(['set_pinned | local_c | false'])
+  })
+
+  test('(b) a switch drops his unpin: a client thread he took the pin off, which stayed off, is pinned again while its client has a clock', async ($, on) => {
+    const w = inB(on, boltAndCedar(), [thread('local_c', 'Cedar work', 1)], { 'mm.links': { [CEDAR]: 'local_c' } }, { dir: PROFILE_B, since: SINCE })
+    await mm($, '')
+    expect(w.threads.get('local_c')?.pinned).toBe(true)
+    // he takes the pin off: it stays off, sync after sync, as before
+    const cedar = w.threads.get('local_c') as Thread
+    cedar.pinned = false
+    for (let i = 0; i < 2; i++) {
+      await w.clock.advance(6 * 60_000)
+      await mm($, '')
+    }
+    expect(w.threads.get('local_c')?.pinned).toBe(false)
+    expect(Object.keys(w.stored['mm.unpinned'] as Record<string, unknown>)).toEqual(['local_c'])
+    // he switches to A and back: the switch drops his unpin, and the bridge pins the thread again
+    w.stored['mm.profile'] = switched(w.clock.now() - 60_000)
+    await mm($, '')
+    expect(w.threads.get('local_c')?.pinned).toBe(true)
+    expect(pinCalls(w, 'local_c')).toEqual(['set_pinned | local_c | true', 'set_pinned | local_c | true'])
+    expect(w.stored['mm.unpinned']).toEqual({})
+    expect(pinsOf(w).local_c?.byUs).toBe(true)
+  })
+
+  test('(c) an internal project\'s thread is never touched: his pin stays, its record stays his; a thread of the other profile keeps its record', async ($, on) => {
+    const coreTask = { ticket_id: 'tc', project_id: CORE, project_name: 'Massmarket Core Snapshot', title: 'Tracker', due_at: null, due_source: null, assignee_email: ME }
+    const away = hisPin(ACME, 'Acme Roofing')
+    const w = inB(on, feed({ drafts: [], mail: [], tickets: { due_soon: [coreTask] } }), [thread('local_core', 'Massmarket · Tracker', 1, { pinned: true })], {
+      'mm.links': { [CORE]: 'local_core', [ACME]: 'local_away' },
+      'mm.pins': { local_core: { ...hisPin(CORE, 'Massmarket Core Snapshot'), internal: true }, local_away: away },
+    })
+    await mm($, '')
+    expect(w.threads.get('local_core')?.pinned).toBe(true)
+    expect(pinCalls(w, 'local_core')).toEqual([])
+    expect(pinsOf(w).local_core).toEqual({ projectId: CORE, client: 'Massmarket Core Snapshot', byUs: false, internal: true })
+    expect(pinsOf(w).local_away).toEqual(away)
+    // the switch is handed over all the same: nothing here was the bridge's to take
+    expect(w.stored['mm.switchPins']).toEqual({ since: SINCE, at: NOW })
+  })
+
+  test('(d) the hand-over runs once a switch: a pin he puts back after it stays his, sync after sync; the next switch hands it over again', async ($, on) => {
+    const w = inB(on, boltAndCedar(), [thread('local_b', 'Bolt work', 1, { pinned: true })], { 'mm.links': { [BOLT]: 'local_b' }, 'mm.pins': { local_b: hisPin(BOLT, 'Bolt Staffing') } })
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(false)
+    // he pins it again himself
+    const bolt = w.threads.get('local_b') as Thread
+    bolt.pinned = true
+    for (let i = 0; i < 3; i++) {
+      await w.clock.advance(6 * 60_000)
+      await mm($, '')
+    }
+    expect(w.threads.get('local_b')?.pinned).toBe(true)
+    expect(pinCalls(w, 'local_b')).toEqual(['set_pinned | local_b | false'])
+    expect(pinsOf(w).local_b?.byUs).toBe(false)
+    expect(w.stored['mm.switchPins']).toEqual({ since: SINCE, at: NOW })
+    // he switched to A and back: a new switch on record, handed over once more
+    w.stored['mm.profile'] = switched(w.clock.now() - 60_000)
+    await mm($, '')
+    expect(w.threads.get('local_b')?.pinned).toBe(false)
+    expect(pinCalls(w, 'local_b')).toEqual(['set_pinned | local_b | false', 'set_pinned | local_b | false'])
+    expect((w.stored['mm.switchPins'] as { since: number }).since).toBe(w.clock.now() - 60_000)
+  })
+
+  for (const [age, handed] of [
+    [47, true],
+    [49, false],
+  ] as Array<[number, boolean]>) {
+    test(`(e) the upgrade: no switch handed over on record, and the switch on record is ${age} hours old: ${handed ? 'handed over' : 'left alone'}`, async ($, on) => {
+      const w = inB(on, romanLate(), [thread('local_r', 'Roman Seges', 1, { pinned: true })], { 'mm.links': { [ROMAN]: 'local_r' }, 'mm.pins': { local_r: hisPin(ROMAN, 'Roman Seges') } }, switched(NOW - age * HOUR))
+      await mm($, '')
+      expect(w.threads.get('local_r')?.pinned).toBe(!handed)
+      expect(pinCalls(w, 'local_r')).toEqual(handed ? ['set_pinned | local_r | false'] : [])
+      expect(w.stored['mm.switchPins']).toEqual(handed ? { since: NOW - age * HOUR, at: NOW } : undefined)
+    })
+  }
+
+  test('(e) with a switch handed over on record, a later one is handed over whatever its age', async ($, on) => {
+    const w = inB(on, romanLate(), [thread('local_r', 'Roman Seges', 1, { pinned: true })], {
+      'mm.links': { [ROMAN]: 'local_r' },
+      'mm.pins': { local_r: hisPin(ROMAN, 'Roman Seges') },
+      'mm.switchPins': { since: NOW - 9 * DAYS, at: NOW - 9 * DAYS },
+    }, switched(NOW - 3 * DAYS))
+    await mm($, '')
+    expect(w.threads.get('local_r')?.pinned).toBe(false)
+    expect(w.stored['mm.switchPins']).toEqual({ since: NOW - 3 * DAYS, at: NOW })
+  })
+
+  for (const [minutes, ours] of [
+    [10, true],
+    [45, false],
+  ] as Array<[number, boolean]>) {
+    test(`(f) a new thread found pinned with no pin record, its [mm-link] marker for its client ${minutes} minutes old: recorded as ${ours ? 'ours' : 'his'}`, async ($, on) => {
+      const w = world(on, {
+        feed: boltAndCedar(),
+        threads: [thread('local_k', 'Cedar Dental: the intake form', 0, { pinned: true })],
+        store: { 'mm.links': { [CEDAR]: 'local_k' }, 'mm.marked': { local_k: CEDAR }, 'mm.markedAt': { local_k: NOW - minutes * 60_000 } },
+      })
+      await mm($, '')
+      expect(w.threads.get('local_k')?.pinned).toBe(true)
+      expect(pinsOf(w).local_k).toEqual({ projectId: CEDAR, client: 'Cedar Dental', byUs: ours })
+    })
+  }
+
+  test('(f) [Roman Seges, 11-03] the kickoff thread the switch routine pinned, its client with no clock: the pin comes off; marked 45 minutes ago, or for another client, it stays his', async ($, on) => {
+    const w = world(on, {
+      feed: romanLate(),
+      threads: [thread('local_new', 'Roman Seges', 0, { pinned: true }), thread('local_old', 'Roman, older', 2, { pinned: true }), thread('local_odd', 'Roman, odd', 1, { pinned: true })],
+      store: {
+        'mm.links': { [ROMAN]: 'local_new' },
+        'mm.marked': { local_new: ROMAN, local_old: ROMAN, local_odd: BOLT },
+        'mm.markedAt': { local_new: NOW - 17 * 60_000, local_old: NOW - 45 * 60_000, local_odd: NOW - 5 * 60_000 },
+      },
+    })
+    await mm($, '')
+    expect(w.threads.get('local_new')?.pinned).toBe(false)
+    expect(pinCalls(w, 'local_new')).toEqual(['set_pinned | local_new | false'])
+    // the older-marked and the other client's threads, each linked in a world of its own, keep his pin
+    for (const [sid, marker, at] of [
+      ['local_old', ROMAN, NOW - 45 * 60_000],
+      ['local_odd', BOLT, NOW - 5 * 60_000],
+    ] as Array<[string, string, number]>) {
+      w.stored['mm.links'] = { [ROMAN]: sid }
+      w.stored['mm.marked'] = { [sid]: marker }
+      w.stored['mm.markedAt'] = { [sid]: at }
+      delete w.stored['mm.pins']
+      await mm($, '')
+      expect(w.threads.get(sid)?.pinned).toBe(true)
+      expect(pinCalls(w, sid)).toEqual([])
+      expect(pinsOf(w)[sid]?.byUs).toBe(false)
+    }
   })
 })

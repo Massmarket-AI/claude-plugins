@@ -120,6 +120,9 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 //    client is clear its thread is unpinned whoever pinned it (R14), once per clear (0.5.3, `mm.cleared`: a
 //    thread the person pins again after its client cleared stays pinned). Otherwise it only unpins a thread
 //    it pinned itself, and never an internal project's thread (R18).
+//    (0.7.16, Rob 2026-11-03: "if I pin something myself, it should stay there until I unpin it, except for when I'm
+//    switching profiles") A profile switch hands every client thread's pin here to the bridge, once per switch
+//    (`mm.switchPins`), and a pin found on a brand-new kickoff thread is the bridge's: see "(0.7.16)" in `reconcile`.
 //    (0.5.19, Rob 10-20) One exception, only on a computer where the person typed /mm rc on: Remote Control
 //    follows the pin on any thread (`rcFollowsPin`). It never switches off Remote Control it did not switch on.
 // ⛔ A thread the person unlinked never links itself again, and gets its own name back.
@@ -168,7 +171,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.7.14'
+const VERSION = '0.7.16'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -202,6 +205,18 @@ const PAIR_KEEP_MS = 30 * DAY_MS
 const REMEMBER_MAX = 300
 /** A link the person made or used stays pinned this long, ahead of the cap. Real hours: this is not a client's clock. */
 const ACTED_MS = DAY_MS
+/**
+ * (0.7.16, Rob 2026-11-03) A switch on record that no pass has handed over yet (`mm.switchPins` holds none: 0.7.15 and
+ * older kept no such record) is handed over only while it is this recent: the first sync of 0.7.16 repairs the switch of
+ * 11-03, never an older one. Real hours: this is not a client's clock.
+ */
+const SWITCH_PINS_UPGRADE_MS = 48 * 3_600_000
+/**
+ * (0.7.16, Rob 2026-11-03: "I never pinned it myself.") A new thread found pinned with no pin record yet, whose first
+ * prompt opened with its client's [mm-link] marker less than this long ago (`mm.markedAt`), was started and pinned by
+ * Claude (a kickoff): its first pin is the bridge's. Real minutes.
+ */
+const KICKOFF_PIN_MS = 30 * 60_000
 /** The desktop app's own record of a thread is read only when it changed in this long. */
 const RECORD_MAX_AGE_MS = 30 * DAY_MS
 /** `local_<id>.json`: one record per thread, named by the app's thread id. */
@@ -2081,6 +2096,111 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   }
   // (0.7.10) where the member's client threads run, by the app's list: the folder `kickoffs` starts a new one in
   if (listed.complete) await noteFolder($, links, live, internal, now).catch(() => {})
+
+  // ⛔ (0.7.16, Rob 2026-11-03: "The profile switch routine is supposed to work in conjunction with the bridge and shouldn't
+  // prevent the bridge from pinning or unpinning anything that should be pinned. I never pinned it myself. Of course, if I
+  // pin something myself, it should stay there until I unpin it, except for when I'm switching profiles. We always clear
+  // out all the pins and then figure out the best way to reorganize all the work I've been working on the last 24 hours
+  // (including the clients that need to be repinned because they need me).") At his switch at 22:04Z on 11-03 the switch
+  // routine started a thread for Roman Seges with its [mm-link] marker and pinned it (its Step 5 said to). The bridge
+  // first saw that thread already pinned, so it recorded the pin as his (`byUs: false`); the client's only items were a
+  // teammate's late tickets (no clock), and the bridge takes off only its own pin, so the thread stayed pinned for good.
+  // So after a switch the bridge, not Claude and not a stale record, decides the pins on client threads, by (1) to (3):
+  /** (0.7.16) Each client on a list, by project: the item its pin record is made from. */
+  const listedNow = new Map<string, QueueItem>()
+  for (const it of [...items, ...quiet, ...checking]) if (!listedNow.has(it.projectId)) listedNow.set(it.projectId, it)
+  /** (0.7.16) The name the feed gives a client on no list, for its pin record when the record has none of its own. */
+  const feedNames = new Map(feedClients(feed).map(c => [c.projectId, c.client] as const))
+  /** (0.7.16) A pin record for a client's linked thread: from its item when it is on a list, else by the name on record or in the feed; none with no name. */
+  const pinFor = (pid: string, sid: string, byUs: boolean): Pin | undefined => {
+    const it = listedNow.get(pid)
+    if (it) return pinOf(it, byUs)
+    const had = pins[sid]
+    const client = had?.projectId === pid && had.client ? had.client : feedNames.get(pid)
+    return client ? { projectId: pid, client, byUs } : undefined
+  }
+  /**
+   * (0.7.16) The linked client threads live in this profile: open in the app here and not archived, never another
+   * profile's (`away`) or one this pass cannot see, never one whose pin record is another client's, and ⛔ never an
+   * internal project's (R18: the bridge never takes the person's pin off such a thread).
+   */
+  const clientThreadsHere = (): Array<{ pid: string; sid: string; s: AppThread }> => {
+    const out: Array<{ pid: string; sid: string; s: AppThread }> = []
+    for (const [pid, sid] of Object.entries(links)) {
+      const s = live.get(sid)
+      if (!s || s.isArchived || !isUuid(pid) || !THREAD_ID.test(sid) || away.has(sid) || unseen.has(sid) || gone.has(sid) || ownerOf(sid, links) !== pid) continue
+      const had = pins[sid]
+      if (had !== undefined && had.projectId !== pid) continue
+      if (listedNow.get(pid)?.internal === true || internal.has(pid) || INTERNAL_PROJECTS.has(pid) || internalPin(had)) continue
+      out.push({ pid, sid, s })
+    }
+    return out
+  }
+  /** (0.7.16) The pin records this pass makes the bridge's, by (1) and (3): thread → its record. */
+  const handed: Record<string, Pin> = {}
+  /** (0.7.16) The person's unpins this pass drops, by (1). */
+  const freed: string[] = []
+  // (1) A SWITCH HANDS THE CLIENT THREADS' PINS TO THE BRIDGE, ONCE PER SWITCH. On the first pass that finds a switch on
+  // record into this profile (`mm.profile`: its `dir` this one, with the profile left, `from`, and `since`) that no pass
+  // has handed over yet (`mm.switchPins`), every client thread here (`clientThreadsHere`) has its pin record made the
+  // bridge's: `byUs: true` while it is pinned now (a record of ours on a thread not pinned now says not ours, so the pass
+  // below does not read it as his unpin), and its `mm.unpinned` entry is dropped. The pass below then decides as it
+  // always does: pinned while its client `pinsNow`, otherwise the bridge's own pin comes off (`unpin: 'ours'`), and R14
+  // still unpins a cleared client's thread. A pin he puts on after that stays his until he takes it off, as before: the
+  // switch is handed over once (`mm.switchPins` keeps its `since`). (The pass that sees a switch first is the one that
+  // records it, in `mm.profile` at its end: the next pass hands it over.)
+  // (2) THE UPGRADE. A store with no handed-over switch on record (0.7.15 and older kept none) hands over the switch on
+  // record when it is less than SWITCH_PINS_UPGRADE_MS old, so the first sync of 0.7.16 repairs the switch of 11-03. An
+  // older one is left alone.
+  const switchSince = Number(profileSeen?.since)
+  const switchedFrom = profileSeen?.from
+  const switchHere = own !== undefined && profileSeen?.dir === own && typeof switchedFrom === 'string' && switchedFrom !== '' && Number.isFinite(switchSince)
+  const handedOver = switchHere ? await storeGet<{ since?: unknown; at?: unknown } | null>($, 'mm.switchPins', null) : null
+  const handOver = switchHere && (handedOver && typeof handedOver === 'object' && handedOver.since !== undefined ? Number(handedOver.since) !== switchSince : now - switchSince < SWITCH_PINS_UPGRADE_MS)
+  if (handOver) {
+    for (const { pid, sid, s } of clientThreadsHere()) {
+      if (sid in unpinned) freed.push(sid)
+      const record = s.pinned ? pinFor(pid, sid, true) : pins[sid]?.byUs ? pinFor(pid, sid, false) : undefined
+      if (record && !sameValue(pins[sid], record)) handed[sid] = record
+    }
+  }
+  // (3) A BRAND-NEW KICKOFF THREAD'S FIRST PIN IS THE BRIDGE'S. A client thread here with no pin record yet, already
+  // pinned when this pass first sees it, whose first prompt opened with its own client's [mm-link] marker (`mm.marked`
+  // names this client) less than KICKOFF_PIN_MS before (`mm.markedAt`): Claude started it (`kickoffs`, the switch
+  // routine) and pinned it; the person has not touched it yet. Its record says ours (`byUs: true`). ⛔ Every other first
+  // sighting of a pinned thread stays the person's, as before (the want and named loops below), and so does one this
+  // pass found archived (`archivedHere`: its marker record may be this pass's own, kept for an archived link, above).
+  for (const { pid, sid, s } of clientThreadsHere()) {
+    if (!s.pinned || pins[sid] !== undefined || handed[sid] !== undefined || marked[sid] !== pid || archivedHere.has(sid)) continue
+    const at = markedAt[sid]
+    if (typeof at !== 'number' || !Number.isFinite(at) || !(now - at < KICKOFF_PIN_MS)) continue
+    const record = pinFor(pid, sid, true)
+    if (record) handed[sid] = record
+  }
+  // ⛔ Stored at once, BEFORE any app call of this pass (F2), each over a fresh copy: the dropped unpins first, then the
+  // pin records (F7's order), then the switch as handed over, so a write refused midway leaves the switch to be handed
+  // over again by the next pass. `was` takes each, so the pass's own writes at its end change nothing more here.
+  if (freed.length) {
+    await patchStore<Record<string, Unpinned>>($, 'mm.unpinned', {}, fresh => {
+      const drop = freed.filter(sid => sid in fresh)
+      if (!drop.length) return false
+      for (const sid of drop) delete fresh[sid]
+    })
+    for (const sid of freed) {
+      delete unpinned[sid]
+      delete was.unpinned[sid]
+    }
+  }
+  if (Object.keys(handed).length) {
+    await patchStore<Record<string, Pin>>($, 'mm.pins', {}, fresh => {
+      for (const [sid, record] of Object.entries(handed)) fresh[sid] = record
+    })
+    for (const [sid, record] of Object.entries(handed)) {
+      pins[sid] = record
+      was.pins[sid] = copyOf(record)
+    }
+  }
+  if (handOver) await $.store.set('mm.switchPins', { since: switchSince, at: now })
 
   // The threads that should be pinned now. R1 (0.5.2, Rob 2026-10-13: "Pinned is something the server
   // recognized needs to be done within the next 24 hours, whether it's a reply or work that must be started
