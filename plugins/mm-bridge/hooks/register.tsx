@@ -3,10 +3,11 @@ import type { Elements, EngineInterface, Register } from 'claude-code'
 import type { MmBand, MmFolds, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTrack, MmTrackLine, MmView } from '../types'
 
 import {
-  INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients, pinsNow,
+  INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients,
   peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
   asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText, undatedOnly,
   hasDue, clientActivity, isRecent, mayStart,
+  pinsFor, pinTitle,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
@@ -123,6 +124,12 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 //    (0.7.16, Rob 2026-11-03: "if I pin something myself, it should stay there until I unpin it, except for when I'm
 //    switching profiles") A profile switch hands every client thread's pin here to the bridge, once per switch
 //    (`mm.switchPins`), and a pin found on a brand-new kickoff thread is the bridge's: see "(0.7.16)" in `reconcile`.
+//    ⛔ (0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you, not when something has a timer left
+//    for a teammate to answer") A teammate's part of a client (drafts they hold, a package they decide, their ticket)
+//    pins only once the viewer should check on them (`pinsFor`: the founder FOUNDER_CHECK_AHEAD_MS, the PM
+//    PM_CHECK_AHEAD_MS or a missed start-by), named `🔴 <client> · check on <teammate> · …`. And ("Our bridge should
+//    repin it if there's still something needed") a pin the person takes off while the client still pins is put back on
+//    the next pass, named ` · still needs you` (`Pin.again`); one taken off a thread with nothing needed stays off.
 //    (0.5.19, Rob 10-20) One exception, only on a computer where the person typed /mm rc on: Remote Control
 //    follows the pin on any thread (`rcFollowsPin`). It never switches off Remote Control it did not switch on.
 // ⛔ A thread the person unlinked never links itself again, and gets its own name back.
@@ -171,7 +178,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it.
-const VERSION = '0.7.16'
+const VERSION = '0.7.18'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -432,7 +439,11 @@ const ONLY_THE_PERSON = {
 
 type Mcp = { content?: Array<{ type: string; text?: string }>; isError?: boolean }
 /** `internal` (0.5.2, R18): the pin is on an internal project's thread, which the bridge never unpins. */
-type Pin = { projectId: string; client: string; byUs: boolean; internal?: true }
+/**
+ * A thread's pin as the bridge last left it. (0.7.18, B) `again`: the person took the pin off while its client still needed
+ * them, and the bridge pinned it again; its name says so (` · still needs you`) until nothing of the client pins it.
+ */
+type Pin = { projectId: string; client: string; byUs: boolean; internal?: true; again?: true }
 type Last = {
   at: number
   member: string
@@ -1044,6 +1055,10 @@ function feedProjects(feed: Feed): string[] {
   for (const d of feed.drafts ?? []) add(d.project_id)
   // (fix round 1, F5) `start_now` too
   for (const k of [feed.tickets?.overdue, feed.tickets?.due_today, feed.tickets?.due_soon, feed.tickets?.start_now]) for (const t of k ?? []) add(t.project_id)
+  // (0.7.18, A) and the founder's undated client tickets (`tickets.undated`): on 11-03 `/mm link <id>` answered "No client
+  // named ... is in your feed" for Black-Peak and Ground Crew Systems, listed by those alone, because the ids were looked up
+  // here while the lists (`buildLists`) and the names (`feedClients`) read `tickets.undated` since 0.7.4
+  for (const t of feed.tickets?.undated ?? []) add(t?.project_id)
   for (const t of Array.isArray(feed.threads) ? feed.threads : []) add(t?.project_id)
   // (0.5.28, internal asks) the project of each of the caller's asks: a thread that opens with its kickoff links to it
   for (const a of Array.isArray(feed.asks) ? feed.asks : []) add(a?.project_id)
@@ -1739,6 +1754,11 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   const away = new Set<string>()
   /** (0.7.6) The threads the app HERE showed archived, asked for by id: of these alone, a client's own may be brought back (`revive`). */
   const archivedHere = new Set<string>()
+  /**
+   * (0.7.18, A) Threads the app here answered "no such thread" for that are kept (`unseen`) because the records could not
+   * say more: whatever else they are, they are not open in this profile.
+   */
+  const notHere = new Set<string>()
   const me = await selfId($)
   const records = recordReader($, now, me)
   /** The threads this pass has asked the app for by id: at most LOOKUPS_PER_SYNC. */
@@ -1760,6 +1780,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const found = asked < LOOKUPS_PER_SYNC ? (asked++, await askApp($, sid)) : 'unknown'
     if (found === 'unknown') unseen.add(sid)
     else if (found === 'notfound') {
+      notHere.add(sid)
       const said = await records.where(sid)
       if (said === 'away') away.add(sid)
       if (said === 'away' || said === 'unknown' || !listed.complete) unseen.add(sid)
@@ -1986,7 +2007,46 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     return [...listedOpen, ...unique.filter(sid => open(sid) < 0)]
   }
 
+  /**
+   * (0.7.18, A) The client's own thread OPEN in this profile (in the app's list here, not archived), the most recently active
+   * first, or undefined. Its own by a record of the bridge's for this client: its [mm-link] marker (`mm.marked`), the pin
+   * record of it (`mm.pins`), the thread the client's last kickoff or Update went to (`mm.sent`), the client's link here
+   * before (`mm.profileLinks`), its sessions having declared this client alone (`onlyClients`), or a name the bridge gave it
+   * for this client (its own name is on record in `mm.titles`, and the name now is the bridge's, naming this client, a name
+   * no other client in the feed has). ⛔ Never a thread linked to any client, one the person unlinked, one a client was moved
+   * off (`released`), one shared with another client (B3, `mm.shared`), or one any record, the feed or a name of the bridge's
+   * gives to another client: a hub thread, which works on many, is never one.
+   */
+  const shortNames = new Map<string, number>()
+  for (const c of feedClients(feed)) shortNames.set(c.client, (shortNames.get(c.client) ?? 0) + 1)
+  const ownHere = (pid: string, client: string): string | undefined => {
+    const named = (s: AppThread): string | undefined => (s.title && isOurTitle(s.title) ? clientInTitle(s.title) : undefined)
+    let best: { sid: string; at: number } | undefined
+    for (const s of live.values()) {
+      const sid = s.sessionId
+      if (s.isArchived || !THREAD_ID.test(sid) || away.has(sid) || ownerOf(sid, links) !== undefined || sid in unlinked || left.includes(sid) || neverOwn.has(sid)) continue
+      if (declaredOther(pid, sid, feedThreads, pairs, marked)) continue
+      const pin = pins[sid]
+      if (pin !== undefined && pin.projectId !== pid) continue
+      if (Object.entries(sent).some(([other, x]) => other !== pid && x?.sid === sid)) continue
+      if (Object.entries(mine).some(([other, x]) => other !== pid && x === sid)) continue
+      const name = named(s)
+      if (name !== undefined && name !== client) continue
+      const byTitle = Boolean(client) && name === client && titles[sid] !== undefined && shortNames.get(client) === 1
+      const own = marked[sid] === pid || pin?.projectId === pid || sent[pid]?.sid === sid || mine[pid] === sid || onlyClients(pid, sid, feedThreads, pairs, marked) || byTitle
+      if (!own) continue
+      const at = Date.parse(s.lastActivityAt ?? '') || 0
+      if (!best || at > best.at) best = { sid, at }
+    }
+    return best?.sid
+  }
+
   if (!known && listed.complete) {
+    /**
+     * (0.7.18, A) The clients whose own thread of this profile, newer than any open one here, the app did not answer for in
+     * this sync: none of their older threads is linked past it (0.5.23), by the loop below or by `relink`.
+     */
+    const heldHere = new Set<string>()
     const tried = await storeGet<Record<string, Revived>>($, 'mm.revived', {})
     const paused = Boolean(await $.store.get('mm.paused'))
     let revivals = 0
@@ -2038,6 +2098,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
             if (typeof found === 'object') live.set(sid, found)
             if (found === 'archived') archivedHere.add(sid)
             there = typeof found === 'object' ? 'live' : found === 'unknown' ? 'stop' : found === 'archived' ? 'archived' : 'skip'
+            if (found === 'unknown') heldHere.add(pid)
           }
         }
         if (there === 'archived') {
@@ -2092,6 +2153,43 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
         auto[pid] = { sid, miss: 0, made: now }
         followed.set(pid, from)
       }
+    }
+
+    // ⛔ (0.7.18, A; Rob 2026-11-03: "we should open those so that it can always repin the oldest one in the future. It should
+    // always either update the thread or hand me a new card in that thread after pinning it and updating the title") A CLIENT
+    // WHOSE THREAD IS IN THIS PROFILE IS LINKED TO IT, NEVER COUNTED AS MISSING. On 11-03 after Rob's switch, Black-Peak and
+    // Ground Crew Systems each had an open thread here, marked as theirs (`mm.marked`), and no link: the loop above takes a
+    // client's own threads newest first, their newest was the thread their last kickoff went to (`mm.sent`), in a third
+    // profile, and finding that out needs its record file, but the sync's RECORDS_PER_SYNC files were spent on the other
+    // profiles' links and pins first, so the loop stopped there ('stop') on every pass and the thread here was never reached.
+    // So, once the loops above are done: a client that is not internal (R18) and may have a thread (`canStart`: not quiet),
+    // with no link, or linked to a thread that is not open here (another profile's, or one the app here has no such thread
+    // for), takes the most recently active OPEN thread in the app's list here that is its own (`ownHere`). No record file and
+    // no lookup is needed: the app's list is this profile's. ⛔ A link to a thread open here is never touched (moving it is
+    // the person's /mm link), and one that cannot be found out about is left as it is, as is (0.5.23) a client whose newer
+    // thread of this profile the app did not answer for (`heldHere`): the next sync asks again. A client with no thread here:
+    // as before.
+    const relink = (pid: string, client: string): void => {
+      const was = links[pid]
+      if ((was !== undefined && !away.has(was) && !notHere.has(was)) || heldHere.has(pid)) return
+      const sid = ownHere(pid, client)
+      if (!sid) return
+      links[pid] = sid
+      auto[pid] = { sid, miss: 0, made: now }
+      if (was !== undefined) followed.set(pid, was)
+      restore.delete(pid)
+    }
+    for (const it of [...items, ...quiet, ...checking]) {
+      const pid = it.projectId
+      if (!isUuid(pid) || it.internal === true || internal.has(pid) || INTERNAL_PROJECTS.has(pid) || !canStart(it)) continue
+      relink(pid, it.client)
+    }
+    // (and a client on no list whose link is another profile's thread, under the rule above for such a client: one that
+    // wrote to us in the last ACTIVE_WINDOW_MS)
+    const inLists = new Set([...items, ...quiet, ...checking].map(i => i.projectId))
+    for (const [pid, from] of Object.entries(links)) {
+      if (inLists.has(pid) || !isUuid(pid) || internal.has(pid) || INTERNAL_PROJECTS.has(pid) || !(away.has(from) || notHere.has(from)) || !isRecent(lastFrom.get(pid), now)) continue
+      relink(pid, cleanName(pins[from]?.projectId === pid ? pins[from]?.client : ''))
     }
   }
   // (0.7.10) where the member's client threads run, by the app's list: the folder `kickoffs` starts a new one in
@@ -2227,7 +2325,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   /** (0.5.14) When the pin of a thread this sync finds off was last known to be on: the sync before this one. */
   const pinSeen = Number.isFinite(before?.at) ? Math.min(before?.at as number, now) : now
   for (const sid of Object.keys(unpinned)) if (gone.has(sid)) delete unpinned[sid]
-  for (const it of items) {
+  // (0.7.18) a client of a teammate's that the bridge pinned to check on them (`pinsFor`) is read the same way
+  for (const it of [...items, ...quiet]) {
     const sid = links[it.projectId]
     const s = sid ? live.get(sid) : undefined
     if (!sid || !s) continue
@@ -2238,10 +2337,22 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const pin = pins[sid]
     if (pin?.byUs && pin.projectId === it.projectId && !(sid in unpinned)) unpinned[sid] = { at: now, ...newestOf(it), seen: pinSeen }
   }
-  /** Whether the person's unpin of this thread still stands: nothing new for its client since, and (0.5.14) its act-by time has not passed since the pin came off. */
+  /**
+   * (0.7.18, B; Rob 2026-11-03: "if something needs attention from the team member and they've unpinned it, the most recent
+   * thread for that client should always be repinned again ... Our bridge should repin it if there's still something
+   * needed") The threads the person took the pin off while their client still pins (`pinsFor`): pinned again on this pass,
+   * named with ` · still needs you` (`Pin.again`). A thread whose client no longer pins keeps the person's unpin, as before.
+   */
+  const again = new Set<string>()
+  /** Whether the person's unpin of this thread still stands: nothing new for its client since, and (0.5.14) its act-by time has not passed since the pin came off. (0.7.18, B) Never while its client pins. */
   const staysOff = (sid: string, it: QueueItem): boolean => {
     const u = unpinned[sid]
     if (!u) return false
+    if (pinsFor(it, now)) {
+      again.add(sid)
+      delete unpinned[sid]
+      return false
+    }
     const n = newestOf(it)
     const nothingNew = n.mail <= (Number(u.mail) || 0) && n.pkg <= (Number(u.pkg) || 0) && n.task <= (Number(u.task) || 0)
     const act = Number.isFinite(it.actBy) ? (it.actBy as number) : it.dueAt
@@ -2265,13 +2376,17 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     const fast = fastState(it, now)
     if (sid && live.has(sid) && !named.has(sid) && fast) named.set(sid, { it, unpin: unpinFor(it, 'any'), title: checkingTitle(it.client, fast.at, now) })
   }
-  for (const it of items) {
+  for (const it of [...items, ...quiet]) {
     const sid = links[it.projectId]
     if (sid && live.has(sid) && !named.has(sid) && staysOff(sid, it)) named.set(sid, { it, unpin: false, title: threadTitle(it, now) })
   }
+  // (0.7.18) a client whose drafts or tickets a teammate has pins once the founder or the PM should check on them
+  // (`pinsFor`: late, or within FOUNDER_CHECK_AHEAD_MS / PM_CHECK_AHEAD_MS); named and never pinned until then, as before
   for (const it of quiet) {
     const sid = links[it.projectId]
-    if (sid && live.has(sid) && !named.has(sid)) named.set(sid, { it, unpin: unpinFor(it, 'ours'), title: titleFor(it, now) })
+    if (!sid || !live.has(sid) || named.has(sid)) continue
+    if (pinsFor(it, now)) want.set(sid, it)
+    else named.set(sid, { it, unpin: unpinFor(it, 'ours'), title: titleFor(it, now) })
   }
   // R1: a linked thread is pinned only while something of its client has a clock for the viewer: overdue (since the cut,
   // `listCutoff`) or due within the next 24 business hours (`pinsNow`). Every other one is named, and the bridge takes its
@@ -2281,10 +2396,14 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
   // thread of every ACTIVE client whatever its time, so threads named only `🟡 <client> · task`, whose items were undated
   // tickets, were pinned with no clock. A pin needs a clock again: an undated client is never pinned, active or not, and
   // the pins 0.7.11 put on such threads come off here (they are ours). The internal queue was never pinned that way.
+  // ⛔ (0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you, not when something has a timer left for a
+  // teammate to answer") Only what needs the person pins by R1's 24 business hours (`ownActBy`): a reply whose drafts a
+  // teammate holds, a package a teammate decides on and a teammate's ticket pin only once the founder or the PM should check
+  // on them (`checkNow`), and the thread is then named for who to check on (`pinTitle`).
   for (const it of items) {
     const sid = links[it.projectId]
     if (!sid || !live.has(sid) || want.has(sid) || named.has(sid)) continue
-    if (pinsNow(it, now)) want.set(sid, it)
+    if (pinsFor(it, now)) want.set(sid, it)
     else named.set(sid, { it, unpin: unpinFor(it, 'ours'), title: threadTitle(it, now) })
   }
 
@@ -2361,9 +2480,11 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
     // The record first, as the thread stands (a pin the person put on stays theirs), so a failed rename
     // leaves a record to give the name back by; then, just before we pin it, the record that the pin is
     // ours. (Recorded as ours any earlier, a rename that failed would read later as the person's unpin.)
-    const record = (byUs: boolean): Pin => pinOf(it, byUs)
+    // (0.7.18, B) pinned again over the person's unpin while the client still needs them: on record (`again`), and named so
+    const back = again.has(sid) || (pins[sid]?.again === true && pins[sid]?.projectId === it.projectId)
+    const record = (byUs: boolean): Pin => ({ ...pinOf(it, byUs), ...(back ? { again: true as const } : {}) })
     await recordPin(sid, record(s.pinned ? (pins[sid]?.byUs ?? false) : false))
-    const title = threadTitle(it, now)
+    const title = pinTitle(it, now, back)
     if (s.title !== title) await rename(s, title)
     if (!s.pinned) {
       await recordPin(sid, record(true))
@@ -2631,7 +2752,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
       // client and every client whose thread was pinned in the other profile: 15 on 10-30, 14 of them undated or a
       // teammate's, all with an open thread in the profile Rob had just left. A thread left unfinished there is carried by
       // the profile-switch skill's switch routine (`switchPromptLine`), not by this list.
-      if (!at || at.listed !== 'items' || !canStart(at.it) || !pinsNow(at.it, now)) continue
+      if (!at || at.listed !== 'items' || !canStart(at.it) || !pinsFor(at.it, now)) continue
       const client = cleanName(at ? at.it.client : pins[sid]?.client)
       if (!client) continue
       // (a time only for the person's own list: a teammate's late ticket is not his to answer)
@@ -3197,7 +3318,7 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
   const links = await storeGet<Record<string, string>>($, 'mm.links', {})
   const me = await knownSelf($)
   // (0.7.11) never a quiet client: no new thread is offered for it
-  const noThread = items.filter(i => isFresh(last, i.projectId) && links[i.projectId] === undefined && pinsNow(i, now) && storedRec(last, i.projectId)?.dormant !== true)
+  const noThread = items.filter(i => isFresh(last, i.projectId) && links[i.projectId] === undefined && pinsFor(i, now) && storedRec(last, i.projectId)?.dormant !== true)
   const chips = await chipsOf($, now)
   /** (0.5.4) Where a chip is, by the band's name for its thread: the one it was minted with, else here or elsewhere. */
   const placeOf = (c: Chip): string => c.place || (c.threadId === me ? 'this thread' : 'another thread')
@@ -3222,11 +3343,11 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
     return Boolean(t && !t.suggested && links[i.projectId] === t.sid)
   }
   const stillOpen = items.find(i => fastState(i, now)?.state === 'still_open' && Boolean(recOf(i.projectId)?.target) && !recOf(i.projectId)?.target?.suggested)
-  const update = items.find(i => recOf(i.projectId)?.state === 'update' && linkedTarget(i) && pinsNow(i, now))
+  const update = items.find(i => recOf(i.projectId)?.state === 'update' && linkedTarget(i) && pinsFor(i, now))
   const text = bandText({
     pinned: Number(last.pinned) || 0,
     // (fix round 1, L7) anything due within the window, with a thread or not, says Needs you
-    pinsNow: items.some(i => pinsNow(i, now)),
+    pinsNow: items.some(i => pinsFor(i, now)),
     noThread: noThread.map(i => ({ client: cleanName(i.client), due: clockText(i.dueAt, now), chipIn: chipIn(i.projectId), chipHere: Boolean(me) && liveChip(chips, i.projectId)?.threadId === me })),
     chipsElsewhere: [...elsewhere.values()],
     stillOpen: stillOpen ? cleanName(stillOpen.client) : undefined,
@@ -4814,7 +4935,7 @@ function needingThreads(last: Last, links: Readonly<Record<string, string>>, now
       if (!rec || rec.state !== 'start' || rec.dormant || !isUuid(it.projectId) || (links[it.projectId] !== undefined && rec.away !== true)) return false
       // (0.7.13) a client whose thread is in another Claude profile is missing here only when it needs the person now
       // (`pinsNow`): an undated one keeps its thread there and its row's own Start
-      if (rec.away === true && !pinsNow(it, now)) return false
+      if (rec.away === true && !pinsFor(it, now)) return false
       return rowButtons(rowFor(it, rec, now, { needsYou: true }))[0] === 'start'
     })
     .sort(byDue)
@@ -4973,7 +5094,7 @@ function needsFor(last: Last, w: ChipWorld, now: number): Need[] {
     if (!isUuid(it.projectId) || heldInternal(it)) continue
     // (0.7.3, internal queue) the internal queue is never due, so it never pins: its chip is minted all the same, in its
     // linked thread alone (C1). With no linked thread it gets none (R17: nothing undated gets a no-thread chip).
-    if (!pinsNow(it, now) && !(internalQueueThread(it) && w.links[it.projectId] !== undefined)) continue
+    if (!pinsFor(it, now) && !(internalQueueThread(it) && w.links[it.projectId] !== undefined)) continue
     const rec = storedRec(last, it.projectId)
     if (!rec) continue
     const signature = signatureOf(it)

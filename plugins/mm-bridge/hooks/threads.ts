@@ -20,7 +20,7 @@ import type { MmRow } from '../types'
 
 import {
   MAY_NEED_OK, NOBODY, assignAsksOf, assignOnly, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, committedCount, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
-  pinsNow, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
+  pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
 } from './queue'
 import type { AskRef, FeedThread, QueueItem } from './queue'
 
@@ -1413,7 +1413,7 @@ export function rowFor(it: QueueItem, rec: Recommendation, now: number, opts: Ro
   // R8: the server is checking our reply: the row is named as its thread is
   const checking = !withMate && fast?.state === 'checking' ? fast : null
   // (0.7.5, the panel redesign) ONE line: the chip, the client, what is needed, the time left (`rowLine`)
-  const title = checking ? checkingTitle(it.client, checking.at, now) : still ? stillOpenTitle(it.client) : rowLine(it, now, { fresh, pins: fresh && pinsNow(it, now) })
+  const title = checking ? checkingTitle(it.client, checking.at, now) : still ? stillOpenTitle(it.client) : rowLine(it, now, { fresh, pins: fresh && pinsFor(it, now) })
   // (0.7.5) and a second line only for what the first does not say (never for a row not the viewer's: its note says it),
   // with the one reason a button does not carry: Update would go to a thread whose title only looks like the client
   const guess = rec.target?.suggested ? rec.reason : ''
