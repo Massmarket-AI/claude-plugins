@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { Feed } from './queue'
-import { register } from './register'
+import { VERSION, register } from './register'
 
 // B1, 2026-10-13: Rob started fifteen chips within a minute or two. Ten of the new threads opened with a valid
 // [mm-link] marker; two of those links never reached the store, though both projects were in the last feed.
@@ -248,7 +248,7 @@ const start = async ($: unknown, n: number) => {
 async function before(w: ReturnType<typeof world>) {
   const poller = w.session('cli-poller', 'local_poller')
   w.put('mm.links', Object.fromEntries(Array.from({ length: 8 }, (_, i) => [older(i + 1), OLD_THREAD(i + 1)])))
-  w.put('mm.lease', { owner: 'cli-poller', until: NOW + HOUR })
+  w.put('mm.lease', { owner: 'cli-poller', until: NOW + HOUR, version: VERSION })
   await syncIn(poller)
   return { poller, threads: Array.from({ length: N }, (_, i) => w.session(`cli-new-${i + 1}`, NEW_THREAD(i + 1))) }
 }
@@ -351,7 +351,7 @@ describe('F4: chip records when a dozen threads tick at once', () => {
       const w = world({ seed, extra: ids })
       await before(w)
       // the thread that polls is one of the twelve, as it is in the app: its session holds the lease, and its pair is on record
-      w.put('mm.lease', { owner: `cli-f4-${seed}-1`, until: NOW + HOUR })
+      w.put('mm.lease', { owner: `cli-f4-${seed}-1`, until: NOW + HOUR, version: VERSION })
       w.put('mm.threads', { ...((w.stored('mm.threads') ?? {}) as Record<string, unknown>), [`cli-f4-${seed}-1`]: { app: ids[0], at: NOW } })
       const threads = ids.map((id, i) => w.session(`cli-f4-${seed}-${i + 1}`, id))
       await tickAll(w, threads)
@@ -390,7 +390,7 @@ describe('0.5.7: a dozen threads that tick at once never start one client\'s thr
       const w = world({ seed, extra: ids, startOnly: true })
       await before(w)
       // the lease is held by a session none of them knows: nobody is the poller to them
-      w.put('mm.lease', { owner: 'cli-nobody', until: NOW + HOUR })
+      w.put('mm.lease', { owner: 'cli-nobody', until: NOW + HOUR, version: VERSION })
       const threads = ids.map((id, i) => w.session(`cli-as-${seed}-${i + 1}`, id))
       for (let i = 0; i < 2; i++) {
         await tickAll(w, threads)

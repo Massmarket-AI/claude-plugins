@@ -4,6 +4,7 @@ import type { Engine, FoundElement } from 'claude-code/testing'
 
 import type { Feed, FeedAsk, FeedQueueTicket, FeedTicket } from './queue'
 import { cleanTitle, clockText, isNewerVersion } from './queue'
+import { VERSION } from './register'
 import { REFRESH_FAILED, carryKickoff, freshParagraph, recommend } from './threads'
 import { localClock } from './track'
 
@@ -3226,7 +3227,7 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
   test('with no sync on record, a chip is not withdrawn for its client being off the list; a superseded one still is', async ($, on) => {
     // another thread holds the sync, and nothing is stored yet
     const w = world(on, {
-      store: { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR }, 'mm.chips': [chip(CEDAR, 1, SELF, { superseded: true }), chip(CEDAR, 2, SELF)] },
+      store: { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR, version: VERSION }, 'mm.chips': [chip(CEDAR, 1, SELF, { superseded: true }), chip(CEDAR, 2, SELF)] },
     })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
@@ -3384,10 +3385,10 @@ describe('the band above the prompt: what needs the person, from any thread', ()
   test('⛔ it draws from what is stored: no feed call and no app call, in a thread that does not do the syncing', async ($, on) => {
     // another thread holds the sync: this one's timer never fetches the feed
     const stored = { at: NOW - 60_000, member: ME, items: [], pinned: 0, recs: {} }
-    const w = world(on, { store: { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR }, 'mm.last': stored } })
+    const w = world(on, { store: { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR, version: VERSION }, 'mm.last': stored } })
     // what the other thread's sync stored: three clients, as this world's feed has them
     await mm($, '')
-    w.stored['mm.lease'] = { owner: 'another-session', until: NOW + 24 * HOUR }
+    w.stored['mm.lease'] = { owner: 'another-session', until: NOW + 24 * HOUR, version: VERSION }
     const fetchedBefore = w.fetched.length
     await started($, w)
     for (let i = 0; i < 12; i++) await w.clock.advance(60_000)
@@ -3645,10 +3646,13 @@ describe('F10: a reply package someone picked up stays in the panel, with who ho
     const w = world(on, { store: { 'mm.links': { [ACME]: SELF }, 'mm.last': last } })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
-    expect(w.fetched.filter(u => u.includes('/closeout'))).toEqual([])
+    // (0.7.19) the sync on record is an older bridge's (no version) and this thread takes the free lease: it syncs at
+    // once, where until 0.7.18 it waited for the sync to be due, so its one note carries that sync's word on when the
+    // thread updates itself (the stored queue had no recommendation to give it)
+    expect(w.fetched.filter(u => u.includes('/closeout')).length).toBe(1)
     expect(w.appended.length).toBe(1)
     expect(w.appended[0]).toContain(
-      `[Massmarket bridge, no reply needed] Acme Roofing Pat: ${ACME_TITLE}. Reply package aaaaaaaa is prepared; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${PKG}. Nothing has been sent.`,
+      `[Massmarket bridge, no reply needed] Acme Roofing Pat: ${ACME_TITLE}. Reply package aaaaaaaa is prepared; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${PKG}. This thread updates itself at about 11:10 AM. Nothing has been sent.`,
     )
     expect(await viewText($, 'Acme Roofing')).toBe('## Acme Roofing\n\n1. What the client sent')
     // the note the last version left is recorded under the same key this version works out: no repeat, before or after a sync
@@ -3763,7 +3767,7 @@ describe('(p) a reply draft is sent or discarded in a thread: one sync follows, 
   const DISCARD = 'node ~/.claude/skills/team-api-gateway/scripts/mm-api.mjs ext POST /reply-draft/discard --body \'{"draft_id":"d2","reason":"read, nothing to confirm"}\''
   const bash = ($: Engine, command: string) => $.tool.call({ tool: 'Bash', command } as never) as Promise<{ result?: unknown; deny?: string; isError?: boolean }>
   /** Another thread polls: this one's timer never syncs. */
-  const notThePoller = { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR } }
+  const notThePoller = { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR, version: VERSION } }
 
   // R6 (0.5.2, Rob 2026-10-13): the feed is read again at once after a route call that can close something
   test('a second after the call, one sync, in the thread it was made in; the command and its answer pass through untouched', async ($, on) => {
@@ -5133,7 +5137,7 @@ describe('R6 and R11: a route call that can close something re-pulls the feed, a
   const bash = ($: Engine, command: string) => $.tool.call({ tool: 'Bash', command } as never)
 
   test('R6: the no-reply route (any reply-package write) re-pulls the feed a second later', async ($, on) => {
-    const w = world(on, { store: { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR } } })
+    const w = world(on, { store: { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR, version: VERSION } } })
     await tickOnce($, w)
     expect(closeouts(w)).toBe(0)
     await bash($, NO_REPLY)
@@ -5474,7 +5478,7 @@ describe('R8: sent · checking, then clear or still open (Rob, 2026-10-13: "yes 
 
 describe('R9: the band never reads all clear from a failed or stale read', () => {
   const quiet = (on: On, last: Record<string, unknown>) =>
-    world(on, { feed: feed({ drafts: [], mail: [], tickets: {} }), store: { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR }, 'mm.last': last } })
+    world(on, { feed: feed({ drafts: [], mail: [], tickets: {} }), store: { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR, version: VERSION }, 'mm.last': last } })
   const bandText = async ($: Engine) => {
     const band = await bandOf($)
     const out = await lines(band)
@@ -5693,7 +5697,7 @@ describe('fix round 1: the reviewer\'s findings', () => {
   // (0.7.12) F6 is withdrawn: until 0.7.12 the band read 'Nothing due in the next 24 hours · 1 older overdue.' here. What was
   // due before the cut is considered nowhere now, so the band is all clear.
   test('F6 (P7a, withdrawn in 0.7.12): a client whose only mail was due before the cut leaves the band all clear', async ($, on) => {
-    world(on, { feed: feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 24 * 8)] as never }), store: { 'mm.lease': { owner: 'x', until: NOW + 24 * HOUR } } })
+    world(on, { feed: feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 24 * 8)] as never }), store: { 'mm.lease': { owner: 'x', until: NOW + 24 * HOUR, version: VERSION } } })
     await mm($, '')
     const band = await bandOf($)
     expect(await lines(band)).toEqual(['Nothing needs you in the next 24 hours.'])
@@ -5701,7 +5705,7 @@ describe('fix round 1: the reviewer\'s findings', () => {
   })
 
   test('L7 (P7b): a client linked since the last sync, due within the window: Needs you, not all clear', async ($, on) => {
-    const w = world(on, { feed: feed({ drafts: [], mail: [] }), threads: [], store: { 'mm.lease': { owner: 'x', until: NOW + 24 * HOUR } } })
+    const w = world(on, { feed: feed({ drafts: [], mail: [] }), threads: [], store: { 'mm.lease': { owner: 'x', until: NOW + 24 * HOUR, version: VERSION } } })
     await mm($, '')
     w.stored['mm.links'] = { [CEDAR]: 'local_new' }
     await mm($, 'status')
@@ -5927,7 +5931,7 @@ describe('0.5.3: a thread\'s chips pass runs every 15 seconds; minting and the f
   })
 
   test('the pass reads no feed and mints nothing: a new need is minted on the minute\'s tick', async ($, on) => {
-    const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: {} }), store: { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR } } })
+    const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: {} }), store: { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR, version: VERSION } } })
     await tickOnce($, w)
     // a sync in this thread (another session holds the lease) puts Cedar on record, with no thread
     w.setFeed(feed({ drafts: [], mail: [] }))
@@ -6027,6 +6031,64 @@ describe('0.5.5: the band says when a later mod is installed than this thread ru
     expect(isNewerVersion('1.0.0', '1.0.0')).toBe(false)
     expect(isNewerVersion('1.0', '0.9.0')).toBe(false)
     expect(isNewerVersion('latest', '0.9.0')).toBe(false)
+  })
+})
+
+// ======================================================================== 0.7.19
+
+describe('0.7.19: a thread behind a later bridge that has run here runs no sync of its own accord; the person\'s /mm still does', () => {
+  const SENT = `node ~/.claude/skills/team-api-gateway/scripts/mm-api.mjs ext POST /reply-draft/sent --body '{"draft_id":"d1","sent_ref":"gmail:abc"}'`
+  const bash = ($: Engine, command: string) => $.tool.call({ tool: 'Bash', command } as never) as Promise<{ result?: unknown; deny?: string; isError?: boolean }>
+  /** A thread running a later bridge reported its version on this machine a minute ago (`mm.versions`): it has run here. */
+  const later = { 'mm.versions': { local_later: { version: '99.0.0', at: NOW - 60_000 } } }
+  const CACHE = '/home/someone/.claude/plugins/cache/massmarket/mm-bridge'
+
+  test('its timer takes no lease and syncs nothing; a reply draft sent there leaves the request for the holder and syncs nothing here', async ($, on) => {
+    const w = world(on, { store: later })
+    await tickOnce($, w)
+    for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
+    expect(closeouts(w)).toBe(0)
+    expect(w.stored['mm.lease']).toBeUndefined()
+    // R6's request is still made, for the lease's holder to read at its next tick
+    const at = w.clock.now()
+    await bash($, SENT)
+    expect(w.stored['mm.ask']).toBe(at)
+    await w.clock.advance(5_000)
+    expect(closeouts(w)).toBe(0)
+    expect(w.stored['mm.last']).toBeUndefined()
+    // the person's own /mm here brings the list up to date, and takes no lease
+    await mm($, '')
+    expect(closeouts(w)).toBe(1)
+    expect(w.stored['mm.lease']).toBeUndefined()
+  })
+
+  test('the same thread with no later bridge run here: the request syncs here a second later, as before', async ($, on) => {
+    const w = world(on, { store: { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR, version: VERSION } } })
+    await tickOnce($, w)
+    await bash($, SENT)
+    await w.clock.advance(1_000)
+    expect(closeouts(w)).toBe(1)
+  })
+
+  test('a later version only in the plugin cache: the restart line, and the holder keeps syncing; once a thread running it reports itself here, the holder stands down', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: {} }), files: { [`${CACHE}/99.0.0/.claude-plugin/plugin.json`]: { text: '{}', mtimeMs: 0 } } })
+    await tickOnce($, w)
+    const band = await bandOf($)
+    expect(await lines(band)).toEqual(['Nothing needs you in the next 24 hours · A newer Claude mod (99.0.0) is installed: quit and reopen Claude to load it.'])
+    await band.unmount()
+    expect(closeouts(w)).toBe(1)
+    expect(w.stored['mm.lease']).toMatchObject({ version: VERSION })
+    // installed, and no thread runs it yet: the sync goes on every five minutes, the lease held
+    for (let i = 0; i < 11; i++) await w.clock.advance(60_000)
+    expect(closeouts(w)).toBe(3)
+    expect((w.stored['mm.lease'] as { until: number }).until).toBeGreaterThan(w.clock.now())
+    // a thread running 99.0.0 reports itself here: at its next look (within five minutes) the holder stands down
+    w.stored['mm.versions'] = { ...(w.stored['mm.versions'] as Record<string, unknown>), local_later: { version: '99.0.0', at: w.clock.now() } }
+    for (let i = 0; i < 5; i++) await w.clock.advance(60_000)
+    const syncs = closeouts(w)
+    for (let i = 0; i < 15; i++) await w.clock.advance(60_000)
+    expect(closeouts(w)).toBe(syncs)
+    expect((w.stored['mm.lease'] as { until: number }).until).toBeLessThan(w.clock.now())
   })
 })
 
@@ -8828,7 +8890,7 @@ describe('(0.5.28, internal asks) the bridge lists, pins and shows an internal a
   })
   const ASKS_PART = '### Internal asks (1)\n\n- Ask from Shezan · due Tue 10 AM\n  > Hey @Builder, which one should we use?'
   const page = () => ({ status: 200, body: { ok: true, markdown: PAGE, draft_sha256: null } })
-  const notThePoller = { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR } }
+  const notThePoller = { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR, version: VERSION } }
   const bash = ($: Engine, command: string) => $.tool.call({ tool: 'Bash', command } as never) as Promise<{ result?: unknown; deny?: string; isError?: boolean }>
 
   test('an ask for me on a client with a package: under This thread, the pickup view, then the ask\'s line, snippet and page', async ($, on) => {
@@ -9615,7 +9677,7 @@ describe('0.6.0: the pane opens by itself for the thread\'s current project, and
 
 describe('0.6.0: the time numbers are read sparingly', () => {
   test('a thread whose project was just set waits 15 seconds, and a change meanwhile starts the wait again', async ($, on) => {
-    const w = world(on, { skillMap: skillsOk, clientTime: timeOk(), store: { 'mm.lease': { owner: 'someone-else', until: NOW + 10 * HOUR } } })
+    const w = world(on, { skillMap: skillsOk, clientTime: timeOk(), store: { 'mm.lease': { owner: 'someone-else', until: NOW + 10 * HOUR, version: VERSION } } })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
     await skill($, 'acme-roofing-project')
@@ -10351,7 +10413,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.18', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.19', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10420,7 +10482,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.18', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.19', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10486,7 +10548,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.18', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.19', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
