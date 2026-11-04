@@ -6379,6 +6379,9 @@ describe('0.5.25: the mm tool\'s kickoffs, for the model on the person\'s own wo
     expect(said.split('\n').at(-1)).toBe('1 more needs a thread: once these have started, call mm with "kickoffs" again.')
     // the eight start, and their markers link them
     w.stored['mm.links'] = Object.fromEntries(kicksIn(said).map((k, i) => [/^\[mm-link ([0-9a-f-]{36})\]/.exec(k.arguments.prompt)?.[1] ?? '', `local_new_${i}`]))
+    // (0.7.20) and they are in the app: kickoffs now syncs before it hands out a client with no thread here, and a sync
+    // drops a link to a thread the app and its records do not have
+    for (let i = 0; i < 8; i++) w.threads.set(`local_new_${i}`, thread(`local_new_${i}`, `New thread ${i}`, 0))
     const rest = await tool($, 'kickoffs')
     expect(kicksIn(rest).length).toBe(1)
     expect(rest.split('\n')).toHaveLength(2)
@@ -10413,7 +10416,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.19', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.20', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10482,7 +10485,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.19', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.20', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10548,7 +10551,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.19', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.20', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
@@ -11157,6 +11160,9 @@ describe('0.7.10 (Rob, 10-28): kickoffs never hand a client out twice, start in 
     expect(await kickoffsOf($)).toEqual([])
     // Client 0's thread opened and linked itself; Client 1's start was never allowed
     w.stored['mm.links'] = { [pidOf(0)]: 'local_new_0' }
+    // (0.7.20) the new thread is in the app: kickoffs now syncs before it hands out Client 1, and a sync drops a link to a
+    // thread the app and its records do not have
+    w.threads.set('local_new_0', thread('local_new_0', 'Client 0 work', 0))
     for (let i = 0; i < 11; i++) await w.clock.advance(60_000)
     expect((await kickoffsOf($)).map(k => k.client)).toEqual(['Client 1'])
   })
@@ -12063,5 +12069,212 @@ describe('0.7.18 A (Rob, 11-03: "it can always repin the oldest one"): a client 
     const w = inB(on, undatedBolt(), [], {})
     expect(await mm($, `link ${BOLT}`)).not.toContain('is in your feed')
     expect((w.stored['mm.links'] as Record<string, string>)[BOLT]).toBe(SELF)
+  })
+})
+
+// ======================================================================== 0.7.20 (Rob, 2026-11-04)
+
+// ⛔ (0.7.20, measured 2026-11-04 16:48 UTC on Rob's computer, 0.7.19 holding the sync; Rob answered "Yes, fix it" to "Fix
+// the bridge so it recognizes a client's existing thread by its name?") After a profile switch the mm tool's `kickoffs`
+// offered to start new threads for Agile Process Solutions and Legacy Law, each linked to its thread in another profile,
+// though each had an OPEN thread in this profile named by the bridge for it (`🔴 16h left · Agile Process Solutions · reply
+// ready`, an older bridge's wording, and `✓ Legacy Law · clear 4:28 PM`). 0.7.18's `ownHere` would have taken either by
+// that name, but it looks only in the app's list, which holds the 60 most recently active threads: the two were last active
+// on 10-19 and 10-20, and 93 open threads of that profile were more recent. When another thread sent each one a message at
+// 16:50 (both went to the top of the list), the next sync, at 16:51:11, linked Agile by that very rule. Here Apex Process
+// Partners stands for Agile, and Linden Law (project "Linden Law — Jo Park") for Legacy Law; `unlisted` threads are open
+// but older than the app's 60 most recent, so the app answers for them only when asked by id.
+describe('0.7.20 (Rob, 11-04: "Yes, fix it"): a client\'s thread here is found by its name, never counted as missing', () => {
+  const APEX = '44444444-4444-4444-8444-444444444444'
+  const LINDEN = '55555555-5555-4555-8555-555555555555'
+  const PROFILE_C = `${PROFILES_ROOT}/acct-c/org-c`
+  const CLI_F4 = 'eeeeeeee-0000-4000-8000-0000000000f4'
+  const CLI_B0 = 'eeeeeeee-0000-4000-8000-0000000000b0'
+  /** Their threads here, as the app named them on 11-04: the bridge's names, given while each was linked here. */
+  const APEX_HERE = '🔴 16h left · Apex Process Partners · reply ready'
+  const LINDEN_HERE = '✓ Linden Law · clear 4:28 PM'
+  const ticket = (n: number, projectId: string, projectName: string, dueH: number) => ({
+    ticket_id: `${String(n).padStart(8, '0')}-0000-4000-8000-0000000007d0`, project_id: projectId, project_name: projectName, title: `Task ${n}`,
+    due_at: new Date(NOW + dueH * HOUR).toISOString(), due_source: 'commitment', assignee_email: FOUNDER,
+  })
+  /** The founder's feed: a task of Apex's due in 5 hours, one of Linden Law's 2 hours late, and Cedar Dental's in 30. */
+  const robFeed = (more: Partial<Feed> = {}): Feed => ({
+    member: FOUNDER, role: 'founder', mail: [], drafts: [], threads: [],
+    tickets: { due_today: [ticket(1, APEX, 'Apex Process Partners', 5)], overdue: [ticket(2, LINDEN, 'Linden Law — Jo Park', -2)], due_soon: [ticket(3, CEDAR, 'Cedar Dental', 30)] },
+    ...more,
+  })
+  /** The store as it was at 16:48: each client linked to its thread in profile A, where its last kickoff went. */
+  const before = (): Record<string, unknown> => ({
+    'mm.profile': { dir: PROFILE_B, since: NOW - DAYS, from: PROFILE_A },
+    'mm.switchPins': { since: NOW - DAYS, at: NOW - DAYS },
+    'mm.links': { [APEX]: 'local_49', [LINDEN]: 'local_96' },
+    // the threads' own names, kept when the bridge first named them
+    'mm.titles': { local_f4: 'Dana Pike: answer her 4:17 AM email (partner question)', local_b0: 'jo' },
+    'mm.threads': { [CLI_F4]: { app: 'local_f4', at: NOW - 16 * DAYS }, [CLI_B0]: { app: 'local_b0', at: NOW - 15 * DAYS } },
+    'mm.sent': { [APEX]: { sid: 'local_49', sig: 'x', at: NOW - 2 * DAYS }, [LINDEN]: { sid: 'local_96', sig: 'x', at: NOW - 5 * DAYS } },
+    'mm.marked': { local_49: APEX, local_96: LINDEN, local_d0: APEX },
+    'mm.profileLinks': { [PROFILE_A]: { [APEX]: 'local_49', [LINDEN]: 'local_96' }, [PROFILE_C]: { [APEX]: 'local_d0' } },
+    'mm.activity': { [APEX]: NOW - DAYS, [LINDEN]: NOW - 5 * DAYS },
+  })
+  const records = () => ({
+    ...profileRec(PROFILE_B, SELF),
+    ...profileRec(PROFILE_B, 'local_f4'),
+    ...profileRec(PROFILE_B, 'local_b0'),
+    ...profileRec(PROFILE_A, 'local_49'),
+    ...profileRec(PROFILE_A, 'local_96'),
+    ...profileRec(PROFILE_C, 'local_d0'),
+  })
+  const here = (over: { f4?: Partial<Thread>; b0?: Partial<Thread> } = {}): Thread[] => [
+    thread('local_other', 'Unrelated notes', 2),
+    thread('local_f4', APEX_HERE, 16 * 24, over.f4),
+    thread('local_b0', LINDEN_HERE, 15 * 24, over.b0),
+  ]
+  const at1648 = (on: On, opts: { feed?: Feed; threads?: Thread[]; store?: Record<string, unknown>; unlisted?: string[]; files?: Record<string, { text: string; mtimeMs: number }> } = {}) => {
+    const disk: Record<string, { text: string; mtimeMs: number }> = { ...records(), ...(opts.files ?? {}) }
+    const w = world(on, { tools: 'start', feed: opts.feed ?? robFeed(), threads: opts.threads ?? here(), unlisted: opts.unlisted ?? ['local_f4', 'local_b0'], files: disk, store: { ...before(), ...(opts.store ?? {}) } })
+    return Object.assign(w, { disk })
+  }
+  const linksOf = (w: { stored: Record<string, unknown> }) => w.stored['mm.links'] as Record<string, string>
+  const kicked = async ($: Engine) => kicksIn(await tool($, 'kickoffs')).map(k => k.client)
+
+  test('[Agile Process Solutions, 11-04] its thread here, past the app\'s 60 most recent, carries an older bridge\'s name for it, and its link is its thread in another profile: linked to its thread here, pinned and named, and kickoffs offers no new one', async ($, on) => {
+    const w = at1648(on)
+    await mm($, '')
+    expect(linksOf(w)[APEX]).toBe('local_f4')
+    expect(w.threads.get('local_f4')).toMatchObject({ title: '🔴 5h left · Apex Process Partners · task', pinned: true })
+    const kicks = await tool($, 'kickoffs')
+    expect(kicks).not.toContain('Apex Process Partners')
+    expect(kicksIn(kicks).map(k => k.client)).not.toContain('Apex Process Partners')
+  })
+
+  test('[Legacy Law, 11-04] its thread here, past the app\'s 60 most recent, is named "✓ Linden Law · clear 4:28 PM" for the project "Linden Law — Jo Park" (its kickoff calls it Linden Law Jo Park): linked to it, and kickoffs offers no new one', async ($, on) => {
+    const w = at1648(on)
+    await mm($, '')
+    expect(linksOf(w)[LINDEN]).toBe('local_b0')
+    expect(w.threads.get('local_b0')?.title).toContain('Linden Law')
+    expect(w.threads.get('local_b0')?.pinned).toBe(true)
+    // (Cedar Dental, with no thread anywhere, is the one handed out)
+    expect(await kicked($)).toEqual(['Cedar Dental'])
+  })
+
+  test('(control, as 0.7.18 and 0.7.19 already did) the same two threads inside the app\'s list are linked by their names: the name and every record gate let them through, so the list alone kept them out', async ($, on) => {
+    const w = at1648(on, { unlisted: [] })
+    await mm($, '')
+    expect(linksOf(w)[APEX]).toBe('local_f4')
+    expect(linksOf(w)[LINDEN]).toBe('local_b0')
+  })
+
+  test('kickoffs, asked before any sync has linked the thread here (it took the bridge\'s name since): it looks first, links it, and names it in its answer instead of handing the client out', async ($, on) => {
+    const w = at1648(on, { threads: here({ f4: { title: 'Dana Pike: answer her 4:17 AM email (partner question)' } }) })
+    await mm($, '')
+    expect(linksOf(w)[APEX]).toBe('local_49')
+    // the thread takes the bridge's name (here, as the bridge in another profile would name it), and the app writes its record
+    const f4 = w.threads.get('local_f4')
+    if (f4) f4.title = APEX_HERE
+    w.disk[`${PROFILE_B}/local_f4.json`] = { text: JSON.stringify({ sessionId: 'local_f4', isArchived: false, title: APEX_HERE }), mtimeMs: NOW }
+    // the sync on record is fresh: until 0.7.20 kickoffs handed Apex out from it as it was
+    const answer = await tool($, 'kickoffs')
+    expect(kicksIn(answer).map(k => k.client)).not.toContain('Apex Process Partners')
+    expect(answer).toContain('Already has a thread in this profile, now linked: Apex Process Partners ("5h left Apex Process Partners task")')
+    expect(linksOf(w)[APEX]).toBe('local_f4')
+    expect(sessionCalls(w)).toEqual([])
+  })
+
+  test('a link whose whereabouts the sync could not find out (the app\'s lookups spent before it) is asked for first: not open here, the client takes its thread here by its name', async ($, on) => {
+    // ten links of clients not in the feed come first and spend the sync's LOOKUPS_PER_SYNC; Apex's link has no record here
+    const filler = Object.fromEntries(Array.from({ length: 10 }, (_, n) => [`${String(n).padStart(8, '0')}-0000-4000-8000-0000000007d1`, `local_gone${n}`]))
+    const w = at1648(on, { unlisted: [], store: { 'mm.links': { ...filler, [APEX]: 'local_49x' }, 'mm.sent': {}, 'mm.marked': {}, 'mm.profileLinks': {} } })
+    await mm($, '')
+    expect(linksOf(w)[APEX]).toBe('local_f4')
+  })
+
+  test('an older bridge\'s name with a two-digit rank in front, on a thread whose own name is not on record, in the app\'s list: linked by that name', async ($, on) => {
+    const w = at1648(on, { unlisted: [], threads: here({ f4: { title: '07 🔴 Apex Process Partners · reply overdue 6h' } }), store: { 'mm.titles': {} } })
+    await mm($, '')
+    expect(linksOf(w)[APEX]).toBe('local_f4')
+  })
+
+  test('the sync asks for at most NAMED_LOOKUPS_PER_SYNC threads past the list, keeps what it learnt, and the next sync goes on from there', async ($, on) => {
+    // 25 threads the bridge named for nobody in the feed, each more recently written than Apex's
+    const others = Array.from({ length: 25 }, (_, n) => `local_n${String(n).padStart(2, '0')}`)
+    const files = Object.fromEntries(others.map((sid, n) => [`${PROFILE_B}/${sid}.json`, { text: JSON.stringify({ sessionId: sid, isArchived: false, title: 'x' }), mtimeMs: NOW - HOUR + n + 1 }]))
+    const w = at1648(on, {
+      threads: [...here(), ...others.map(sid => thread(sid, `🟡 Elm Clinic ${sid} · task`, 20 * 24))],
+      unlisted: ['local_f4', 'local_b0', ...others],
+      files: { ...files, [`${PROFILE_B}/local_f4.json`]: { text: '{}', mtimeMs: NOW - 2 * HOUR } },
+      store: { 'mm.titles': { ...Object.fromEntries(others.map(sid => [sid, 'own name'])), local_f4: 'Dana Pike', local_b0: 'jo' } },
+    })
+    const asked = () => w.calls.filter(c => c.tool === 'get_session' && String(c.args.session_id).startsWith('local_n')).length
+    await mm($, '')
+    expect(asked()).toBeLessThanOrEqual(20)
+    expect(linksOf(w)[APEX]).toBe('local_49')
+    await w.clock.advance(6 * 60_000)
+    await mm($, '')
+    expect(linksOf(w)[APEX]).toBe('local_f4')
+    // each of them asked once: what they were named is on record, and their records have not changed
+    expect(asked()).toBe(25)
+    await mm($, '')
+    expect(asked()).toBe(25)
+  })
+
+  // ⛔ every exclusion of 0.7.18 stands, past the list as in it
+  test('⛔ a name of the bridge\'s for ANOTHER client in the feed is never this client\'s', async ($, on) => {
+    const w = at1648(on, { threads: here({ f4: { title: '🔴 16h left · Cedar Dental · task' } }) })
+    await mm($, '')
+    expect(linksOf(w)[APEX]).toBe('local_49')
+    expect(await kicked($)).toContain('Apex Process Partners')
+  })
+
+  test('⛔ a link to a thread open here is never moved, past the list too, however new the named thread is', async ($, on) => {
+    const w = at1648(on, { threads: [...here(), thread('local_x', 'Apex, older work', 30 * 24)], unlisted: ['local_f4', 'local_b0', 'local_x'], store: { 'mm.links': { [APEX]: 'local_x', [LINDEN]: 'local_96' } } })
+    await mm($, '')
+    expect(linksOf(w)[APEX]).toBe('local_x')
+  })
+
+  test('⛔ a link whose whereabouts the sync could not find out, and that is open here when asked, is never moved', async ($, on) => {
+    const filler = Object.fromEntries(Array.from({ length: 10 }, (_, n) => [`${String(n).padStart(8, '0')}-0000-4000-8000-0000000007d1`, `local_gone${n}`]))
+    const w = at1648(on, { threads: [...here(), thread('local_x', 'Apex, older work', 30 * 24)], unlisted: ['local_x'], store: { 'mm.links': { ...filler, [APEX]: 'local_x' } } })
+    await mm($, '')
+    expect(linksOf(w)[APEX]).toBe('local_x')
+  })
+
+  test('⛔ an archived thread with the bridge\'s name for the client is never taken by its name, and never brought back by it', async ($, on) => {
+    const w = at1648(on, { threads: here({ f4: { isArchived: true } }) })
+    await mm($, '')
+    expect(linksOf(w)[APEX]).toBe('local_49')
+    expect(w.threads.get('local_f4')?.isArchived).toBe(true)
+    expect(w.calls.filter(c => c.tool === 'unarchive_session')).toEqual([])
+  })
+
+  test('⛔ a name two clients in the feed could both claim is evidence for neither', async ($, on) => {
+    const twins = robFeed({ tickets: { due_today: [ticket(1, APEX, 'Apex Process Partners — East', 5), ticket(4, CEDAR, 'Apex Process Partners — West', 6)], overdue: [ticket(2, LINDEN, 'Linden Law — Jo Park', -2)] } })
+    const w = at1648(on, { feed: twins })
+    await mm($, '')
+    expect(linksOf(w)[APEX]).toBe('local_49')
+    expect(linksOf(w)[CEDAR]).toBeUndefined()
+    // Linden Law's name is its own: linked as before
+    expect(linksOf(w)[LINDEN]).toBe('local_b0')
+  })
+
+  for (const [why, store] of [
+    ['the person unlinked it', { 'mm.unlinked': { local_f4: NOW - DAYS } }],
+    ['a client was moved off it', { 'mm.released': ['local_f4'] }],
+    ['it is shared with another client (a hub)', { 'mm.shared': { local_f4: NOW - DAYS } }],
+    ['it is linked to another client', { 'mm.links': { [APEX]: 'local_49', [LINDEN]: 'local_96', [CEDAR]: 'local_f4' } }],
+    ['its pin record is another client\'s', { 'mm.pins': { local_f4: ourPin(CEDAR, 'Cedar Dental') } }],
+    ['it opened with another client\'s marker', { 'mm.marked': { local_49: APEX, local_96: LINDEN, local_f4: CEDAR } }],
+  ] as const) {
+    test(`⛔ never taken by its name when ${why}`, async ($, on) => {
+      const w = at1648(on, { store })
+      await mm($, '')
+      expect(linksOf(w)[APEX]).not.toBe('local_f4')
+    })
+  }
+
+  test('⛔ a thread whose sessions worked on two clients (a hub) is never taken by its name', async ($, on) => {
+    const hub = robFeed({ threads: [{ project_id: APEX, session_id: CLI_F4, last_activity_at: ago(2) }, { project_id: CEDAR, session_id: CLI_F4, last_activity_at: ago(1) }] })
+    const w = at1648(on, { feed: hub })
+    await mm($, '')
+    expect(linksOf(w)[APEX]).not.toBe('local_f4')
   })
 })
