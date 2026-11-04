@@ -4,6 +4,7 @@ import { ME, NOW, ago, bandButtons, fakeApp, hooks, mm, next, paneButtons, pid, 
 import type { FakeThread } from './fake-app.test-helper'
 import type { Feed } from './queue'
 import { cleanTitle } from './queue'
+import { VERSION } from './register'
 import { secondThreadSentence } from './threads'
 import { localClock } from './track'
 
@@ -670,7 +671,7 @@ describe('L3: a refresh that fails after a press shows in one line, until a sync
     await w.advance(1_000)
     const other = w.session('local_l3bother')
     await mm(other, '')
-    w.put('mm.lease', { owner: 'cli:local_l3bother', until: w.now() + 24 * 3_600_000 })
+    w.put('mm.lease', { owner: 'cli:local_l3bother', until: w.now() + 24 * 3_600_000, version: VERSION })
     // this thread's own timer: no sync of its own, and the line goes
     await hooks['session.start']?.(hub, { cwd: '/w', surface: 'desktop', isInteractive: false }, next)
     await w.advance(4_000)
@@ -818,7 +819,7 @@ describe('0.5.4: a thread that does not poll draws its band and list again once 
     const w = fakeApp(feed, [{ sessionId: pollerId }, { sessionId: hubId }], [], { every: true })
     const poller = w.session(pollerId)
     const hub = w.session(hubId)
-    w.put('mm.lease', { owner: `cli:${pollerId}`, until: NOW + 24 * 3_600_000 })
+    w.put('mm.lease', { owner: `cli:${pollerId}`, until: NOW + 24 * 3_600_000, version: VERSION })
     await mm(hub, '')
     await startIn(hub)
     await w.advance(4_000)
@@ -898,7 +899,7 @@ describe('0.5.3 claim in place, as 0.5.4 has it: the long thread\'s own fresh-th
   test('(0.5.11) sixteen running threads and a long linked thread that polls: no chip for a fresh thread, nothing started, no claim; another thread updates it by itself, once', LONG, async () => {
     const { w, threads, LINKED, linked } = crucialShape('a')
     // the long thread is the one that polls: it never sends into itself, and another running thread sends it
-    w.put('mm.lease', { owner: `cli:${LINKED}`, until: NOW + 24 * 3_600_000 })
+    w.put('mm.lease', { owner: `cli:${LINKED}`, until: NOW + 24 * 3_600_000, version: VERSION })
     await mm(linked, '')
     for (const t of threads) await start(t)
     await w.advance(4_000)
@@ -974,7 +975,7 @@ describe('0.5.6: Start moves the chip to the thread it is pressed in (Rob, 10-14
     const w = fakeApp(feed, [{ sessionId: Y, title: 'Fabrikam Media HighLevel Build' }, { sessionId: X, title: 'Where I am' }, { sessionId: Z, title: 'Elsewhere' }], [], { every: true })
     const [ys, xs, zs] = [Y, X, Z].map(id => w.session(id))
     // Y polls: with no prompt of the person's anywhere yet, the client's one chip is minted there (C3)
-    w.put('mm.lease', { owner: `cli:${Y}`, until: NOW + 24 * 3_600_000 })
+    w.put('mm.lease', { owner: `cli:${Y}`, until: NOW + 24 * 3_600_000, version: VERSION })
     await mm(ys, '')
     for (const s of [ys, xs, zs]) await startIn(s)
     await w.advance(4_000)
@@ -1019,7 +1020,7 @@ describe('0.5.7: a thread the bridge starts by itself is started once, whoever t
     const ids = ['local_race_a', 'local_race_b']
     const w = fakeApp(feed, ids.map(sessionId => ({ sessionId })), [], { every: true, tools: 'start' })
     // the thread that polls is none of theirs, and nobody has written in either: each may take itself for the holder
-    w.put('mm.lease', { owner: 'cli:local_nobody', until: NOW + 24 * 3_600_000 })
+    w.put('mm.lease', { owner: 'cli:local_nobody', until: NOW + 24 * 3_600_000, version: VERSION })
     const [a, b] = ids.map(id => w.session(id))
     await mm(a, '')
     await startIn(a)
@@ -1058,7 +1059,7 @@ describe('R13: in a thread that does not sync, the refresh-failed line never goe
     await w.advance(1_000)
     const other = w.session('local_r13other')
     await mm(other, '')
-    w.put('mm.lease', { owner: 'cli:local_r13other', until: w.now() + 24 * 3_600_000 })
+    w.put('mm.lease', { owner: 'cli:local_r13other', until: w.now() + 24 * 3_600_000, version: VERSION })
     await hooks['session.start']?.(hub, { cwd: '/w', surface: 'desktop', isInteractive: false }, next)
     await w.advance(4_000)
     for (let i = 0; i < 20_000; i++) await Promise.resolve()
@@ -1582,7 +1583,7 @@ describe('0.5.11: a client\'s thread updated by itself is sent once, whoever cho
     w.put('mm.links', { [pid(93)]: 'local_ut' })
     // the thread that polls is none of theirs: each chooses from the sync on record (a /mm in one of them, every
     // five minutes, stands in for the poller's syncs)
-    w.put('mm.lease', { owner: 'cli:local_nobody', until: NOW + 24 * 3_600_000 })
+    w.put('mm.lease', { owner: 'cli:local_nobody', until: NOW + 24 * 3_600_000, version: VERSION })
     const [a, b, t] = ids.map(id => w.session(id))
     await mm(a, '')
     for (const s of [a, b, t]) await startIn(s)
@@ -1623,7 +1624,7 @@ describe('0.5.13: the cap\'s line in the notice log, once per client per hour in
     w.put('mm.links', { [pid(94)]: LINKED })
     // the thread that polls is none of theirs: each chooses from the sync on record (a /mm in one of them, every five
     // minutes, stands in for the poller's syncs)
-    w.put('mm.lease', { owner: 'cli:local_nobody', until: NOW + 24 * 3_600_000 })
+    w.put('mm.lease', { owner: 'cli:local_nobody', until: NOW + 24 * 3_600_000, version: VERSION })
     // the day's cap holds for hours: forty updates in the last day, none of them in the last hour
     w.put('mm.autoupdates', Array.from({ length: 40 }, (_, i) => ({
       at: NOW - (2 * 60 + i * 10) * 60_000, pid: pid(500 + i), client: `Client ${i}`, sig: '00000000', sid: `local_x${i}`, by: 'local_y', ok: true, reason: 'x',
@@ -1898,7 +1899,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
   })
 
   test('a thread that does not hold the lease asks nothing', async () => {
-    const { w } = await running([{ sessionId: 'local_rc_l', pinned: true }], { before: w => w.put('mm.lease', { owner: 'cli:local_nobody', until: NOW + DAY }) })
+    const { w } = await running([{ sessionId: 'local_rc_l', pinned: true }], { before: w => w.put('mm.lease', { owner: 'cli:local_nobody', until: NOW + DAY, version: VERSION }) })
     for (let i = 0; i < 3; i++) await tickOnce(w)
     expect(rcCalls(w)).toEqual([])
     expect(passLists(w)).toBe(0)
@@ -2148,5 +2149,217 @@ describe('0.7.12: a pin needs a clock, late says when it was due, undated says s
       // Mon Nov 2 to Fri Nov 20 10 AM: 14 business days and 10 hours
       expect(counts.app.get('local_c1')).toMatchObject({ title: `🔴 14d late, due Oct 30 · ${KIN} · task`, pinned: true })
     })
+  })
+})
+
+// ======================================================================== 0.7.19
+
+// (0.7.19, measured 2026-11-04) An hour after 0.7.18 was installed on Rob's computer, a thread still running 0.7.16 held
+// the lease (a thread keeps the code it started with) and its syncs put back the pins 0.7.18 had taken off. Those threads'
+// code cannot change: the newest bridge takes the lease from them, and keeps it where their rule never finds it run out.
+describe('0.7.19: the newest bridge on this machine holds the sync, against the lease rule of 0.7.14 to 0.7.18', () => {
+  /** LEASE_MS and LEASE_RENEW_MS, as register.tsx has them. */
+  const LEASE_MS = 150_000
+  const RENEW_MS = 30_000
+  type Lease = { owner: string; until: number; version?: string }
+  type World = ReturnType<typeof fakeApp>
+  const leaseOf = (w: World) => w.stored('mm.lease') as Lease | undefined
+  const closeouts = (w: World) => w.fetched.filter(u => u.includes('/closeout')).length
+  const bandText = (w: World, id: string) => (w.view(id, 'band') as { text?: string } | undefined)?.text ?? ''
+  /** One client message waiting: a sync has a thread to pin. */
+  const oneClient = (n = 91): Feed => ({ member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(n, 'Client Nine One', 2)] })
+  /** A later bridge on this machine, as `checkVersions` learns of one: a thread running it reported its version (`mm.versions`). */
+  const LATER = '99.0.0'
+  const laterRan = (w: World) => w.put('mm.versions', { ...((w.stored('mm.versions') ?? {}) as object), local_later: { version: LATER, at: w.now() } })
+  /**
+   * The lease as every bridge from 0.7.14 to 0.7.18 takes it, once a minute in its `tick` (f0508af and c7af4d5, the same
+   * code as 0.7.18's): when there is none, it has run out (`until < now`), or it is its own, it writes `{ owner, until:
+   * now + 150 s }` with no version and syncs when one is due; otherwise it leaves the lease alone and syncs nothing.
+   * Answers whether it took the lease (and so would have synced with its own version's pin rules).
+   */
+  const oldTick = (w: World, owner: string): boolean => {
+    const now = w.now()
+    const lease = leaseOf(w)
+    if (lease && !(lease.until < now) && lease.owner !== owner) return false
+    w.put('mm.lease', { owner, until: now + LEASE_MS })
+    return true
+  }
+  /** A thread whose process can end: from `end()` on, none of its timers runs again (its tick, chips pass and renewal). */
+  const mortal = (w: World, id: string) => {
+    const base = w.session(id)
+    let alive = true
+    const $ = {
+      ...base,
+      clock: {
+        ...base.clock,
+        after: (ms: number, fn: () => void) => base.clock.after(ms, () => void (alive && fn())),
+        every: (ms: number, fn: () => void) => base.clock.every(ms, () => void (alive && fn())),
+      },
+    }
+    return { $, end: () => void (alive = false) }
+  }
+  /** Moves the clock on `ms` in steps of `step`, letting each step's work finish. */
+  const run = async (w: World, ms: number, step = 60_000) => {
+    for (let t = 0; t < ms; t += step) {
+      await w.advance(step)
+      await settleAll()
+    }
+  }
+
+  test('a newer thread takes a live lease from an older bridge, writes its version on it, and syncs; never one of its own version or later', async () => {
+    const results: Array<[string, string, number]> = []
+    for (const version of [undefined, '0.7.18', '0.0.1', VERSION, LATER]) {
+      const id = `local_t1new${results.length}`
+      const w = fakeApp(oneClient(), [{ sessionId: id }], [], { every: true })
+      // another thread renewed the lease a moment ago; up to 0.7.18 a lease carries no version
+      w.put('mm.lease', { owner: 'cli:local_held', until: NOW + LEASE_MS, ...(version ? { version } : {}) })
+      await startIn(w.session(id))
+      await w.advance(4_000)
+      await settleAll()
+      const lease = leaseOf(w)
+      results.push([version ?? 'none', `${lease?.owner === `cli:${id}` ? 'this thread' : lease?.owner} ${lease?.version ?? '-'}`, closeouts(w)])
+    }
+    expect(results).toEqual([
+      ['none', `this thread ${VERSION}`, 1],
+      ['0.7.18', `this thread ${VERSION}`, 1],
+      ['0.0.1', `this thread ${VERSION}`, 1],
+      [VERSION, `cli:local_held ${VERSION}`, 0],
+      [LATER, `cli:local_held ${LATER}`, 0],
+    ])
+    // the lease it wrote: its own session, LEASE_MS on from its tick, and its version
+    const w = fakeApp(oneClient(), [{ sessionId: 'local_t1new' }], [], { every: true })
+    w.put('mm.lease', { owner: 'cli:local_old16', until: NOW + LEASE_MS })
+    await startIn(w.session('local_t1new'))
+    await w.advance(4_000)
+    await settleAll()
+    expect(leaseOf(w)).toEqual({ owner: 'cli:local_t1new', until: NOW + 4_000 + LEASE_MS, version: VERSION })
+  })
+
+  test('the older thread never takes it back: the 0.7.16 rule, tried every 7 s for 15 minutes, never finds the lease run out', LONG, async () => {
+    const w = fakeApp(oneClient(), [{ sessionId: 'local_t2new' }], [], { every: true })
+    // the 0.7.16 thread holds the lease, as on 11-04
+    w.put('mm.lease', { owner: 'cli:local_old16', until: NOW + LEASE_MS })
+    await startIn(w.session('local_t2new'))
+    await w.advance(4_000)
+    await settleAll()
+    expect(leaseOf(w)?.owner).toBe('cli:local_t2new')
+    let took = 0
+    let least = Infinity
+    for (let t = 0; t < 15 * 60_000; t += 7_000) {
+      await w.advance(7_000)
+      await settleAll()
+      least = Math.min(least, (leaseOf(w)?.until ?? 0) - w.now())
+      if (oldTick(w, 'cli:local_old16')) took++
+    }
+    expect(took).toBe(0)
+    expect(leaseOf(w)).toMatchObject({ owner: 'cli:local_t2new', version: VERSION })
+    // never less than 120 s left whenever the old rule looked: four renewals in a row would have to be missed
+    expect(least).toBeGreaterThanOrEqual(LEASE_MS - RENEW_MS)
+  })
+
+  test('the renewal keeps the lease live between syncs: rewritten every 30 s, with no sync of its own', async () => {
+    const w = fakeApp(oneClient(), [{ sessionId: 'local_t3new' }], [], { every: true })
+    await startIn(w.session('local_t3new'))
+    await w.advance(4_000)
+    await settleAll()
+    expect(closeouts(w)).toBe(1)
+    // the minute ticks alone would leave as little as 90 s; with the renewal it never falls under 120 s
+    const left: number[] = []
+    for (let t = 0; t < 4 * 60_000; t += 5_000) {
+      await w.advance(5_000)
+      await settleAll()
+      left.push((leaseOf(w)?.until ?? 0) - w.now())
+    }
+    expect(Math.min(...left)).toBeGreaterThanOrEqual(LEASE_MS - RENEW_MS)
+    expect(Math.max(...left)).toBeLessThanOrEqual(LEASE_MS)
+    // written again within the last 30 s, and the feed read no more often: the sync is still every five minutes
+    expect(w.now() - ((leaseOf(w)?.until ?? 0) - LEASE_MS)).toBeLessThan(RENEW_MS)
+    expect(closeouts(w)).toBe(1)
+    expect(leaseOf(w)).toMatchObject({ owner: 'cli:local_t3new', version: VERSION })
+  })
+
+  test('a thread that sees a later bridge installed here takes no lease, renews none and syncs nothing; its band says to restart', async () => {
+    const w = fakeApp(oneClient(), [{ sessionId: 'local_t4behind' }], [], { every: true })
+    laterRan(w)
+    await startIn(w.session('local_t4behind'))
+    await w.advance(4_000)
+    await settleAll()
+    await run(w, 12 * 60_000)
+    expect(closeouts(w)).toBe(0)
+    expect(leaseOf(w)).toBeUndefined()
+    // the person's own /mm there still brings the list up to date; its timer still syncs nothing after it
+    await mm(w.session('local_t4behind'), '')
+    expect(closeouts(w)).toBe(1)
+    await run(w, 6 * 60_000)
+    expect(closeouts(w)).toBe(1)
+    expect(leaseOf(w)).toBeUndefined()
+    // and the band, drawn from the sync on record, says to restart
+    expect(bandText(w, 'local_t4behind')).toContain(`A newer Claude mod (${LATER}) is installed`)
+  })
+
+  test('a holder that learns of a later bridge stops renewing and syncing: its lease runs out, and the old rule may take it as before', async () => {
+    const w = fakeApp(oneClient(), [{ sessionId: 'local_t5new' }], [], { every: true })
+    await startIn(w.session('local_t5new'))
+    await w.advance(4_000)
+    await settleAll()
+    expect(leaseOf(w)?.owner).toBe('cli:local_t5new')
+    laterRan(w)
+    // it looks for a later bridge every five minutes: from then on it renews nothing and syncs nothing
+    await run(w, 9 * 60_000)
+    const lease = leaseOf(w) as Lease
+    expect(lease.owner).toBe('cli:local_t5new')
+    expect(lease.until).toBeLessThan(w.now())
+    expect(closeouts(w)).toBe(1)
+    expect(oldTick(w, 'cli:local_old16')).toBe(true)
+  })
+
+  test('the holder\'s process ends: the lease runs out LEASE_MS after its last write, and another thread takes it over at its next tick', async () => {
+    const w = fakeApp(oneClient(), [{ sessionId: 'local_t6a' }, { sessionId: 'local_t6b' }], [], { every: true })
+    const a = mortal(w, 'local_t6a')
+    await startIn(a.$)
+    await w.advance(4_000)
+    await settleAll()
+    // b starts 17 s later: its minute ticks fall between a's
+    await w.advance(13_000)
+    await startIn(w.session('local_t6b'))
+    await run(w, 5 * 60_000)
+    // b runs the same version: it leaves a's live lease alone
+    expect(leaseOf(w)?.owner).toBe('cli:local_t6a')
+    a.end()
+    const ranOut = (leaseOf(w) as Lease).until
+    let takenAt = 0
+    for (let t = 0; t < 6 * 60_000 && !takenAt; t += 1_000) {
+      await w.advance(1_000)
+      await settleAll()
+      if (leaseOf(w)?.owner === 'cli:local_t6b') takenAt = w.now()
+    }
+    // not before it ran out, and at b's first tick after
+    expect(takenAt).toBeGreaterThan(ranOut)
+    expect(takenAt - ranOut).toBeLessThanOrEqual(60_000)
+    expect(leaseOf(w)).toMatchObject({ owner: 'cli:local_t6b', version: VERSION })
+  })
+
+  test('an update it sends by itself, behind a later bridge, is followed by no sync of its own: the request is left for the holder', LONG, async () => {
+    const w = fakeApp(oneClient(94), [{ sessionId: 'local_t7vb' }, { sessionId: 'local_t7vt' }], [], { every: true })
+    w.put('mm.links', { [pid(94)]: 'local_t7vt' })
+    laterRan(w)
+    const b = w.session('local_t7vb')
+    // the holder's syncs: a /mm here every five minutes stands in for them (this thread syncs nothing by itself)
+    await mm(b, '')
+    await startIn(b)
+    await w.advance(4_000)
+    await settleAll()
+    for (let i = 1; i <= 20; i++) {
+      await w.advance(60_000)
+      await settleAll()
+      if (w.sends().length) break
+      if (i % 5 === 0) await mm(b, '')
+    }
+    await run(w, 10_000, 1_000)
+    expect(w.sends().map(c => c.args.session_id)).toEqual(['local_t7vt'])
+    // the sync on record is the last /mm's, and the request for the one after the update is in the store, newer than it
+    const last = w.stored('mm.last') as { at: number }
+    expect(Number(w.stored('mm.ask'))).toBeGreaterThan(last.at)
+    expect(leaseOf(w)).toBeUndefined()
   })
 })
