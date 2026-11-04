@@ -3646,10 +3646,13 @@ describe('F10: a reply package someone picked up stays in the panel, with who ho
     const w = world(on, { store: { 'mm.links': { [ACME]: SELF }, 'mm.last': last } })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
-    expect(w.fetched.filter(u => u.includes('/closeout'))).toEqual([])
+    // (0.7.19) the sync on record is an older bridge's (no version) and this thread takes the free lease: it syncs at
+    // once, where until 0.7.18 it waited for the sync to be due, so its one note carries that sync's word on when the
+    // thread updates itself (the stored queue had no recommendation to give it)
+    expect(w.fetched.filter(u => u.includes('/closeout')).length).toBe(1)
     expect(w.appended.length).toBe(1)
     expect(w.appended[0]).toContain(
-      `[Massmarket bridge, no reply needed] Acme Roofing Pat: ${ACME_TITLE}. Reply package aaaaaaaa is prepared; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${PKG}. Nothing has been sent.`,
+      `[Massmarket bridge, no reply needed] Acme Roofing Pat: ${ACME_TITLE}. Reply package aaaaaaaa is prepared; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${PKG}. This thread updates itself at about 11:10 AM. Nothing has been sent.`,
     )
     expect(await viewText($, 'Acme Roofing')).toBe('## Acme Roofing\n\n1. What the client sent')
     // the note the last version left is recorded under the same key this version works out: no repeat, before or after a sync
@@ -6001,9 +6004,6 @@ describe('0.5.5: the band says when a later mod is installed than this thread ru
   test('(a) a later version in the plugin cache: the line, at the end of the band\'s first line', async ($, on) => {
     const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: {} }), files: installed('0.0.1', '9.0.0', '10.0.0-beta') })
     await tickOnce($, w)
-    // (0.7.19) a thread behind a later version syncs nothing by itself: the list on record is the person's /mm here
-    expect(closeouts(w)).toBe(0)
-    await mm($, '')
     expect(await bandLines($)).toEqual([`Nothing needs you in the next 24 hours · ${NEWER('9.0.0')}`])
   })
 
@@ -6022,9 +6022,6 @@ describe('0.5.5: the band says when a later mod is installed than this thread ru
   test('(b) a thread on this machine reported a later version in the last day: the line; one reported two days ago: none', async ($, on) => {
     const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: {} }), store: { 'mm.versions': { local_other: { version: '9.1.0', at: NOW - HOUR }, local_old: { version: '99.0.0', at: NOW - 48 * HOUR } } } })
     await tickOnce($, w)
-    // (0.7.19) as in (a): no sync by itself, the person's /mm here
-    expect(closeouts(w)).toBe(0)
-    await mm($, '')
     expect(await bandLines($)).toEqual([`Nothing needs you in the next 24 hours · ${NEWER('9.1.0')}`])
   })
 
@@ -6039,11 +6036,12 @@ describe('0.5.5: the band says when a later mod is installed than this thread ru
 
 // ======================================================================== 0.7.19
 
-describe('0.7.19: a thread behind a later bridge installed here runs no sync of its own accord; the person\'s /mm still does', () => {
+describe('0.7.19: a thread behind a later bridge that has run here runs no sync of its own accord; the person\'s /mm still does', () => {
   const SENT = `node ~/.claude/skills/team-api-gateway/scripts/mm-api.mjs ext POST /reply-draft/sent --body '{"draft_id":"d1","sent_ref":"gmail:abc"}'`
   const bash = ($: Engine, command: string) => $.tool.call({ tool: 'Bash', command } as never) as Promise<{ result?: unknown; deny?: string; isError?: boolean }>
-  /** A thread running a later bridge reported its version on this machine an hour ago (`mm.versions`). */
-  const later = { 'mm.versions': { local_later: { version: '99.0.0', at: NOW - HOUR } } }
+  /** A thread running a later bridge reported its version on this machine a minute ago (`mm.versions`): it has run here. */
+  const later = { 'mm.versions': { local_later: { version: '99.0.0', at: NOW - 60_000 } } }
+  const CACHE = '/home/someone/.claude/plugins/cache/massmarket/mm-bridge'
 
   test('its timer takes no lease and syncs nothing; a reply draft sent there leaves the request for the holder and syncs nothing here', async ($, on) => {
     const w = world(on, { store: later })
@@ -6064,12 +6062,33 @@ describe('0.7.19: a thread behind a later bridge installed here runs no sync of 
     expect(w.stored['mm.lease']).toBeUndefined()
   })
 
-  test('the same thread with no later bridge installed: the request syncs here a second later, as before', async ($, on) => {
+  test('the same thread with no later bridge run here: the request syncs here a second later, as before', async ($, on) => {
     const w = world(on, { store: { 'mm.lease': { owner: 'another-session', until: NOW + 24 * HOUR, version: VERSION } } })
     await tickOnce($, w)
     await bash($, SENT)
     await w.clock.advance(1_000)
     expect(closeouts(w)).toBe(1)
+  })
+
+  test('a later version only in the plugin cache: the restart line, and the holder keeps syncing; once a thread running it reports itself here, the holder stands down', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: {} }), files: { [`${CACHE}/99.0.0/.claude-plugin/plugin.json`]: { text: '{}', mtimeMs: 0 } } })
+    await tickOnce($, w)
+    const band = await bandOf($)
+    expect(await lines(band)).toEqual(['Nothing needs you in the next 24 hours · A newer Claude mod (99.0.0) is installed: quit and reopen Claude to load it.'])
+    await band.unmount()
+    expect(closeouts(w)).toBe(1)
+    expect(w.stored['mm.lease']).toMatchObject({ version: VERSION })
+    // installed, and no thread runs it yet: the sync goes on every five minutes, the lease held
+    for (let i = 0; i < 11; i++) await w.clock.advance(60_000)
+    expect(closeouts(w)).toBe(3)
+    expect((w.stored['mm.lease'] as { until: number }).until).toBeGreaterThan(w.clock.now())
+    // a thread running 99.0.0 reports itself here: at its next look (within five minutes) the holder stands down
+    w.stored['mm.versions'] = { ...(w.stored['mm.versions'] as Record<string, unknown>), local_later: { version: '99.0.0', at: w.clock.now() } }
+    for (let i = 0; i < 5; i++) await w.clock.advance(60_000)
+    const syncs = closeouts(w)
+    for (let i = 0; i < 15; i++) await w.clock.advance(60_000)
+    expect(closeouts(w)).toBe(syncs)
+    expect((w.stored['mm.lease'] as { until: number }).until).toBeLessThan(w.clock.now())
   })
 })
 

@@ -2168,7 +2168,7 @@ describe('0.7.19: the newest bridge on this machine holds the sync, against the 
   const bandText = (w: World, id: string) => (w.view(id, 'band') as { text?: string } | undefined)?.text ?? ''
   /** One client message waiting: a sync has a thread to pin. */
   const oneClient = (n = 91): Feed => ({ member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(n, 'Client Nine One', 2)] })
-  /** A later bridge on this machine, as `checkVersions` learns of one: a thread running it reported its version (`mm.versions`). */
+  /** A later bridge that has run on this machine, as `checkVersions` learns of one: a thread running it reported its version (`mm.versions`) just now. */
   const LATER = '99.0.0'
   const laterRan = (w: World) => w.put('mm.versions', { ...((w.stored('mm.versions') ?? {}) as object), local_later: { version: LATER, at: w.now() } })
   /**
@@ -2235,6 +2235,59 @@ describe('0.7.19: the newest bridge on this machine holds the sync, against the 
     expect(leaseOf(w)).toEqual({ owner: 'cli:local_t1new', until: NOW + 4_000 + LEASE_MS, version: VERSION })
   })
 
+  test('right after it takes the lease the holder syncs at once, even with a fresh sync on record; one that keeps its own lease waits for the sync to be due', async () => {
+    const results: Array<[string, number]> = []
+    for (const [what, lease] of [
+      ['an older bridge holds it, live', { owner: 'cli:local_old16', until: NOW + LEASE_MS }],
+      ['a thread of this version held it, run out', { owner: 'cli:local_gone', until: NOW - 1_000, version: VERSION }],
+      ['none', undefined],
+      ['its own, live', 'own'],
+    ] as Array<[string, Lease | 'own' | undefined]>) {
+      const id = `local_t8new${results.length}`
+      const w = fakeApp(oneClient(), [{ sessionId: id }], [], { every: true })
+      // a sync this version made a minute ago (a press of the person's, in another thread of this version)
+      w.put('mm.last', { at: NOW - 60_000, member: ME, items: [], pinned: 0, recs: {}, projects: [], version: VERSION })
+      const before = closeouts(w)
+      if (lease === 'own') w.put('mm.lease', { owner: `cli:${id}`, until: NOW + LEASE_MS, version: VERSION })
+      else if (lease) w.put('mm.lease', lease)
+      await startIn(w.session(id))
+      await w.advance(4_000)
+      await settleAll()
+      expect(leaseOf(w)?.owner).toBe(`cli:${id}`)
+      results.push([what, closeouts(w) - before])
+    }
+    expect(results).toEqual([
+      ['an older bridge holds it, live', 1],
+      ['a thread of this version held it, run out', 1],
+      ['none', 1],
+      ['its own, live', 0],
+    ])
+  })
+
+  test('the holder syncs at its next tick when the sync on record is an older bridge\'s (no version); one of its own version waits to be due', async () => {
+    const w = fakeApp(oneClient(), [{ sessionId: 'local_t9new' }], [], { every: true })
+    await startIn(w.session('local_t9new'))
+    await w.advance(4_000)
+    await settleAll()
+    expect(closeouts(w)).toBe(1)
+    const ours = w.stored('mm.last') as { at: number; version?: string }
+    expect(ours.version).toBe(VERSION)
+    // a sync of this version a moment ago (a press in another thread of this version): nothing more until it is due
+    w.put('mm.last', { ...ours, at: w.now() })
+    await run(w, 2 * 60_000)
+    expect(closeouts(w)).toBe(1)
+    // an older thread's press writes the sync on record, by its own rules and with no version: the next tick syncs again
+    const older = { ...(w.stored('mm.last') as Record<string, unknown>), at: w.now() }
+    delete older.version
+    w.put('mm.last', older)
+    await run(w, 60_000)
+    expect(closeouts(w)).toBe(2)
+    expect((w.stored('mm.last') as { version?: string }).version).toBe(VERSION)
+    // and then waits for the next one to be due, as before
+    await run(w, 2 * 60_000)
+    expect(closeouts(w)).toBe(2)
+  })
+
   test('the older thread never takes it back: the 0.7.16 rule, tried every 7 s for 15 minutes, never finds the lease run out', LONG, async () => {
     const w = fakeApp(oneClient(), [{ sessionId: 'local_t2new' }], [], { every: true })
     // the 0.7.16 thread holds the lease, as on 11-04
@@ -2278,7 +2331,7 @@ describe('0.7.19: the newest bridge on this machine holds the sync, against the 
     expect(leaseOf(w)).toMatchObject({ owner: 'cli:local_t3new', version: VERSION })
   })
 
-  test('a thread that sees a later bridge installed here takes no lease, renews none and syncs nothing; its band says to restart', async () => {
+  test('a thread that knows a later bridge has run here takes no lease, renews none and syncs nothing; its band says to restart', async () => {
     const w = fakeApp(oneClient(), [{ sessionId: 'local_t4behind' }], [], { every: true })
     laterRan(w)
     await startIn(w.session('local_t4behind'))
@@ -2297,7 +2350,7 @@ describe('0.7.19: the newest bridge on this machine holds the sync, against the 
     expect(bandText(w, 'local_t4behind')).toContain(`A newer Claude mod (${LATER}) is installed`)
   })
 
-  test('a holder that learns of a later bridge stops renewing and syncing: its lease runs out, and the old rule may take it as before', async () => {
+  test('a holder that learns a later bridge has run here stops renewing and syncing: its lease runs out, and the old rule may take it as before', async () => {
     const w = fakeApp(oneClient(), [{ sessionId: 'local_t5new' }], [], { every: true })
     await startIn(w.session('local_t5new'))
     await w.advance(4_000)
@@ -2339,7 +2392,7 @@ describe('0.7.19: the newest bridge on this machine holds the sync, against the 
     expect(leaseOf(w)).toMatchObject({ owner: 'cli:local_t6b', version: VERSION })
   })
 
-  test('an update it sends by itself, behind a later bridge, is followed by no sync of its own: the request is left for the holder', LONG, async () => {
+  test('an update it sends by itself, behind a later bridge that has run here, is followed by no sync of its own: the request is left for the holder', LONG, async () => {
     const w = fakeApp(oneClient(94), [{ sessionId: 'local_t7vb' }, { sessionId: 'local_t7vt' }], [], { every: true })
     w.put('mm.links', { [pid(94)]: 'local_t7vt' })
     laterRan(w)

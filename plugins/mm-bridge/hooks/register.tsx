@@ -137,9 +137,13 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 //    started with, so several versions run at once, and the session that holds `mm.lease` pins and names by its own
 //    version's rules. The lease carries its holder's version; a session takes it from an older bridge (`mayTakeLease`),
 //    and the holder writes it again every LEASE_RENEW_MS (`renewLease`), so a bridge up to 0.7.18, which takes the lease
-//    only once it has run out, never does while a newer holder runs. A session that knows a later bridge is installed
-//    here (`behindBy`) takes and renews no lease and runs no sync of its own accord (the tick's, `syncAsked`, the one after
-//    an update it sent): its band says to restart. A press of the person's in it still refreshes the list there.
+//    only once it has run out, never does while a newer holder runs. Each sync carries its version too (`mm.last`), and
+//    the holder syncs at once right after it takes the lease and whenever the sync on record is an older bridge's
+//    (`olderSync`: an older thread's press, skill load or update), so an older bridge's pins last a minute at most. A
+//    session that knows a later bridge has RUN here (`behindBy`: reported in `mm.versions` in the last RAN_HERE_MS)
+//    takes and renews no lease and runs no sync of its own accord (the tick's, `syncAsked`, the one after an update it
+//    sent): its band says to restart. A press of the person's in it still refreshes the list there. A later bridge only
+//    in the plugin cache, that no thread runs yet, draws the restart line and stops nothing.
 // ⛔ A thread the person unlinked never links itself again, and gets its own name back.
 // ⛔ A thread that linked itself gets the pin and the name, nothing more, until the person acts on it (0.6.0: its
 //    pane also opens and draws its client part, read only, with no note for Claude and no pickup); and
@@ -485,6 +489,11 @@ type Last = {
    * a switch, and `kickoffs`. Absent: none.
    */
   away?: AwayClient[]
+  /**
+   * (0.7.19) The mm-bridge that made this sync (`storeLast`). Up to 0.7.18 a sync carried none: the lease's holder syncs
+   * again at its next tick when the sync on record is an older bridge's (`olderSync`).
+   */
+  version?: string
 }
 /**
  * (0.7.11) The away clients the last sync found, each checked again (a uuid project, an app thread id, a name), and only
@@ -740,8 +749,24 @@ async function home($: EngineInterface): Promise<string> {
 
 /** How often a thread looks for a newer mod. */
 const VERSION_EVERY_MS = 5 * 60_000
-/** The newest mm-bridge on this machine, by session, when it is later than this thread's own VERSION ('' otherwise), and when that was looked for. */
-const newerMod = new Map<string, { version: string; at: number }>()
+/**
+ * (0.7.19) A later mm-bridge has RUN on this machine when a thread running it reported its version (`mm.versions`) no
+ * longer ago than this: a session behind it leaves the sync to it (`behindBy`). One only in the plugin cache, that no
+ * thread runs yet, says to restart and stops nothing, so the sync never stops between an install and the first thread
+ * that loads it.
+ */
+const RAN_HERE_MS = 3_600_000
+/**
+ * (0.7.19) How often a running thread writes its own version again (`mm.versions`): well inside RAN_HERE_MS, so a thread
+ * that runs a later bridge is always on record as running. (Until 0.7.18: once an hour, DAY_MS / 24.)
+ */
+const VERSION_REPORT_MS = 30 * 60_000
+/**
+ * The newest mm-bridge on this machine, by session, when it is later than this thread's own VERSION ('' otherwise), and
+ * when that was looked for. (0.7.19) `ran`: the newest later one a thread on this machine reported running in the last
+ * RAN_HERE_MS ('' when none).
+ */
+const newerMod = new Map<string, { version: string; at: number; ran: string }>()
 
 /**
  * (0.5.5, Rob 10-14: the band "could also say when there's an update and they need to restart their Claude Code")
@@ -760,7 +785,7 @@ async function checkVersions($: EngineInterface): Promise<void> {
   if (was && now - was.at < VERSION_EVERY_MS) return
   const me = await knownSelf($)
   const versions = await storeGet<Record<string, { version?: unknown; at?: unknown }>>($, 'mm.versions', {})
-  if (me && (versions[me]?.version !== VERSION || !(now - Number(versions[me]?.at) < DAY_MS / 24))) {
+  if (me && (versions[me]?.version !== VERSION || !(now - Number(versions[me]?.at) < VERSION_REPORT_MS))) {
     await patchStore<Record<string, { version?: unknown; at?: unknown }>>($, 'mm.versions', {}, fresh => {
       fresh[me] = { version: VERSION, at: now }
       for (const [sid, v] of Object.entries(fresh)) if (!v || !(now - Number(v.at) <= DAY_MS)) delete fresh[sid]
@@ -769,15 +794,19 @@ async function checkVersions($: EngineInterface): Promise<void> {
   let newest = VERSION
   for (const v of await installedVersions($)) if (isNewerVersion(v, newest)) newest = v
   for (const v of Object.values(versions)) if (v && now - Number(v.at) <= DAY_MS && isNewerVersion(v.version, newest)) newest = String(v.version)
-  newerMod.set(id, { version: newest === VERSION ? '' : newest, at: now })
+  // (0.7.19) and the newest later one that has run here lately: a cache folder alone is not a bridge that runs
+  let ran = VERSION
+  for (const v of Object.values(versions)) if (v && now - Number(v.at) <= RAN_HERE_MS && isNewerVersion(v.version, ran)) ran = String(v.version)
+  newerMod.set(id, { version: newest === VERSION ? '' : newest, at: now, ran: ran === VERSION ? '' : ran })
 }
 
 /**
- * (0.7.19) The later mm-bridge this session last found installed on this machine (`checkVersions`), or '' when it found
- * none: a session that knows of one is behind it, and leaves the sync to it. No store read, no app call.
+ * (0.7.19) The later mm-bridge this session last found RUNNING on this machine (`checkVersions`: reported in `mm.versions`
+ * in the last RAN_HERE_MS), or '' when it found none: a session behind one leaves the sync to it. A later one only in the
+ * plugin cache does not count: it draws the restart line, and the sync goes on here. No store read, no app call.
  */
 function behindBy(id: string): string {
-  return newerMod.get(id)?.version ?? ''
+  return newerMod.get(id)?.ran ?? ''
 }
 
 /** (0.5.5, way (a)) The versions of mm-bridge in the plugin cache: the folder names that are versions. [] when it cannot be listed. */
@@ -2845,8 +2874,10 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
 /** The sync record a pass made, stored; and, when the pass was over the feed this session read last, kept with it (recentFeed). */
 
 async function storeLast($: EngineInterface, feed: Feed, last: Last): Promise<void> {
-  await $.store.set('mm.last', last)
-  if (recent?.feed === feed) recent.wrote = JSON.stringify(last)
+  // (0.7.19) with the version that made it
+  const made: Last = { ...last, version: VERSION }
+  await $.store.set('mm.last', made)
+  if (recent?.feed === feed) recent.wrote = JSON.stringify(made)
 }
 
 /**
@@ -3603,6 +3634,14 @@ async function rcFollowsPin($: EngineInterface): Promise<void> {
  */
 type Lease = { owner: string; until: number; version?: string }
 
+/**
+ * (0.7.19) Whether the sync on record was made by an older bridge than this one: one with no version (0.7.18 or older, or
+ * stored by one) or an older version. The lease's holder syncs again at its next tick.
+ */
+function olderSync(last: Pick<Last, 'version'>): boolean {
+  return isNewerVersion(VERSION, last.version)
+}
+
 /** (0.7.19) The sessions here whose last tick took or kept the lease: they alone look at it between ticks (`renewLease`). */
 const leaseHeld = new Set<string>()
 
@@ -3628,8 +3667,9 @@ function mayTakeLease(lease: unknown, id: string, now: number): boolean {
  * comes late hands the sync back to an older bridge's rules.
  * It renews only a live lease this session holds: once one has run out, the tick decides as before (`mayTakeLease`). A
  * session whose last tick did not take or keep it (`leaseHeld`) does not even read it, and one that knows a later bridge
- * is installed here (`behindBy`: it lets the lease run out for that one) writes nothing. While the bridge is paused the holder keeps it, so no older bridge takes it at /mm resume. When the
- * holder's process ends its timer ends with it, and the lease runs out LEASE_MS after the last write, as before.
+ * has run here (`behindBy`: it lets the lease run out for that one) writes nothing. While the bridge is paused the holder
+ * keeps it, so no older bridge takes it at /mm resume. When the holder's process ends its timer ends with it, and the
+ * lease runs out LEASE_MS after the last write, as before.
  */
 async function renewLease($: EngineInterface): Promise<void> {
   try {
@@ -3664,17 +3704,23 @@ async function tick($: EngineInterface): Promise<void> {
     await checkVersions($).catch(() => {})
     const now = await $.clock.now()
     const id = await instanceId($)
-    // ⛔ (0.7.19) the newest bridge on this machine holds the sync: a session behind a later one installed here (`behindBy`)
-    // neither takes nor renews the lease, and syncs nothing (its band says to restart); every other takes the lease when
-    // it is free, run out, its own, or an older bridge's (`mayTakeLease`), and writes its version on it
-    if (!behindBy(id) && mayTakeLease(await storeGet<unknown>($, 'mm.lease', null), id, now)) {
+    // ⛔ (0.7.19) the newest bridge on this machine holds the sync: a session behind a later one that has run here
+    // (`behindBy`) neither takes nor renews the lease, and syncs nothing (its band says to restart); every other takes the
+    // lease when it is free, run out, its own, or an older bridge's (`mayTakeLease`), and writes its version on it
+    const behind = Boolean(behindBy(id))
+    const lease = behind ? null : await storeGet<unknown>($, 'mm.lease', null)
+    if (!behind && mayTakeLease(lease, id, now)) {
+      /** (0.7.19) The lease on record was not this session's: it takes it now (from an older bridge, or one that ran out). */
+      const took = !(lease && typeof lease === 'object' && (lease as { owner?: unknown }).owner === id)
       await $.store.set('mm.lease', { owner: id, until: now + LEASE_MS, version: VERSION } satisfies Lease)
       leaseHeld.add(id)
       const last = await storeGet<Last | null>($, 'mm.last', null)
       // Due every SYNC_MS, and at once when a thread asked since the last one (a reply draft was sent or
-      // discarded there: `askSync`).
+      // discarded there: `askSync`). ⛔ (0.7.19) And at once right after this session takes the lease, and whenever the
+      // sync on record was made by an older bridge (`olderSync`): an older thread's press, skill load or update applied
+      // its own version's rules, and this sync puts the pins and names right within the minute, not five minutes on.
       const asked = Number(await storeGet<number>($, 'mm.ask', 0)) || 0
-      if (!last || now - last.at >= SYNC_MS || asked > last.at) {
+      if (!last || now - last.at >= SYNC_MS || asked > last.at || took || olderSync(last)) {
         try {
           await sync($)
         } catch (err) {
@@ -3760,7 +3806,7 @@ async function syncAsked($: EngineInterface): Promise<void> {
   try {
     if ((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) !== 'claude-desktop') return
     if (await $.store.get('mm.paused')) return
-    // ⛔ (0.7.19) a session behind a later bridge installed here syncs nothing: the request stays in the store, and the
+    // ⛔ (0.7.19) a session behind a later bridge that has run here syncs nothing: the request stays in the store, and the
     // lease's holder syncs at its next tick (`asked > last.at`), as for a terminal session
     if (behindBy(await instanceId($))) return
     const asked = Number(await storeGet<number>($, 'mm.ask', 0)) || 0
@@ -4578,7 +4624,7 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
       if (!(await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]) await putSent($, pid, has)
     })
     await bandNote($, `Updated ${client}'s thread.`, `updated\n${key}`)
-    // ⛔ (0.7.19) a session behind a later bridge installed here runs no sync of its own accord: the sync after the update
+    // ⛔ (0.7.19) a session behind a later bridge that has run here runs no sync of its own accord: the sync after the update
     // is asked of the lease's holder (`askSync`: a request in the store, read at its next tick)
     if (behindBy(await instanceId($))) await askSync($).catch(err => noteFailure($, 'auto update: the sync after it', err))
     else await refreshList($).catch(err => noteFailure($, 'auto update: the sync after it', err))
