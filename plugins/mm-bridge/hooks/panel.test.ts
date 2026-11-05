@@ -114,7 +114,7 @@ describe('0.7.5: Your build queue, and the groups on one line', () => {
     expect(buildOf(acme(), rowFor(acme(), update, NOW))).toBeUndefined()
   })
 
-  test('a long title is cut to one line; the founder\'s late teammate tickets ride along, as they did on its row', async () => {
+  test('a long title is cut to one line; (0.7.21) the founder\'s late teammate tickets no longer ride along: Team · late lists them', async () => {
     const long = queued(1)
     const ticket = { ...(long.queue?.tickets[0] as NonNullable<QueueItem['queue']>['tickets'][number]), title: 'HighLevel mobile app cannot answer inbound calls - at least 3 clients affected in the last few days' }
     const mates = [
@@ -126,7 +126,9 @@ describe('0.7.5: Your build queue, and the groups on one line', () => {
     const b = buildOf(it, rowFor(it, update, NOW))
     expect(b?.top).toEqual(['HighLevel mobile app cannot answer inbound calls - at least 3 clients a…'])
     expect(b?.top[0]?.length).toBe(72)
-    expect(b?.late).toBe('3 late with Has9 and Asif')
+    // (0.7.5 to 0.7.20: `late: '3 late with Has9 and Asif'`)
+    expect(b).not.toHaveProperty('late')
+    expect(JSON.stringify(b)).not.toContain('late with')
     expect(buildMore(b as NonNullable<typeof b>)).toBe('')
   })
 

@@ -1,6 +1,6 @@
 import type { Elements, EngineInterface, Register } from 'claude-code'
 
-import type { MmBand, MmFolds, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTrack, MmTrackLine, MmView } from '../types'
+import type { MmBand, MmFolds, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTeam, MmTrack, MmTrackLine, MmView } from '../types'
 
 import {
   INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients,
@@ -8,6 +8,7 @@ import {
   asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText, undatedOnly,
   hasDue, clientActivity, isRecent, mayStart,
   pinsFor, pinTitle,
+  lateOnly, teamLate, teamLateCount, teamLateSegment, teamLateWho, LATE_WITH_TEAM,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
@@ -16,6 +17,7 @@ import {
   REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, bandText, chipTitle, ownPackage, seenNow, selfUpdateAt, selfUpdateText, waitingText,
   FRESH_THREAD_BYTES, draftsComing, freshParagraph, prepDue,
   buildHeading, buildMore, buildOf, buildShown,
+  teamCount, teamHeading, teamOf, teamPane, teamPerson,
   START_ALL_MAX, startAllKickoff, startAllLabel, startMissingLabel, AWAY_REASON, ownThreads, START_ALL_WORDS, startWords, startFillSaid, kickoffsAnswer,
   ARCHIVED_REASON, KICKOFF_PENDING_MS,
   awayBandText, awayButton, awayHandoverText, awayPromptLine, awaySorted, carryKickoff, switchPromptLine, transcriptPath,
@@ -126,8 +128,11 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 //    (`mm.switchPins`), and a pin found on a brand-new kickoff thread is the bridge's: see "(0.7.16)" in `reconcile`.
 //    ⛔ (0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you, not when something has a timer left
 //    for a teammate to answer") A teammate's part of a client (drafts they hold, a package they decide, their ticket)
-//    pins only once the viewer should check on them (`pinsFor`: the founder FOUNDER_CHECK_AHEAD_MS, the PM
-//    PM_CHECK_AHEAD_MS or a missed start-by), named `🔴 <client> · check on <teammate> · …`. And ("Our bridge should
+//    pins only once the viewer should check on them (`pinsFor`: the PM PM_CHECK_AHEAD_MS or a missed start-by), named
+//    `🔴 <client> · check on <teammate> · …`. ⛔ (0.7.21, Rob 2026-11-05: "When things are overdue but not assigned to me, I
+//    don't think they should be pinned here") Never for the founder: his own items alone pin his threads, and his
+//    teammates' late tickets are listed under Team · late, by person, then client (0.7.18 to 0.7.20 pinned his thread
+//    to check on them, 2 business hours ahead; a pin of ours put there for that comes off on the next pass). And ("Our bridge should
 //    repin it if there's still something needed") a pin the person takes off while the client still pins is put back on
 //    the next pass, named ` · still needs you` (`Pin.again`); one taken off a thread with nothing needed stays off.
 //    (0.5.19, Rob 10-20) One exception, only on a computer where the person typed /mm rc on: Remote Control
@@ -191,7 +196,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.20'
+export const VERSION = '0.7.21'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -1865,7 +1870,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     const last: Last = { at: now, member, items, ...also, pinned: before?.pinned ?? 0, recs, projects, ...newPeople, ...(Array.isArray(before?.away) && before.away.length ? { away: before.away } : {}) }
     await storeLast($, feed, last)
     const rowsOf = (list: readonly QueueItem[], needsYou = false): Row[] => list.map(it => rowFor(it, recs[it.projectId] as Recommendation, now, { needsYou }))
-    await showQueue($, member, items, rowsOf(items, true), last.pinned, now, { teammate: rowsOf(lists.teammate), checking: rowsOf(checking) }, now, last)
+    // (0.7.21) a client listed by the founder's teammates' late tickets alone is Team · late's, not With a teammate's
+    await showQueue($, member, items, rowsOf(items, true), last.pinned, now, { teammate: rowsOf(lists.teammate.filter(it => !lateOnly(it))), checking: rowsOf(checking), team: teamPane([...items, ...quiet, ...checking], now) }, now, last)
     // (0.6.0) a terminal session's own current project, by the feed's rows for its session: no thread is touched
     if (!known) await currentPass($, { now, links: {}, was: {}, moved: [], live, gone: new Set(), feedThreads, pairs: {}, complete: false, lookups: LOOKUPS_PER_SYNC }).catch(() => {})
     return { last, live, pairs: known ?? {}, listed: false, unseen: new Set() }
@@ -2617,8 +2623,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     const sid = links[it.projectId]
     if (sid && live.has(sid) && !named.has(sid) && staysOff(sid, it)) named.set(sid, { it, unpin: false, title: threadTitle(it, now) })
   }
-  // (0.7.18) a client whose drafts or tickets a teammate has pins once the founder or the PM should check on them
-  // (`pinsFor`: late, or within FOUNDER_CHECK_AHEAD_MS / PM_CHECK_AHEAD_MS); named and never pinned until then, as before
+  // (0.7.18) a client whose drafts or tickets a teammate has pins once the PM should check on them (`pinsFor`: late, or
+  // within PM_CHECK_AHEAD_MS); named and never pinned until then, as before. ⛔ (0.7.21) For the founder, never: such a
+  // client's thread is named and our pin comes off it (0.7.18 to 0.7.20 pinned it to check on the teammate)
   for (const it of quiet) {
     const sid = links[it.projectId]
     if (!sid || !live.has(sid) || named.has(sid)) continue
@@ -2635,8 +2642,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // the pins 0.7.11 put on such threads come off here (they are ours). The internal queue was never pinned that way.
   // ⛔ (0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you, not when something has a timer left for a
   // teammate to answer") Only what needs the person pins by R1's 24 business hours (`ownActBy`): a reply whose drafts a
-  // teammate holds, a package a teammate decides on and a teammate's ticket pin only once the founder or the PM should check
-  // on them (`checkNow`), and the thread is then named for who to check on (`pinTitle`).
+  // teammate holds, a package a teammate decides on and a teammate's ticket pin only once the PM should check on them
+  // (`checkNow`), and the thread is then named for who to check on (`pinTitle`). ⛔ (0.7.21) For the founder they never pin:
+  // a thread of his that 0.7.18 to 0.7.20 pinned only for that is named for what is his and our pin comes off (`unpin: 'ours'`).
   for (const it of items) {
     const sid = links[it.projectId]
     if (!sid || !live.has(sid) || want.has(sid) || named.has(sid)) continue
@@ -2895,7 +2903,11 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   }
   const rows = items.map(it => rowOf(it, true))
   // (R8, Opus decision 2) a client being checked is under `Checking your reply`, with a recommendation on record
-  const folds = { teammate: lists.teammate.map(it => rowOf(it)), checking: checking.map(it => rowOf(it)) }
+  // (0.7.21) a client listed by the founder's teammates' late tickets alone (`lateOnly`) keeps its recommendation, and is
+  // drawn under Team · late alone, never under With a teammate; Team · late holds every late ticket of theirs, whichever
+  // client's item carries it
+  const mateRows = lists.teammate.map(it => ({ it, row: rowOf(it) }))
+  const folds = { teammate: mateRows.filter(m => !lateOnly(m.it)).map(m => m.row), checking: checking.map(it => rowOf(it)), team: teamPane([...items, ...quiet, ...checking], now) }
 
   await patchStore<string[]>($, 'mm.released', [], fresh => applyListChanges(fresh, was.released, waiting))
 
@@ -3068,6 +3080,8 @@ async function storeLast($: EngineInterface, feed: Feed, last: Last): Promise<vo
  * neither is counted. `syncedAt` is when the list was worked out: the list drawn from a stored sync says that
  * sync's time, not the time it was drawn. `found` (New people): the sync record's people and where Route can send
  * them; anyone a press here or in another thread resolved in the last PEOPLE_DONE_MS is left out. Never counted.
+ * (0.7.21, for the founder) `folds.team`: Team · late, his teammates' late internal tickets by person, then client. Not
+ * counted in the header; the status line ends with how many (`· 5 late with the team`).
  */
 async function showQueue(
   $: EngineInterface,
@@ -3076,7 +3090,7 @@ async function showQueue(
   rows: Row[],
   pinned: number,
   now: number,
-  folds: { teammate: Row[]; checking?: Row[] },
+  folds: { teammate: Row[]; checking?: Row[]; team?: MmTeam[] },
   syncedAt = now,
   found: Pick<Last, 'people' | 'routeTo' | 'away'> = {},
 ): Promise<void> {
@@ -3109,14 +3123,17 @@ async function showQueue(
     ...(folds.teammate.length ? { teammate: folds.teammate } : {}),
     ...(folds.checking?.length ? { checking: folds.checking } : {}),
     ...(undated.length ? { undated } : {}),
-    ...(build ? { build: { total: build.total, top: [...build.top], row: build.row, ...(build.late ? { late: build.late } : {}) } } : {}),
+    ...(build ? { build: { total: build.total, top: [...build.top], row: build.row } } : {}),
+    ...(folds.team?.length ? { team: folds.team } : {}),
     ...(people.length ? { people, ...(routeTo.length ? { routeTo } : {}) } : {}),
     ...(away.length ? { away: { text: awayBandText(away, syncedAt), count: away.length } } : {}),
   }
   await $.state.set(QUEUE, queue)
   const { value: notice } = await $.state.get(NOTICE)
   if (notice?.text && now - notice.at > SYNC_MS) await $.state.set(NOTICE, { text: '', at: now })
-  await putStatus($, 'base', listed.length ? `MM: ${listed.length} need you · ${pinned} pinned` : 'MM: clear')
+  // (0.7.21) and, for the founder, how many of his teammates' tickets are late (`· 5 late with the team`): none, no segment
+  const late = teamLateSegment(teamCount(folds.team ?? []))
+  await putStatus($, 'base', listed.length ? `MM: ${listed.length} need you · ${pinned} pinned${late}` : `MM: clear${late}`)
 }
 
 async function sync($: EngineInterface): Promise<Last> {
@@ -3231,7 +3248,11 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
       return rowFor(it, rec ?? recommend([], undefined, at), at, { needsYou, ...(needsYou ? { self: selfOf(it, rec) } : {}) })
     })
   const items = list(last.items)
-  await showQueue($, memberText(last.member), items, rowsOf(items, true), Number(last.pinned) || 0, now, { teammate: rowsOf(list(last.teammate)), checking: rowsOf(list(last.checking)) }, at, last)
+  const teammate = list(last.teammate)
+  const checking = list(last.checking)
+  // (0.7.21) Team · late from what that sync stored, worded at its moment too; its `lateOnly` clients are drawn there alone
+  const team = teamPane([...items, ...teammate, ...checking], at)
+  await showQueue($, memberText(last.member), items, rowsOf(items, true), Number(last.pinned) || 0, now, { teammate: rowsOf(teammate.filter(it => !lateOnly(it))), checking: rowsOf(checking), team }, at, last)
 }
 
 /** The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that waits for his OK. */
@@ -6579,8 +6600,8 @@ async function resolvePerson($: EngineInterface, id: string, action: PersonActio
   }
 }
 
-/** Opens or closes one of the two groups under the list, in this thread's pane. The person's press: nothing is fetched, called or changed. */
-async function toggleFold($: EngineInterface, key: Fold | 'people' | 'track' | 'more'): Promise<void> {
+/** Opens or closes one of the groups under the list ((0.7.21) Team · late too), in this thread's pane. The person's press: nothing is fetched, called or changed. */
+async function toggleFold($: EngineInterface, key: Fold | 'people' | 'track' | 'more' | 'team'): Promise<void> {
   try {
     const { value } = await $.state.get(FOLDS)
     await $.state.set(FOLDS, { ...(value ?? {}), [key]: !value?.[key] } satisfies MmFolds)
@@ -6660,9 +6681,13 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
     // the pins the person took off and that are still off: of threads linked to a client now
     const unpinned = await storeGet<Record<string, Unpinned>>($, 'mm.unpinned', {})
     const off = new Set(Object.values(links).filter(sid => sid in unpinned)).size
+    // (0.7.21, for the founder) his teammates' late internal tickets, who and how many, as the last sync listed them
+    const team = teamLate(listedIn(last))
+    const late = teamLateCount(team)
     return [
       `member: ${memberText(last?.member) || '?'}`,
       `last sync: ${last ? new Date(last.at).toISOString() : 'never'} · ${last?.items.length ?? 0} need you · ${last?.pinned ?? 0} pinned`,
+      ...(late > 0 ? [`${LATE_WITH_TEAM}: ${late} (${teamLateWho(team)})`] : []),
       `linked threads: ${Object.keys(links).length} · this thread: ${await selfId($)}`,
       // (0.6.0) every thread with a current project, and the second threads among them
       await currentLine($),
@@ -8608,10 +8633,13 @@ export const register: Register = on => {
     }
     // (0.7.5, the panel redesign; Rob, 2026-10-27: "queue first, one merged time list, plain numbers") Top to bottom: in
     // a waiting client's thread its part first (Rob, 2026-10-12), then `Needs you now`, one line a row; `Your build
-    // queue`; the groups under the list on ONE line, each its own button; the Tracking part closed to its one line; and
-    // one `Updated <time>` line in the person's own clock.
+    // queue`; the groups under the list on ONE line, each its own button ((0.7.21) for the founder, `Team · late (n)` last:
+    // opened, it is drawn below the other groups, by person, then client, one line a ticket); the Tracking part closed to
+    // its one line; and one `Updated <time>` line in the person's own clock.
     const build = hasList && queue && buildShown(queue.build, here) ? queue.build : undefined
     const groups = hasList && queue ? foldGroups(queue) : []
+    // (0.7.21, for the founder) Team · late: its button last on the line of groups, and once opened, below the other groups
+    const team = hasList && queue ? teamOf(queue.team) : []
     const trackOpen = folds?.track === true
     const moreOpen = folds?.more === true
     const openTasks = new Set(Array.isArray(folds?.tasks) ? folds.tasks : [])
@@ -8662,16 +8690,16 @@ export const register: Register = on => {
               <Text>{` ${i + 1}. ${title}`}</Text>
             ))}
             {buildMore(build) ? <Text dimColor>{` ${buildMore(build)}`}</Text> : null}
-            {build.late ? <Text dimColor>{` ${build.late}`}</Text> : null}
             {build.row.target ? <Button key="mm-build-open" label={LABEL.open} variant="primary" onPress={() => void press($, 'open', build.row)} /> : null}
           </Box>
         ) : null}
-        {hasList && (people.length || groups.length) ? (
+        {hasList && (people.length || groups.length || team.length) ? (
           <Box key="mm-folds" flexDirection="row" flexWrap="wrap" gap={1} marginTop={1}>
             {people.length ? <Button key="mm-fold:people" label={`New people (${people.length})`} dimColor={folds?.people !== true} onPress={() => void toggleFold($, 'people')} /> : null}
             {groups.map(group => (
               <Button key={`mm-fold:${group.key}`} label={group.heading} dimColor={folds?.[group.key] !== true} onPress={() => void toggleFold($, group.key)} />
             ))}
+            {team.length ? <Button key="mm-fold:team" label={teamHeading(team)} dimColor={folds?.team !== true} onPress={() => void toggleFold($, 'team')} /> : null}
           </Box>
         ) : null}
         {hasList && people.length && folds?.people ? (
@@ -8691,6 +8719,26 @@ export const register: Register = on => {
               {group.rows.map(({ row, n }) => drawRow(row, `${n}.`))}
             </Box>
           ))}
+        {team.length && folds?.team ? (
+          <Box key="mm-team" flexDirection="column" marginTop={1}>
+            <Text bold dimColor>
+              {teamHeading(team)}
+            </Text>
+            {team.map(p => (
+              <Box flexDirection="column" marginTop={1}>
+                <Text bold>{teamPerson(p)}</Text>
+                {p.clients.map(c => (
+                  <Box flexDirection="column">
+                    <Text>{`  ${c.client}`}</Text>
+                    {c.lines.map(l => (
+                      <Text dimColor>{`    - ${l}`}</Text>
+                    ))}
+                  </Box>
+                ))}
+              </Box>
+            ))}
+          </Box>
+        ) : null}
         {tracking ? (
           <Box key="mm-track" flexDirection="column" marginTop={1}>
             {trackOpen ? trackBody.map(drawTrack) : trackBody.filter(l => l.part === 'head').map(drawTrack)}

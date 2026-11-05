@@ -107,14 +107,27 @@ export type MmQueue = {
    * which puts "Start the missing client threads" in the prompt box. Absent when there are none.
    */
   away?: { text: string; count: number }
+  /**
+   * (0.7.21, for the founder) Team · late: his teammates' late internal tickets, by person, then client, each ticket one
+   * line. A closed group `Team · late (n)` at the end of the line of groups under the list, drawn below the others once
+   * opened. Never pinned, and never counted in the header: the status line says `· n late with the team`. Absent: none.
+   */
+  team?: MmTeam[]
 }
 
 /**
- * (0.7.5, the panel redesign) `Your build queue · N` under the list: how many tickets the viewer's internal queue holds,
- * the top few in rank order (one line each), the internal-ops row, whose linked thread the part's button opens, and
- * (the founder's) teammates' late internal tickets.
+ * (0.7.21) One teammate in Team · late: their name, how many of their tickets are late, and those tickets by client, each
+ * worded as one line (`Send the onboarding form · late since Mon 3 PM · no ETA given`). Every text is drawn as given; none
+ * goes to Claude.
  */
-export type MmBuild = { total: number; top: string[]; row: MmRow; /** For the founder: his teammates' late internal tickets, `9 late with Has9 and 2 more`. */ late?: string }
+export type MmTeam = { by: string; count: number; clients: Array<{ client: string; lines: string[] }> }
+
+/**
+ * (0.7.5, the panel redesign) `Your build queue · N` under the list: how many tickets the viewer's internal queue holds,
+ * the top few in rank order (one line each), and the internal-ops row, whose linked thread the part's button opens.
+ * ((0.7.5 to 0.7.20 also the founder's teammates' late internal tickets, `late`: Team · late's alone since 0.7.21.)
+ */
+export type MmBuild = { total: number; top: string[]; row: MmRow }
 
 /**
  * (New people) One person under `New people`: who, what they wrote about, when, what to check first, what we
@@ -163,6 +176,8 @@ export type MmFolds = {
   people?: boolean
   /** (0.7.5) `No due date`. */
   undated?: boolean
+  /** (0.7.21) `Team · late`. */
+  team?: boolean
   /** (0.7.5) The Tracking part, closed to its one line until opened; `more`: its further numbers. */
   track?: boolean
   more?: boolean
