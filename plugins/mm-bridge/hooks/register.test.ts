@@ -9185,19 +9185,21 @@ describe('(0.7.4) a teammate\'s internal ticket owes an ETA: listed with its clo
   /** A teammate's ETA ask on a client's project, its ETA needed four hours ago. */
   const lateAsk = () => etaRow({ project_id: ACME, project_name: 'Acme Roofing — Pat', eta_needed_by: new Date(NOW - 4 * HOUR).toISOString() })
 
-  test('for the founder: a teammate\'s ticket past when its ETA was needed lists under With a teammate, whose and what; never pinned, chipped or sent', async ($, on) => {
+  test('for the founder: a teammate\'s ticket past when its ETA was needed lists under Team · late (0.7.21; until then With a teammate), whose and what; never pinned, chipped or sent', async ($, on) => {
     const w = world(on, { feed: { member: FOUNDER, role: 'founder', mail: [], drafts: [], tickets: { overdue: [lateAsk()] } }, threads: [] })
     expect(await mm($, '')).toBe('Nothing needs you right now.')
     const ui = await pane($)
-    expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([['mm-fold:teammate', 'With a teammate (1)']])
-    await ui.press({ key: 'mm-fold:teammate' })
+    // (0.7.21) not under With a teammate any more (0.7.5 to 0.7.20: `With a teammate (1)`, its row `🟡 Acme Roofing · no ETA
+    // · with Builder A` and the note `Builder A owes an ETA on 1 internal ticket`)
+    expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([['mm-fold:team', 'Team · late (1)']])
+    await ui.press({ key: 'mm-fold:team' })
     const all = await lines(ui)
-    // (0.7.5) the row's one line: the client, what is late, and whose it is last
-    const row = all.findIndex(l => l.includes('🟡 Acme Roofing · no ETA · with Builder A'))
-    expect(row).toBeGreaterThan(-1)
-    // (0.7.5) a row not the viewer's has no second line of its own (its one line says whose): the note under it says what is late
-    expect(all[row + 1]).toBe('Builder A owes an ETA on 1 internal ticket')
+    const head = all.indexOf('Team · late (1)')
+    expect(head).toBeGreaterThan(-1)
+    expect(all.slice(head, head + 4)).toEqual(['Team · late (1)', 'Builder A (1)', '  Acme Roofing', '    - Fix the tracker export · late since 7 AM · no ETA given'])
+    expect(all.some(l => l.includes('with Builder A'))).toBe(false)
     await ui.unmount()
+    expect(String(w.statuses.at(-1) ?? '')).toMatch(/^MM: clear · 1 late with the team/)
     for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
     expect(chipTitles(w)).toEqual([])
     expect(sends(w)).toEqual([])
@@ -10416,7 +10418,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.20', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.21', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10485,7 +10487,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.20', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.21', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10551,7 +10553,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.20', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.21', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
@@ -11709,19 +11711,16 @@ describe('0.7.16 (Rob, 11-03: "We always clear out all the pins and then figure 
     ['[Roman Seges, 11-03] a teammate\'s late ticket', romanLate(), ROMAN, 'Roman Seges'],
     ['undated tickets only', boltAndCedar(), BOLT, 'Bolt Staffing'],
   ] as Array<[string, Feed, string, string]>) {
-    // ⛔ (0.7.18, C; Rob 2026-11-03: "It could say, 'Hey, check on the team member who's holding this ticket and hasn't closed
-    // it out yet.'") a teammate's late ticket is now something the founder acts on: he checks on them. Roman Seges's thread is
-    // handed over and stays pinned, as ours, named for whom to check on (until 0.7.18 the pass took it off, as here for Bolt).
+    // ⛔ (0.7.21, Rob 2026-11-05: "When things are overdue but not assigned to me, I don't think they should be pinned here") a
+    // teammate's late ticket never pins the founder's thread: Roman Seges's is handed over and the pass takes it off, as for
+    // Bolt (0.7.18 to 0.7.20 kept it pinned, as ours, named `🔴 Roman Seges · check on Builder A · task 4h late`)
     const roman = pid === ROMAN
     test(`(a) a switch hands his recorded pin on a client thread with no clock to the bridge, and the pass takes it off (${what}); with no switch on record it stays, as before`, async ($, on) => {
       const w = inB(on, f, [thread('local_c1', 'Client work', 1, { pinned: true })], { 'mm.links': { [pid]: 'local_c1' }, 'mm.pins': { local_c1: hisPin(pid, client) } })
       await mm($, '')
-      expect(w.threads.get('local_c1')?.pinned).toBe(roman)
-      expect(pinCalls(w, 'local_c1')).toEqual(roman ? [] : ['set_pinned | local_c1 | false'])
-      if (roman) {
-        expect(w.threads.get('local_c1')?.title).toBe('🔴 Roman Seges · check on Builder A · task 4h late')
-        expect(pinsOf(w).local_c1?.byUs).toBe(true)
-      }
+      expect(w.threads.get('local_c1')?.pinned).toBe(false)
+      expect(pinCalls(w, 'local_c1')).toEqual(['set_pinned | local_c1 | false'])
+      if (roman) expect(w.threads.get('local_c1')?.title).toBe('🟡 with Builder A · Roman Seges · no ETA')
       expect(w.stored['mm.switchPins']).toEqual({ since: SINCE, at: NOW })
       // the switch stays where it was: this pass did not see a new one
       expect(w.stored['mm.profile']).toEqual(switched())
@@ -11892,7 +11891,7 @@ describe('0.7.16 (Rob, 11-03: "We always clear out all the pins and then figure 
 // answer." B: "if something needs attention from the team member and they've unpinned it, the most recent thread for that
 // client should always be repinned again." A: "we should open those so that it can always repin the oldest one in the
 // future": a client whose thread is in this profile is linked to it, never counted as missing.
-describe('0.7.18 C (Rob, 11-03: "The pinned is for when action is needed from you"): a teammate\'s part pins only to check on them', () => {
+describe('0.7.18 C (Rob, 11-03: "The pinned is for when action is needed from you"): a teammate\'s part pins only for the PM to check on them; (0.7.21) never for the founder', () => {
   const ASIF = 'asif@example.com'
   const PKG2 = 'aaaaaaa2-bbbb-4ccc-8ddd-eeeeeeeeeeee'
   const tid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-0000000007c0`
@@ -11904,16 +11903,17 @@ describe('0.7.18 C (Rob, 11-03: "The pinned is for when action is needed from yo
     tickets: { undated: [{ ticket_id: tid(1), project_id: ACME, project_name: 'Acme Roofing — Pat', title: 'Check the roof sizes', due_at: null, due_source: null, assignee_email: FOUNDER }] },
   })
 
-  test('[11-03] the founder: "may need your OK · Asif decides" with 19 hours left is named and NOT pinned; within 2 business hours it is pinned to check on Asif', async ($, on) => {
+  test('[11-03] the founder: "may need your OK · Asif decides" is named and NOT pinned, 19 hours left or (0.7.21) 1', async ($, on) => {
     const w = world(on, { feed: robFeed(19), threads: [thread('local_a', 'Acme work', 2)], store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.activity': { [ACME]: NOW - DAYS } } })
     await mm($, '')
     expect(w.threads.get('local_a')).toMatchObject({ title: '🟡 19h left · Acme Roofing · may need your OK · Asif decides', pinned: false })
     expect(pinCalls(w, 'local_a')).toEqual([])
-    // 1 hour left (FOUNDER_CHECK_AHEAD_MS is 2): check on Asif
+    // 1 hour left: (0.7.21) still Asif's, never pinned for the founder to check on him (0.7.18 to 0.7.20 pinned it from 2
+    // business hours out, named `🔴 Acme Roofing · check on Asif · reply due 12 PM`)
     w.setFeed(robFeed(1))
     await mm($, '')
-    expect(w.threads.get('local_a')).toMatchObject({ title: '🔴 Acme Roofing · check on Asif · reply due 12 PM', pinned: true })
-    expect(pinCalls(w, 'local_a')).toEqual(['set_pinned | local_a | true'])
+    expect(w.threads.get('local_a')).toMatchObject({ title: '🔴 1h left · Acme Roofing · may need your OK · Asif decides', pinned: false })
+    expect(pinCalls(w, 'local_a')).toEqual([])
     // Asif sent it (the feed lists it no more): the client is clear, and the pin comes off
     w.setFeed({ ...robFeed(1), drafts: [] })
     await mm($, '')
@@ -12276,5 +12276,135 @@ describe('0.7.20 (Rob, 11-04: "Yes, fix it"): a client\'s thread here is found b
     const w = at1648(on, { feed: hub })
     await mm($, '')
     expect(linksOf(w)[APEX]).not.toBe('local_f4')
+  })
+})
+
+// ======================================================================== 0.7.21 (Rob, 2026-11-05)
+
+// Rob, 2026-11-05: "My side panel is now just getting really overcluttered with things that are late. I'm supposed to check
+// on a team member, and while I need to see those, it's making it hard for me to know what I still need to handle... When
+// things are overdue but not assigned to me, I don't think they should be pinned here. I think they should all show up in
+// the same thing that shows the system stats. It should show people and which tasks are overdue for which clients, so I can
+// run through those with the team in the morning." Measured that day on his machine: 24 threads pinned, 52 of his
+// teammates' late tickets riding on his own rows. Every client, ticket and address below is made up.
+describe('0.7.21 (Rob, 11-05: "When things are overdue but not assigned to me, I don\'t think they should be pinned here"): Team · late', () => {
+  const tid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-000000000721`
+  const B = TEAMMATE_B
+  const C = 'builder-c@example.com'
+  const pinCalls = (w: { writes: () => string[] }, sid: string) => w.writes().filter(c => c.startsWith(`set_pinned | ${sid} `))
+  /** A teammate's ticket that owes an ETA, needed `h` hours ago: late, `no ETA given`. */
+  const lateAsk = (n: number, who: string, h: number, pid: string, name: string, title: string) => ({
+    ticket_id: tid(n), project_id: pid, project_name: name, title, due_at: null, due_source: null, assignee_email: who,
+    eta_needed_by: new Date(NOW - h * HOUR).toISOString(), eta_ask: '⏳ NO ETA — give one in Claude Code',
+  })
+  /**
+   * The founder's feed: his own task on Cedar due in `cedarH` hours, and his teammates' late tickets: Builder B's on Cedar
+   * (his client too) and on Acme (nothing of his there), Builder C's on Acme. `mates: false`: his own task alone.
+   */
+  const robFeed = (cedarH = 5, mates = true): Feed => ({
+    member: FOUNDER, role: 'founder', mail: [], drafts: [], threads: [],
+    tickets: {
+      [cedarH < 24 ? 'due_today' : 'due_soon']: [{ ticket_id: tid(1), project_id: CEDAR, project_name: 'Cedar Dental', title: 'Send the intake form', due_at: new Date(NOW + cedarH * HOUR).toISOString(), due_source: 'commitment', assignee_email: FOUNDER }],
+      ...(mates
+        ? { overdue: [lateAsk(2, B, 4, CEDAR, 'Cedar Dental', 'Order the signage'), lateAsk(3, B, 2, ACME, 'Acme Roofing — Pat', 'Build the quote page'), lateAsk(4, C, 1, ACME, 'Acme Roofing — Pat', 'Send the roof photos')] }
+        : {}),
+    },
+  })
+  /** A pin of ours, as 0.7.18 to 0.7.20 left it on a thread pinned to check on a teammate. */
+  const checkPin = (projectId: string, client: string) => ({ projectId, client, byUs: true })
+
+  test('a thread the bridge pinned only to check on a teammate (ours) is unpinned on the next sync and named for what is there; the person\'s own pin stays', async ($, on) => {
+    const w = world(on, {
+      feed: robFeed(50),
+      threads: [
+        thread('local_c', '🔴 Cedar Dental · check on Builder B · task 4h late', 2, { pinned: true }),
+        thread('local_a', '🔴 Acme Roofing · check on Builder B · task 2h late', 3, { pinned: true }),
+      ],
+      store: { 'mm.links': { [CEDAR]: 'local_c', [ACME]: 'local_a' }, 'mm.pins': { local_c: checkPin(CEDAR, 'Cedar Dental'), local_a: checkPin(ACME, 'Acme Roofing') } },
+    })
+    await mm($, '')
+    // Cedar: his own task is 2 days out, so nothing of his pins it; the pin was ours, so it comes off
+    expect(w.threads.get('local_c')).toMatchObject({ title: '🟡 2d left · Cedar Dental · task', pinned: false })
+    expect(pinCalls(w, 'local_c')).toEqual(['set_pinned | local_c | false'])
+    // Acme: theirs alone, named for whose it is, our pin off
+    expect(w.threads.get('local_a')).toMatchObject({ title: '🟡 with Builder B and Builder C · Acme Roofing · no ETA', pinned: false })
+    expect(pinCalls(w, 'local_a')).toEqual(['set_pinned | local_a | false'])
+    const pins = w.stored['mm.pins'] as Record<string, { byUs: boolean }>
+    expect([pins.local_c?.byUs, pins.local_a?.byUs]).toEqual([false, false])
+    expect((w.stored['mm.last'] as { pinned: number }).pinned).toBe(0)
+    // and the next sync leaves both alone: nothing pins them again
+    await w.clock.advance(6 * 60_000)
+    await mm($, '')
+    expect([w.threads.get('local_c')?.pinned, w.threads.get('local_a')?.pinned]).toEqual([false, false])
+    expect([...pinCalls(w, 'local_c'), ...pinCalls(w, 'local_a')]).toHaveLength(2)
+  })
+
+  test('a pin the person put on the thread of a client of theirs alone is the person\'s: it stays', async ($, on) => {
+    const w = world(on, {
+      feed: robFeed(50),
+      threads: [thread('local_a', 'Acme work', 3, { pinned: true })],
+      store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.pins': { local_a: { projectId: ACME, client: 'Acme Roofing', byUs: false } } },
+    })
+    await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: '🟡 with Builder B and Builder C · Acme Roofing · no ETA', pinned: true })
+    expect(pinCalls(w, 'local_a')).toEqual([])
+  })
+
+  test('his own task still pins his thread, named for what is his; his row carries nothing of theirs; Team · late lists them by person, then client, below his groups', async ($, on) => {
+    const w = world(on, { feed: robFeed(5), threads: [thread('local_c', 'Cedar work', 2)], store: { 'mm.links': { [CEDAR]: 'local_c' } } })
+    await mm($, '')
+    expect(w.threads.get('local_c')).toMatchObject({ title: CEDAR_TITLE, pinned: true })
+    const ui = await pane($)
+    const before = await lines(ui)
+    // his row: one line, no `1 late with Builder B` under it (0.7.4 to 0.7.20)
+    const row = before.findIndex(l => l.includes('🔴 Cedar Dental · task · 5h left'))
+    expect(row).toBeGreaterThan(-1)
+    expect(before.some(l => l.includes('late with'))).toBe(false)
+    // the group is closed until opened, its button last on the line of groups; Acme is not under With a teammate
+    expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([['mm-fold:team', 'Team · late (3)']])
+    expect(before).not.toContain('Team · late (3)')
+    await ui.press({ key: 'mm-fold:team' })
+    const after = await lines(ui)
+    const head = after.indexOf('Team · late (3)')
+    expect(head).toBeGreaterThan(row)
+    expect(after.slice(head, head + 9)).toEqual([
+      'Team · late (3)',
+      'Builder B (2)',
+      '  Cedar Dental',
+      '    - Order the signage · late since 7 AM · no ETA given',
+      '  Acme Roofing',
+      '    - Build the quote page · late since 9 AM · no ETA given',
+      'Builder C (1)',
+      '  Acme Roofing',
+      '    - Send the roof photos · late since 10 AM · no ETA given',
+    ])
+    await ui.unmount()
+    expect(sends(w)).toEqual([])
+  })
+
+  test('the status line: `· L late with the team` after the pins, and nothing when none is late; /mm status names who', async ($, on) => {
+    const w = world(on, { feed: robFeed(5), threads: [thread('local_c', 'Cedar work', 2)], store: { 'mm.links': { [CEDAR]: 'local_c' } } })
+    await mm($, '')
+    expect(String(w.statuses.at(-1) ?? '')).toMatch(/^MM: 1 need you · 1 pinned · 3 late with the team(  |$)/)
+    const status = await mm($, 'status')
+    expect(status.split('\n')).toContain('late with the team: 3 (Builder B 2, Builder C 1)')
+    // nobody late: the line as it was
+    w.setFeed(robFeed(5, false))
+    await mm($, '')
+    expect(String(w.statuses.at(-1) ?? '')).toMatch(/^MM: 1 need you · 1 pinned(  |$)/)
+    expect(await mm($, 'status')).not.toContain('late with the team')
+  })
+
+  test('⛔ a teammate\'s feed and the PM\'s: no Team · late, and the status line is as it was', async ($, on) => {
+    const w = world(on, { feed: { ...robFeed(5), member: ME, role: 'builder' }, threads: [] })
+    await mm($, '')
+    expect(String(w.statuses.at(-1) ?? '')).not.toContain('late with the team')
+    const ui = await pane($)
+    expect((await buttons(ui)).some(b => b[0] === 'mm-fold:team')).toBe(false)
+    await ui.unmount()
+    w.setFeed({ ...robFeed(5), member: 'has9@example.com', role: 'pm' })
+    await mm($, '')
+    expect(String(w.statuses.at(-1) ?? '')).not.toContain('late with the team')
+    expect(await mm($, 'status')).not.toContain('late with the team')
   })
 })
