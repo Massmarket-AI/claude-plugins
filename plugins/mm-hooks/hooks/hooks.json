@@ -15,6 +15,11 @@
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/update-plugins.js\"", "timeout": 10 }
         ]
+      },
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/revision-insights-notice.js\"", "timeout": 10 }
+        ]
       }
     ]
   }
