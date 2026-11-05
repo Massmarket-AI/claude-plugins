@@ -42,14 +42,15 @@ const NEVER_RAN = "has never run on this computer";
 /** Every path this step reads or writes, under MM_HOOK_HOME when it is set (the same rule as update-plugins.js). */
 function paths(env = process.env) {
   const home = env.MM_HOOK_HOME || os.homedir();
-  const claudeDir = env.MM_HOOK_HOME ? path.join(env.MM_HOOK_HOME, ".claude") : env.CLAUDE_CONFIG_DIR || path.join(home, ".claude");
+  // The tracker hook installs team skills under <home>/.claude/skills whatever CLAUDE_CONFIG_DIR says (worklog-hook.js
+  // homeClaudeDir), so that is where the skill is looked for.
   const hookDir = path.join(home, ".claude", "mm-hooks");
   return {
     home,
     hookDir,
     statusFile: path.join(hookDir, "plugin-sync.json"),
     stampFile: path.join(hookDir, "revision-insights.json"),
-    skillFile: path.join(claudeDir, "skills", "revision-insights", "SKILL.md"),
+    skillFile: path.join(home, ".claude", "skills", "revision-insights", "SKILL.md"),
     reviewHostDir: path.join(home, ".massmarket-zero-revision"),
   };
 }

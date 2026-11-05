@@ -329,13 +329,13 @@ test("decideNotice: each gate, in order, with its reason", () => {
   assert.equal(d({ record: { last_notice_at: iso(now - 21 * HOUR), count: 1 } }).show, true);
 });
 
-test("paths: MM_HOOK_HOME sandboxes everything; otherwise CLAUDE_CONFIG_DIR is where the skill is looked for", () => {
+test("paths: MM_HOOK_HOME sandboxes everything; the skill is looked for where the tracker hook installs it", () => {
   const sandbox = rin.paths({ MM_HOOK_HOME: "/sb", CLAUDE_CONFIG_DIR: "/elsewhere" });
   assert.equal(sandbox.skillFile, path.join("/sb", ".claude", "skills", "revision-insights", "SKILL.md"));
   assert.equal(sandbox.stampFile, path.join("/sb", ".claude", "mm-hooks", "revision-insights.json"));
   assert.equal(sandbox.reviewHostDir, path.join("/sb", ".massmarket-zero-revision"));
   const cfg = rin.paths({ CLAUDE_CONFIG_DIR: "/cfg" });
-  assert.equal(cfg.skillFile, path.join("/cfg", "skills", "revision-insights", "SKILL.md"));
+  assert.equal(cfg.skillFile, path.join(os.homedir(), ".claude", "skills", "revision-insights", "SKILL.md"), "worklog-hook.js installs team skills under the home folder, whatever CLAUDE_CONFIG_DIR says");
   assert.equal(cfg.hookDir, path.join(os.homedir(), ".claude", "mm-hooks"), "the tracker folder stays under the home folder");
 });
 
