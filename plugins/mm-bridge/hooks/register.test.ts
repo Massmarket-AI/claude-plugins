@@ -1816,7 +1816,7 @@ describe('F4: no thread list, no target; nothing dropped on an odd answer', () =
       await w.clock.advance(4_000)
       await w.clock.advance(5 * 60_000)
       // and a command, which fails as it does for an HTTP error
-      expect(await mm($, '').catch(() => 'failed')).toBe('failed')
+      expect(await mm($, '')).toContain('/mm queue did not finish: ')
       for (const key of ['mm.links', 'mm.pins', 'mm.titles', 'mm.unlinked'] as const) expect(w.stored[key], key).toEqual(STORE[key])
       expect(w.stored['mm.last']).toBeUndefined()
       expect(w.writes()).toEqual([])
@@ -2094,7 +2094,7 @@ describe('F7: a link the bridge made by itself is undone when it stops being tru
     w.setFeed(feed({ threads: [] }))
     for (let i = 0; i < 4; i++) await sync()
     status = 500
-    expect(await sync()).toBe('failed')
+    expect(await sync()).toContain('/mm queue did not finish: ')
     status = 200
     linked()
 
@@ -10535,7 +10535,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.28', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.29', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10604,7 +10604,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.28', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.29', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10670,7 +10670,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.28', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.29', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
@@ -12694,7 +12694,7 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
     expect(w.pinPosts).toHaveLength(1)
     const sent = w.pinPosts[0] as (typeof w.pinPosts)[number]
     expect(sent.method).toBe('POST')
-    expect(sent.headers).toEqual({ Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.28', 'Content-Type': 'application/json' })
+    expect(sent.headers).toEqual({ Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.29', 'Content-Type': 'application/json' })
     const body = sent.body
     expect(Object.keys(body).sort()).toEqual(['at', 'extra', 'items'])
     expect(body.at).toBe(new Date(NOW).toISOString())

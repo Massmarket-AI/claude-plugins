@@ -74,6 +74,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   let feedStatus = 200
   /** Threads the app refuses to pin. */
   const failPins = new Set<string>()
+  /** (0.7.29) Threads the app refuses to pin, with the words it refuses in. */
+  const refusePins = new Map<string, string>()
   /**
    * (0.7.28) Threads that are a scheduled task's runs. The app refuses to pin one in its own words and its list does not say
    * (both measured 2026-11-06); `get_session` says so where the value is true, and a false is a run only the refusal gives away.
@@ -131,6 +133,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           }
           if (tool === 'set_session_title' && t) t.title = String(args.title)
           if (tool === 'set_pinned' && failPins.has(id)) return { content: [{ type: 'text', text: 'set_pinned failed' }], isError: true }
+          if (tool === 'set_pinned' && refusePins.has(id)) return { content: [{ type: 'text', text: String(refusePins.get(id)) }], isError: true }
           if (tool === 'set_pinned' && runs.has(id)) return { content: [{ type: 'text', text: `Session "${id}" is a scheduled task run. These runs show under their task, not as their own sidebar rows, so they can't be grouped, pinned or marked.` }], isError: true }
           if (tool === 'set_pinned' && t) t.pinned = Boolean(args.pinned)
           // (0.5.19) as the app answers set_remote_control: the state afterwards (Claude.app, 10-20), or its refusal
@@ -251,6 +254,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
     fetched,
     opened,
     failPins,
+    refusePins,
     runs,
     refuseRc,
     silentRc,

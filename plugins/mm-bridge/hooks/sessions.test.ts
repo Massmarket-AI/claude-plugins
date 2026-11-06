@@ -164,10 +164,133 @@ describe('0.7.28: a scheduled task\'s run is never a client\'s thread, and one r
     expect(last.error).toBeUndefined()
     expect(last.pinRefused?.map(r => [r.thread, r.pinned])).toEqual([['local_a', false]])
     w.failPins.clear()
+    // (0.7.29) not asked again before its 6 hours are out
     await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(w.app.get('local_a')?.pinned).toBe(true)
+    await w.advance(6 * 3_600_000)
     await mm(hub, '')
     expect(w.app.get('local_a')?.pinned).toBe(false)
     expect((w.stored('mm.pins') as Record<string, unknown>).local_a).toBeUndefined()
+  })
+})
+
+// ⛔ (0.7.29, on 0.7.28) A refusal for any other reason than a scheduled task's run: the thread waits 6 hours, the refusal is
+// reported once per thread and reason, and everything else in the pass goes on. A typed /mm says why a pass failed.
+describe('0.7.29: a pin the app refuses waits 6 hours and is reported once; a typed /mm says why a pass failed', () => {
+  const SIX_HOURS = 6 * 3_600_000
+  const threeClients = (): Feed => ({ member: ME, role: 'founder', tickets: {}, threads: [], mail: [mail(1, 'Client One', 3), mail(2, 'Client Two', 2), mail(3, 'Client Three')] })
+  /** Client One's thread comes first in the pin pass, and the app refuses to pin it. */
+  const world = () => {
+    const w = fakeApp(threeClients(), [{ sessionId: 'local_hub' }, { sessionId: 'local_a', title: 'A work' }, { sessionId: 'local_b', title: 'B work' }, { sessionId: 'local_c', title: 'C work' }])
+    w.put('mm.links', { [pid(1)]: 'local_a', [pid(2)]: 'local_b', [pid(3)]: 'local_c' })
+    w.failPins.add('local_a')
+    return w
+  }
+  const pinCalls = (w: ReturnType<typeof fakeApp>, sid: string) => w.calls.filter(c => c.tool === 'set_pinned' && c.args.session_id === sid).length
+  /** The refusals of a thread in bridge-notices.log: one line a write, since the fake's file reads back as empty. */
+  const noticesOf = (w: ReturnType<typeof fakeApp>, sid: string) => w.written.filter(f => f.path.endsWith('bridge-notices.log') && f.text.includes(`thread ${sid}: the app refused`))
+  const lastAt = (w: ReturnType<typeof fakeApp>) => (w.stored('mm.last') as { at: number }).at
+
+  test('a refused pin: every other thread is pinned and named, a typed /mm answers, the sync advances, and our record goes back to not ours', async () => {
+    const w = world()
+    const hub = w.session('local_hub')
+    expect(await mm(hub, '')).toContain('3 clients need you; 2 threads pinned.')
+    expect(w.app.get('local_a')?.pinned).toBeFalsy()
+    expect(w.app.get('local_a')?.title).toContain('Client One')
+    for (const [sid, name] of [['local_b', 'Client Two'], ['local_c', 'Client Three']] as const) {
+      expect(w.app.get(sid)?.pinned).toBe(true)
+      expect(w.app.get(sid)?.title).toContain(name)
+    }
+    expect((w.stored('mm.pins') as Record<string, { byUs: boolean }>).local_a?.byUs).toBe(false)
+    expect((w.stored('mm.last') as { error?: string }).error).toBeUndefined()
+    const first = lastAt(w)
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(lastAt(w)).toBeGreaterThan(first)
+  })
+
+  test('asked again no sooner than 6 hours, for that thread alone; reported once per thread and reason; /mm status says so the whole time', async () => {
+    const w = world()
+    const hub = w.session('local_hub')
+    await mm(hub, '')
+    expect(pinCalls(w, 'local_a')).toBe(1)
+    expect(noticesOf(w, 'local_a').length).toBe(1)
+    // no lookup and no record flip for it either while it waits
+    const lookups = () => w.calls.filter(c => c.tool === 'get_session' && c.args.session_id === 'local_a').length
+    const asked = lookups()
+    const a = w.app.get('local_b')
+    if (a) a.pinned = false
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(pinCalls(w, 'local_a')).toBe(1)
+    expect(lookups()).toBe(asked)
+    expect(await mm(hub, 'status')).toContain('pins the app refused: Client One (')
+    expect((w.stored('mm.pins') as Record<string, { byUs: boolean }>).local_a?.byUs).toBe(false)
+    // just short of 6 hours since the refusal
+    await w.advance(SIX_HOURS - 7 * 60_000)
+    await mm(hub, '')
+    expect(pinCalls(w, 'local_a')).toBe(1)
+    // past them: asked again, refused in the same words, so it waits again and is not reported again
+    await w.advance(2 * 60_000)
+    await mm(hub, '')
+    expect(pinCalls(w, 'local_a')).toBe(2)
+    expect(noticesOf(w, 'local_a').length).toBe(1)
+    await w.advance(60_000)
+    await mm(hub, '')
+    expect(pinCalls(w, 'local_a')).toBe(2)
+    // a new reason is a new report
+    w.failPins.clear()
+    w.refusePins.set('local_a', 'The sidebar is busy.')
+    await w.advance(SIX_HOURS)
+    await mm(hub, '')
+    expect(pinCalls(w, 'local_a')).toBe(3)
+    expect(noticesOf(w, 'local_a').length).toBe(2)
+    expect(noticesOf(w, 'local_a')[1]?.text).toContain('The sidebar is busy.')
+    // the app takes it: pinned, the wait goes, and it never read as the person's unpin
+    w.refusePins.clear()
+    await w.advance(SIX_HOURS)
+    await mm(hub, '')
+    expect(w.app.get('local_a')?.pinned).toBe(true)
+    expect(w.stored('mm.pinwait')).toEqual({})
+    expect(w.stored('mm.unpinned') ?? {}).toEqual({})
+    expect(await mm(hub, 'status')).not.toContain('pins the app refused')
+  })
+
+  test('a refusal that waits is in the heartbeat file, as `refreshError` is', async () => {
+    const w = world()
+    const hub = w.session('local_hub')
+    await mm(hub, '')
+    w.feedAnswers(503)
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    const state = JSON.parse(w.written.filter(f => f.path.endsWith('bridge-state.json')).at(-1)?.text ?? '{}') as { pinRefused?: Array<{ thread: string; why: string; until: string }>; refreshError?: unknown }
+    expect(state.pinRefused?.map(r => r.thread)).toEqual(['local_a'])
+    expect(state.pinRefused?.[0]?.why).toContain('set_pinned failed')
+    expect(state.refreshError).toBeTruthy()
+  })
+
+  test('a thread that is gone takes its wait with it', async () => {
+    const w = world()
+    const hub = w.session('local_hub')
+    await mm(hub, '')
+    expect(Object.keys(w.stored('mm.pinwait') as object)).toEqual(['local_a'])
+    w.app.delete('local_a')
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(w.stored('mm.pinwait')).toEqual({})
+  })
+
+  test('a typed /mm answers why a pass failed, with the list as last loaded', async () => {
+    const w = fakeApp(threeClients(), [{ sessionId: 'local_hub' }, { sessionId: 'local_a', title: 'A work' }])
+    const hub = w.session('local_hub')
+    await mm(hub, '')
+    w.feedAnswers(503)
+    await w.advance(6 * 60_000)
+    const said = await mm(hub, '')
+    expect(said).toContain('/mm queue did not finish: closeout HTTP 503')
+    expect(said).toContain('From the list as last loaded: 3 clients need you')
+    expect(await mm(hub, 'link Client One')).toContain('/mm link Client One did not finish: closeout HTTP 503')
   })
 })
 
@@ -336,9 +459,8 @@ describe('F2: a write the engine refuses midway leaves nothing half done', () =>
     w.put('mm.threads', { 'cli-a': { app: 'local_p2a', at: Date.parse(ago(0)) } })
     const hub = w.session('local_p2hub')
     w.refuse('mm.auto', 1)
-    let failed = ''
-    await mm(hub, '').catch((err: unknown) => void (failed = String(err)))
-    expect(failed).toContain('Lock file is already being held')
+    // (0.7.29) a typed /mm answers with why; until 0.7.28 it threw
+    expect(await mm(hub, '')).toContain('Lock file is already being held')
     // the link was never written without its auto record; what the sync did to the thread is on record
     expect(linksOf(w)[pid(1)]).toBeUndefined()
     expect((w.stored('mm.titles') as Record<string, string>).local_p2a).toBe('Pipeline speed work')
@@ -534,6 +656,22 @@ describe('re-review of a446f5ab: Start after a chip was spent, a re-check after 
     expect(links).toEqual({ [pid(2)]: 'local_l2a' })
   })
 
+  test('(0.7.28) the `mm` tool answers with why a pass failed: a hook that throws is skipped, and the app then says no hook answered', async () => {
+    const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], mail: [mail(1, 'Client One')] }
+    const w = fakeApp(feed, [{ sessionId: 'local_l3thub' }, { sessionId: 'local_l3ta', title: 'A work' }])
+    w.put('mm.links', { [pid(1)]: 'local_l3ta' })
+    const hub = w.session('local_l3thub')
+    // OW's feed answering 5xx (2026-10-19)
+    w.feedAnswers(503)
+    expect(await tool(hub, 'queue')).toContain('/mm queue did not finish: closeout HTTP 503')
+    expect(await tool(hub, '')).toContain('/mm queue did not finish: closeout HTTP 503')
+    expect(await tool(hub, 'link Client One')).toContain('/mm link Client One did not finish: closeout HTTP 503')
+    // what reads no feed still answers, as it did in the session this was seen in
+    expect(await tool(hub, 'status')).toContain('last sync: ')
+    w.feedAnswers(200)
+    expect(await tool(hub, 'queue')).toContain('The list is in the side pane.')
+  })
+
   test('L3: a pin the app refused is pinned on the next sync, never read as the person\'s unpin (P10)', async () => {
     const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], mail: [mail(1, 'Client One')] }
     const w = fakeApp(feed, [{ sessionId: 'local_l3hub' }, { sessionId: 'local_l3a', title: 'A work' }])
@@ -545,7 +683,12 @@ describe('re-review of a446f5ab: Start after a chip was spent, a re-check after 
     expect((w.stored('mm.last') as { pinRefused?: Array<{ why: string }> }).pinRefused?.[0]?.why).toContain('set_pinned failed')
     expect((w.stored('mm.pins') as Record<string, { byUs: boolean }>).local_l3a?.byUs).toBe(false)
     w.failPins.clear()
+    // (0.7.29) not asked again before its 6 hours are out
     await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(w.app.get('local_l3a')?.pinned).toBe(false)
+    expect((w.stored('mm.pins') as Record<string, { byUs: boolean }>).local_l3a?.byUs).toBe(false)
+    await w.advance(6 * 3_600_000)
     await mm(hub, '')
     expect(w.app.get('local_l3a')?.pinned).toBe(true)
     expect(w.stored('mm.unpinned') ?? {}).toEqual({})

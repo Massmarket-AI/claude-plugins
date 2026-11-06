@@ -302,7 +302,9 @@ test("no Chrome, no install, or nothing carried: nothing written, a plain record
 
 const OS = process.platform === "darwin" ? "darwin" : "linux";
 const ONE_WORK = "The Massmarket time tracker is not installed in the Chrome profile signed in as ana@massmarket.ai, which was used recently. Ask the member to load the tracker in that profile so the work done there is tracked.";
-const DEV_OFF = "The Massmarket time tracker in Chrome cannot update itself because Developer mode is off on chrome://extensions. Ask the member to turn on Developer mode there (the switch at the top right); after that the tracker keeps itself up to date.";
+// The sentence, with the profile it names: the name Chrome shows for it, else its folder name.
+const devOff = (where) => `The Massmarket time tracker in Chrome cannot update itself because Developer mode is off on chrome://extensions in ${where}. Ask the member to turn on Developer mode there (the switch at the top right); after that the tracker keeps itself up to date.`;
+const DEV_OFF = devOff('the Chrome profile "Work"');
 const work = (email) => [{ email, full_name: "Ana Member", given_name: "Ana", gaia: "123" }];
 
 test("a WORK profile used in the last 7 days with no tracker is named by its @massmarket.ai email; others are not", () => {
@@ -403,11 +405,49 @@ test("Developer mode off: the member is told once a day, in the same notice as t
     "Profile 1": { devMode: true, accounts: work("ana@massmarket.ai") },
   });
   const both = runIn(home2, carriedBuild("0.11.5"), { now });
-  assert.equal(both.notice, ONE_WORK + " " + DEV_OFF);
+  // (this Default has no name in Local State: its folder name stands in)
+  assert.equal(both.notice, ONE_WORK + " " + devOff('the Chrome profile "Default"'));
   assert.equal(runIn(home2, carriedBuild("0.11.5"), { now: now + 60 * 1000, lastNoticeAt: now }).notice, null);
   // Developer mode on, or nothing carried to write: no Developer mode sentence.
   assert.equal(runIn(oneFolder("0.11.4").home, carriedBuild("0.11.5")).notice, null);
   assert.equal(runIn(home, tmp("mm-empty-plugin-")).notice, null);
+});
+
+test("two profiles share a folder, one with Developer mode off: the sentence names the one that is off, not the other", () => {
+  const home = tmp("mm-home-");
+  const folder = installedFolder("0.11.4");
+  fakeChrome(home, OS, {
+    Default: { name: "Rob at work", install: { path: folder, location: 4 }, devMode: true },
+    "Profile 6": { name: "Side projects", install: { path: folder, location: 4 }, devMode: false },
+  });
+  const before = snapshot(folder);
+  const { status, notice } = runIn(home, carriedBuild("0.11.5"));
+  assert.equal(status.folders[0].action, "skipped-developer-mode-off");
+  assert.equal(notice, devOff('the Chrome profile "Side projects"'));
+  assert.ok(!notice.includes("Rob at work"), "a profile that has it on is not named");
+  assert.ok(!JSON.stringify(status).includes("Side projects"), "the name goes in the sentence, never in plugin-sync.json");
+  assert.deepEqual(snapshot(folder), before);
+});
+
+test("the profiles with Developer mode off, by the name Chrome shows, else the folder name, each once and at most five", () => {
+  const home = tmp("mm-home-");
+  const folder = installedFolder("0.11.4");
+  const other = installedFolder("0.11.4");
+  fakeChrome(home, OS, {
+    Default: { name: "Work", install: { path: folder, location: 4 }, devMode: false },
+    // never set counts as off, and no name in Local State: its folder name
+    "Profile 2": { install: { path: folder, location: 4 } },
+    // a second folder, off in a profile whose name holds a quote and a line break: one clean line
+    "Profile 3": { name: 'Dana "D"\nSmith', install: { path: other, location: 4 }, devMode: false },
+    // loads the tracker with it on, and a profile with no tracker at all: neither is named
+    "Profile 4": { name: "On one", install: { path: other, location: 8 }, devMode: true },
+    "Profile 5": { name: "No tracker", devMode: false },
+  });
+  const { notice } = runIn(home, carriedBuild("0.11.5"));
+  assert.equal(notice, devOff('the Chrome profiles "Work", "Profile 2" and "Dana D Smith"'));
+  assert.equal(sx.devModeSentence(["a", "b", "a"]), devOff('the Chrome profiles "a" and "b"'));
+  assert.equal(sx.devModeSentence(["a", "b", "c", "d", "e", "f"]), devOff('the Chrome profiles "a", "b", "c", "d" and "e"'));
+  assert.equal(sx.devModeSentence([]), "The Massmarket time tracker in Chrome cannot update itself because Developer mode is off on chrome://extensions. Ask the member to turn on Developer mode there (the switch at the top right); after that the tracker keeps itself up to date.");
 });
 
 test("the profile sentence is said at most once a day", () => {

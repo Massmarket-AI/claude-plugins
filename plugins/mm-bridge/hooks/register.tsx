@@ -200,7 +200,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.28'
+export const VERSION = '0.7.29'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -237,6 +237,8 @@ const LEASE_RENEW_MS = 30_000
 const MAX_WRITES = 24
 /** (0.7.28) The most refused pins one sync record keeps. */
 const PIN_REFUSED_MAX = 10
+/** (0.7.29) How long a thread the app refused a pin or an unpin for waits before it is asked again (`mm.pinwait`). */
+const PIN_WAIT_MS = 6 * 3_600_000
 const DAY_MS = 24 * 3_600_000
 /** A session's own pair (Claude Code session id → app thread) is kept this long after it last ran. */
 const PAIR_KEEP_MS = 30 * DAY_MS
@@ -492,6 +494,11 @@ type Mcp = { content?: Array<{ type: string; text?: string }>; isError?: boolean
 type Pin = { projectId: string; client: string; byUs: boolean; internal?: true; again?: true }
 /** (0.7.28) One `set_pinned` the app refused: which thread, whose, which way, and in its own words. */
 type PinRefused = { thread: string; client?: string; pinned: boolean; why: string }
+/**
+ * (0.7.29) A thread the app refused a pin or an unpin for, as anything but a scheduled task's run (`mm.pinwait`): not asked
+ * again before `until`. `why` outlives `until`, so the same refusal is reported once however many times it is retried.
+ */
+type PinWait = { until: number; why: string }
 /** (0.7.28) The words the app refuses to pin a scheduled task's run in. */
 const SCHEDULED_RUN = 'is a scheduled task run'
 type Last = {
@@ -2808,16 +2815,43 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   }
   /** (0.7.28) What the app refused this pass: on the sync record, and in /mm status. */
   const refused: PinRefused[] = []
+  /** (0.7.29) The refusals on record. */
+  const pinWaits = await storeGet<Record<string, PinWait>>($, 'mm.pinwait', {})
+  const waitingOnPin = (sid: string): boolean => {
+    const w = pinWaits[sid]
+    return w !== undefined && now < w.until
+  }
+  /**
+   * ⛔ (0.7.29) A thread whose refusal is still waiting: not asked, and still on the record and in /mm status for as long as
+   * the pass wants it changed.
+   */
+  const heldBack = (sid: string, pinned: boolean): boolean => {
+    if (!waitingOnPin(sid)) return false
+    if (!refused.some(r => r.thread === sid)) {
+      const client = pins[sid]?.client
+      refused.push({ thread: sid, ...(client ? { client } : {}), pinned, why: pinWaits[sid]?.why ?? '' })
+    }
+    return true
+  }
   /**
    * ⛔ (0.7.28) One `set_pinned`, for every pin and unpin of this pass: false when the app refused it, and ONE REFUSAL NEVER
    * STOPS THE PASS. Each caller leaves that thread as it would with no writes left, for a later sync to finish, and goes on
-   * to the next. A refusal in the words the app uses for a scheduled task's run lets that run go (above).
+   * to the next. A refusal in the words the app uses for a scheduled task's run lets that run go (above). ⛔ (0.7.29) Any
+   * other refusal waits PIN_WAIT_MS for that thread (`mm.pinwait`), and is reported once per thread and reason: a line in
+   * bridge-notices.log, and `pinRefused` in the heartbeat file, where `refreshError` is.
    */
   const setPin = async (sid: string, pinned: boolean): Promise<boolean> => {
     // (the clear sweep comes to a thread the loop before it was just refused for: once per pass is enough)
     if (refused.some(r => r.thread === sid && r.pinned === pinned)) return false
+    if (heldBack(sid, pinned)) return false
     try {
       await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: sid, pinned })
+      if (pinWaits[sid]) {
+        delete pinWaits[sid]
+        await patchStore<Record<string, PinWait>>($, 'mm.pinwait', {}, fresh => {
+          delete fresh[sid]
+        }).catch(() => {})
+      }
       return true
     } catch (err) {
       const why = errorText(err)
@@ -2827,7 +2861,16 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
         letGoRun(sid)
         want.delete(sid)
         named.delete(sid)
+        return false
       }
+      const known = pinWaits[sid]?.why === why
+      const wait: PinWait = { until: now + PIN_WAIT_MS, why }
+      pinWaits[sid] = wait
+      await patchStore<Record<string, PinWait>>($, 'mm.pinwait', {}, fresh => {
+        fresh[sid] = wait
+        capped(fresh)
+      }).catch(() => {})
+      if (!known) await logAuto($, `thread ${sid}: the app refused to ${pinned ? 'pin' : 'unpin'} it (${why}); not asked again for 6 hours`)
       return false
     }
   }
@@ -2906,7 +2949,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     if (s && writes >= MAX_WRITES) outOfWrites.add(sid)
     if (!s || writes >= MAX_WRITES) continue
     // (0.7.28) a run is never pinned, so only a thread that is not pinned is asked about
-    if (!s.pinned && (await isRun(sid))) continue
+    if (!s.pinned && !waitingOnPin(sid) && (await isRun(sid))) continue
     // The record first, as the thread stands (a pin the person put on stays theirs), so a failed rename
     // leaves a record to give the name back by; then, just before we pin it, the record that the pin is
     // ours. (Recorded as ours any earlier, a rename that failed would read later as the person's unpin.)
@@ -2917,6 +2960,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     const title = pinTitle(it, now, back)
     if (s.title !== title) await rename(s, title)
     if (!s.pinned) {
+      // (0.7.29) waiting on a refusal: its name is right, and its record stays not ours until the app is asked again
+      if (heldBack(sid, true)) continue
       await recordPin(sid, record(true))
       if (!(await setPin(sid, true))) {
         // ⛔ The app refused the pin: our record goes back to not ours, so the next sync pins it again
@@ -3179,6 +3224,12 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       if (before) auto[pid] = copyOf(before)
       else delete auto[pid]
     }
+  }
+  // (0.7.29) a refusal whose thread is gone, or a run now, or that nothing has asked about for a day past its wait, goes
+  if (Object.keys(pinWaits).some(sid => gone.has(sid) || Object.hasOwn(runs, sid) || now - Number(pinWaits[sid]?.until) > DAY_MS)) {
+    await patchStore<Record<string, PinWait>>($, 'mm.pinwait', {}, fresh => {
+      for (const sid of Object.keys(fresh)) if (gone.has(sid) || Object.hasOwn(runs, sid) || !(now - Number(fresh[sid]?.until) <= DAY_MS)) delete fresh[sid]
+    }).catch(() => {})
   }
   // (0.7.28) the scheduled runs this pass found, before their links go: a link dropped with no record would be made again
   if (runsFound.length) {
@@ -3750,7 +3801,7 @@ async function showList($: EngineInterface, press: boolean): Promise<string> {
     last = (await reconcile($, press ? await recentFeed($) : await fetchFeed($))).last
   } catch (err) {
     // the list it opened with stays, and the pane says it is the one last loaded (L3). A typed /mm still
-    // answers with the failure, as before; the band's button has said all there is to say.
+    // answers with the failure (`didNotFinish`); the band's button has said all there is to say.
     await refreshFailed($, err)
     if (!press) throw err
     return REFRESH_FAILED
@@ -3771,13 +3822,17 @@ function listSaid(last: Last): string {
   return n ? `${n} client${n === 1 ? '' : 's'} need you; ${last.pinned} thread${last.pinned === 1 ? '' : 's'} pinned. The list is in the side pane.` : 'Nothing needs you right now.'
 }
 
+/** (0.7.28) What /mm and the mm tool answer for a hook that ran out of its time. */
+const NOT_IN_TIME = 'The bridge did not finish that in time. /mm status says how its last sync went.'
+
 /**
- * (0.7.28) What the mm tool answers when a command failed: why, and the list as last stored when there is one. ⛔ It must
- * answer: a hook that throws is skipped, and the engine then calls the plugin's tool itself, which says only that "no
- * tool.call hook answered this call" (`queue` and `kickoffs`, every sync, on 2026-11-06; `status` runs no sync).
+ * (0.7.28) What the mm tool, and (0.7.29) a typed /mm, answer when a command failed: which, why, and the list as last stored
+ * when there is one. ⛔ It must answer: a hook that throws is skipped, and the engine then calls the plugin's tool itself,
+ * which says only that "no tool.call hook answered this call" (`queue` and `kickoffs`, every sync, on 2026-11-06; `status`
+ * runs no sync).
  */
-async function toolFailed($: EngineInterface, err: unknown): Promise<string> {
-  const said = `The bridge could not finish that: ${errorText(err)}`
+async function didNotFinish($: EngineInterface, args: string, err: unknown): Promise<string> {
+  const said = `/mm ${args.trim() || 'queue'} did not finish: ${errorText(err)}`
   try {
     const last = await storeGet<Last | null>($, 'mm.last', null)
     return last && Array.isArray(last.items) ? `${said}\nFrom the list as last loaded: ${listSaid(last)}` : said
@@ -3951,9 +4006,11 @@ async function beat($: EngineInterface, extra: Record<string, unknown>): Promise
     const appPairs = Object.values(await storeGet<Records>($, 'mm.records', {})).filter(r => r && r.cli).length
     // (0.5.4) the last refresh that failed, in any thread: its session, thread, time and reason
     const refreshError = await storeGet<unknown>($, 'mm.refreshError', null)
+    // (0.7.29) the pins and unpins the app refused and that are still waiting: thread, why, when it is asked again
+    const pinRefused = Object.entries(await storeGet<Record<string, PinWait>>($, 'mm.pinwait', {})).slice(0, PIN_REFUSED_MAX).map(([thread, w]) => ({ thread, why: w?.why, until: new Date(Number(w?.until)).toISOString() }))
     await $.fs.write(
       `${await home($)}/.claude/mm-hooks/bridge-state.json`,
-      JSON.stringify({ version: VERSION, at: new Date(await $.clock.now()).toISOString(), session: await instanceId($), lastSync: last ? new Date(last.at).toISOString() : null, member: last?.member, need: last?.items.length ?? 0, pinned: last?.pinned ?? 0, appPairs, error: last?.error ?? null, refreshError, ...extra }, null, 1),
+      JSON.stringify({ version: VERSION, at: new Date(await $.clock.now()).toISOString(), session: await instanceId($), lastSync: last ? new Date(last.at).toISOString() : null, member: last?.member, need: last?.items.length ?? 0, pinned: last?.pinned ?? 0, appPairs, error: last?.error ?? null, refreshError, ...(pinRefused.length ? { pinRefused } : {}), ...extra }, null, 1),
     )
   } catch {
     // a heartbeat must never break the bridge
@@ -8730,24 +8787,35 @@ export const register: Register = on => {
 
   // ⛔ The person's own /mm only: typed here, or sent from their phone. A /mm that arrived any other way is
   // answered like the tool.
+  // ⛔ (0.7.29) It always answers, as the tool does (`didNotFinish`): a typed /mm threw out on a failed pass, and said nothing.
   on('command.run', { command: 'mm' }, async ($, e) => {
-    const text = await runCommand($, String(e.args ?? ''), PERSON_ORIGINS.has(String((e.origin as { kind?: string } | undefined)?.kind)) ? 'person' : 'other')
-    await refreshBand($)
+    const args = String(e.args ?? '')
+    let text: string
+    try {
+      text = await runCommand($, args, PERSON_ORIGINS.has(String((e.origin as { kind?: string } | undefined)?.kind)) ? 'person' : 'other')
+    } catch (err) {
+      text = await didNotFinish($, args, err)
+    }
+    await refreshBand($).catch(() => {})
     return { text }
-  })
+  }).catch(() => ({ text: NOT_IN_TIME }))
 
   // ⛔ Claude calls this. It never starts or updates a thread: `runCommand` refuses both for it.
-  // ⛔ (0.7.28) It always answers (`toolFailed`), and its `.catch` answers for a hook that ran out of its time.
+  // ⛔ (0.7.28) It always answers (`didNotFinish`), and its `.catch` answers for a hook that ran out of its time. The engine
+  // skips a hook that throws and runs what is beneath it, and beneath this one is the app's own end of the tool, which says
+  // "registered the tool mm but no tool.call hook answered": a pass that failed (the app refused a pin, OW's feed answered
+  // 5xx) read as a bridge with no hook, in the same session where `status` answered (2026-10-19 and 2026-11-06).
   on('tool.call', { tool: 'mcp__mm-bridge__mm' }, async ($, e) => {
+    const args = String((e as Record<string, unknown>).args ?? '')
     let result: string
     try {
-      result = await runCommand($, String((e as Record<string, unknown>).args ?? ''), 'other')
+      result = await runCommand($, args, 'other')
     } catch (err) {
-      result = await toolFailed($, err)
+      result = await didNotFinish($, args, err)
     }
     await refreshBand($).catch(() => {})
     return { result }
-  }).catch(() => ({ result: 'The bridge did not finish that in time. /mm status says how its last sync went.' }))
+  }).catch(() => ({ result: NOT_IN_TIME }))
 
   // A route that can close something was called from this thread and worked (R6: a reply draft sent or
   // discarded, a team draft posted, any write to a reply package; (0.5.28, internal asks) an ask's reply stored,
