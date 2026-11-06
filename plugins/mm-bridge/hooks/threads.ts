@@ -23,8 +23,9 @@ import {
   checkNow, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
   TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine,
   goOf, goOnly, stepWord,
+  NO_REPLY_WHAT, checkDot, paceOf, paceOnly, paceStatus, paceWord, statusOf,
 } from './queue'
-import type { AskRef, FeedThread, QueueItem } from './queue'
+import type { AskRef, FeedThread, QueueItem, StatusDot } from './queue'
 
 const TZ = 'America/New_York'
 
@@ -568,7 +569,8 @@ export const asksForPrep = (it: QueueItem): boolean => it.messages > 0 && !it.pa
 export function autoUpdatable(it: QueueItem, now: number): boolean {
   const o = it.open ?? null
   // (0.7.4) never for the founder's undated client tickets alone (`undatedOnly`): they ride along with what does update it
-  return !heldInternal(it) && !it.theirs && !withTeammate(it) && !(o && withHolder(o)) && fastState(it, now) === null && !undatedOnly(it)
+  // (0.7.27) nor for its pace row alone: quoted work left is nothing new for its thread
+  return !heldInternal(it) && !it.theirs && !withTeammate(it) && !(o && withHolder(o)) && fastState(it, now) === null && !undatedOnly(it) && !paceOnly(it)
 }
 
 /**
@@ -717,7 +719,7 @@ export function recommend(
 /** What is waiting on a client, as its row shows it: `2 messages waiting, 1 task due`, or `drafts ready`. */
 export function waitingText(it: QueueItem): string {
   const o = it.open ?? null
-  const drafts = !o ? '' : o.state === 'held_by_me' ? `${o.unsent} draft${o.unsent === 1 ? '' : 's'} not sent` : o.state === 'held_by_other' ? `drafts with ${o.by}` : o.state === 'stale' ? 'drafts out of date' : 'drafts ready'
+  const drafts = !o || it.noReply === true ? '' : o.state === 'held_by_me' ? `${o.unsent} draft${o.unsent === 1 ? '' : 's'} not sent` : o.state === 'held_by_other' ? `drafts with ${o.by}` : o.state === 'stale' ? 'drafts out of date' : 'drafts ready'
   // for the founder, a package that waits for his OK: that first, and who sends it once he has given it; one a
   // teammate decides on, before its reply is due, says so instead (R2)
   const ok = it.kind === 'ok' ? (it.theirs ? decidesText(it.theirs) : `needs your OK · ${(it.ok ?? null)?.sends ?? NOBODY} sends`) : ''
@@ -735,7 +737,10 @@ export function waitingText(it: QueueItem): string {
   // (0.7.24) follow-up steps that wait for a go: `3 follow-ups need your go` (a teammate's: `3 follow-ups need Asif's go`)
   const g = goOf(it)
   const go = g ? `${g.steps} follow-up${g.steps > 1 ? 's' : ''} need${g.steps > 1 ? '' : 's'} ${g.mine ? 'your' : `${g.by}'s`} go` : ''
-  const parts = [ok, it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', ...tasks, drafts, go]
+  // (0.7.27) the viewer's own pace on the client: `on track`, `behind`
+  const pace = paceOf(it) ? paceWord(it) : ''
+  // (0.7.27, OW #638) a package that owes no reply says so, whatever else is on it
+  const parts = [it.noReply === true ? NO_REPLY_WHAT : '', ok, it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', ...tasks, drafts, go, pace]
   const base = parts.filter(Boolean).join(', ')
   // (0.5.28, internal asks) and then the viewer's open asks, `1 internal ask`: after what the client has otherwise (a
   // package of theirs with nothing else waiting is still `drafts ready`), or alone for a client listed by its asks alone
@@ -970,6 +975,9 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
                 : goOnly(it)
                   ? // (0.7.24) listed by follow-up steps that wait for a go alone
                     goKickoff(it, who)
+                : paceOnly(it)
+                  ? // (0.7.27) listed by the viewer's own pace row alone: no state or numbers here, they change by the day and this text is what `signatureOf` compares
+                    `[mm-link ${id}] ${who} has quoted work left on my plate and nothing else waiting. Load the client's project skill first, then show me what is left on the quote and wait for me. Send nothing without my go.`
                 : it.tasks === 0 && asks.length
                   ? // (0.5.28, internal asks) listed by its asks alone: a first line that names the client, then each ask's paragraph
                     `[mm-link ${id}] ${who} has ${asks.length} internal ask(s) waiting on my reply. Load the client's project skill first.`
@@ -1859,7 +1867,7 @@ export type PinReportItem = {
   project_id: string
   client: string
   kind: string
-  tone: 'red' | 'yellow'
+  tone: 'red' | 'yellow' | 'green'
   due_at: string | null
   pinned: boolean
   why_not: PinWhyNot | null
@@ -1874,6 +1882,9 @@ export type PinReport = { at: string; items: PinReportItem[]; extra: PinReportEx
 /** (0.7.23) The most items and extra rows a report carries: past that it is trimmed, never refused. */
 export const PIN_REPORT_ITEMS_MAX = 200
 export const PIN_REPORT_EXTRA_MAX = 100
+
+/** (0.7.27) A status's colour as the pin report says it. */
+const REPORT_TONE: Record<StatusDot, PinReportItem['tone']> = { '🔴': 'red', '🟡': 'yellow', '🟢': 'green' }
 
 /** (0.7.23) A text cut to `max` characters (by code point), as the report's contract caps its strings. */
 const capText = (text: string, max: number): string => [...text].slice(0, max).join('')
@@ -1924,12 +1935,16 @@ export function pinReport(o: {
           : o.stayedOff.has(sid) ? 'person_unpinned' : o.capped.has(sid) ? 'write_cap' : 'unknown'
     // the clock its thread's name shows (`pinTitle`): a teammate's part to check on (the PM's), else the client's due time
     const c = ownPins(it, o.now) ? null : checkNow(it, o.now)
-    const at = c ? c.due : hasDue(it) ? it.dueAt : NaN
+    // (0.7.27, Rob 2026-11-05: "Every status shows by name in each person's row on the 9 AM image") the status that names the
+    // thread, when one does: its kind, its colour and its date (`needs_date` has none)
+    const status = c ? (c.pace ? paceStatus(c.pace, o.now) : null) : statusOf(it, o.now)
+    const notStarted = c !== null && c.pace === undefined && c.notStarted && checkDot(c, o.now) === '🟡'
+    const at = status ? status.at : c ? c.due : hasDue(it) ? it.dueAt : NaN
     items.push({
       project_id: it.projectId,
       client: capText(cleanText(it.client, 80), 80),
-      kind: capText(String(it.kind ?? ''), 16),
-      tone: Number.isFinite(at) && at <= o.now ? 'red' : 'yellow',
+      kind: capText(status ? status.kind : notStarted ? 'behind' : String(it.kind ?? ''), 16),
+      tone: status ? REPORT_TONE[status.dot] : Number.isFinite(at) && at <= o.now ? 'red' : 'yellow',
       due_at: Number.isFinite(at) ? new Date(at).toISOString() : null,
       pinned,
       why_not: whyNot,
