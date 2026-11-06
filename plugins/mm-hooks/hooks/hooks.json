@@ -21,6 +21,14 @@
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/revision-insights-notice.js\"", "timeout": 10 }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit|mcp__.*",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/skill-check.js\"", "timeout": 10 }
+        ]
+      }
     ]
   }
 }
