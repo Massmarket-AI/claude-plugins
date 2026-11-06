@@ -1849,7 +1849,10 @@ const capText = (text: string, max: number): string => [...text].slice(0, max).j
  * but had no writes left, MAX_WRITES), else `unknown`. `tone` is red once the clock its thread's name shows is past, and
  * `due_at` that clock. `extra`: the client threads pinned once the pass is done whose client is not in `items`, and whether
  * the pin is the bridge's or the person's; never a thread linked to no client (the person's own). ⛔ Pure: it reads only what
- * it is given.
+ * it is given. (0.7.23, coordinator 2026-11-05) A client whose thread the pass named through the checking loop
+ * (`checkedOff`: R8, a newer send being checked, its thread unpinned whoever pinned it) is not in `items`: it is off the
+ * person's plate, so it is not one that should be pinned. One the loop did not name that way stays in, as the pass treats
+ * it; its thread, if still pinned, may be in `extra`.
  */
 export function pinReport(o: {
   now: number
@@ -1859,6 +1862,8 @@ export function pinReport(o: {
   hidden: (sid: string) => boolean
   stayedOff: ReadonlySet<string>
   capped: ReadonlySet<string>
+  /** (0.7.23) The clients (project ids) whose thread the pass named through the checking loop (R8). */
+  checkedOff?: ReadonlySet<string>
   byUs: (sid: string) => boolean
   client: (projectId: string, sid: string) => string | undefined
 }): PinReport {
@@ -1867,7 +1872,7 @@ export function pinReport(o: {
   for (const it of o.listed) {
     if (!it || typeof it !== 'object' || seen.has(it.projectId)) continue
     seen.add(it.projectId)
-    if (!pinsFor(it, o.now)) continue
+    if (!pinsFor(it, o.now) || o.checkedOff?.has(it.projectId)) continue
     const sid = o.links[it.projectId]
     const s = sid ? o.thread(sid) : undefined
     const pinned = s?.pinned === true

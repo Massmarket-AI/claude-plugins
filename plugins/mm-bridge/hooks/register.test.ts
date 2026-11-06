@@ -12772,6 +12772,26 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
     })
   }
 
+  // (0.7.23, coordinator 2026-11-05) R8 takes a client whose newer send is being checked off the person's plate and unpins its
+  // thread whoever pinned it: never one that should be pinned, so never in the report's items
+  test('a client in checking with a newer send being checked is not in the items; the rest are as before', async ($, on) => {
+    const w = acmeWorld(on, { bridgePins: () => OK })
+    await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: ACME_TITLE, pinned: true })
+    expect(w.pinPosts.at(-1)?.body.items.find(i => i.project_id === ACME)).toMatchObject({ pinned: true, why_not: null })
+    // our send is in the feed, newer than any check: the checking loop names its thread and unpins it
+    w.setFeed(acmeFeed({ last_outbound_at: ago(0.25) }))
+    await w.clock.advance(6 * 60_000)
+    await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: '✓ Acme Roofing · sent 10:45 AM · checking', pinned: false })
+    expect(w.pinPosts).toHaveLength(2)
+    const body = w.pinPosts[1]?.body as PinReport
+    expect(body.items.map(i => i.project_id)).not.toContain(ACME)
+    expect(body.extra.map(e => e.project_id)).not.toContain(ACME)
+    // Cedar and Bolt, with no thread, as before
+    expect(body.items.map(i => [i.project_id, i.why_not])).toEqual(expect.arrayContaining([[CEDAR, 'no_thread'], [BOLT, 'no_thread']]))
+  })
+
   test('a teammate\'s view sends its own report too', async ($, on) => {
     const w = world(on, { feed: feed(), bridgePins: () => OK })
     await mm($, '')

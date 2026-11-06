@@ -2663,10 +2663,18 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // own pin off it (never the person's); `any`, whoever pinned it (R8, R14: it is off the person's plate);
   // false, it is left as it is.
   const named = new Map<string, { it: QueueItem; unpin: 'ours' | 'any' | false; title: string }>()
+  /**
+   * (0.7.23, coordinator 2026-11-05) The clients whose thread the checking loop names (R8: off the person's plate, unpinned
+   * whoever pinned it): never "should be pinned", so the pin report leaves them out of its items.
+   */
+  const checkedOff = new Set<string>()
   for (const it of checking) {
     const sid = links[it.projectId]
     const fast = fastState(it, now)
-    if (sid && live.has(sid) && !named.has(sid) && fast) named.set(sid, { it, unpin: unpinFor(it, 'any'), title: checkingTitle(it.client, fast.at, now) })
+    if (sid && live.has(sid) && !named.has(sid) && fast) {
+      named.set(sid, { it, unpin: unpinFor(it, 'any'), title: checkingTitle(it.client, fast.at, now) })
+      checkedOff.add(it.projectId)
+    }
   }
   /** (0.7.23) The threads named here because the person's unpin stands: what the pin report calls `person_unpinned`. */
   const stayedOff = new Set<string>()
@@ -2988,6 +2996,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       hidden: sid => unseen.has(sid) || away.has(sid),
       stayedOff,
       capped: outOfWrites,
+      checkedOff,
       byUs: sid => pins[sid]?.byUs === true,
       client: (pid, sid) => listedNow.find(i => i.projectId === pid)?.client ?? pins[sid]?.client,
     })
