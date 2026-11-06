@@ -83,7 +83,7 @@ describe("Rob's pin and clock rules, one test each (0.7.25)", () => {
     expect(pins(feed({ mail: [mail(1, NOW - 60_000)], drafts: [pkg(1, { covers_through: iso(NOW - 60_000) })] }))).toBe(true)
   })
 
-  test('P4 (0.7.31, Rob 2026-11-06, over 11-05\'s "Shouldn\'t it be pinned?": "a ticket with no due date never pins and never asks for a date, for anyone"): an undated open item says `no due date` and does not pin, whatever its age', () => {
+  test('P4 (0.7.32, Rob 2026-11-06, over 11-05\'s "Shouldn\'t it be pinned?": "a ticket with no due date never pins and never asks for a date, for anyone"): an undated open item says `no due date` and does not pin, whatever its age', () => {
     const undated = feed({ member: ROB, role: 'founder', tickets: { undated: [ticket(1, null, { assignee_email: ROB })] } })
     expect(pinsFor(one(undated), NOW)).toBe(false)
     expect(titleFor(one(undated), NOW)).toBe(`🟡 ${ACME} · task · no due date`)
@@ -605,7 +605,7 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
     expect(report(feed({ pace: [paceRow('overbooked')] }))).toMatchObject({ kind: 'overbooked', tone: 'red', due_at: iso(NOV_30) })
     expect(report(feed({ pace: [paceRow('late')] }))).toMatchObject({ kind: 'late', tone: 'red', due_at: iso(NOV_30) })
     expect(report(feed({ pace: [onTrack()] }))).toMatchObject({ kind: 'on_track', tone: 'green', due_at: iso(NOV_9) })
-    // (0.7.31, Rob 2026-11-06) an undated ticket is not one that should be pinned: the report no longer says `needs_date`
+    // (0.7.32, Rob 2026-11-06) an undated ticket is not one that should be pinned: the report no longer says `needs_date`
     expect(report(founder({ tickets: { undated: [undatedRow()] } }))).toBeUndefined()
     expect(report(feed({ tickets: { start_now: [ticket(1, NOV_9, { start_by_at: iso(NOW - 26 * H) })] } }))).toMatchObject({ kind: 'behind', tone: 'yellow', due_at: iso(NOV_9) })
     // today's hours done is not one that should be pinned
@@ -706,12 +706,12 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
 })
 
 // ============================================================================================================================
-// (0.7.31, Rob 2026-11-06) "Panels: a ticket with no due date never pins and never asks for a date, for anyone. It goes back
+// (0.7.32, Rob 2026-11-06) "Panels: a ticket with no due date never pins and never asks for a date, for anyone. It goes back
 // under the closed No due date toggle, so it's still one press away." And: "a ticket's age no longer matters if no-date
 // tickets never pin." Over his call of 2026-11-05 that shipped in 0.7.27 (`needs a due date`). ⛔ From OW's next release a
 // teammate's and a PM's feed send `tickets.undated` as well, so the rules below hold for all three.
 // ============================================================================================================================
-describe('0.7.31: a ticket with no due date never pins and never asks for a date, for anyone', () => {
+describe('0.7.32: a ticket with no due date never pins and never asks for a date, for anyone', () => {
   const H9 = 'h9@example.com'
   const VIEWERS: ReadonlyArray<readonly [string, string, string]> = [['the founder', ROB, 'founder'], ['a teammate', ME, 'builder'], ['the PM', H9, 'pm']]
   const as = (who: string, role: string, over: Partial<Feed> = {}): Feed => feed({ member: who, role, ...over })
@@ -769,6 +769,10 @@ describe('0.7.31: a ticket with no due date never pins and never asks for a date
       expect(pinsFor(both, NOW)).toBe(false)
       // the client's move: the existing skip, whatever its age
       expect(all(as(who, role, { tickets: { undated: [{ ...ancient, waiting_on: 'client' }] } }))).toEqual([])
+      // (0.7.31, Rob 11-06: "It shouldn't be prompting me to do anything") the owner picks it up when ready: it reads as any undated ticket
+      const whenReady = one(as(who, role, { tickets: { undated: [{ ...noDate(who), waiting_on: 'owner_when_ready' } as FeedTicket] } }))
+      expect(pinsFor(whenReady, NOW)).toBe(false)
+      expect(noDateGroup(whenReady)).toBe(true)
     })
 
     test(`${name}: a message, a package, an ETA ask or anything else beside them reads as it does without them`, () => {

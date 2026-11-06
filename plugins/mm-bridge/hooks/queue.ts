@@ -137,7 +137,8 @@ export type FeedTicket = {
   /**
    * (0.7.25) OW's `details.waiting_on` (src/lib/team-ops/eta.ts `isWaitingOnClient`): `client` while the ticket's next move
    * is the client's, set by a reply package's `waiting` outcome and cleared by the next one. Such a ticket is skipped
-   * (`waitingOnClient`). Absent on a server that does not send it yet: read as before.
+   * (`waitingOnClient`). Absent on a server that does not send it yet: read as before. (0.7.32) Since every undated
+   * ticket lists undated and never pins, `owner_when_ready` (0.7.31) needs no reading of its own: it reads as any other value.
    */
   waiting_on?: string | null
 }
@@ -334,7 +335,7 @@ export type Feed = {
   /**
    * (0.7.4) `undated`: the viewer's own tickets on client projects that nobody dated (Rob, 2026-10-27: "All of those belong
    * to client projects ... They should be routed to the client projects"), R17's undated rows. Until OW's next release the
-   * founder's feed alone sends it; (0.7.31) nothing here reads it as the founder's.
+   * founder's feed alone sends it; (0.7.32) nothing here reads it as the founder's.
    */
   tickets?: { overdue?: FeedTicket[]; due_today?: FeedTicket[]; due_soon?: FeedTicket[]; start_now?: FeedTicket[]; internal_queue?: FeedQueueTicket[]; undated?: FeedTicket[] }
   /** (0.7.3, internal queue) The feed's counts: `internal_queue_total`, how many tickets the caller's internal queue holds in all. */
@@ -606,9 +607,9 @@ export const assignAsksOf = (it: Pick<QueueItem, 'assignAsks'>): AssignRef[] => 
 export const matesOf = (it: Pick<QueueItem, 'mates'>): MateRef[] => (Array.isArray(it.mates) ? it.mates : [])
 
 /**
- * (0.7.31, Rob 2026-11-06: "a ticket with no due date never pins and never asks for a date, for anyone") A client's tasks
+ * (0.7.32, Rob 2026-11-06: "a ticket with no due date never pins and never asks for a date, for anyone") A client's tasks
  * besides the viewer's undated ones (`tickets.undated`): whatever else a client has reads as it does without them. Until
- * 0.7.31 that feed was the founder's alone; a client with none of them reads exactly as it did.
+ * 0.7.32 that feed was the founder's alone; a client with none of them reads exactly as it did.
  */
 export const tasksBesidesUndated = (it: Pick<QueueItem, 'tasks' | 'undatedTasks'>): number => it.tasks - (it.undatedTasks ?? 0)
 
@@ -624,15 +625,15 @@ export const assignOnly = (it: QueueItem): boolean =>
  * (0.7.4) A client listed by the viewer's undated client tickets alone (`tickets.undated`): nothing dated, no client
  * message, no package of theirs, no ask, no queue. Rob, 2026-10-27: "It doesn't necessarily create the need for a new
  * reply." Its thread is never updated by itself for them (`autoUpdatable`); they ride along with whatever does update it.
- * (0.7.31) A package that is not the viewer's (`it.open` with no `packageId`: a teammate's, or a stale one) lists nothing by
- * itself, so it does not stop them being alone. Until 0.7.31 it took them out of `No due date`, offered Start and updated
+ * (0.7.32) A package that is not the viewer's (`it.open` with no `packageId`: a teammate's, or a stale one) lists nothing by
+ * itself, so it does not stop them being alone. Until 0.7.32 it took them out of `No due date`, offered Start and updated
  * the thread.
  */
 export const undatedOnly = (it: QueueItem): boolean =>
   (it.undatedTasks ?? 0) > 0 && !hasDue(it) && it.messages === 0 && !it.packageId && openAsks(it).length === 0 && queuedOf(it).length === 0
 
 /**
- * (0.7.31, Rob 2026-11-06: "Panels: a ticket with no due date never pins and never asks for a date, for anyone. It goes back
+ * (0.7.32, Rob 2026-11-06: "Panels: a ticket with no due date never pins and never asks for a date, for anyone. It goes back
  * under the closed No due date toggle, so it's still one press away."; "a ticket's age no longer matters if no-date tickets
  * never pin.") A client under the closed group `No due date`: undated tickets alone, whatever their age, and no pace row of
  * the viewer's. ⛔ Nor a go or a teammate's part beside them: `undatedOnly` does not look at those, they pin by themselves
@@ -785,7 +786,7 @@ export const dueForViewer = (it: QueueItem): boolean => it.messages > 0 || it.ta
  */
 export function mayStart(it: QueueItem, lastFrom: number | undefined, now: number, internal = false): boolean {
   if (internal || it.internal === true || it.kind === 'queue') return true
-  // (0.7.31) under `No due date`, a package that is not the viewer's is not something of the client's waiting on them
+  // (0.7.32) under `No due date`, a package that is not the viewer's is not something of the client's waiting on them
   return (clientWaiting(it) && !noDateGroup(it)) || isRecent(lastFrom, now) || dueForViewer(it)
 }
 
@@ -963,7 +964,7 @@ export type Lists = { queue: QueueItem[]; teammate: QueueItem[]; checking: Queue
  * too: a client whose package a teammate sends and that is theirs to see through (`theirs`, R1 and R2).
  * (0.5.28, internal asks) An open ask of the viewer's keeps the client in their list as a task of theirs does: it was
  * asked of them, whoever holds the client's drafts. (0.7.3, internal queue) So does their internal queue. (0.7.24) So
- * does a go of theirs on follow-up steps. (0.7.27) So does a pace row they hold. (0.7.31) An undated ticket of theirs does
+ * does a go of theirs on follow-up steps. (0.7.27) So does a pace row they hold. (0.7.32) An undated ticket of theirs does
  * not: a client a teammate has with a clock stays here, whatever undated tickets the viewer has on it, as one listed with no
  * clock (nothing but those tickets lists it) goes to `No due date`. ⛔ Not a package flagged for the founder's OK that a
  * teammate decides on: 0.7.21 and 0.7.23 name his thread for what is his beside it.
@@ -1104,8 +1105,8 @@ export function pinsFor(it: Pick<QueueItem, 'dueAt' | 'actBy' | 'own' | 'watch' 
  * (0.7.18) Whether what needs the viewer pins now (R1's rule, on `ownActBy`). (0.7.24, Rob 2026-11-04: "If the other one's
  * supposed to give approval, it should show up for them as soon as possible") A go the viewer must give on follow-up steps
  * pins at once, however far off the first step is: `goMine`. (0.7.27) So does the viewer's own pace row (`pacePins`), which
- * has no clock of its own. ⛔ (0.7.31, Rob 2026-11-06: "a ticket with no due date never pins and never asks for a date, for
- * anyone") Never an undated ticket: 0.7.27 to 0.7.30 pinned one with recent activity as `needs a due date`.
+ * has no clock of its own. ⛔ (0.7.32, Rob 2026-11-06: "a ticket with no due date never pins and never asks for a date, for
+ * anyone") Never an undated ticket: 0.7.27 to 0.7.31 pinned one with recent activity as `needs a due date`.
  */
 export const ownPins = (it: Pick<QueueItem, 'dueAt' | 'actBy' | 'own' | 'go' | 'pace'>, now: number): boolean =>
   goMine(it) || pacePins(it, now) || pinsNow({ dueAt: Infinity, actBy: ownActBy(it) }, now)
@@ -1162,7 +1163,7 @@ export function pinTitle(it: QueueItem, now: number, again = false): string {
 /**
  * (0.7.27, Rob 2026-11-05, approved "Yes, use them" and "Yes, all three") The status list, worst first: what a client's name
  * shows when it is more urgent than what the name says already (`statusOf`). Red: late, overbooked, due today. Yellow: behind,
- * due within 24 business hours. Green: on track, today's hours done. (0.7.31) `needs a due date` is gone from the list.
+ * due within 24 business hours. Green: on track, today's hours done. (0.7.32) `needs a due date` is gone from the list.
  */
 const RANK = { late: 0, overbooked: 1, dueToday: 2, behind: 3, dueSoon: 4, onTrack: 5, hoursDone: 6 } as const
 
@@ -2328,8 +2329,8 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
       // a ticket is in one of the feed's lists only; counted once whatever a feed sends
       if (typeof tk.ticket_id === 'string' && counting.has(tk.ticket_id)) continue
       const due = etaAsk ? neededBy : undatedRow ? Infinity : ms(tk.due_at)
-      // (a ticket nobody dated has no due time to cut by: it lists, undated). (0.7.31, Rob 2026-11-06: "a ticket's age no
-      // longer matters if no-date tickets never pin.") Whatever its age: 0.7.27 to 0.7.30 dropped one by its last activity.
+      // (a ticket nobody dated has no due time to cut by: it lists, undated). (0.7.32, Rob 2026-11-06: "a ticket's age no
+      // longer matters if no-date tickets never pin.") Whatever its age: 0.7.27 to 0.7.31 dropped one by its last activity.
       if (!(undatedRow && !etaAsk) && !inWindow(due)) continue
       // (0.7.15, owner asks) a dated ticket on H9's `assign_by` clock: due then, to be given an owner by then (or taken
       // and given an ETA), never delivered by then. OW prints no label for it: the row, the pane and the kickoff do.
@@ -2343,7 +2344,7 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
       it.dueAt = Math.min(it.dueAt, due)
       // R1: a task acts by its start-by time when the feed gives one (OW's `start_by_at`, from the ticket's
       // estimate), else by its due time. (0.7.15) An owner ask acts by its clock: the estimate is the work's, not the
-      // assigning's. ⛔ (0.7.31, Rob 2026-11-06: "a ticket with no due date never pins") An undated ticket has no start-by:
+      // assigning's. ⛔ (0.7.32, Rob 2026-11-06: "a ticket with no due date never pins") An undated ticket has no start-by:
       // one on the row would otherwise pin it, and name it `behind · not started`, against a due time of Infinity.
       const startBy = assignAsk || (undatedRow && !etaAsk) ? NaN : ms(tk.start_by_at)
       mine(it, Number.isFinite(startBy) && startBy < due ? startBy : due)

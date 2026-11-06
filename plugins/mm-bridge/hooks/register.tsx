@@ -200,7 +200,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.31'
+export const VERSION = '0.7.32'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -2785,9 +2785,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // thread of every ACTIVE client whatever its time, so threads named only `🟡 <client> · task`, whose items were undated
   // tickets, were pinned with no clock. A pin needs a clock again: an undated client is never pinned, active or not, and
   // the pins 0.7.11 put on such threads come off here (they are ours). The internal queue was never pinned that way.
-  // (0.7.27) A client's own pace row pins as its status says (`ownPins`). ⛔ (0.7.31, Rob 2026-11-06, over 0.7.27's "Shouldn't
+  // (0.7.27) A client's own pace row pins as its status says (`ownPins`). ⛔ (0.7.32, Rob 2026-11-06, over 0.7.27's "Shouldn't
   // it be pinned?": "a ticket with no due date never pins and never asks for a date, for anyone") An undated ticket never
-  // does, and a pin 0.7.27 to 0.7.30 put on one comes off here (it is ours).
+  // does, and a pin 0.7.27 to 0.7.31 put on one comes off here (it is ours).
   // ⛔ (0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you, not when something has a timer left for a
   // teammate to answer") Only what needs the person pins by R1's 24 business hours (`ownActBy`): a reply whose drafts a
   // teammate holds, a package a teammate decides on and a teammate's ticket pin only once the PM should check on them
@@ -3385,7 +3385,7 @@ async function showQueue(
   const home = items.find(it => queuedOf(it).length > 0)
   const homeRow = home ? rows.find(r => r.projectId === home.projectId) : undefined
   const build = home && homeRow ? buildOf(home, homeRow) : undefined
-  // (0.7.31, Rob 2026-11-06: "so it's still one press away") The founder's page has no With a teammate (0.7.27): an undated
+  // (0.7.32, Rob 2026-11-06: "so it's still one press away") The founder's page has no With a teammate (0.7.27): an undated
   // ticket of his on a client listed there is under `No due date` too, or it would be on no part of his page.
   const besideMate = new Set(found.founder === true ? (found.teammate ?? []).filter(it => (it.undatedTasks ?? 0) > 0).map(it => it.projectId) : [])
   const undated = [...rows.filter(r => {
