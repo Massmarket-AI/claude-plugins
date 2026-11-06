@@ -74,6 +74,11 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   let feedStatus = 200
   /** Threads the app refuses to pin. */
   const failPins = new Set<string>()
+  /**
+   * (0.7.28) Threads that are a scheduled task's runs. The app refuses to pin one in its own words and its list does not say
+   * (both measured 2026-11-06); `get_session` says so where the value is true, and a false is a run only the refusal gives away.
+   */
+  const runs = new Map<string, boolean>()
   /** (0.5.19) Threads the app refuses Remote Control for, with the words it refuses in. */
   const refuseRc = new Map<string, string>()
   /** (0.5.19) Threads whose Remote Control call the app never answers. */
@@ -111,7 +116,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           calls.push({ tool, args })
           const id = args.session_id === 'self' ? self : String(args.session_id ?? '')
           const t = app.get(id)
-          if (tool === 'get_session') return t ? text(t) : { content: [{ type: 'text', text: `Session ${id} not found.` }], isError: true }
+          if (tool === 'get_session') return t ? text(runs.get(id) ? { ...t, scheduledTaskId: 'made-up-task' } : t) : { content: [{ type: 'text', text: `Session ${id} not found.` }], isError: true }
           // (0.7.6) `include_archived`: the archived threads too, as the app lists them then
           if (tool === 'list_sessions') return text([...app.values()].filter(x => x.sessionId !== self && (args.include_archived === true || !x.isArchived) && !unlisted.includes(x.sessionId)))
           // (0.7.6) as the app answers unarchive_session: the thread unarchived, or the person's no, an error, no answer
@@ -126,6 +131,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           }
           if (tool === 'set_session_title' && t) t.title = String(args.title)
           if (tool === 'set_pinned' && failPins.has(id)) return { content: [{ type: 'text', text: 'set_pinned failed' }], isError: true }
+          if (tool === 'set_pinned' && runs.has(id)) return { content: [{ type: 'text', text: `Session "${id}" is a scheduled task run. These runs show under their task, not as their own sidebar rows, so they can't be grouped, pinned or marked.` }], isError: true }
           if (tool === 'set_pinned' && t) t.pinned = Boolean(args.pinned)
           // (0.5.19) as the app answers set_remote_control: the state afterwards (Claude.app, 10-20), or its refusal
           if (tool === 'set_remote_control') {
@@ -245,6 +251,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
     fetched,
     opened,
     failPins,
+    runs,
     refuseRc,
     silentRc,
     rcStates,
