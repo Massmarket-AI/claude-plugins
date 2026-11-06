@@ -4,7 +4,7 @@ import type { Engine, FoundElement } from 'claude-code/testing'
 
 import type { Feed, FeedAsk, FeedQueueTicket, FeedTicket } from './queue'
 import { buildLists, cleanTitle, clockText, isNewerVersion } from './queue'
-import { SMS_TREE } from './card-fixture.test-helper'
+import { SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
 import { VERSION } from './register'
 import { REFRESH_FAILED, carryKickoff, freshParagraph, lookupOrder, pinReport, recommend } from './threads'
 import type { PinReport } from './threads'
@@ -181,6 +181,8 @@ function world(on: On, opts: WorldOptions = {}) {
   const fetched: string[] = []
   const registered: string[] = []
   let theFeed = opts.feed ?? feed()
+  /** (0.7.26) What the reply-package pickup read answers. */
+  let pickupNow = opts.pickup
   let chipsMinted = 0
   let sessionsStarted = 0
   let startsNow = 0
@@ -319,7 +321,7 @@ function world(on: On, opts: WorldOptions = {}) {
     }
     const read = e.url.includes('/closeout') ? opts.feedRead?.() : undefined
     if (read === 'network') return { deny: 'fetch failed: socket hang up' }
-    const body = e.url.includes('/reply-package') ? opts.pickup ?? { markdown: '## Acme Roofing\n\n1. What the client sent' } : theFeed
+    const body = e.url.includes('/reply-package') ? pickupNow ?? { markdown: '## Acme Roofing\n\n1. What the client sent' } : theFeed
     const status = typeof read === 'number' ? read : !e.url.includes('/reply-package') && opts.feedStatus ? opts.feedStatus() : 200
     return { value: { status, ok: status === 200, headers: {}, text: JSON.stringify(status === 200 ? body : { error: 'boom' }) } }
   })
@@ -463,6 +465,9 @@ function world(on: On, opts: WorldOptions = {}) {
     argvs: () => ran.map(r => (JSON.parse(r) as { argv: string[] }).argv),
     /** How often this session asked the app for its usage, and for whom. */
     usageAsked: () => calls.filter(c => c.tool === 'get_usage').map(c => String(c.args.session_id)),
+    setPickup: (answer: Record<string, unknown>) => {
+      pickupNow = answer
+    },
     setFeed: (f: Feed) => {
       theFeed = f
     },
@@ -10535,7 +10540,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.29', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.30', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10604,7 +10609,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.29', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.30', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10670,7 +10675,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.29', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.30', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
@@ -12694,7 +12699,7 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
     expect(w.pinPosts).toHaveLength(1)
     const sent = w.pinPosts[0] as (typeof w.pinPosts)[number]
     expect(sent.method).toBe('POST')
-    expect(sent.headers).toEqual({ Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.29', 'Content-Type': 'application/json' })
+    expect(sent.headers).toEqual({ Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.30', 'Content-Type': 'application/json' })
     const body = sent.body
     expect(Object.keys(body).sort()).toEqual(['at', 'extra', 'items'])
     expect(body.at).toBe(new Date(NOW).toISOString())
@@ -12853,14 +12858,10 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
 
 describe('0.7.26 the reply-package card in the bridge\'s own pane, on the desktop and in the terminal', () => {
   const LABEL = SMS_TREE.label
-  const PAGE = `## Acme Roofing\n\n1. What the client sent\n\nOne go sends 1 item. Package \`${LABEL}\`.`
+  const PAGE = SMS_PAGE
   const PICKUP = { markdown: PAGE, package_sha256: SMS_TREE.package_sha256 }
   const SURFACES = ['desktop', 'terminal'] as const
   const mount = ($: Engine, surface: (typeof SURFACES)[number]) => $.ui.mount({ plugin: 'mm-bridge', surface, component: 'Pane', requestId: 'mm-queue', props: PANE })
-  /** The thread prints the package's page, as a client thread's answer does: a response row of the main loop. */
-  const prints = ($: Engine, text: string) =>
-    $.session.append({ message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text }] }, door: 'response', origin: { kind: 'model', model: 'claude-opus-5-5' }, uuid: `row-${text.length}` })
-
   test('Drafts on another client\'s row: the card is drawn from the renderer on both surfaces, to read, with no signature box and the page a press away', async ($, on) => {
     const w = world(on, { feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.threads': PAIRS }, renderer: 'tree', pickup: PICKUP })
     await mm($, '')
@@ -12895,18 +12896,17 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
   })
 
   for (const surface of SURFACES) {
-    test(`in the client's own thread (${surface}): the box opens once the thread printed the page, and a signature puts exactly the go in the prompt box`, async ($, on) => {
+    test(`in the client's own thread (${surface}): the box is open with no page printed, and a signature is recorded and puts exactly the go in the prompt box`, async ($, on) => {
       const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } }, renderer: 'tree', pickup: PICKUP })
       await mm($, '')
       const u = await mount($, surface)
       await u.press({ key: `drafts:${ACME}` })
-      // not printed here yet: the card, and the line saying what opens the box
-      expect((await lines(u)).join('\n'), surface).toContain(`Signing opens once this thread prints the package's page (Package ${LABEL}).`)
-      expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn')), surface).toBe(false)
-      await prints($, `Here is the package.\n\n${PAGE}`)
       const signBtn = (await buttons(u)).find(([k]) => k === `mm-card-sign-btn:${LABEL}`)
       expect(signBtn?.[1], surface).toBe('✍  Click to sign and send')
       await u.press({ key: `mm-card-sign-btn:${LABEL}` })
+      // on record for the send gate, by the transcript's id, before anything is in the prompt box
+      const record = JSON.parse(w.written.findLast(f => f.path.endsWith('/.claude/mm-hooks/card-signed.jsonl'))?.text ?? '{}') as Record<string, unknown>
+      expect(record, surface).toMatchObject({ v: 1, session_id: SELF_CLI, package_id: PKG, package_sha256: SMS_TREE.package_sha256, label: LABEL })
       // the name and the envelope first; the words only once it has flown, and never sent
       expect(w.fills, surface).toEqual([])
       if (surface === 'desktop') expect(await u.find({ type: 'Svg' }), surface).toBeDefined()
@@ -12917,4 +12917,108 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await u.unmount()
     })
   }
+
+  describe('0.7.30 `mm card <package id>`: whether the thread prints the page', () => {
+    const READY = `card ready: Package ${LABEL}. The whole package is on screen in the side pane and its copy check passed. Do not print the page. Print one line saying it is in the side pane, ending "Package ${LABEL}.", then wait for the person.`
+    const notReady = (why: string) => `card not ready: ${why}. Print the whole page.`
+    const own = { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } }, renderer: 'tree' as const, pickup: PICKUP }
+    /** This thread's client in the pane, drawn. */
+    const shown = async ($: Engine, surface: (typeof SURFACES)[number] = 'desktop') => {
+      await mm($, '')
+      const u = await mount($, surface)
+      await u.press({ key: `drafts:${ACME}` })
+      return u
+    }
+
+    test('ready: its one form, through the tool and a typed /mm, and it sends, starts and picks up nothing', async ($, on) => {
+      const w = world(on, own)
+      const u = await shown($)
+      const calls = w.calls.length
+      expect(await tool($, `card ${PKG}`)).toBe(READY)
+      expect(await mm($, `card ${PKG}`)).toBe(READY)
+      expect(w.fills).toEqual([])
+      expect(w.prompts).toEqual([])
+      expect(w.minted).toEqual([])
+      expect(sends(w)).toEqual([])
+      expect(w.calls.length).toBe(calls)
+      await u.unmount()
+    })
+
+    test('not ready, each in plain words: no id, another package, another client\'s part', async ($, on) => {
+      const w = world(on, { ...own, feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.threads': PAIRS } })
+      expect(await tool($, 'card')).toBe(notReady('that is not a package id'))
+      expect(await tool($, 'card not-a-uuid')).toBe(notReady('that is not a package id'))
+      expect(await tool($, `card ${PKG}`)).toBe(notReady('the side pane is not showing this package'))
+      const u = await shown($)
+      expect(await tool($, 'card 99999999-9999-4999-8999-999999999999')).toBe(notReady('the side pane is not showing this package'))
+      expect(await tool($, `card ${PKG}`)).toBe(notReady("this is not the client's own thread"))
+      expect(w.fills).toEqual([])
+      await u.unmount()
+    })
+
+    test('the page holds a line the card does not: not ready, naming 60 characters of it, the box closed and nothing of it in the log', async ($, on) => {
+      const LINE = `A line only OW prints about the package, long enough to be cut ${'x'.repeat(40)}`
+      const w = world(on, { ...own, pickup: { ...PICKUP, markdown: `${PAGE}\n\n${LINE}` } })
+      const u = await shown($)
+      expect(await tool($, `card ${PKG}`)).toBe(notReady(`the page holds a line the card does not (${LINE.slice(0, 60)})`))
+      expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn'))).toBe(false)
+      expect((await lines(u)).join('\n')).toContain('This view does not match the stored drafts, so signing is off here. Go by the page printed in the thread.')
+      expect(w.written.filter(f => f.path.endsWith('bridge-notices.log')).map(f => f.text).join('\n')).not.toContain('A line only OW prints')
+      await u.unmount()
+    })
+
+    test('the package moved on since the pane read it: not ready, and the box closes', async ($, on) => {
+      const w = world(on, { ...own, pickup: PICKUP })
+      const u = await shown($)
+      expect(await tool($, `card ${PKG}`)).toBe(READY)
+      w.setPickup({ ...PICKUP, package_sha256: 'f'.repeat(64) })
+      expect(await tool($, `card ${PKG}`)).toBe(notReady('the card was drawn from an older version of this package'))
+      expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn'))).toBe(false)
+      await u.unmount()
+    })
+
+    test('a card that could not be drawn: one plain line in the pane, the raw error in the log only, and not ready', async ($, on) => {
+      const w = world(on, { ...own, renderer: undefined })
+      const u = await shown($)
+      const text = (await lines(u)).join('\n')
+      expect(text).toContain('The card could not be drawn on this computer. Your thread prints the whole package instead.')
+      expect(text).not.toContain('--tree')
+      expect(text).not.toContain('client-reply-prep')
+      // the page stands in the pane
+      expect((await u.find({ type: 'Markdown' }))?.text).toBe(PAGE)
+      expect(w.written.filter(f => f.path.endsWith('bridge-notices.log')).map(f => f.text).join('\n')).toContain('could not be drawn: this computer has an older client-reply-prep')
+      expect(await tool($, `card ${PKG}`)).toBe(notReady('the card could not be drawn on this computer'))
+      await u.unmount()
+    })
+
+    test('no pane on this surface: not ready', async ($, on) => {
+      world(on, own)
+      const u = await shown($)
+      on('ui.open', () => ({ value: { isPlaced: false as const, reason: 'nothing can draw a pane here' } }))
+      expect(await tool($, `card ${PKG}`)).toBe(notReady('the side pane is not open on a surface that can draw it'))
+      await u.unmount()
+    })
+
+    test('(G11) under the card the banner, the asks and the queue stay in sight, and only the page folds', async ($, on) => {
+      const held = { package_id: PKG, project_id: ACME, project_name: 'Acme Roofing — Pat', status: 'picked_up', covers_through: ago(3), drafts_ready: 2, drafts_unsent: 2, picked_up_by: ME, picked_up_at: ago(1), project_owner_email: ME }
+      world(on, { ...own, feed: feed({ drafts: [held], threads: [declared(ACME, SELF_CLI, 1)] }) })
+      const u = await shown($)
+      const under = await u.find({ type: 'Markdown' })
+      expect(under?.text).toContain('**You picked this up**')
+      expect(under?.text).not.toContain('Every question answered?')
+      await u.press({ key: `mm-card-page:${PKG}` })
+      const all = await u.findAll({ type: 'Markdown' })
+      expect(all.map(m => m.text)).toEqual([under?.text, PAGE])
+      await u.unmount()
+    })
+
+    test('the person\'s go stays exactly their words: the line after a switch of profiles waits for their next prompt', async ($, on) => {
+      const w = world(on, { ...own, store: { ...own.store, 'mm.profile': { dir: '/elsewhere', since: NOW - HOUR } } })
+      await mm($, '')
+      await w.clock.advance(60_000)
+      await mm($, '')
+      await $.prompt.submit({ text: `Send package ${LABEL}`, wait: false, origin: { kind: 'composer' } })
+      expect(w.prompts.at(-1)?.text).toBe(`Send package ${LABEL}`)
+    })
+  })
 })

@@ -76,6 +76,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   const failPins = new Set<string>()
   /** (0.7.29) Threads the app refuses to pin, with the words it refuses in. */
   const refusePins = new Map<string, string>()
+  /** (0.7.30) Threads the app refuses a new name for, with the words it refuses in. */
+  const refuseTitles = new Map<string, string>()
   /**
    * (0.7.28) Threads that are a scheduled task's runs. The app refuses to pin one in its own words and its list does not say
    * (both measured 2026-11-06); `get_session` says so where the value is true, and a false is a run only the refusal gives away.
@@ -131,6 +133,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
             t.isArchived = false
             return text(`Session ${id} unarchived.`)
           }
+          if (tool === 'set_session_title' && refuseTitles.has(id)) return { content: [{ type: 'text', text: String(refuseTitles.get(id)) }], isError: true }
           if (tool === 'set_session_title' && t) t.title = String(args.title)
           if (tool === 'set_pinned' && failPins.has(id)) return { content: [{ type: 'text', text: 'set_pinned failed' }], isError: true }
           if (tool === 'set_pinned' && refusePins.has(id)) return { content: [{ type: 'text', text: String(refusePins.get(id)) }], isError: true }
@@ -255,6 +258,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
     opened,
     failPins,
     refusePins,
+    refuseTitles,
     runs,
     refuseRc,
     silentRc,
