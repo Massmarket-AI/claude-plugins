@@ -198,7 +198,11 @@ export type MmNotice = { text: string; at: number }
  * the band's Start missing threads button, which is always drawn (0 or absent: All threads started). (0.5.12's
  * `startAll` is no longer written or read.)
  */
-export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number }
+/**
+ * `why` (0.7.23): in a client's own thread, the one line under the band that says why the thread is pinned or why no pin
+ * is needed (`threadWhy`); absent in any other thread.
+ */
+export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string }
 
 /**
  * (0.6.0) One line of the pane's Tracking part. `open`: the app thread (`local_…`) a press on the line opens, on a

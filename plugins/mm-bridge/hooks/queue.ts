@@ -126,7 +126,22 @@ export type FeedTicket = {
    * the PM's feed: `in_progress` is the one sign the bridge has that its work started (start-by, PM_CHECK_AHEAD_MS).
    */
   status?: string | null
+  /**
+   * (0.7.23) OW's `details.waiting_on` (src/lib/team-ops/eta.ts `isWaitingOnClient`): `client` while the ticket's next move
+   * is the client's, set by a reply package's `waiting` outcome and cleared by the next one. Such a ticket is skipped
+   * (`waitingOnClient`). Absent on a server that does not send it yet: read as before.
+   */
+  waiting_on?: string | null
 }
+
+/**
+ * (0.7.23, Rob 2026-11-05, on a thread pinned for tickets of a client who never approved the plan: "I don't know why this
+ * is pinned or what. Antu doesn't have anything to do for them... Why is this pinned?") A ticket waiting on the client is
+ * nobody's late work: it never lists, pins, counts late or names a thread, whoever it is assigned to and whatever date it
+ * carries. OW already drops its ETA ask (closeout.ts, "WAITING ON THE CLIENT"); this is the bridge's half.
+ */
+export const waitingOnClient = (tk: Pick<FeedTicket, 'waiting_on'>): boolean =>
+  typeof tk.waiting_on === 'string' && tk.waiting_on.trim().toLowerCase() === 'client'
 
 /**
  * One of the caller's own Claude Code sessions that declared a client: the feed's `threads` field. The
@@ -915,6 +930,111 @@ export function pinTitle(it: QueueItem, now: number, again = false): string {
   return again ? `${title} · ${STILL_NEEDS_YOU}` : title
 }
 
+// ---------------------------------------------------------------- 0.7.23: why a thread is pinned, said in the thread
+
+/**
+ * (0.7.23) Who wrote a client message, as a sentence names them: the display name before the address (`Jeff Smith
+ * <jeff@acme.com>`), else the address's own part (`jeff.smith@acme.com` is `Jeff Smith`), cleaned; '' when neither.
+ */
+export function senderName(sender: unknown): string {
+  const s = typeof sender === 'string' ? sender : ''
+  const bare = s.replace(/<[^>]*>/g, ' ')
+  if (!bare.includes('@')) return cleanText(bare, 40)
+  const local = (/[^\s<>"',;]+@[^\s<>"',;]+/.exec(s)?.[0] ?? '').split('@')[0] ?? ''
+  return cleanText(local.replace(/[._-]+/g, ' '), 40).replace(/(^|\s)\p{L}/gu, ch => ch.toUpperCase())
+}
+
+const several = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`
+
+/** (0.7.23) The first thing of the viewer's own on a client, in plain words: what a pinned thread's reason names. */
+function ownWhat(it: QueueItem): string {
+  const o = it.open ?? null
+  if (o?.state === 'held_by_me') return `your draft to ${it.client} is not sent yet${o.unsent > 1 ? ` (${o.unsent} left)` : ''}`
+  if (it.messages > 0 && !withTeammate(it) && !it.theirs && o?.state !== 'held_by_other') {
+    const who = senderName(it.mail[0]?.sender) || it.client
+    return `${who} is waiting on your reply${it.messages > 1 ? ` to ${it.messages} messages` : ''}${it.kind === 'ready' ? ', and the drafts are ready' : ''}`
+  }
+  if (it.kind === 'ready') return `the reply to ${it.client} is drafted and yours to send`
+  if (it.kind === 'ok' && !it.theirs) {
+    const sends = it.ok?.sends && it.ok.sends !== NOBODY ? ` (${it.ok.sends} sends it)` : ''
+    return `the reply to ${it.client} waits on your OK${sends}`
+  }
+  const asks = openAsks(it)
+  if (asks.length) return `${asks[0]?.asker || 'a teammate'} asked you something in Discord${asks.length > 1 ? ` (${asks.length} asks)` : ''}`
+  const eta = etaAsksOf(it).length
+  if (eta) return `you owe an ETA on ${several(eta, 'ticket')}`
+  const owners = assignAsksOf(it).length
+  if (owners) return `${several(owners, 'ticket')} ${owners === 1 ? 'needs' : 'need'} an owner from you`
+  const committed = committedCount(it)
+  if (committed === 1 && it.taskTitles[0]) return `your task "${cleanText(it.taskTitles[0], 60)}"`
+  if (committed > 0) return `${several(committed, 'task')} of yours`
+  return whatOf(it)
+}
+
+/**
+ * (0.7.23) Why a client's thread is pinned, or why it is not, in one sentence the thread's band shows (Rob asked about 52
+ * times in the six weeks to 2026-11-05 why a thread was pinned; 11-03: "Why does it say there's 23 hours left here? Do I
+ * owe him something?" and "I don't know if this is supposed to be pinned for me or if the team is handling this"). It
+ * says who must act, what is owed and to whom, and by when, from the same tests the pin itself is decided by (`ownPins`,
+ * `checkNow`, and R8's `checking`, which unpins), so the sentence and the pin never disagree: it starts `Pinned` exactly when
+ * the bridge pins the thread.
+ *   Pinned for you, 3h late, due 3 PM: Jeff Smith is waiting on your reply, and the drafts are ready.
+ *   Pinned for you: your task "Build the intake form" is due Fri 3 PM, and to land on time its work had to start Tue 3 PM.
+ *   Pinned to check on Asif: their reply is due 3 PM (4h left).
+ *   No pin needed: Asif has Acme Legal's reply drafts, so nothing here needs you.
+ *   No pin needed: nothing of yours here has a due date.
+ *   No pin needed: the next thing of yours is due Fri 3 PM, more than 24 business hours away.
+ */
+export function pinReason(it: QueueItem, now: number): string {
+  // (R8) our send is being checked: the client is off the list and its thread unpinned, whatever its clock says
+  const fast = fastState(it, now)
+  if (fast?.state === 'checking') return `No pin needed: your reply went at ${clockText(fast.at, now)}, and the server is checking it answered everything.`
+  if (ownPins(it, now)) {
+    const own = ownActBy(it)
+    // a start-by (the work's own estimate at the client's pace) came before every due time: the work must start
+    if (own < it.dueAt && committedCount(it) > 0 && it.messages === 0) {
+      const due = clockText(shownDue(it.dueAt), now)
+      return own <= now
+        ? `Pinned for you: ${ownWhat(it)} is due ${due}, and to land on time its work had to start ${dueWhen(own, now)}.`
+        : `Pinned for you: ${ownWhat(it)} is due ${due}, and to land on time its work must start by ${clockText(shownDue(own), now)}.`
+    }
+    const when = own <= now ? clockAndDue(own, now) : `due ${clockText(shownDue(own), now)} (${clockLead(own, now)})`
+    return `Pinned for you, ${when}: ${ownWhat(it)}.`
+  }
+  const c = checkNow(it, now)
+  if (c) {
+    const by = cleanText(c.by, 40) || 'a teammate'
+    const when = c.late ? `is ${clockAndDue(c.due, now)}` : `${c.notStarted ? 'has not started and ' : ''}is due ${clockText(shownDue(c.due), now)} (${clockLead(c.due, now)})`
+    return `Pinned to check on ${by}: their ${c.what} ${when}.`
+  }
+  if (withTeammate(it)) return `No pin needed: ${it.theirs ?? it.open?.by ?? 'a teammate'} has ${it.client}'s reply drafts, so nothing here needs you.`
+  if (lateOnly(it)) return `No pin needed: only ${whoseLate(matesOf(it))}'s late tickets are here, and they are listed under ${TEAM_LATE}.`
+  if (it.kind === 'ok' && it.theirs) return `No pin needed: ${it.theirs} decides whether the reply to ${it.client} needs your OK.`
+  if (it.kind === 'queue') return 'No pin needed: the internal queue has no due dates.'
+  const own = ownActBy(it)
+  if (!Number.isFinite(own)) return 'No pin needed: nothing of yours here has a due date.'
+  return `No pin needed: the next thing of yours is due ${clockText(shownDue(own), now)}, more than 24 business hours away.`
+}
+
+/**
+ * (0.7.23) The line a client's own thread shows under its band: `pinReason`, with how a pin stands beside it. `it`: the
+ * client as the last sync listed it (Needs you, With a teammate or checking); undefined once the client is clear, named
+ * by `client`. `pin.person`: the last sync found the person's own pin on the thread (`Pin.byUs` false), which the bridge
+ * leaves (Rob, 2026-11-03: "if I pin something myself, it should stay there until I unpin it"). `pin.again`: the bridge
+ * pinned it back after the person took its pin off while the client still needed them (`Pin.again`). '' with nothing to
+ * say: a clear client with no name on record.
+ */
+export function threadWhy(it: QueueItem | undefined, client: string, now: number, pin: { person?: boolean; again?: boolean } = {}): string {
+  if (!it) {
+    const name = cleanName(client)
+    if (!name) return ''
+    return `No pin needed: nothing of ${name}'s waits on you.${pin.person ? ' You pinned it yourself, so it stays until you unpin it.' : ''}`
+  }
+  const why = pinReason(it, now)
+  if (why.startsWith('Pinned')) return pin.again ? `${why} You took its pin off, and it still needs you.` : why
+  return pin.person ? `${why} You pinned it yourself, so it stays until you unpin it.` : why
+}
+
 /**
  * (R18) The internal projects. Every project a feed row marks `internal: true`; and (fix round 1, L9)
  * INTERNAL_PROJECTS only while no row of the feed carries the flag at all (a boolean either way): once OW sends
@@ -1694,6 +1814,8 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
   const lists: [FeedTicket[] | undefined, '' | 'undated'][] = [[t.overdue, ''], [t.due_today, ''], [t.due_soon, ''], [t.start_now, ''], [t.undated, 'undated']]
   for (const [list, k] of lists) {
     for (const tk of list ?? []) {
+      // (0.7.23) the client's move, not ours: no row, no pin, no late count, for the viewer, the PM or the founder
+      if (!tk || waitingOnClient(tk)) continue
       // (R17) a ticket with no due time (internal work nobody dated) has no due source either: it lists, undated
       const undatedRow = tk.due_at === null
       if (tk.due_source !== 'commitment' && !(undatedRow && (tk.due_source === null || tk.due_source === undefined))) continue

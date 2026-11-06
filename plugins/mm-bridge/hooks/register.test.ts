@@ -3318,8 +3318,12 @@ describe('the band above the prompt: what needs the person, from any thread', ()
     const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }) })
     await started($, w)
     // (0.5.4, C3) the no-thread chips are in this thread, Acme's: the band names a thread of the bridge's by its client
+    // (0.7.23) and above it, in Acme's own thread, why the thread is pinned
     expect(await drawn($)).toEqual({
-      texts: [`Needs you: 1 pinned · 2 with no thread: Cedar Dental, Bolt Staffing. ${chipIn('Cedar Dental', '4 PM', 'Acme Roofing')} ${chipIn('Bolt Staffing', 'Tue 9 AM', 'Acme Roofing')}`],
+      texts: [
+        'Pinned for you, due Tue 8 AM (21h left): the reply to Acme Roofing is drafted and yours to send.',
+        `Needs you: 1 pinned · 2 with no thread: Cedar Dental, Bolt Staffing. ${chipIn('Cedar Dental', '4 PM', 'Acme Roofing')} ${chipIn('Bolt Staffing', 'Tue 9 AM', 'Acme Roofing')}`,
+      ],
       buttons: [['mm-start-missing', 'Start missing threads (2)'], ['mm-open-drafts', 'Drafts']],
     })
   })
@@ -10418,7 +10422,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.21', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.23', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10487,7 +10491,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.21', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.23', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10553,7 +10557,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.21', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.23', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
