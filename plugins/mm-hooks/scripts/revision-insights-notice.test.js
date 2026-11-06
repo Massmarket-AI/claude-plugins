@@ -221,6 +221,26 @@ test("⛔ two sessions starting together show the notice once", async () => {
   }
 });
 
+// The race above, with the timing taken out: it needs no luck to fail. A session reads its clock, waits for the lock,
+// and finds a claim another session wrote in the meantime, whose time is later than the clock it read.
+test("⛔ a session that read its clock before another session's claim does not show the notice too", () => {
+  const home = makeHome();
+  const env = envFor(home);
+  const t = Date.now();
+  assert.equal(rin.fastPath(env, t), expected("has never run on this computer"));
+  assert.equal(rin.fastPath(env, t - 5), null, "its clock read 5 ms before the claim");
+  // Past the minute of slack the first look lets it through, so only the clock read inside the lock can hold it.
+  assert.equal(rin.fastPath(env, t - 5 * 60000), null, "its clock read 5 minutes before the claim");
+  assert.equal(statusOf(home).revision_insights_notice.count, 1, "one claim, one notice");
+});
+
+test("a claim that could not be written shows nothing: unrecorded, it would show again in every session", () => {
+  const home = makeHome();
+  fs.mkdirSync(path.join(hookDir(home), "plugin-sync.json")); // the replacing rename fails on a folder
+  assert.equal(rin.fastPath(envFor(home), Date.now()), null);
+  assert.equal(fs.existsSync(path.join(hookDir(home), "plugin-sync.json.lock")), false, "the lock is released");
+});
+
 // ───────────────────────────────────────────────────────────── plugin-sync.json
 
 test("a malformed plugin-sync.json does not crash it: the notice shows and the file is rewritten as an object", async () => {
@@ -301,7 +321,7 @@ test("stampAge and ageWords: the 9-day and 1-day-ahead boundaries, whole days ro
   assert.equal(rin.ageWords(-DAY - 1), "has never run on this computer", "more than a day ahead reads as no stamp");
 });
 
-test("throttleAllows: 20 hours, unreadable or ahead-of-clock records let it through", () => {
+test("throttleAllows: 20 hours, unreadable or more than a minute ahead of the clock let it through; a moment ahead holds it", () => {
   const now = Date.parse("2026-11-05T17:00:00.000Z");
   assert.equal(rin.throttleAllows(undefined, now), true);
   assert.equal(rin.throttleAllows("x", now), true);
@@ -310,6 +330,9 @@ test("throttleAllows: 20 hours, unreadable or ahead-of-clock records let it thro
   assert.equal(rin.throttleAllows({ last_notice_at: iso(now - 20 * HOUR + 1) }, now), false);
   assert.equal(rin.throttleAllows({ last_notice_at: iso(now - 20 * HOUR) }, now), true);
   assert.equal(rin.throttleAllows({ last_notice_at: iso(now + HOUR) }, now), true, "a clock moved back never holds it forever");
+  assert.equal(rin.throttleAllows({ last_notice_at: iso(now + 1) }, now), false, "1 ms ahead is another session's claim, not a moved clock");
+  assert.equal(rin.throttleAllows({ last_notice_at: iso(now + 60000) }, now), false, "a minute ahead still holds it");
+  assert.equal(rin.throttleAllows({ last_notice_at: iso(now + 60001) }, now), true, "past the minute it is a moved clock");
 });
 
 test("decideNotice: each gate, in order, with its reason", () => {

@@ -19,7 +19,7 @@
 //   6. The stamp is missing or unreadable, its last_run_at does not parse, or it is 9 days old or more, or more than a
 //      day in the future.
 //   7. No notice in the last 20 hours on this computer. The notice is claimed under plugin-sync.json's lock, under
-//      `revision_insights_notice`, so two sessions starting together show it once.
+//      `revision_insights_notice`, with the clock read inside the lock, so two sessions starting together show it once.
 //
 // The session pass (Rob, 2026-11-05: "I wonder if they should do a deeper analysis like I just did"): once the skill on
 // this computer carries scripts/session_insights.mjs, the routine's prompt runs three steps instead of one, so an
@@ -41,6 +41,7 @@ const DAY = 24 * HOUR;
 const STALE_MS = 9 * DAY;
 const FUTURE_SLACK_MS = DAY;
 const NOTICE_EVERY_MS = 20 * HOUR;
+const CLOCK_SLACK_MS = 60 * 1000;
 const STAMP_MAX_BYTES = 64 * 1024;
 const STATUS_MAX_BYTES = 1 << 20;
 const OFF_RE = /^(0|false|no|off)$/i;
@@ -128,13 +129,17 @@ function ageWords(age) {
   return "last ran " + Math.floor(age / DAY) + " days ago";
 }
 
-/** The last notice is 20 hours back or more (or never was, or its time is unreadable or ahead of the clock). PURE. */
+/**
+ * The last notice is 20 hours back or more (or never was, or its time is unreadable or more than a minute ahead of the
+ * clock). PURE. A clock moved back never holds the notice forever, but a time just ahead of this clock is a notice made
+ * a moment ago, so it holds.
+ */
 function throttleAllows(rec, now) {
   if (!rec || typeof rec !== "object") return true;
   const last = Date.parse(rec.last_notice_at || "");
   if (!Number.isFinite(last)) return true;
   const since = now - last;
-  return since < 0 || since >= NOTICE_EVERY_MS;
+  return since < -CLOCK_SLACK_MS || since >= NOTICE_EVERY_MS;
 }
 
 /**
@@ -228,16 +233,21 @@ function fastPath(env = process.env, now = Date.now()) {
   const status = readJsonObject(p.statusFile, STATUS_MAX_BYTES) || {};
   const d = decideNotice({ env, now, facts, stamp, sessionStamp, record: status.revision_insights_notice });
   if (!d.show) return null;
-  // Claimed under plugin-sync.json's lock and checked again there, so two sessions starting together show it once.
+  // Claimed under plugin-sync.json's lock and checked again there, so two sessions starting together show it once. The
+  // check reads the clock again inside the lock. `now` was read before this session waited for the lock, so it can be
+  // older than the claim another session has just written, and that claim then looked like one from ahead of the clock
+  // and let a second notice through (2026-11-05: 2 notices in about 1 CI run in 6). The lock orders the two reads.
   let claimed = false;
-  updateStatus(p.hookDir, (current) => {
+  const recorded = updateStatus(p.hookDir, (current) => {
     const rec = current.revision_insights_notice && typeof current.revision_insights_notice === "object" ? current.revision_insights_notice : {};
-    if (!throttleAllows(rec, now)) return current;
+    const at = Date.now();
+    if (!throttleAllows(rec, at)) return current;
     claimed = true;
     const count = Number.isInteger(rec.count) && rec.count >= 0 ? rec.count + 1 : 1;
-    return Object.assign({}, current, { revision_insights_notice: { last_notice_at: new Date(now).toISOString(), count } });
+    return Object.assign({}, current, { revision_insights_notice: { last_notice_at: new Date(at).toISOString(), count } });
   });
-  if (!claimed) return null;
+  // A claim that never reached the file claims nothing: without this, every later session would show the notice too.
+  if (!claimed || !recorded) return null;
   return facts.sessionPass ? sessionPassText(d.mode, d.age) : noticeText(d.age);
 }
 
