@@ -27,7 +27,11 @@
 //     ⛔ A work profile is one whose Preferences `account_info` holds an @massmarket.ai account. Any other
 //     profile is never named or counted: personal browsing stays out (Rob's rule, 2026-10-23). Only each
 //     account's `email` is read, and no email is written anywhere; plugin-sync.json keeps the count only.
-//   - a tracker folder skipped because Developer mode is off, so the member turns it on.
+//   - a tracker folder skipped because Developer mode is off, so the member turns it on. It names the profile or
+//     profiles that have it off, by the name Chrome shows for them (Local State), or their folder name when Chrome
+//     lists none: one folder can be loaded by several profiles and one profile left off holds it back, so a member
+//     whose main profile already has it on could not tell why (Rob, 2026-11-06: Default on, Profile 6 off). Only a
+//     profile that loads the tracker and has it off is ever named; the name goes in this sentence and nowhere else.
 //
 // What it did is recorded under `extension` in ~/.claude/mm-hooks/plugin-sync.json, beside sync-hook.js's
 // record (a folder is a short hash of its path, never the path). Any error: silent, and the session goes on.
@@ -53,8 +57,18 @@ const WRITE_BUDGET_MS = 6000;
 // A Massmarket Google account, as Chrome lists it in a profile's account_info. Plain address characters only, so
 // nothing but an address can reach the sentence.
 const WORK_EMAIL_RE = /^[a-z0-9._%+-]{1,64}@massmarket\.ai$/i;
-const DEV_MODE_SENTENCE =
-  "The Massmarket time tracker in Chrome cannot update itself because Developer mode is off on chrome://extensions. Ask the member to turn on Developer mode there (the switch at the top right); after that the tracker keeps itself up to date.";
+/** The Developer mode sentence for Claude, naming the profiles that have it off, each once, at most five. */
+function devModeSentence(names) {
+  const list = [];
+  for (const n of names) if (typeof n === "string" && n && list.indexOf(n) === -1) list.push(n);
+  const shown = list.slice(0, 5).map((n) => `"${n}"`);
+  const where = !shown.length
+    ? ""
+    : shown.length === 1
+      ? ` in the Chrome profile ${shown[0]}`
+      : ` in the Chrome profiles ${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}`;
+  return `The Massmarket time tracker in Chrome cannot update itself because Developer mode is off on chrome://extensions${where}. Ask the member to turn on Developer mode there (the switch at the top right); after that the tracker keeps itself up to date.`;
+}
 
 function sha256(buf) {
   return crypto.createHash("sha256").update(buf).digest("hex");
@@ -140,7 +154,20 @@ function readProfile(userDataDir, dir) {
   return { dir, install, developerMode, usedAt, workEmail: email };
 }
 
-/** Every profile: the ones Local State lists, and any other folder with Preferences. Display names are not read. */
+/**
+ * What a sentence for Claude calls these profile folders: the name Chrome shows for each (Local State's
+ * `profile.info_cache.<dir>.name`, on one line and short), else the folder's own name. Read only when one has to be named.
+ */
+function displayNames(userDataDir, dirs) {
+  const cache = dig(readJson(path.join(userDataDir, "Local State")), ["profile", "info_cache"]);
+  return dirs.map((dir) => {
+    const name = cache && typeof cache === "object" && cache[dir] && typeof cache[dir] === "object" ? cache[dir].name : null;
+    const clean = typeof name === "string" ? name.replace(/[\u0000-\u001f\u007f"]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60).trim() : "";
+    return clean || dir;
+  });
+}
+
+/** Every profile: the ones Local State lists, and any other folder with Preferences. Display names are not read here (`displayNames`). */
 function listProfiles(userDataDir) {
   const listed = new Set();
   const cache = dig(readJson(path.join(userDataDir, "Local State")), ["profile", "info_cache"]);
@@ -292,8 +319,8 @@ function run({ platform = process.platform, env = process.env, home = os.homedir
   status.profiles_recent_without_tracker = recentWithout.length;
   const profileSentence = noticeSentence(recentWithout.map((p) => p.workEmail));
   // One notice a day at most, both sentences in it.
-  const done = (developerModeOff = false) => {
-    const sentences = [profileSentence, developerModeOff ? DEV_MODE_SENTENCE : null].filter(Boolean);
+  const done = (developerModeOff = null) => {
+    const sentences = [profileSentence, developerModeOff ? devModeSentence(developerModeOff) : null].filter(Boolean);
     let notice = null;
     if (sentences.length && !(now - lastNoticeAt < NOTICE_EVERY_MS)) {
       notice = sentences.join(" ");
@@ -309,8 +336,8 @@ function run({ platform = process.platform, env = process.env, home = os.homedir
   for (const p of profiles) {
     const folder = unpackedFolder(p.install);
     if (!folder) continue;
-    const seen = folders.get(folder) || { developerModeOff: false };
-    if (p.developerMode !== true) seen.developerModeOff = true;
+    const seen = folders.get(folder) || { developerModeOff: [] };
+    if (p.developerMode !== true) seen.developerModeOff.push(p.dir);
     folders.set(folder, seen);
   }
   if (!folders.size) {
@@ -331,7 +358,7 @@ function run({ platform = process.platform, env = process.env, home = os.homedir
   }
   status.carried = carried.version;
   status.folders = Array.from(folders, ([folder, seen]) => {
-    if (seen.developerModeOff) return { id: sha256(folder).slice(0, 12), action: "skipped-developer-mode-off" };
+    if (seen.developerModeOff.length) return { id: sha256(folder).slice(0, 12), action: "skipped-developer-mode-off" };
     try {
       return syncFolder(folder, carried, deadline);
     } catch (err) {
@@ -339,7 +366,9 @@ function run({ platform = process.platform, env = process.env, home = os.homedir
     }
   });
   status.action = status.folders.some((f) => f.action === "updated") ? "updated" : "checked";
-  return done(status.folders.some((f) => f.action === "skipped-developer-mode-off"));
+  // those folders' profiles, by name, for the sentence only: plugin-sync.json keeps the action and a hash
+  const off = Array.from(folders.values()).flatMap((seen) => seen.developerModeOff);
+  return done(off.length ? displayNames(userDataDir, off) : null);
 }
 
 function main() {
@@ -369,4 +398,4 @@ if (require.main === module) {
   process.exit(0);
 }
 
-module.exports = { EXT_ID, chromeUserDataDir, cmpVersion, extensionIdFromKey, listProfiles, loadCarried, noticeSentence, run, syncFolder, unpackedFolder };
+module.exports = { EXT_ID, chromeUserDataDir, cmpVersion, devModeSentence, extensionIdFromKey, listProfiles, loadCarried, noticeSentence, run, syncFolder, unpackedFolder };

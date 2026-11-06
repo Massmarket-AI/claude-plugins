@@ -200,7 +200,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.27'
+export const VERSION = '0.7.28'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -8593,8 +8593,18 @@ export const register: Register = on => {
   })
 
   // ⛔ Claude calls this. It never starts or updates a thread: `runCommand` refuses both for it.
+  // (0.7.28) ⛔ A failure is this tool's answer. The engine skips a hook that throws and runs what is beneath it, and beneath
+  // this one is the app's own end of the tool, which says "registered the tool mm but no tool.call hook answered": a pass that
+  // failed (the app refused a pin, OW's feed answered 5xx) read as a bridge with no hook, in the same session where `status`
+  // answered (2026-10-19 and 2026-11-06).
   on('tool.call', { tool: 'mcp__mm-bridge__mm' }, async ($, e) => {
-    const result = await runCommand($, String((e as Record<string, unknown>).args ?? ''), 'other')
+    const args = String((e as Record<string, unknown>).args ?? '')
+    let result: string
+    try {
+      result = await runCommand($, args, 'other')
+    } catch (err) {
+      result = `/mm ${args.trim() || 'queue'} did not finish: ${errorText(err)}`
+    }
     await refreshBand($)
     return { result }
   })

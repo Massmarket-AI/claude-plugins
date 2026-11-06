@@ -389,6 +389,25 @@ describe('re-review of a446f5ab: Start after a chip was spent, a re-check after 
     expect(links).toEqual({ [pid(2)]: 'local_l2a' })
   })
 
+  test('(0.7.28) the `mm` tool answers with why a pass failed: a hook that throws is skipped, and the app then says no hook answered', async () => {
+    const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], mail: [mail(1, 'Client One')] }
+    const w = fakeApp(feed, [{ sessionId: 'local_l3thub' }, { sessionId: 'local_l3ta', title: 'A work' }])
+    w.put('mm.links', { [pid(1)]: 'local_l3ta' })
+    const hub = w.session('local_l3thub')
+    // the app refuses a pin (2026-11-06: a linked thread that is a scheduled task run), and every pass stops there
+    w.failPins.add('local_l3ta')
+    expect(await tool(hub, 'queue')).toContain('/mm queue did not finish: ')
+    expect(await tool(hub, '')).toContain('set_pinned failed')
+    // what reads no feed still answers, as it did in the session this was seen in
+    expect(await tool(hub, 'status')).toContain('member: ')
+    w.failPins.clear()
+    // OW's feed answering 5xx (2026-10-19)
+    w.feedAnswers(503)
+    expect(await tool(hub, 'link Client One')).toContain('did not finish: closeout HTTP 503')
+    w.feedAnswers(200)
+    expect(await tool(hub, 'queue')).toContain('The list is in the side pane.')
+  })
+
   test('L3: a pin the app refused is pinned on the next sync, never read as the person\'s unpin (P10)', async () => {
     const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], mail: [mail(1, 'Client One')] }
     const w = fakeApp(feed, [{ sessionId: 'local_l3hub' }, { sessionId: 'local_l3a', title: 'A work' }])
