@@ -3,11 +3,7 @@ import type { Elements, EngineInterface, Register } from 'claude-code'
 import type { MmBand, MmFolds, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTrack, MmTrackLine, MmView } from '../types'
 
 import {
-  INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients,
-  peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
-  asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText, undatedOnly,
-  hasDue, clientActivity, isRecent, mayStart,
-  pinsFor, pinTitle,
+  INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients, peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder, asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText, undatedOnly, hasDue, clientActivity, isRecent, mayStart, pinsFor, pinTitle, goOf, goMine, goOnly,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
@@ -2810,7 +2806,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs): Promise
       const client = cleanName(at ? at.it.client : pins[sid]?.client)
       if (!client) continue
       // (a time only for the person's own list: a teammate's late ticket is not his to answer)
-      const what = at && at.listed === 'items' && hasDue(at.it) ? (at.it.kind === 'task' ? 'task' : at.it.kind === 'ask' || at.it.kind === 'queue' ? '' : 'reply') : ''
+      const what = at && at.listed === 'items' && hasDue(at.it) ? (at.it.kind === 'task' ? 'task' : at.it.kind === 'ask' || at.it.kind === 'queue' || at.it.kind === 'go' ? '' : 'reply') : ''
       const transcript = said ? transcriptPath(h, said.cwd, said.cli) : undefined
       const title = typeof titles[sid] === 'string' && titles[sid] ? titles[sid] : undefined
       found.push({
@@ -3051,9 +3047,13 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
   await showQueue($, memberText(last.member), items, rowsOf(items, true), Number(last.pinned) || 0, now, { teammate: rowsOf(list(last.teammate)), checking: rowsOf(list(last.checking)) }, at, last)
 }
 
-/** The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that waits for his OK. */
+/**
+ * The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that
+ * waits for his OK. (0.7.21) A client listed by follow-up steps that wait for a go alone: their follow-ups-only package,
+ * whose page lists every step in full (read, never picked up, by drawing it).
+ */
 function pickupOf(it: QueueItem): string | null {
-  const packageId = it.packageId ?? (it.kind === 'ok' ? ((it.open ?? null)?.id ?? null) : null)
+  const packageId = it.packageId ?? (it.kind === 'ok' ? ((it.open ?? null)?.id ?? null) : null) ?? (goOnly(it) ? (goOf(it)?.packageId ?? null) : null)
   return packageId && isUuid(packageId) ? packageId : null
 }
 
@@ -3936,10 +3936,11 @@ function startTitle(it: QueueItem): string {
  * internal asks) A client listed by the viewer's internal asks alone: `<client>: reply to the internal ask`. (0.7.3) The
  * internal-ops item listed by the viewer's internal queue alone: `<client>: work the internal queue`. (0.7.4) Listed by
  * tickets that owe an ETA alone: `<client>: give your ETA`; a teammate's own internal tasks: `<client>: work the internal
- * task`, never a reply. (0.7.15) Listed by tickets to give an owner alone: `<client>: assign an owner`.
+ * task`, never a reply. (0.7.15) Listed by tickets to give an owner alone: `<client>: assign an owner`. (0.7.21) Listed by
+ * follow-up steps that wait for a go alone: `<client>: give the go on the follow-ups` (a teammate's: `check on the follow-ups`).
  */
 function startWhat(it: QueueItem): string {
-  return `${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : it.kind === 'ask' ? 'reply to the internal ask' : etaOnly(it) ? 'give your ETA' : assignOnly(it) ? 'assign an owner' : it.kind === 'queue' ? 'work the internal queue' : it.internal === true && it.messages === 0 ? 'work the internal task' : 'reply to the client'}`
+  return `${it.client}: ${goOnly(it) ? (goMine(it) ? 'give the go on the follow-ups' : 'check on the follow-ups') : it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : it.kind === 'ask' ? 'reply to the internal ask' : etaOnly(it) ? 'give your ETA' : assignOnly(it) ? 'assign an owner' : it.kind === 'queue' ? 'work the internal queue' : it.internal === true && it.messages === 0 ? 'work the internal task' : 'reply to the client'}`
 }
 
 /** 0.5.1's line under that title. */
