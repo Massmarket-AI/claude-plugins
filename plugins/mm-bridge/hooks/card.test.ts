@@ -99,7 +99,7 @@ function thread(box = '') {
   }
 }
 
-describe('0.7.25 the card the renderer draws, read and checked here', () => {
+describe('0.7.26 the card the renderer draws, read and checked here', () => {
   test('the fingerprint is the renderer\'s FNV-1a over UTF-8, accents, curly quotes, CJK, emoji and line breaks included', () => {
     // the values render_visual.py's fp() gives for the same strings
     expect(fnv1a('')).toBe('811c9dc5')
@@ -160,7 +160,7 @@ describe('0.7.25 the card the renderer draws, read and checked here', () => {
   })
 })
 
-describe('0.7.25 when the pane offers the signature box', () => {
+describe('0.7.26 when the pane offers the signature box', () => {
   const marks = (printed: string[] = [LABEL]) => ({ printed, signed: {} })
 
   test('only with every hold clear, and each hold says why', () => {
@@ -206,7 +206,7 @@ describe('0.7.25 when the pane offers the signature box', () => {
   })
 })
 
-describe('0.7.25 signing: the name, the envelope, then exactly the go in the prompt box, never a send', () => {
+describe('0.7.26 signing: the name, the envelope, then exactly the go in the prompt box, never a send', () => {
   test('a press records the signature; when the envelope has flown, "Send package <12>" is in the prompt box, once', async () => {
     const t = thread()
     t.state.set('card', cardOf())
@@ -271,7 +271,7 @@ describe('0.7.25 signing: the name, the envelope, then exactly the go in the pro
   })
 })
 
-describe('0.7.25 prepared on arrival: the renderer runs once a package version, on this computer', () => {
+describe('0.7.26 prepared on arrival: the renderer runs once a package version, on this computer', () => {
   test('a pickup read with the hash: the card is drawn from render_visual.py --tree and kept; the next read reuses it', async () => {
     const t = thread()
     const runs: string[][] = []
@@ -306,7 +306,7 @@ describe('0.7.25 prepared on arrival: the renderer runs once a package version, 
   })
 })
 
-describe('0.7.25 in the bridge: the pane draws the card above the page as the client part shows a package', () => {
+describe('0.7.26 in the bridge: the pane draws the card above the page as the client part shows a package', () => {
   test('Drafts on a row: the pane reads the package, draws its card from the renderer, and offers no signature outside that client\'s own thread', async () => {
     // a package id of its own: the card kept for the fixture's id by the tests above would be reused (as it should)
     const PKG = '66666666-6666-4666-8666-666666666666'

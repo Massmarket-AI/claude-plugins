@@ -149,9 +149,9 @@ type WorldOptions = {
    * answers (the person has not answered its question).
    */
   unarchive?: 'refuse' | 'error' | 'silent' | (() => 'refuse' | 'error' | 'silent' | undefined)
-  /** (0.7.25) The renderer on this computer draws the card (the synthetic text package's tree), instead of being one from before --tree. */
+  /** (0.7.26) The renderer on this computer draws the card (the synthetic text package's tree), instead of being one from before --tree. */
   renderer?: 'tree'
-  /** (0.7.25) What the reply-package pickup read answers, when not the plain page. */
+  /** (0.7.26) What the reply-package pickup read answers, when not the plain page. */
   pickup?: Record<string, unknown>
 }
 
@@ -369,13 +369,13 @@ function world(on: On, opts: WorldOptions = {}) {
   })
   /** Every program the bridge started. */
   const ran: string[] = []
-  /** (0.7.25) Every reply-package card the bridge drew on this computer: the renderer, apart from the programs above. */
+  /** (0.7.26) Every reply-package card the bridge drew on this computer: the renderer, apart from the programs above. */
   const renders: string[] = []
   on('process.run', (_$, e) => {
     if (e.argv.some(a => String(a).endsWith('/client-reply-prep/scripts/render_visual.py'))) {
       renders.push(JSON.stringify(e))
       if (opts.renderer === 'tree') return { value: { exitCode: 0, stdout: JSON.stringify(SMS_TREE), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-      // a renderer from before --tree: the pane shows the page alone, as before 0.7.25
+      // a renderer from before --tree: the pane shows the page alone, as before 0.7.26
       return { value: { exitCode: 2, stdout: '', stderr: 'render_visual.py: error: unrecognized arguments: --tree -', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     ran.push(JSON.stringify(e))
@@ -10508,7 +10508,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.25', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.26', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10577,7 +10577,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.25', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.26', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10643,7 +10643,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.25', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.26', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
@@ -12656,7 +12656,7 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
     expect(w.pinPosts).toHaveLength(1)
     const sent = w.pinPosts[0] as (typeof w.pinPosts)[number]
     expect(sent.method).toBe('POST')
-    expect(sent.headers).toEqual({ Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.25', 'Content-Type': 'application/json' })
+    expect(sent.headers).toEqual({ Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.26', 'Content-Type': 'application/json' })
     const body = sent.body
     expect(Object.keys(body).sort()).toEqual(['at', 'extra', 'items'])
     expect(body.at).toBe(new Date(NOW).toISOString())
@@ -12813,7 +12813,7 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
   })
 })
 
-describe('0.7.25 the reply-package card in the bridge\'s own pane, on the desktop and in the terminal', () => {
+describe('0.7.26 the reply-package card in the bridge\'s own pane, on the desktop and in the terminal', () => {
   const LABEL = SMS_TREE.label
   const PAGE = `## Acme Roofing\n\n1. What the client sent\n\nOne go sends 1 item. Package \`${LABEL}\`.`
   const PICKUP = { markdown: PAGE, package_sha256: SMS_TREE.package_sha256 }

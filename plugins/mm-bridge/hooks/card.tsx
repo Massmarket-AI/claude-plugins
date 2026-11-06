@@ -1,9 +1,9 @@
 /**
- * (0.7.25) The reply-package card in the side pane (Rob, 2026-11-05: "make our reply packages appear like it's a UI with
+ * (0.7.26) The reply-package card in the side pane (Rob, 2026-11-05: "make our reply packages appear like it's a UI with
  * an approve button"; then: "I just want to make sure this doesn't cause it to take more time for my team to receive an
  * update after it hits their chat").
  *
- * Until 0.7.25 the thread drew the card itself: client-reply-prep §9.3 had it run `render_visual.py` and copy 16 to 39 KB
+ * Until 0.7.26 the thread drew the card itself: client-reply-prep §9.3 had it run `render_visual.py` and copy 16 to 39 KB
  * of HTML into `show_widget`, 5 to 12K output tokens on every pickup. Now the bridge draws it here, from the same
  * renderer, and the thread draws nothing:
  *
@@ -429,7 +429,7 @@ export async function pressAsk($: EngineInterface, words: string): Promise<void>
 }
 
 /**
- * (0.7.25) Every response block of this thread is read for a pickup page's closing line: once the page of a package is
+ * (0.7.26) Every response block of this thread is read for a pickup page's closing line: once the page of a package is
  * printed here, the pane may offer its signature. Reads only; the row is stored as it came.
  */
 export function cardHooks(on: Parameters<Register>[0]): void {

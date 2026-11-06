@@ -272,13 +272,13 @@ export type MmLineAsk = {
 }
 
 /**
- * (0.7.25, the reply-package card) One run of a card paragraph, as `render_visual.py --tree` writes it: its exact text,
+ * (0.7.26, the reply-package card) One run of a card paragraph, as `render_visual.py --tree` writes it: its exact text,
  * the card's classes on it, a link, and the fingerprint of a block that is one run.
  */
 export type MmCardRun = { s: string; c?: string; href?: string; fp?: string }
 
 /**
- * (0.7.25) One node of the card: a box of nodes (`k`), a paragraph of runs (`r`, with `fp` when it is a fingerprinted
+ * (0.7.26) One node of the card: a box of nodes (`k`), a paragraph of runs (`r`, with `fp` when it is a fingerprinted
  * block), a button that puts words in the prompt box (`btn`, `ask`), or the signature box (`sign`).
  */
 export type MmCardNode = {
@@ -291,7 +291,7 @@ export type MmCardNode = {
   sign?: { label: string; signer: string }
 }
 
-/** (0.7.25) The card `render_visual.py --tree` draws for one version of a reply package. */
+/** (0.7.26) The card `render_visual.py --tree` draws for one version of a reply package. */
 export type MmCardTree = {
   v: number
   package_id: string | null
@@ -307,7 +307,7 @@ export type MmCardTree = {
 }
 
 /**
- * (0.7.25) The card in this thread's pane: the package the client part shows, whether it is this thread's own client,
+ * (0.7.26) The card in this thread's pane: the package the client part shows, whether it is this thread's own client,
  * the package's hash as the last pickup read gave it (`current`: 64 hex, or the 12 of a page read locally), the card
  * drawn for it and how its drawing stands. `packageId` '' is no card.
  */
@@ -323,11 +323,11 @@ export type MmCard = {
   at: number
 }
 
-/** (0.7.25) A signature given in this thread's pane: the tag signed, by whom, when, and what became of the words. */
+/** (0.7.26) A signature given in this thread's pane: the tag signed, by whom, when, and what became of the words. */
 export type MmCardSigned = { label: string; signer: string; at: number; filled?: 'filled' | 'draft' | 'none' | 'stale' }
 
 /**
- * (0.7.25) What this thread did with cards: the tags of the pickup pages it printed (newest last), each signature given
+ * (0.7.26) What this thread did with cards: the tags of the pickup pages it printed (newest last), each signature given
  * here by tag, and whether the page as text is open under the card.
  */
 export type MmCardMarks = { printed: string[]; signed: Record<string, MmCardSigned>; pageOpen?: boolean }

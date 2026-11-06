@@ -1,5 +1,5 @@
 /**
- * (0.7.25) A card as client-reply-prep's render_visual.py --tree draws it, for the synthetic text-message package
+ * (0.7.26) A card as client-reply-prep's render_visual.py --tree draws it, for the synthetic text-message package
  * (skills/client-reply-prep/scripts/tests/fixtures/visual/sms-package.json, signer "Test Signer"). Made-up client, made-up
  * numbers; regenerate with: python3 render_visual.py --json <that fixture> --signer "Test Signer" --tree -
  */
