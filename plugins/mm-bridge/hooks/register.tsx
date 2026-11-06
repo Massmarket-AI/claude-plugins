@@ -5,12 +5,13 @@ import type { MmBand, MmFolds, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPe
 import {
   INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients,
   peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
-  asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText, undatedOnly,
+  asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText,
   hasDue, clientActivity, isRecent, mayStart,
   pinsFor, pinTitle, threadWhy,
   teamLate, teamLateCount, teamLateSegment, teamLateWho, LATE_WITH_TEAM,
   teamLateOnly,
   goOf, goMine, goOnly,
+  NO_REPLY_WHAT, keptPace, noDateGroup, paceOnly, paceWord,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
@@ -199,7 +200,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.26'
+export const VERSION = '0.7.27'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -496,6 +497,8 @@ type Last = {
   teammate?: QueueItem[]
   /** (0.5.2, R8) Clients whose package waits for the server's check of our newer send: off the list, not pinned, not counted. */
   checking?: QueueItem[]
+  /** (0.7.27) The feed's role was `founder`: his page shows neither With a teammate nor Team · late (`showQueue`). */
+  founder?: true
   pinned: number
   recs: Record<string, Recommendation>
   /** Every project id the last feed carried: the only ids an [mm-link] marker may name. */
@@ -719,12 +722,12 @@ const errorText = (err: unknown) => short(err instanceof Error ? err.message : S
 /** The member's address as the feed gave it, kept to what an address is made of. */
 const memberText = (member: unknown) => (typeof member === 'string' ? member : '').replace(/[^A-Za-z0-9._%+@-]/g, '').slice(0, 120)
 /** A thread name the bridge wrote itself: never anybody's original title. */
-const isOurTitle = (title: string) => /^(?:🔴|🟡|✓)\s/u.test(title)
+const isOurTitle = (title: string) => /^(?:🔴|🟡|🟢|✓)\s/u.test(title)
 /**
  * (0.7.20) A name of the bridge's when it is read as evidence of whose a thread is (`ownHere`): its marks, or an older
  * bridge's with a two-digit rank in front, as `clientInTitle` and `threadTitleShort` read them.
  */
-const OUR_NAME = /^(?:\d{2}\s+)?(?:🔴|🟡|✓)\s/u
+const OUR_NAME = /^(?:\d{2}\s+)?(?:🔴|🟡|🟢|✓)\s/u
 
 async function mcpJson($: EngineInterface, server: string, tool: string, args: Record<string, unknown>): Promise<unknown> {
   const r = (await $.mcp.call(server, tool, args)) as Mcp
@@ -1176,8 +1179,27 @@ async function fetchFeed($: EngineInterface): Promise<Feed> {
   // ⛔ A 200 that is not a feed (neither `tickets` nor `mail` in it) is a failed call, not "nobody needs
   // you": read as an empty feed it would take every pin off and rename every thread "clear".
   if (!feed || typeof feed !== 'object' || !('tickets' in feed || 'mail' in feed)) throw failed()
+  await keepPace($, feed, now)
   recent = { at: await $.clock.now(), feed, wrote: '' }
   return feed
+}
+
+/**
+ * (0.7.27) ⛔ `pace` absent means OW could not read it this time, never that everyone is on track: the reader keeps what it had
+ * (`keptPace`), and a read leaves what the next miss keeps. An OW that has never sent the key, and the founder's feed, store
+ * nothing and change nothing. A store that fails costs the memory alone, never the feed.
+ */
+async function keepPace($: EngineInterface, feed: Feed, now: number): Promise<void> {
+  try {
+    if (Array.isArray(feed.pace)) {
+      await $.store.set('mm.pace', { at: now, rows: feed.pace })
+      return
+    }
+    const kept = keptPace(await $.store.get('mm.pace'), now)
+    if (kept) feed.pace = kept
+  } catch {
+    // no memory of pace this time
+  }
 }
 
 /**
@@ -1831,6 +1853,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     ...(checking.length ? { checking } : {}),
   }
   const member = memberText(feed.member)
+  /** (0.7.27) What his page leaves out goes by this, on a redraw from the stored sync too. */
+  const founderMark = feed.role === 'founder' ? { founder: true as const } : {}
   const projects = feedProjects(feed)
   /** (New people) Who wrote to us and matched no project (the founder's and a PM's feed only), and where Route can send them: kept only while there is somebody. */
   const people = peopleRows(feed, now)
@@ -1876,7 +1900,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     const recs: Record<string, Recommendation> = {}
     for (const it of [...items, ...quiet, ...checking]) recs[it.projectId] = quietened(it, carried(it, true))
     // (0.7.11) with no list, where each client's thread is cannot be told: the away clients the last sync found are kept
-    const last: Last = { at: now, member, items, ...also, pinned: before?.pinned ?? 0, recs, projects, ...newPeople, ...(Array.isArray(before?.away) && before.away.length ? { away: before.away } : {}) }
+    const last: Last = { at: now, member, items, ...also, ...founderMark, pinned: before?.pinned ?? 0, recs, projects, ...newPeople, ...(Array.isArray(before?.away) && before.away.length ? { away: before.away } : {}) }
     await storeLast($, feed, last)
     const rowsOf = (list: readonly QueueItem[], needsYou = false): Row[] => list.map(it => rowFor(it, recs[it.projectId] as Recommendation, now, { needsYou }))
     // (0.7.21) a client listed by the founder's teammates' late tickets alone is Team · late's, not With a teammate's
@@ -2703,6 +2727,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // thread of every ACTIVE client whatever its time, so threads named only `🟡 <client> · task`, whose items were undated
   // tickets, were pinned with no clock. A pin needs a clock again: an undated client is never pinned, active or not, and
   // the pins 0.7.11 put on such threads come off here (they are ours). The internal queue was never pinned that way.
+  // (0.7.27, Rob 2026-11-05, over that: "Shouldn't it be pinned?") An undated ticket with a known last activity inside the
+  // window pins for its owner as `needs a due date`, and a client's own pace row pins as its status says (`ownPins`); an
+  // undated item with nothing to measure it by still never pins.
   // ⛔ (0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you, not when something has a timer left for a
   // teammate to answer") Only what needs the person pins by R1's 24 business hours (`ownActBy`): a reply whose drafts a
   // teammate holds, a package a teammate decides on and a teammate's ticket pin only once the PM should check on them
@@ -2981,7 +3008,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // (0.7.11, 10-30: the status said 3 pinned while the sidebar showed 8) the client threads this profile's app shows
   // pinned once the pass is done: what the sidebar shows, never a pin record, and never a thread of another profile
   const pinnedHere = new Set(Object.values(links).filter(sid => live.get(sid)?.pinned === true && !gone.has(sid))).size
-  const last: Last = { at: now, member, items, ...also, pinned: pinnedHere, recs, projects, ...newPeople }
+  const last: Last = { at: now, member, items, ...also, ...founderMark, pinned: pinnedHere, recs, projects, ...newPeople }
   // (0.7.23, Rob 2026-11-05: "it should be everything that should be pinned, and there should be another indicator, like a
   // green light beside it, to show if it is or not.") What should be pinned and whether it is, once the pass is done: sent to
   // OW for the team's daily "Pins by person" image after everything else of this pass (`sendPinReport`). ⛔ Built from what
@@ -3094,7 +3121,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       const client = cleanName(at ? at.it.client : pins[sid]?.client)
       if (!client) continue
       // (a time only for the person's own list: a teammate's late ticket is not his to answer)
-      const what = at && at.listed === 'items' && hasDue(at.it) ? (at.it.kind === 'task' ? 'task' : at.it.kind === 'ask' || at.it.kind === 'queue' || at.it.kind === 'go' ? '' : 'reply') : ''
+      const what = at && at.listed === 'items' && hasDue(at.it) ? (at.it.kind === 'task' ? 'task' : at.it.kind === 'ask' || at.it.kind === 'queue' || at.it.kind === 'go' || at.it.kind === 'pace' ? '' : 'reply') : ''
       const transcript = said ? transcriptPath(h, said.cwd, said.cli) : undefined
       const title = typeof titles[sid] === 'string' && titles[sid] ? titles[sid] : undefined
       found.push({
@@ -3172,7 +3199,11 @@ async function storeLast($: EngineInterface, feed: Feed, last: Last): Promise<vo
  * sync's time, not the time it was drawn. `found` (New people): the sync record's people and where Route can send
  * them; anyone a press here or in another thread resolved in the last PEOPLE_DONE_MS is left out. Never counted.
  * (0.7.21, for the founder) `folds.team`: Team · late, his teammates' late internal tickets by person, then client. Not
- * counted in the header; the status line ends with how many (`· 5 late with the team`).
+ * counted in the header; the status line ended with how many (`· 5 late with the team`).
+ * ⛔ (0.7.27, Rob 2026-11-05: "everything that shows up as needing to be worked on right now, which usually means yellow or
+ * red, shouldn't show up for me and clutter my page ... I just need to lay eyes on it once a day") The founder's pane and strip
+ * show neither With a teammate nor Team · late: he sees his teammates' work on the 9 AM image. `/mm status` keeps its counts,
+ * and a PM's and a member's page keeps its sections.
  */
 async function showQueue(
   $: EngineInterface,
@@ -3183,8 +3214,10 @@ async function showQueue(
   now: number,
   folds: { teammate: Row[]; checking?: Row[]; team?: MmTeam[] },
   syncedAt = now,
-  found: Pick<Last, 'people' | 'routeTo' | 'away'> = {},
+  found: Pick<Last, 'people' | 'routeTo' | 'away' | 'founder'> = {},
 ): Promise<void> {
+  const teammateRows = found.founder === true ? [] : folds.teammate
+  const teamRows = found.founder === true ? [] : (folds.team ?? [])
   const people = await peopleShown($, found.people, now)
   const routeTo = Array.isArray(found.routeTo) ? found.routeTo : []
   // (0.7.11) the band at the very top: the clients whose thread is in another Claude profile, with none of their own here
@@ -3198,7 +3231,7 @@ async function showQueue(
   const build = home && homeRow ? buildOf(home, homeRow) : undefined
   const undated = rows.filter(r => {
     const it = byPid.get(r.projectId)
-    return it !== undefined && undatedOnly(it)
+    return it !== undefined && noDateGroup(it)
   })
   const listed = rows.filter(r => {
     const it = byPid.get(r.projectId)
@@ -3211,11 +3244,11 @@ async function showQueue(
     // (0.7.5) one clock: the person's own, in the one line at the bottom of the pane
     note: `Updated ${localClock(syncedAt)}`,
     syncedAt,
-    ...(folds.teammate.length ? { teammate: folds.teammate } : {}),
+    ...(teammateRows.length ? { teammate: teammateRows } : {}),
     ...(folds.checking?.length ? { checking: folds.checking } : {}),
     ...(undated.length ? { undated } : {}),
     ...(build ? { build: { total: build.total, top: [...build.top], row: build.row } } : {}),
-    ...(folds.team?.length ? { team: folds.team } : {}),
+    ...(teamRows.length ? { team: teamRows } : {}),
     ...(people.length ? { people, ...(routeTo.length ? { routeTo } : {}) } : {}),
     ...(away.length ? { away: { text: awayBandText(away, syncedAt), count: away.length } } : {}),
   }
@@ -3223,7 +3256,7 @@ async function showQueue(
   const { value: notice } = await $.state.get(NOTICE)
   if (notice?.text && now - notice.at > SYNC_MS) await $.state.set(NOTICE, { text: '', at: now })
   // (0.7.21) and, for the founder, how many of his teammates' tickets are late (`· 5 late with the team`): none, no segment
-  const late = teamLateSegment(teamCount(folds.team ?? []))
+  const late = teamLateSegment(teamCount(teamRows))
   await putStatus($, 'base', listed.length ? `MM: ${listed.length} need you · ${pinned} pinned${late}` : `MM: clear${late}`)
 }
 
@@ -4273,7 +4306,7 @@ function startTitle(it: QueueItem): string {
  * follow-up steps that wait for a go alone: `<client>: give the go on the follow-ups` (a teammate's: `check on the follow-ups`).
  */
 function startWhat(it: QueueItem): string {
-  return `${it.client}: ${goOnly(it) ? (goMine(it) ? 'give the go on the follow-ups' : 'check on the follow-ups') : it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : it.kind === 'ask' ? 'reply to the internal ask' : etaOnly(it) ? 'give your ETA' : assignOnly(it) ? 'assign an owner' : it.kind === 'queue' ? 'work the internal queue' : it.internal === true && it.messages === 0 ? 'work the internal task' : 'reply to the client'}`
+  return `${it.client}: ${it.noReply === true ? NO_REPLY_WHAT : paceOnly(it) ? `work the quoted hours (${paceWord(it)})` : goOnly(it) ? (goMine(it) ? 'give the go on the follow-ups' : 'check on the follow-ups') : it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : it.kind === 'ask' ? 'reply to the internal ask' : etaOnly(it) ? 'give your ETA' : assignOnly(it) ? 'assign an owner' : it.kind === 'queue' ? 'work the internal queue' : it.internal === true && it.messages === 0 ? 'work the internal task' : 'reply to the client'}`
 }
 
 /** 0.5.1's line under that title. */

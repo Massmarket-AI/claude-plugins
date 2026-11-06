@@ -580,8 +580,8 @@ function drawPara(els: Els, node: MmCardNode, ctx: Ctx): Node {
   // a bubble: ours green (blue for iMessage) with white words, theirs in an outline
   if (has(c, 'rp-bub-out')) return <Box backgroundColor={ctx.out === 'imessage' ? '#0a72e8' : '#248a3d'} borderStyle="round" borderColor={ctx.out === 'imessage' ? '#0a72e8' : '#248a3d'} paddingX={1}>{text}</Box>
   if (has(c, 'rp-bub-in')) return <Box borderStyle="round" borderColor="subtle" paddingX={1}>{text}</Box>
-  // a quoted step or note: a bar on its left
-  if (has(c, 'rp-quote')) return <Box flexDirection="row" gap={1}><Text dimColor>▎</Text><Box flexShrink={1}>{text}</Box></Box>
+  // a quoted step or note: boxed like the other text that goes out
+  if (has(c, 'rp-quote')) return <Box borderStyle="round" borderColor="subtle" paddingX={1}>{text}</Box>
   if (has(c, 'rp-pre')) return <Box borderStyle="round" borderColor="subtle" paddingX={1}>{text}</Box>
   return text
 }
