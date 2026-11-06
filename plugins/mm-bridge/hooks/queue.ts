@@ -313,6 +313,8 @@ export type FeedFollowups = {
   next_kind?: string | null
   awaiting_go?: number | null
   go_package_id?: string | null
+  /** (0.7.32) What that package covers: a client message up to then is the package's, one after it needs a package of its own. Absent on a server that does not send it yet. */
+  go_covers_through?: string | null
   go_first_at?: string | null
   go_first_kind?: string | null
   go_by?: string | null
@@ -326,7 +328,7 @@ export type FeedFollowups = {
  * and whose go it is: `mine` when it is the
  * viewer's to give, else `by`, the teammate's name (cleaned), for the founder and the PM to check on.
  */
-export type GoRef = { packageId: string; steps: number; firstAt: number | null; firstKind: string; by: string; mine: boolean }
+export type GoRef = { packageId: string; steps: number; firstAt: number | null; firstKind: string; by: string; mine: boolean; coversThrough?: number }
 
 /** (New people) One project OW's resolve route accepts for `route`: the feed's `route_projects` (founder and PMs, uncapped). */
 export type FeedRouteProject = { id: string; name: string }
@@ -378,7 +380,8 @@ export type FeedActivity = { project_id: string; at: string }
  *   prepared       drafts are ready, but the client does not pin for the viewer on them (another owner's
  *                  client, or a package due before the list's floor)
  * `unsent` is the drafts not sent on a held package, the drafts ready otherwise. `newer` is the client
- * messages that arrived after a package the viewer holds was written.
+ * messages that arrived after a package the viewer holds was written. (0.7.32) `noReply`: the package owes no reply
+ * and has nothing to send (the feed's `no_reply`), so there are no drafts to count, whoever's it is (`owesNoReply`).
  */
 export type OpenPackage = {
   id: string
@@ -387,6 +390,7 @@ export type OpenPackage = {
   at: string | null
   unsent: number
   newer: number
+  noReply?: true
 }
 
 /**
@@ -705,8 +709,43 @@ export const goMine = (it: Pick<QueueItem, 'go'>): boolean => goOf(it)?.mine ===
 export const goOnly = (it: QueueItem): boolean =>
   goOf(it) !== null && it.messages === 0 && it.tasks === 0 && !it.packageId && !(it.open ?? null) && openAsks(it).length === 0 && queuedOf(it).length === 0
 
+/**
+ * (0.7.32) The client messages waiting are all ones the follow-ups-only package already covers, and the client has no other
+ * package. That package is the client's: its thread is pointed at it and never asked to build another (Money Badger on
+ * Asif's list, 2026-11-06: a message of 11-03, package 453c17aa covering through 11-05, and the kickoff said "no package
+ * exists yet, so run prep"). ⛔ A message after what it covers is new, and gets a package of its own (followup-cadence: "Any
+ * client message ... cancels the rest; that message gets its own new package"), so the reply leads as in 0.7.24, and so it
+ * does with no `go_covers_through` from the feed.
+ */
+export function goWithMail(it: QueueItem): boolean {
+  const g = goOf(it)
+  const through = g?.coversThrough
+  if (!g || typeof through !== 'number' || !Number.isFinite(through)) return false
+  return it.messages > 0 && !it.packageId && !(it.open ?? null) && it.mail.every(m => !(ms(m.at) > through))
+}
+
 /** (0.7.27, OW #638) What a row, a thread's name and a chip say for a package that owes no reply and has nothing to send. */
 export const NO_REPLY_WHAT = 'no reply needed, one go closes it'
+
+/**
+ * (0.7.32) The client's open package owes no reply and has nothing to send, whoever's it is: the viewer's to work
+ * (`it.noReply`), or one a teammate holds or that is otherwise not the viewer's to pin on (`open.noReply`).
+ */
+export const owesNoReply = (it: Pick<QueueItem, 'noReply' | 'open'>): boolean => it.noReply === true || (it.open ?? null)?.noReply === true
+
+/**
+ * (0.7.32) The client messages that arrived after what a package covers: the package said nothing of them. The one the
+ * viewer holds is counted from the whole feed (`open.newer`), any other from the mail on the client's item.
+ */
+export function afterPackage(it: Pick<QueueItem, 'open' | 'mail' | 'coversThrough'>): number {
+  const o = it.open ?? null
+  if (o?.state === 'held_by_me') return o.newer
+  const through = ms(it.coversThrough)
+  return Number.isFinite(through) ? it.mail.filter(m => ms(m.at) > through).length : 0
+}
+
+/** (0.7.32) The viewer's package owes no reply and nothing came from the client after it: `NO_REPLY_WHAT` holds. A message after it may need a reply, so the rows stop saying none is needed. */
+export const noReplyNow = (it: Pick<QueueItem, 'noReply' | 'open' | 'mail' | 'coversThrough'>): boolean => it.noReply === true && afterPackage(it) === 0
 
 /** (0.7.24) What a row, a thread's name and a chip say for follow-up steps that wait for the viewer's go (Rob's words, 2026-11-04). */
 export const GO_WHAT = 'follow-ups need your go'
@@ -1361,9 +1400,9 @@ const several = (n: number, word: string): string => `${n} ${word}${n === 1 ? ''
 /** (0.7.25) The first thing of the viewer's own on a client, in plain words: what a pinned thread's reason names. */
 function ownReason(it: QueueItem): string {
   const o = it.open ?? null
-  if (it.noReply === true) return `${it.client} is owed no reply, and one go closes it`
+  if (it.noReply === true) return noReplyNow(it) ? `${it.client} is owed no reply, and one go closes it` : `${it.client} wrote again after the package that said no reply was needed`
   if (o?.state === 'held_by_me') return `your draft to ${it.client} is not sent yet${o.unsent > 1 ? ` (${o.unsent} left)` : ''}`
-  if (it.messages > 0 && !withTeammate(it) && !it.theirs && o?.state !== 'held_by_other') {
+  if (it.messages > 0 && !goWithMail(it) && !withTeammate(it) && !it.theirs && o?.state !== 'held_by_other') {
     const who = senderName(it.mail[0]?.sender) || it.client
     return `${who} is waiting on your reply${it.messages > 1 ? ` to ${it.messages} messages` : ''}${it.kind === 'ready' ? ', and the drafts are ready' : ''}`
   }
@@ -2194,6 +2233,7 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     const open = (state: OpenPackage['state']): OpenPackage => ({
       id: d.package_id, state, by: state === 'held_by_other' ? holderName(holder) : state === 'stale' && staleTheirsHere ? holderName(sender) : '',
       at: held ? d.picked_up_at ?? null : null, unsent: held ? unsent : ready, newer: 0,
+      ...(noReply ? { noReply: true as const } : {}),
     })
     // ⛔ The holder is asked first, the owner second: a package the viewer holds is theirs to finish whoever
     // owns the client (Rob, 2026-10-12: a client owned by a teammate, picked up and sent by the founder,
@@ -2454,7 +2494,8 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     const first = ms(f.go_first_at)
     if (Number.isFinite(first) && !inWindow(first)) continue
     const it = item(p.project_id, p.name)
-    it.go = { packageId: f.go_package_id, steps, firstAt: Number.isFinite(first) ? first : null, firstKind: typeof f.go_first_kind === 'string' && /^[a-z_]{1,24}$/.test(f.go_first_kind) ? f.go_first_kind : '', by: mineGo ? '' : holderName(by), mine: mineGo }
+    const covers = ms(f.go_covers_through)
+    it.go = { packageId: f.go_package_id, steps, firstAt: Number.isFinite(first) ? first : null, firstKind: typeof f.go_first_kind === 'string' && /^[a-z_]{1,24}$/.test(f.go_first_kind) ? f.go_first_kind : '', by: mineGo ? '' : holderName(by), mine: mineGo, ...(Number.isFinite(covers) ? { coversThrough: covers } : {}) }
     if (Number.isFinite(first)) {
       it.dueAt = Math.min(it.dueAt, first)
       act(it, first)
@@ -2746,7 +2787,9 @@ export function clockText(t: number, now: number): string {
  */
 const whatOf = (it: QueueItem): string =>
   it.noReply === true
-    ? NO_REPLY_WHAT
+    ? noReplyNow(it) ? NO_REPLY_WHAT : 'reply'
+    : goWithMail(it)
+    ? goWhat(it)
     : it.open?.state === 'held_by_me'
     ? 'your draft'
     : it.kind === 'ok' ? (it.okLate && ownBesides(it) ? ownWhat(it) : it.theirs ? decidesText(it.theirs) : 'needs your OK') : it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : it.kind === 'ask' ? 'internal ask' : it.kind === 'queue' ? 'internal queue' : it.kind === 'go' ? goWhat(it) : it.kind === 'pace' ? paceWord(it) : taskWhat(it)
@@ -2998,7 +3041,15 @@ const draftCount = (n: number): string => `${n} draft${n === 1 ? '' : 's'}`
 export function draftsLine(it: QueueItem): string {
   const ask = (verb: string) => `Ask Claude: "${verb} the reply drafts for ${it.client}"`
   const o = it.open ?? null
-  if (it.noReply === true) return `_${NO_REPLY_WHAT[0]?.toUpperCase()}${NO_REPLY_WHAT.slice(1)}. ${ask('Pick up')}._`
+  // (0.7.32) a package that owes no reply has no drafts to pick up or wait for, whoever's it is
+  if (owesNoReply(it)) {
+    const show = `Ask Claude: "Show me the reply package for ${it.client}"`
+    if (o?.state === 'held_by_other') return `_No reply needed, and ${o.by} holds this package. Ask ${o.by} before writing anything._`
+    return afterPackage(it) > 0 ? `_This package said no reply was needed, but the client wrote again after it. ${show}._` : `_${NO_REPLY_WHAT[0]?.toUpperCase()}${NO_REPLY_WHAT.slice(1)}. ${show}._`
+  }
+  // (0.7.32) client messages a follow-ups-only package already covers: that package is the client's, and it holds no drafts
+  const g = goOf(it)
+  if (g && goWithMail(it)) return `_Package ${g.packageId.slice(0, 8)} covers the client's message and holds follow-up steps, with no reply drafts. ${g.mine ? `Ask Claude: "Show me the follow-ups for ${it.client}"` : `Ask ${g.by} before writing anything`}._`
   if (o?.state === 'held_by_me') return `_You picked up the reply drafts for this client: ${draftCount(o.unsent)} not sent yet. ${ask('Show me')}._`
   if (it.packageId) return `_Reply drafts are prepared for this client, but the pickup view could not be loaded here. ${ask('Show me')}._`
   if (o?.state === 'held_by_other') return `_${o.by} picked up the reply drafts for this client${pickedAt(o.at)} and has ${draftCount(o.unsent)} not sent yet. Ask ${o.by} before writing a second reply._`
@@ -3013,8 +3064,10 @@ export function draftsLine(it: QueueItem): string {
 export function holdBanner(it: QueueItem): string {
   const o = it.open ?? null
   if (o?.state !== 'held_by_me') return ''
-  const newer = o.newer > 0 ? ` ${o.newer} client message${o.newer === 1 ? '' : 's'} arrived after ${o.unsent === 1 ? 'it was' : 'they were'} written.` : ''
-  return `> **You picked this up**${pickedAt(o.at)}. ${draftCount(o.unsent)} not sent yet.${newer}`
+  // (0.7.32) a package that owes no reply has no drafts: never "0 drafts not sent yet"
+  const none = owesNoReply(it)
+  const newer = o.newer > 0 ? ` ${o.newer} client message${o.newer === 1 ? '' : 's'} arrived after ${o.unsent === 1 || none ? 'it was' : 'they were'} written.` : ''
+  return `> **You picked this up**${pickedAt(o.at)}. ${none ? 'No reply needed, one go closes it.' : `${draftCount(o.unsent)} not sent yet.`}${newer}`
 }
 
 /**
@@ -3117,17 +3170,34 @@ export function goSentence(it: QueueItem, member: string): string {
   return `Package ${g.packageId.slice(0, 8)} holds ${n} that nobody has approved and that wait for ${holderName(member)}'s go${first}. Nothing goes until the go. When the person asks to act on them, follow client-reply-prep §9 with --package ${g.packageId}.`
 }
 
+/**
+ * (0.7.32) The note for a package that owes no reply: never a count of drafts, never "prepared" as if a reply were ready,
+ * never prep. The client's messages it covers are what it answers, so they are not counted as waiting on a reply.
+ */
+function noReplyNote(it: QueueItem, member: string): string {
+  const o = it.open ?? null
+  const id = it.packageId ?? o?.id ?? ''
+  const pkg = id.slice(0, 8)
+  if (o?.state === 'held_by_other') return `Reply package ${pkg} owes no reply, and ${o.by} holds it. There is nothing to draft: ask ${o.by} before writing anything.`
+  const since = afterPackage(it)
+  const held = o?.state === 'held_by_me' ? `, is already picked up by ${holderName(member)}, the person in this session,` : ''
+  const newer = since > 0 ? ` ${since} client message${since === 1 ? '' : 's'} arrived after it: read ${since === 1 ? 'it' : 'them'} before anyone closes it.` : ''
+  return `Reply package ${pkg} owes no reply${held} and has no draft: one go closes it. The one-package page is in the side pane.${newer} When the person asks to act on it, follow client-reply-prep §9 with --package ${id}; do not run prep.`
+}
+
 function noteBody(it: QueueItem, member: string): string {
   if (goOnly(it)) return goSentence(it, member)
   const waiting = `${it.messages} client message${it.messages === 1 ? '' : 's'} waiting on our reply and ${taskPhrase(it)}`
   const o = it.open ?? null
+  if (owesNoReply(it) && (it.packageId || o)) return noReplyNote(it, member)
+  if (goWithMail(it)) return `${waiting}; the package named next covers ${it.messages === 1 ? 'it' : 'them'}, so there is no reply to prepare.`
   if (o?.state === 'held_by_me' && it.packageId) {
     const newer = o.newer > 0
       ? ` ${o.newer} client message${o.newer === 1 ? '' : 's'} arrived after ${o.unsent === 1 ? 'that draft was' : 'those drafts were'} written: read the package again and revise the open draft, never write a second email.`
       : ''
-    return `Reply package ${it.packageId.slice(0, 8)} is already picked up by ${holderName(member)}, the person in this session, with ${draftCount(o.unsent)} not sent yet${it.flagged ? ', flagged for approval' : ''}; the five-part pickup view is in the side pane.${newer} The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${it.packageId}.`
+    return `Reply package ${it.packageId.slice(0, 8)} is already picked up by ${holderName(member)}, the person in this session, with ${draftCount(o.unsent)} not sent yet${it.flagged ? ', flagged for approval' : ''}; the one-package page is in the side pane.${newer} The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${it.packageId}.`
   }
-  if (it.packageId) return `Reply package ${it.packageId.slice(0, 8)} is prepared${it.flagged ? ' and flagged for approval' : ''}; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${it.packageId}.`
+  if (it.packageId) return `Reply package ${it.packageId.slice(0, 8)} is prepared${it.flagged ? ' and flagged for approval' : ''}; the one-package page is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${it.packageId}.`
   if (o?.state === 'held_by_other') return `${waiting}; ${o.by} picked up the reply drafts for this client (package ${o.id.slice(0, 8)}) and has ${draftCount(o.unsent)} not sent yet. Do not write a second reply: ask ${o.by}.`
   // (the founder) a stale package a teammate has is treated as one a teammate holds: never "pick it up" (M2),
   // its first sentence in Opus's words for a package nobody picked up

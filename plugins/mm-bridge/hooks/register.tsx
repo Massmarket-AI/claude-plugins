@@ -10,8 +10,8 @@ import {
   pinsFor, pinTitle, threadWhy,
   teamLate, teamLateCount, teamLateSegment, teamLateWho, LATE_WITH_TEAM,
   teamLateOnly,
-  goOf, goMine, goOnly,
-  NO_REPLY_WHAT, keptPace, noDateGroup, paceOnly, paceWord,
+  goOf, goMine, goOnly, goWithMail,
+  NO_REPLY_WHAT, keptPace, noDateGroup, noReplyNow, paceOnly, paceWord,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
@@ -200,7 +200,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.29'
+export const VERSION = '0.7.32'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -3561,10 +3561,10 @@ import { holderName } from './queue'
 /**
  * The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that
  * waits for his OK. (0.7.24) A client listed by follow-up steps that wait for a go alone: their follow-ups-only package,
- * whose page lists every step in full (read, never picked up, by drawing it).
+ * whose page lists every step in full (read, never picked up, by drawing it). (0.7.32) And with client messages that package already covers.
  */
 function pickupOf(it: QueueItem): string | null {
-  const packageId = it.packageId ?? (it.kind === 'ok' ? ((it.open ?? null)?.id ?? null) : null) ?? (goOnly(it) ? (goOf(it)?.packageId ?? null) : null)
+  const packageId = it.packageId ?? (it.kind === 'ok' ? ((it.open ?? null)?.id ?? null) : null) ?? (goOnly(it) || goWithMail(it) ? (goOf(it)?.packageId ?? null) : null)
   return packageId && isUuid(packageId) ? packageId : null
 }
 
@@ -4505,7 +4505,7 @@ function startTitle(it: QueueItem): string {
  * follow-up steps that wait for a go alone: `<client>: give the go on the follow-ups` (a teammate's: `check on the follow-ups`).
  */
 function startWhat(it: QueueItem): string {
-  return `${it.client}: ${it.noReply === true ? NO_REPLY_WHAT : paceOnly(it) ? `work the quoted hours (${paceWord(it)})` : goOnly(it) ? (goMine(it) ? 'give the go on the follow-ups' : 'check on the follow-ups') : it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : it.kind === 'ask' ? 'reply to the internal ask' : etaOnly(it) ? 'give your ETA' : assignOnly(it) ? 'assign an owner' : it.kind === 'queue' ? 'work the internal queue' : it.internal === true && it.messages === 0 ? 'work the internal task' : 'reply to the client'}`
+  return `${it.client}: ${it.noReply === true ? (noReplyNow(it) ? NO_REPLY_WHAT : 'read what they sent since') : paceOnly(it) ? `work the quoted hours (${paceWord(it)})` : goOnly(it) || goWithMail(it) ? (goMine(it) ? 'give the go on the follow-ups' : 'check on the follow-ups') : it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : it.kind === 'ask' ? 'reply to the internal ask' : etaOnly(it) ? 'give your ETA' : assignOnly(it) ? 'assign an owner' : it.kind === 'queue' ? 'work the internal queue' : it.internal === true && it.messages === 0 ? 'work the internal task' : 'reply to the client'}`
 }
 
 /** 0.5.1's line under that title. */
@@ -6624,7 +6624,7 @@ async function claimThread($: EngineInterface, feed: Feed | null, it: QueueItem,
 }
 
 /**
- * Drafts, on a row: that client's part goes to the top of the pane (its five-part pickup view when there
+ * Drafts, on a row: that client's part goes to the top of the pane (its one-package page when there
  * is a package, else what is waiting and due) and the pane shows its top. Links, pins and starts nothing.
  * S2: the pane opens at once with what needs no network (beginClient); the pickup view is read after.
  */
