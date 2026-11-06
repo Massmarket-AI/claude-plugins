@@ -4,6 +4,7 @@ import type { Engine, FoundElement } from 'claude-code/testing'
 
 import type { Feed, FeedAsk, FeedQueueTicket, FeedTicket } from './queue'
 import { buildLists, cleanTitle, clockText, isNewerVersion } from './queue'
+import { SMS_TREE } from './card-fixture.test-helper'
 import { VERSION } from './register'
 import { REFRESH_FAILED, carryKickoff, freshParagraph, lookupOrder, pinReport, recommend } from './threads'
 import type { PinReport } from './threads'
@@ -148,6 +149,10 @@ type WorldOptions = {
    * answers (the person has not answered its question).
    */
   unarchive?: 'refuse' | 'error' | 'silent' | (() => 'refuse' | 'error' | 'silent' | undefined)
+  /** (0.7.26) The renderer on this computer draws the card (the synthetic text package's tree), instead of being one from before --tree. */
+  renderer?: 'tree'
+  /** (0.7.26) What the reply-package pickup read answers, when not the plain page. */
+  pickup?: Record<string, unknown>
 }
 
 /** (0.5.11, review of PR #15, F4) The parts of the time-tracking hook's text the bridge reads: 0.11.7's, and 0.11.4's. */
@@ -314,7 +319,7 @@ function world(on: On, opts: WorldOptions = {}) {
     }
     const read = e.url.includes('/closeout') ? opts.feedRead?.() : undefined
     if (read === 'network') return { deny: 'fetch failed: socket hang up' }
-    const body = e.url.includes('/reply-package') ? { markdown: '## Acme Roofing\n\n1. What the client sent' } : theFeed
+    const body = e.url.includes('/reply-package') ? opts.pickup ?? { markdown: '## Acme Roofing\n\n1. What the client sent' } : theFeed
     const status = typeof read === 'number' ? read : !e.url.includes('/reply-package') && opts.feedStatus ? opts.feedStatus() : 200
     return { value: { status, ok: status === 200, headers: {}, text: JSON.stringify(status === 200 ? body : { error: 'boom' }) } }
   })
@@ -364,7 +369,15 @@ function world(on: On, opts: WorldOptions = {}) {
   })
   /** Every program the bridge started. */
   const ran: string[] = []
+  /** (0.7.26) Every reply-package card the bridge drew on this computer: the renderer, apart from the programs above. */
+  const renders: string[] = []
   on('process.run', (_$, e) => {
+    if (e.argv.some(a => String(a).endsWith('/client-reply-prep/scripts/render_visual.py'))) {
+      renders.push(JSON.stringify(e))
+      if (opts.renderer === 'tree') return { value: { exitCode: 0, stdout: JSON.stringify(SMS_TREE), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      // a renderer from before --tree: the pane shows the page alone, as before 0.7.26
+      return { value: { exitCode: 2, stdout: '', stderr: 'render_visual.py: error: unrecognized arguments: --tree -', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     ran.push(JSON.stringify(e))
     if (opts.opener === 'missing') return { deny: `spawn ${String(e.argv[0])} ENOENT` }
     return { value: { exitCode: opts.opener === 'works' ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -441,7 +454,7 @@ function world(on: On, opts: WorldOptions = {}) {
   /** The chips this session asked the app for. */
   const minted = () => calls.filter(c => c.tool === 'spawn_task')
   return {
-    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, ran, shell, box, fills, resolves, statuses, closes, scopePosts, pinPosts,
+    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, ran, renders, shell, box, fills, resolves, statuses, closes, scopePosts, pinPosts,
     /** The app calls that change a thread: a rename, a pin, a message, a chip. (Reading this session's own usage, and withdrawing a chip, change none.) */
     writes: () => calls.filter(c => !['get_session', 'list_sessions', 'get_usage', 'dismiss_task'].includes(c.tool)).map(c => [c.tool, c.args.session_id ?? '', c.args.title ?? c.args.pinned ?? ''].join(' | ')),
     /** The chips this session asked the app to withdraw, by their ids. */
@@ -10499,7 +10512,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.25', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.26', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10568,7 +10581,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.25', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.26', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10634,7 +10647,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.25', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.26', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
@@ -12647,7 +12660,7 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
     expect(w.pinPosts).toHaveLength(1)
     const sent = w.pinPosts[0] as (typeof w.pinPosts)[number]
     expect(sent.method).toBe('POST')
-    expect(sent.headers).toEqual({ Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.25', 'Content-Type': 'application/json' })
+    expect(sent.headers).toEqual({ Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.26', 'Content-Type': 'application/json' })
     const body = sent.body
     expect(Object.keys(body).sort()).toEqual(['at', 'extra', 'items'])
     expect(body.at).toBe(new Date(NOW).toISOString())
@@ -12802,4 +12815,72 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
     expect(w.pinPosts).toHaveLength(1)
     expect(Array.isArray(w.pinPosts[0]?.body.items)).toBe(true)
   })
+})
+
+describe('0.7.26 the reply-package card in the bridge\'s own pane, on the desktop and in the terminal', () => {
+  const LABEL = SMS_TREE.label
+  const PAGE = `## Acme Roofing\n\n1. What the client sent\n\nOne go sends 1 item. Package \`${LABEL}\`.`
+  const PICKUP = { markdown: PAGE, package_sha256: SMS_TREE.package_sha256 }
+  const SURFACES = ['desktop', 'terminal'] as const
+  const mount = ($: Engine, surface: (typeof SURFACES)[number]) => $.ui.mount({ plugin: 'mm-bridge', surface, component: 'Pane', requestId: 'mm-queue', props: PANE })
+  /** The thread prints the package's page, as a client thread's answer does: a response row of the main loop. */
+  const prints = ($: Engine, text: string) =>
+    $.session.append({ message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text }] }, door: 'response', origin: { kind: 'model', model: 'claude-opus-5-5' }, uuid: `row-${text.length}` })
+
+  test('Drafts on another client\'s row: the card is drawn from the renderer on both surfaces, to read, with no signature box and the page a press away', async ($, on) => {
+    const w = world(on, { feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.threads': PAIRS }, renderer: 'tree', pickup: PICKUP })
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: `drafts:${ACME}` })
+    expect(w.renders).toHaveLength(1)
+    const argv = JSON.parse(w.renders[0] ?? '{}').argv as string[]
+    expect(argv.at(-7)).toMatch(/\/client-reply-prep\/scripts\/render_visual\.py$/)
+    expect(argv.slice(-6)).toEqual(['--package', PKG, '--signer', argv.at(-3), '--tree', '-'])
+    await ui.unmount()
+    for (const surface of SURFACES) {
+      const u = await mount($, surface)
+      const text = (await lines(u)).join('\n')
+      expect(text, surface).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
+      expect(text, surface).toContain('Every question answered?')
+      expect(text, surface).toContain('own thread. This card is here to read.')
+      expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn')), surface).toBe(false)
+      // the page is under "Show the page as text", and opens on a press
+      expect(await u.find({ type: 'Markdown' }), surface).toBeUndefined()
+      await u.press({ key: `mm-card-page:${PKG}` })
+      expect((await u.find({ type: 'Markdown' }))?.text, surface).toBe(PAGE)
+      await u.press({ key: `mm-card-page:${PKG}` })
+      await u.unmount()
+    }
+    // drawn once a package version: a second look draws nothing again
+    const again = await pane($)
+    await again.press({ key: `drafts:${ACME}` })
+    expect(w.renders).toHaveLength(1)
+    expect(w.fills).toEqual([])
+    expect(w.prompts).toEqual([])
+    await again.unmount()
+  })
+
+  for (const surface of SURFACES) {
+    test(`in the client's own thread (${surface}): the box opens once the thread printed the page, and a signature puts exactly the go in the prompt box`, async ($, on) => {
+      const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } }, renderer: 'tree', pickup: PICKUP })
+      await mm($, '')
+      const u = await mount($, surface)
+      await u.press({ key: `drafts:${ACME}` })
+      // not printed here yet: the card, and the line saying what opens the box
+      expect((await lines(u)).join('\n'), surface).toContain(`Signing opens once this thread prints the package's page (Package ${LABEL}).`)
+      expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn')), surface).toBe(false)
+      await prints($, `Here is the package.\n\n${PAGE}`)
+      const signBtn = (await buttons(u)).find(([k]) => k === `mm-card-sign-btn:${LABEL}`)
+      expect(signBtn?.[1], surface).toBe('✍  Click to sign and send')
+      await u.press({ key: `mm-card-sign-btn:${LABEL}` })
+      // the name and the envelope first; the words only once it has flown, and never sent
+      expect(w.fills, surface).toEqual([])
+      if (surface === 'desktop') expect(await u.find({ type: 'Svg' }), surface).toBeDefined()
+      await w.clock.advance(3_100)
+      expect(w.fills, surface).toEqual([`Send package ${LABEL}`])
+      expect(w.prompts, surface).toEqual([])
+      expect((await lines(u)).join('\n'), surface).toContain(`Sealed: "Send package ${LABEL}" is in your prompt box. Press Enter to send it.`)
+      await u.unmount()
+    })
+  }
 })
