@@ -616,7 +616,7 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
     expect([...pastCutClients(f(undatedRow({ last_activity_at: '2026-10-01' })), NOW)]).toEqual([P(1)])
     // the client's move: the existing skip, whatever its last activity
     expect(all(f(undatedRow({ last_activity_at: '2026-11-01', waiting_on: 'client' })))).toEqual([])
-    // (0.7.30, Rob 11-06: "It shouldn't be prompting me to do anything") the owner picks it up when ready: lists, never pins
+    // (0.7.31, Rob 11-06: "It shouldn't be prompting me to do anything") the owner picks it up when ready: lists, never pins
     const whenReady = one(f(undatedRow({ last_activity_at: '2026-11-01', waiting_on: 'owner_when_ready' })))
     expect(whenReady.needsDate ?? 0).toBe(0)
     expect(pinsFor(whenReady, NOW)).toBe(false)
