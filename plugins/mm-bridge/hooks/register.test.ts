@@ -1844,7 +1844,8 @@ describe('R6: a link is not dropped only because its thread is missing from the 
     const w = world(on, { store: linked, threads: others(), unlisted: ['local_a'] })
     expect(await mm($, '')).toBe('3 clients need you; 2 threads pinned. The list is in the side pane.')
     expect(w.stored['mm.links']).toEqual(linked['mm.links'])
-    expect(w.calls.filter(c => c.tool === 'get_session' && c.args.session_id !== 'self').map(c => c.args.session_id)).toEqual(['local_a'])
+    // (0.7.28) and local_b, which the list shows: it is about to be named and pinned, and the list does not say whether it is a scheduled task's run
+    expect(w.calls.filter(c => c.tool === 'get_session' && c.args.session_id !== 'self').map(c => c.args.session_id)).toEqual(['local_a', 'local_b'])
     expect(w.threads.get('local_a')).toMatchObject({ title: ACME_TITLE, pinned: true })
     // Update acts on it
     expect(await mm($, 'update Acme Roofing')).toBe(`Sent to Acme Roofing's thread: open "${ACME_SHOWN}" under Pinned.`)
@@ -6377,6 +6378,61 @@ describe('0.5.25: Start puts the person\'s own words in the prompt box (Rob, 10-
   })
 })
 
+describe('0.7.28: a sync that fails stops neither Start missing threads nor the mm tool (2026-11-06: the words never reached the prompt box, and `queue` and `kickoffs` answered "no tool.call hook answered")', () => {
+  const FAILED = 'Error: ccd_sidebar.set_pinned: refused'
+  /** A sync that worked, then the sync on record marked failed and every sync after it failing. */
+  const failingAfterASync = async ($: Engine, on: On) => {
+    let down = false
+    const w = world(on, { tools: 'start', feedStatus: () => (down ? 503 : 200) })
+    await mm($, '')
+    down = true
+    w.stored['mm.last'] = { ...(w.stored['mm.last'] as object), error: FAILED }
+    return w
+  }
+
+  test('(b) Start missing threads with the sync on record failed and the sync it runs failing: the words still go in the prompt box, from the stored list', async ($, on) => {
+    const w = await failingAfterASync($, on)
+    const band = await bandOf($)
+    await band.press({ key: 'mm-start-missing' })
+    await band.unmount()
+    expect(w.fills).toEqual([START_ALL])
+    expect(w.box.text).toBe(START_ALL)
+    expect(w.toasts.at(-1)).toBe(FILLED_ALL)
+    expect(sessionCalls(w)).toEqual([])
+  })
+
+  test('Start missing threads with no list at all: nothing to go on, and the press says why', async ($, on) => {
+    const w = await failingAfterASync($, on)
+    w.stored['mm.last'] = { at: NOW, member: ME, pinned: 0, recs: {} }
+    const band = await bandOf($)
+    await band.press({ key: 'mm-start-missing' })
+    await band.unmount()
+    expect(w.fills).toEqual([])
+    expect(w.toasts.at(-1)).toContain('closeout HTTP 503')
+  })
+
+  test('(c) mm kickoffs with the sync failing answers from the stored list, as if the sync had worked', async ($, on) => {
+    await failingAfterASync($, on)
+    const kicks = kicksIn(await tool($, 'kickoffs'))
+    expect(kicks.map(k => k.client).sort()).toEqual(['Acme Roofing', 'Bolt Staffing', 'Cedar Dental'])
+  })
+
+  test('mm queue with the sync failing answers why, and from the stored list', async ($, on) => {
+    await failingAfterASync($, on)
+    for (const args of ['queue', '']) {
+      const said = await tool($, args)
+      expect(said).toContain('closeout HTTP 503')
+      expect(said).toContain('From the list as last loaded: 3 clients need you')
+    }
+  })
+
+  test('with no list at all every subcommand still answers, with the failure as its result', async ($, on) => {
+    world(on, { tools: 'start', feedStatus: () => 503 })
+    for (const args of ['kickoffs', 'kickoffs Acme Roofing', 'queue', '', 'restore Acme Roofing', 'link Acme Roofing']) expect(await tool($, args)).toContain('closeout HTTP 503')
+    expect(await tool($, 'status')).toContain('last sync: never')
+  })
+})
+
 describe('0.5.25: the mm tool\'s kickoffs, for the model on the person\'s own words', () => {
   const notices = (w: { written: Array<{ path: string; text: string }> }) => w.written.filter(f => f.path.endsWith('bridge-notices.log')).map(f => f.text).join('')
   const ACME_ALL = NOT_TAKEN(ACME, 'Acme Roofing Pat')
@@ -10479,7 +10535,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.27', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.28', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10548,7 +10604,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.27', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.28', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10614,7 +10670,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.27', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.28', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
@@ -12638,7 +12694,7 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
     expect(w.pinPosts).toHaveLength(1)
     const sent = w.pinPosts[0] as (typeof w.pinPosts)[number]
     expect(sent.method).toBe('POST')
-    expect(sent.headers).toEqual({ Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.27', 'Content-Type': 'application/json' })
+    expect(sent.headers).toEqual({ Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.28', 'Content-Type': 'application/json' })
     const body = sent.body
     expect(Object.keys(body).sort()).toEqual(['at', 'extra', 'items'])
     expect(body.at).toBe(new Date(NOW).toISOString())
