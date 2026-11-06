@@ -137,7 +137,8 @@ export type FeedTicket = {
   /**
    * (0.7.25) OW's `details.waiting_on` (src/lib/team-ops/eta.ts `isWaitingOnClient`): `client` while the ticket's next move
    * is the client's, set by a reply package's `waiting` outcome and cleared by the next one. Such a ticket is skipped
-   * (`waitingOnClient`). Absent on a server that does not send it yet: read as before.
+   * (`waitingOnClient`). Absent on a server that does not send it yet: read as before. (0.7.30) `owner_when_ready`: the
+   * owner picks it up when ready, so it lists undated and never pins (`ownerWhenReady`). Any other value reads as none.
    */
   waiting_on?: string | null
   /**
@@ -156,6 +157,15 @@ export type FeedTicket = {
  */
 export const waitingOnClient = (tk: Pick<FeedTicket, 'waiting_on'>): boolean =>
   typeof tk.waiting_on === 'string' && tk.waiting_on.trim().toLowerCase() === 'client'
+
+/**
+ * (0.7.30, Rob 2026-11-06, on Drew Mays's tasks: "I'll pick this up when I'm ready to. It shouldn't be prompting me to do
+ * anything. There should be no due date with the task.") A ticket its owner picks up when ready: OW's
+ * `details.waiting_on = "owner_when_ready"`. It stays open and lists under `No due date`, and it never pins as
+ * `needs a due date`, whatever its last activity. The mark says no date is owed: a ticket that has a date reads as any other.
+ */
+export const ownerWhenReady = (tk: Pick<FeedTicket, 'waiting_on'>): boolean =>
+  typeof tk.waiting_on === 'string' && tk.waiting_on.trim().toLowerCase() === 'owner_when_ready'
 
 /**
  * One of the caller's own Claude Code sessions that declared a client: the feed's `threads` field. The
@@ -2343,7 +2353,8 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
       if (!(undatedRow && !etaAsk) && !inWindow(due)) continue
       // (0.7.27, Rob 2026-11-05: "Shouldn't it be pinned?") ...but by its last activity, once OW sends it: inside the window it
       // pins for its owner as `needs a due date`; outside it counts nowhere; with nothing to measure by, it lists as before.
-      const undatedPlace = undatedRow && !etaAsk ? undatedWindow(tk, cut) : 'unknown'
+      // (0.7.30) ...and never for a ticket its owner picks up when ready: it lists undated, as one with nothing to measure by.
+      const undatedPlace = undatedRow && !etaAsk && !ownerWhenReady(tk) ? undatedWindow(tk, cut) : 'unknown'
       if (undatedPlace === 'outside') continue
       // (0.7.15, owner asks) a dated ticket on H9's `assign_by` clock: due then, to be given an owner by then (or taken
       // and given an ETA), never delivered by then. OW prints no label for it: the row, the pane and the kickoff do.
