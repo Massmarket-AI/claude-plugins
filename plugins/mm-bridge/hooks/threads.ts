@@ -22,6 +22,7 @@ import {
   MAY_NEED_OK, NOBODY, assignAsksOf, assignOnly, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, committedCount, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
   checkNow, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
   TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine,
+  goOf, goOnly, stepWord,
 } from './queue'
 import type { AskRef, FeedThread, QueueItem } from './queue'
 
@@ -731,7 +732,10 @@ export function waitingText(it: QueueItem): string {
     owners > 0 ? `${owners} need${owners > 1 ? '' : 's'} an owner` : '',
     nodate > 0 ? `${nodate} task${nodate > 1 ? 's' : ''} with no date` : '',
   ]
-  const parts = [ok, it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', ...tasks, drafts]
+  // (0.7.24) follow-up steps that wait for a go: `3 follow-ups need your go` (a teammate's: `3 follow-ups need Asif's go`)
+  const g = goOf(it)
+  const go = g ? `${g.steps} follow-up${g.steps > 1 ? 's' : ''} need${g.steps > 1 ? '' : 's'} ${g.mine ? 'your' : `${g.by}'s`} go` : ''
+  const parts = [ok, it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', ...tasks, drafts, go]
   const base = parts.filter(Boolean).join(', ')
   // (0.5.28, internal asks) and then the viewer's open asks, `1 internal ask`: after what the client has otherwise (a
   // package of theirs with nothing else waiting is still `drafts ready`), or alone for a client listed by its asks alone
@@ -853,6 +857,38 @@ export function askParagraph(a: Pick<AskRef, 'id' | 'asker' | 'dueAt'>): string 
 }
 
 /**
+ * (0.7.24, Rob 2026-11-04) The first line of a kickoff for a client listed by follow-up steps that wait for a go alone. The
+ * viewer's own go: show the steps on the follow-ups-only package's pickup view and wait for the go (client-reply-prep §9;
+ * the same approve schedules them, §9.5 step 5). A teammate's (for the founder and the PM): show them and wait, approving
+ * nothing for the teammate.
+ */
+export function goKickoff(it: QueueItem, who: string): string {
+  const g = goOf(it)
+  if (!g) return `[mm-link ${it.projectId}] ${who}: follow-up steps wait for a go. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`
+  const pkg = g.packageId.slice(0, 8)
+  const first = typeof g.firstAt === 'number' && Number.isFinite(g.firstAt) ? `, the first (a ${stepWord(g.firstKind)}) opening ${dueText(g.firstAt)}` : ''
+  const n = `${g.steps} follow-up step(s)`
+  if (!g.mine) {
+    return `[mm-link ${it.projectId}] ${who}: package ${pkg} holds ${n} that wait for ${g.by}'s go${first}. Load the client's project skill first, then follow client-reply-prep §9 to show the five-part pickup view for that package, but do not take it and do not approve it: the go is ${g.by}'s. Then wait for me. Send nothing without my go.`
+  }
+  return `[mm-link ${it.projectId}] ${who} has ${n} that nobody has approved, in package ${pkg}${first}. Nothing goes until I give the go. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${pkg} with every step in full and wait for me. Send nothing without my go.`
+}
+
+/**
+ * (0.7.24) The paragraph a kickoff and an Update carry for follow-up steps that wait for a go, on a client listed for
+ * something else as well (a client listed by them alone opens with `goKickoff` instead). '' with none.
+ */
+export function goParagraph(it: QueueItem): string {
+  const g = goOf(it)
+  if (!g) return ''
+  const pkg = g.packageId.slice(0, 8)
+  const first = typeof g.firstAt === 'number' && Number.isFinite(g.firstAt) ? `, the first (a ${stepWord(g.firstKind)}) opening ${dueText(g.firstAt)}` : ''
+  return g.mine
+    ? `Package ${pkg} also holds ${g.steps} follow-up step(s) that nobody has approved${first}. Show them with client-reply-prep §9 for package ${pkg} once the rest is done, and wait for my go on them.`
+    : `Package ${pkg} also holds ${g.steps} follow-up step(s) that wait for ${g.by}'s go${first}. They are ${g.by}'s to approve: do not approve them.`
+}
+
+/**
  * R5: the one message that starts a client's reply in a thread. The Start chip carries it as its prompt and
  * Update sends it into the existing thread, with a first line saying what is new. Seven cases, the first
  * that holds (and, for the founder alone, an eighth between 2 and 3: a package that waits for his OK and
@@ -931,6 +967,9 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
                   ? // (0.5.11, Opus 10-15, verbatim) case 6 sent by itself
                     `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep: no package exists yet, so run prep (§2) to build one, then show the five-part pickup view without taking the package: no pickup call until I answer here. Then wait for me. Send nothing without my go.`
                   : `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
+                : goOnly(it)
+                  ? // (0.7.24) listed by follow-up steps that wait for a go alone
+                    goKickoff(it, who)
                 : it.tasks === 0 && asks.length
                   ? // (0.5.28, internal asks) listed by its asks alone: a first line that names the client, then each ask's paragraph
                     `[mm-link ${id}] ${who} has ${asks.length} internal ask(s) waiting on my reply. Load the client's project skill first.`
@@ -947,7 +986,7 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
   // (0.5.28, internal asks) once per open ask, after the body and before any hand-over: `askParagraph`, verbatim;
   // (0.7.4, ETA asks) then the tickets that owe an ETA (`etaParagraph`); (0.7.15, owner asks) then the tickets to give an
   // owner (`assignParagraph`); (0.7.3, internal queue) then the queue, in rank order (`queueParagraph`)
-  const body = [lead, ...asks.map(askParagraph), etaParagraph(it), assignParagraph(it), queue].filter(Boolean).join('\n\n')
+  const body = [lead, ...asks.map(askParagraph), etaParagraph(it), assignParagraph(it), goOnly(it) ? '' : goParagraph(it), queue].filter(Boolean).join('\n\n')
   const news = `New since this thread last worked on this client: ${waitingText(it)}.`
   // ⛔ (0.5.11, review of PR #15, F4) sent by itself: the marker first, at the very start of the text, as every hook
   // that tells the person's time from the bridge's reads it (a time-tracking hook too old to read the app's own
