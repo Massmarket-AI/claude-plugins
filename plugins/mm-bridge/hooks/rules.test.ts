@@ -57,7 +57,7 @@ const one = (f: Feed, now = NOW): QueueItem => {
 }
 const pins = (f: Feed, now = NOW): boolean => all(f, now).some(it => pinsFor(it, now))
 
-describe("Rob's pin and clock rules, one test each (0.7.24)", () => {
+describe("Rob's pin and clock rules, one test each (0.7.25)", () => {
   // -------------------------------------------------------------------------------------------------------- what pins
   test('P1 (10-14, 11-04: "the clock is supposed to pin it when I have something due in less than 24 hours (like a reply or an ETA)"): due within 24 business hours or late pins; further out does not', () => {
     expect(pins(feed({ mail: [mail(1, NOW - 4 * H, { reply_due_at: iso(NOW + 20 * H) })] }))).toBe(true)

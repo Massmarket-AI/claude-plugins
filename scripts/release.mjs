@@ -106,7 +106,7 @@ for (const target of ['.', ...PLUGINS.map(p => `plugins/${p}`)]) {
   if (!/Validation passed/.test(out)) throw new Error(`validate ${target} failed:\n${out}`)
 }
 run(claude, ['plugin', 'test', '.'], { cwd: join(ROOT, 'plugins/mm-bridge') })
-run(process.execPath, ['--test', 'plugins/mm-hooks/scripts/sync-extension.test.js', 'plugins/mm-hooks/scripts/update-plugins.test.js', 'scripts/carry-extension.test.mjs', 'plugins/mm-hooks/scripts/revision-insights-notice.test.js'])
+run(process.execPath, ['--test', 'plugins/mm-hooks/scripts/sync-extension.test.js', 'plugins/mm-hooks/scripts/update-plugins.test.js', 'scripts/carry-extension.test.mjs', 'plugins/mm-hooks/scripts/revision-insights-notice.test.js', 'plugins/mm-hooks/scripts/skill-check.test.js'])
 run('gitleaks', ['dir', ROOT, '--redact', '--no-banner'])
 
 console.log(`Releasing: ${released.join(', ')}`)

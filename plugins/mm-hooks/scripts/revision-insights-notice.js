@@ -19,10 +19,17 @@
 //   6. The stamp is missing or unreadable, its last_run_at does not parse, or it is 9 days old or more, or more than a
 //      day in the future.
 //   7. No notice in the last 20 hours on this computer. The notice is claimed under plugin-sync.json's lock, under
-//      `revision_insights_notice`, so two sessions starting together show it once.
+//      `revision_insights_notice`, with the clock read inside the lock, so two sessions starting together show it once.
 //
-// What it never does: write the stamp, create or change a scheduled task itself, or print anything else. Every error
-// is swallowed and the session goes on.
+// The session pass (Rob, 2026-11-05: "I wonder if they should do a deeper analysis like I just did"): once the skill on
+// this computer carries scripts/session_insights.mjs, the routine's prompt runs three steps instead of one, so an
+// existing routine has to be told. Gate 6 then also fires, with the UPDATE wording, while the routine's stamp is fresh
+// but ~/.claude/mm-hooks/session-insights.json (written by the session pass on every run, switched on or off) is
+// missing: the session updates the routine's prompt once, and the pass's first run writes the stamp that ends it.
+// Without the script on disk the old wording shows, word for word.
+//
+// What it never does: write either stamp, create or change a scheduled task itself, or print anything else. Every
+// error is swallowed and the session goes on.
 "use strict";
 const fs = require("fs");
 const os = require("os");
@@ -34,6 +41,7 @@ const DAY = 24 * HOUR;
 const STALE_MS = 9 * DAY;
 const FUTURE_SLACK_MS = DAY;
 const NOTICE_EVERY_MS = 20 * HOUR;
+const CLOCK_SLACK_MS = 60 * 1000;
 const STAMP_MAX_BYTES = 64 * 1024;
 const STATUS_MAX_BYTES = 1 << 20;
 const OFF_RE = /^(0|false|no|off)$/i;
@@ -50,7 +58,9 @@ function paths(env = process.env) {
     hookDir,
     statusFile: path.join(hookDir, "plugin-sync.json"),
     stampFile: path.join(hookDir, "revision-insights.json"),
+    sessionStampFile: path.join(hookDir, "session-insights.json"),
     skillFile: path.join(home, ".claude", "skills", "revision-insights", "SKILL.md"),
+    sessionScript: path.join(home, ".claude", "skills", "revision-insights", "scripts", "session_insights.mjs"),
     reviewHostDir: path.join(home, ".massmarket-zero-revision"),
   };
 }
@@ -119,32 +129,76 @@ function ageWords(age) {
   return "last ran " + Math.floor(age / DAY) + " days ago";
 }
 
-/** The last notice is 20 hours back or more (or never was, or its time is unreadable or ahead of the clock). PURE. */
+/**
+ * The last notice is 20 hours back or more (or never was, or its time is unreadable or more than a minute ahead of the
+ * clock). PURE. A clock moved back never holds the notice forever, but a time just ahead of this clock is a notice made
+ * a moment ago, so it holds.
+ */
 function throttleAllows(rec, now) {
   if (!rec || typeof rec !== "object") return true;
   const last = Date.parse(rec.last_notice_at || "");
   if (!Number.isFinite(last)) return true;
   const since = now - last;
-  return since < 0 || since >= NOTICE_EVERY_MS;
+  return since < -CLOCK_SLACK_MS || since >= NOTICE_EVERY_MS;
 }
 
 /**
  * Whether to show the notice, and with which age words. PURE.
- *   facts  { hookDir, skill, reviewHost }: whether ~/.claude/mm-hooks, the skill file and Rob's review folder exist
+ *   facts  { hookDir, skill, reviewHost, sessionPass }: whether ~/.claude/mm-hooks, the skill file, Rob's review
+ *          folder and the skill's session_insights.mjs exist
  *   stamp  the parsed revision-insights.json, or null
+ *   sessionStamp the parsed session-insights.json, or null
  *   record plugin-sync.json's revision_insights_notice, or undefined
- * Returns { show, reason, age }: age is the <AGE> words when show is true.
+ * Returns { show, reason, age, mode }: age is the <AGE> words when show is true; mode is "setup" (create or check the
+ * routine) or "update" (the routine runs, but its prompt predates the session pass).
  */
-function decideNotice({ env = {}, now, facts = {}, stamp = null, record } = {}) {
+function decideNotice({ env = {}, now, facts = {}, stamp = null, sessionStamp = null, record } = {}) {
   if (OFF_RE.test(String(env.MM_REVISION_INSIGHTS_NOTICE || "").trim())) return { show: false, reason: "turned-off" };
   if (String(env.MM_UNATTENDED || "").trim() === "1") return { show: false, reason: "unattended" };
   if (!facts.hookDir) return { show: false, reason: "no-tracker" };
   if (!facts.skill) return { show: false, reason: "no-skill" };
   if (facts.reviewHost) return { show: false, reason: "review-host" };
   const age = ageWords(stampAge(stamp, now));
-  if (age === null) return { show: false, reason: "fresh" };
+  const mode = age !== null ? "setup" : facts.sessionPass && !sessionStamp ? "update" : null;
+  if (mode === null) return { show: false, reason: "fresh" };
   if (!throttleAllows(record, now)) return { show: false, reason: "throttled" };
-  return { show: true, reason: "due", age };
+  return mode === "setup" ? { show: true, reason: "due", age, mode } : { show: true, reason: "update", age: null, mode };
+}
+
+// The routine with the session pass (Opus-authored; the person-facing lines approved by Rob). Place, never edit.
+const ROUTINE_PROMPT =
+  "Load the revision-insights skill and follow its 'Run it' section: run its steps in order and reply with the lines they print. Do nothing else.";
+const ROUTINE_DESCRIPTION = "Sends OW my own instructions on reply-package drafts and short sorted lines from my own messages to Claude, nothing else";
+const SETUP_TELL =
+  "I set up your weekly revision-insights routine (Fridays 4 PM). It sends OW your own instructions on reply-package drafts, and has your Claude sort your own messages to Claude (six weeks the first time, then each week) into one short line for each correction, ask, decision, rule or status question: what it was about, the client, the skill, and your own words, 300 characters at most. It reads only sessions in the folder you chose for time tracking; nothing outside that folder is opened. Your sessions, Claude's replies and personal threads stay on your computer. Put 'private' in a thread's title to keep that thread out.";
+const UPDATE_TELL =
+  "I updated your weekly revision-insights routine (still Fridays 4 PM). It now also has your Claude sort your own messages to Claude (six weeks the first time, then each week) and sends OW one short line for each correction, ask, decision, rule or status question: what it was about, the client, the skill, and your own words, 300 characters at most. It reads only sessions in the folder you chose for time tracking; nothing outside that folder is opened. Your sessions, Claude's replies and personal threads stay on your computer. Put 'private' in a thread's title to keep that thread out.";
+
+function createStep(tell) {
+  return '3. No such task: call create_scheduled_task with taskId "revision-insights", title "Revision insights (weekly)", description "' +
+    ROUTINE_DESCRIPTION + '", cronExpression "0 16 * * 5", and prompt "' + ROUTINE_PROMPT + '" Then tell the person in one line: "' + tell + '"';
+}
+
+/** The instruction once the session pass is on this computer: setup (with <AGE>) or update. Opus-authored. */
+function sessionPassText(mode, age) {
+  if (mode === "update") {
+    return [
+      "Massmarket revision-insights routine: the weekly routine now has a second step, the session pass, and its prompt on this computer is older than that.",
+      "Do this once in this session, alongside the person's task, without stopping their work:",
+      "1. Call list_scheduled_tasks (load the scheduled-tasks tools with ToolSearch if they are deferred).",
+      '2. A task with taskId "revision-insights": call update_scheduled_task with that taskId, description "' + ROUTINE_DESCRIPTION + '" and prompt "' + ROUTINE_PROMPT + '" Change nothing else (keep its schedule and whether it is enabled). Then tell the person in one line: "' + UPDATE_TELL + '"',
+      createStep(SETUP_TELL),
+      "If the scheduled-tasks tools are not in this session, say nothing about this; a later session will try again.",
+    ].join("\n");
+  }
+  return [
+    "Massmarket revision-insights routine: the weekly routine " + age + ". It sends OW only this person's own instructions on reply-package drafts and short sorted lines from their own messages to Claude, so the skills need fewer revisions and fewer corrections.",
+    "Do this once in this session, alongside the person's task, without stopping their work:",
+    "1. Call list_scheduled_tasks (load the scheduled-tasks tools with ToolSearch if they are deferred).",
+    '2. A task with taskId "revision-insights" that is enabled: if its prompt is not exactly "' + ROUTINE_PROMPT + '", call update_scheduled_task with that taskId, description "' + ROUTINE_DESCRIPTION + '" and that prompt, change nothing else, and tell the person in one line: "' + UPDATE_TELL + '" One that is disabled: tell the person in one line that their weekly revision-insights routine is switched off, and ask whether to switch it back on.',
+    createStep(SETUP_TELL),
+    "If the scheduled-tasks tools are not in this session, say nothing about this; a later session will try again.",
+  ].join("\n");
 }
 
 /** The instruction the session gets, with <AGE> replaced. The wording is Opus-authored: place it, never edit it. */
@@ -173,20 +227,28 @@ function fastPath(env = process.env, now = Date.now()) {
   facts.skill = isFile(p.skillFile);
   if (!facts.skill) return null;
   facts.reviewHost = exists(p.reviewHostDir);
+  facts.sessionPass = isFile(p.sessionScript);
   const stamp = readJsonObject(p.stampFile, STAMP_MAX_BYTES);
+  const sessionStamp = facts.sessionPass ? readJsonObject(p.sessionStampFile, STAMP_MAX_BYTES) : null;
   const status = readJsonObject(p.statusFile, STATUS_MAX_BYTES) || {};
-  const d = decideNotice({ env, now, facts, stamp, record: status.revision_insights_notice });
+  const d = decideNotice({ env, now, facts, stamp, sessionStamp, record: status.revision_insights_notice });
   if (!d.show) return null;
-  // Claimed under plugin-sync.json's lock and checked again there, so two sessions starting together show it once.
+  // Claimed under plugin-sync.json's lock and checked again there, so two sessions starting together show it once. The
+  // check reads the clock again inside the lock. `now` was read before this session waited for the lock, so it can be
+  // older than the claim another session has just written, and that claim then looked like one from ahead of the clock
+  // and let a second notice through (2026-11-05: 2 notices in about 1 CI run in 6). The lock orders the two reads.
   let claimed = false;
-  updateStatus(p.hookDir, (current) => {
+  const recorded = updateStatus(p.hookDir, (current) => {
     const rec = current.revision_insights_notice && typeof current.revision_insights_notice === "object" ? current.revision_insights_notice : {};
-    if (!throttleAllows(rec, now)) return current;
+    const at = Date.now();
+    if (!throttleAllows(rec, at)) return current;
     claimed = true;
     const count = Number.isInteger(rec.count) && rec.count >= 0 ? rec.count + 1 : 1;
-    return Object.assign({}, current, { revision_insights_notice: { last_notice_at: new Date(now).toISOString(), count } });
+    return Object.assign({}, current, { revision_insights_notice: { last_notice_at: new Date(at).toISOString(), count } });
   });
-  return claimed ? noticeText(d.age) : null;
+  // A claim that never reached the file claims nothing: without this, every later session would show the notice too.
+  if (!claimed || !recorded) return null;
+  return facts.sessionPass ? sessionPassText(d.mode, d.age) : noticeText(d.age);
 }
 
 if (require.main === module) {
@@ -207,4 +269,7 @@ if (require.main === module) {
   }
 }
 
-module.exports = { NEVER_RAN, ageWords, decideNotice, envAllows, fastPath, noticeText, outputLine, paths, stampAge, throttleAllows };
+module.exports = {
+  NEVER_RAN, ROUTINE_PROMPT, SETUP_TELL, UPDATE_TELL, ageWords, decideNotice, envAllows, fastPath, noticeText, outputLine, paths,
+  sessionPassText, stampAge, throttleAllows,
+};

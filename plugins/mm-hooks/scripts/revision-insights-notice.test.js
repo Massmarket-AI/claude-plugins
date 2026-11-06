@@ -221,6 +221,26 @@ test("⛔ two sessions starting together show the notice once", async () => {
   }
 });
 
+// The race above, with the timing taken out: it needs no luck to fail. A session reads its clock, waits for the lock,
+// and finds a claim another session wrote in the meantime, whose time is later than the clock it read.
+test("⛔ a session that read its clock before another session's claim does not show the notice too", () => {
+  const home = makeHome();
+  const env = envFor(home);
+  const t = Date.now();
+  assert.equal(rin.fastPath(env, t), expected("has never run on this computer"));
+  assert.equal(rin.fastPath(env, t - 5), null, "its clock read 5 ms before the claim");
+  // Past the minute of slack the first look lets it through, so only the clock read inside the lock can hold it.
+  assert.equal(rin.fastPath(env, t - 5 * 60000), null, "its clock read 5 minutes before the claim");
+  assert.equal(statusOf(home).revision_insights_notice.count, 1, "one claim, one notice");
+});
+
+test("a claim that could not be written shows nothing: unrecorded, it would show again in every session", () => {
+  const home = makeHome();
+  fs.mkdirSync(path.join(hookDir(home), "plugin-sync.json")); // the replacing rename fails on a folder
+  assert.equal(rin.fastPath(envFor(home), Date.now()), null);
+  assert.equal(fs.existsSync(path.join(hookDir(home), "plugin-sync.json.lock")), false, "the lock is released");
+});
+
 // ───────────────────────────────────────────────────────────── plugin-sync.json
 
 test("a malformed plugin-sync.json does not crash it: the notice shows and the file is rewritten as an object", async () => {
@@ -301,7 +321,7 @@ test("stampAge and ageWords: the 9-day and 1-day-ahead boundaries, whole days ro
   assert.equal(rin.ageWords(-DAY - 1), "has never run on this computer", "more than a day ahead reads as no stamp");
 });
 
-test("throttleAllows: 20 hours, unreadable or ahead-of-clock records let it through", () => {
+test("throttleAllows: 20 hours, unreadable or more than a minute ahead of the clock let it through; a moment ahead holds it", () => {
   const now = Date.parse("2026-11-05T17:00:00.000Z");
   assert.equal(rin.throttleAllows(undefined, now), true);
   assert.equal(rin.throttleAllows("x", now), true);
@@ -310,13 +330,16 @@ test("throttleAllows: 20 hours, unreadable or ahead-of-clock records let it thro
   assert.equal(rin.throttleAllows({ last_notice_at: iso(now - 20 * HOUR + 1) }, now), false);
   assert.equal(rin.throttleAllows({ last_notice_at: iso(now - 20 * HOUR) }, now), true);
   assert.equal(rin.throttleAllows({ last_notice_at: iso(now + HOUR) }, now), true, "a clock moved back never holds it forever");
+  assert.equal(rin.throttleAllows({ last_notice_at: iso(now + 1) }, now), false, "1 ms ahead is another session's claim, not a moved clock");
+  assert.equal(rin.throttleAllows({ last_notice_at: iso(now + 60000) }, now), false, "a minute ahead still holds it");
+  assert.equal(rin.throttleAllows({ last_notice_at: iso(now + 60001) }, now), true, "past the minute it is a moved clock");
 });
 
 test("decideNotice: each gate, in order, with its reason", () => {
   const now = Date.parse("2026-11-05T17:00:00.000Z");
   const ok = { hookDir: true, skill: true, reviewHost: false };
   const d = (over) => rin.decideNotice(Object.assign({ env: {}, now, facts: ok, stamp: null }, over));
-  assert.deepEqual(d({}), { show: true, reason: "due", age: "has never run on this computer" });
+  assert.deepEqual(d({}), { show: true, reason: "due", age: "has never run on this computer", mode: "setup" });
   assert.equal(d({ env: { MM_REVISION_INSIGHTS_NOTICE: "off" } }).reason, "turned-off");
   assert.equal(d({ env: { MM_UNATTENDED: "1" } }).reason, "unattended");
   assert.equal(d({ env: { MM_UNATTENDED: "0" } }).show, true);
@@ -324,7 +347,7 @@ test("decideNotice: each gate, in order, with its reason", () => {
   assert.equal(d({ facts: Object.assign({}, ok, { skill: false }) }).reason, "no-skill");
   assert.equal(d({ facts: Object.assign({}, ok, { reviewHost: true }) }).reason, "review-host");
   assert.equal(d({ stamp: { last_run_at: iso(now - 2 * DAY) } }).reason, "fresh");
-  assert.deepEqual(d({ stamp: { last_run_at: iso(now - 10 * DAY) } }), { show: true, reason: "due", age: "last ran 10 days ago" });
+  assert.deepEqual(d({ stamp: { last_run_at: iso(now - 10 * DAY) } }), { show: true, reason: "due", age: "last ran 10 days ago", mode: "setup" });
   assert.equal(d({ record: { last_notice_at: iso(now - HOUR), count: 1 } }).reason, "throttled");
   assert.equal(d({ record: { last_notice_at: iso(now - 21 * HOUR), count: 1 } }).show, true);
 });
@@ -346,4 +369,56 @@ test("the step itself is fast: well under 200 ms in process", () => {
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
   assert.equal(text, expected("last ran 12 days ago"));
   assert.ok(ms < 200, `took ${ms.toFixed(1)} ms`);
+});
+
+// ── the session pass (mm-hooks 1.0.16) ──
+function addSessionPass(home, sessionStamp = null) {
+  const dir = path.join(home, ".claude", "skills", "revision-insights", "scripts");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "session_insights.mjs"), "// stand-in\n");
+  if (sessionStamp) fs.writeFileSync(path.join(hookDir(home), "session-insights.json"), JSON.stringify(sessionStamp));
+}
+
+test("session pass on disk, routine fresh, no session stamp: the UPDATE notice, once", async () => {
+  const home = makeHome({ stamp: { last_run_at: iso(Date.now() - 2 * DAY) } });
+  addSessionPass(home);
+  const r = await runHook(envFor(home));
+  const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+  assert.equal(ctx, rin.sessionPassText("update"));
+  assert.match(ctx, /update_scheduled_task with that taskId/);
+  assert.ok(ctx.includes(rin.ROUTINE_PROMPT) && ctx.includes(rin.UPDATE_TELL) && ctx.includes(rin.SETUP_TELL));
+  assert.equal((await runHook(envFor(home))).stdout, "", "throttled for 20 hours");
+});
+
+test("session pass on disk and its stamp written (on or off): nothing", async () => {
+  const home = makeHome({ stamp: { last_run_at: iso(Date.now() - 2 * DAY) } });
+  addSessionPass(home, { last_run_at: iso(Date.now()), result: "not_enabled" });
+  assert.equal((await runHook(envFor(home))).stdout, "");
+});
+
+test("session pass on disk, routine missing: the setup notice creates the routine with the three-step prompt", async () => {
+  const home = makeHome();
+  addSessionPass(home);
+  const ctx = JSON.parse((await runHook(envFor(home))).stdout).hookSpecificOutput.additionalContext;
+  assert.equal(ctx, rin.sessionPassText("setup", "has never run on this computer"));
+  assert.match(ctx, /create_scheduled_task with taskId "revision-insights"/);
+  assert.ok(ctx.includes(rin.ROUTINE_PROMPT));
+  assert.doesNotMatch(ctx, /run its extract_my_revisions\.mjs script once/);
+});
+
+test("decideNotice: update mode only with the session pass and no session stamp; Rob's Mac and headless still silent", () => {
+  const now = Date.parse("2026-11-05T17:00:00.000Z");
+  const fresh = { last_run_at: iso(now - 2 * DAY) };
+  const ok = { hookDir: true, skill: true, reviewHost: false, sessionPass: true };
+  const d = (over) => rin.decideNotice(Object.assign({ env: {}, now, facts: ok, stamp: fresh, sessionStamp: null }, over));
+  assert.deepEqual(d({}), { show: true, reason: "update", age: null, mode: "update" });
+  assert.equal(d({ sessionStamp: { last_run_at: iso(now) } }).reason, "fresh");
+  assert.equal(d({ facts: Object.assign({}, ok, { sessionPass: false }) }).reason, "fresh");
+  assert.equal(d({ facts: Object.assign({}, ok, { reviewHost: true }) }).reason, "review-host");
+  assert.equal(d({ env: { MM_UNATTENDED: "1" } }).reason, "unattended");
+  assert.equal(d({ stamp: null }).mode, "setup");
+});
+
+test("the authored routine prompt and the person-facing lines carry no double quotes inside the quoted text", () => {
+  for (const s of [rin.ROUTINE_PROMPT, rin.SETUP_TELL, rin.UPDATE_TELL]) assert.doesNotMatch(s, /"/);
 });
