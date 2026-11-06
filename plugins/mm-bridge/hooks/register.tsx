@@ -7,7 +7,7 @@ import {
   peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
   asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText, undatedOnly,
   hasDue, clientActivity, isRecent, mayStart,
-  pinsFor, pinTitle,
+  pinsFor, pinTitle, threadWhy,
   teamLate, teamLateCount, teamLateSegment, teamLateWho, LATE_WITH_TEAM,
   teamLateOnly,
   goOf, goMine, goOnly,
@@ -199,7 +199,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.24'
+export const VERSION = '0.7.25'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -3721,7 +3721,23 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
   const missing = needingThreads(last, links, now).length + awayOffList(last, links).length
   // In a waiting client's thread the line carries the button that opens its part of the pane.
   const mine = me ? ownerOf(me, links) : undefined
-  return mine && items.some(i => i.projectId === mine) ? { text, drafts: true, at: last.at, missing } : { text, at: last.at, missing }
+  const band: MmBand = mine && items.some(i => i.projectId === mine) ? { text, drafts: true, at: last.at, missing } : { text, at: last.at, missing }
+  // (0.7.25) and, in a client's own thread, why it is pinned or why no pin is needed
+  const why = mine && me ? await whyHere($, last, mine, me, now) : ''
+  return why ? { ...band, why } : band
+}
+
+/**
+ * (0.7.25, Rob asked about 52 times in six weeks why a thread was pinned or not) The band's `why` line in the thread linked
+ * to `pid`: the client as the last sync listed it (Needs you, With a teammate or checking), or clear, and the pin record
+ * the sync left on the thread (the person's own, or one the bridge put back over their unpin). From the store alone.
+ */
+async function whyHere($: EngineInterface, last: Last, pid: string, sid: string, now: number): Promise<string> {
+  const listed = [...last.items, ...(Array.isArray(last.teammate) ? last.teammate : []), ...(Array.isArray(last.checking) ? last.checking : [])].find(i => i && i.projectId === pid)
+  const record = (await storeGet<Record<string, Pin>>($, 'mm.pins', {}))[sid]
+  const pin = record && record.projectId === pid ? record : undefined
+  const client = listed?.client ?? pin?.client ?? clientInTitle((await storeGet<Record<string, string>>($, 'mm.titles', {}))[sid] ?? '')
+  return threadWhy(listed, client, now, { person: pin ? pin.byUs !== true : false, again: pin?.again === true })
 }
 
 /** Works the band's line out again and redraws it when it changed. */
@@ -3730,7 +3746,7 @@ async function refreshBand($: EngineInterface): Promise<void> {
     const band = await bandLine($)
     const { value: was } = await $.state.get(BAND)
     // (0.5.4) the sync it was drawn from is kept with it, so a thread can tell it is behind the store (`catchUp`)
-    if ((was?.text ?? '') !== band.text || Boolean(was?.drafts) !== Boolean(band.drafts) || was?.at !== band.at || (was?.missing ?? 0) !== (band.missing ?? 0)) await $.state.set(BAND, band)
+    if ((was?.text ?? '') !== band.text || Boolean(was?.drafts) !== Boolean(band.drafts) || was?.at !== band.at || (was?.missing ?? 0) !== (band.missing ?? 0) || (was?.why ?? '') !== (band.why ?? '')) await $.state.set(BAND, band)
   } catch {
     // the band is a convenience: it never breaks a sync or a command
   }
@@ -8588,7 +8604,7 @@ export const register: Register = on => {
     const { Box, Button, Text } = $.ui.resolve(e) as Partial<ReturnType<typeof $.ui.resolve>> & Pick<ReturnType<typeof $.ui.resolve>, 'Box' | 'Text'>
     const missing = Number(band?.missing) || 0
     // a surface that draws no button there says how to open the list instead
-    const line = !band?.text ? null : !Button ? (
+    const row = !band?.text ? null : !Button ? (
       <Text>{bandWords(band.text, false)}</Text>
     ) : (
       <Box flexDirection="row" gap={1}>
@@ -8601,6 +8617,14 @@ export const register: Register = on => {
         {band.drafts ? <Button key="mm-open-drafts" label="Drafts" onPress={() => void openDrafts($)} /> : null}
       </Box>
     )
+    // (0.7.25) in a client's own thread, why it is pinned or why no pin is needed, on its own line above the band
+    const why = row && typeof band?.why === 'string' && band.why ? <Text key="mm-why">{band.why}</Text> : null
+    const line = row && why ? (
+      <Box flexDirection="column">
+        {why}
+        {row}
+      </Box>
+    ) : row
     const suggest = asking && Array.isArray(nudge?.suggest) ? nudge.suggest.slice(0, 2) : []
     const ask = !asking ? null : (
       <Box key="mm-nudge" flexDirection="row" gap={1}>
