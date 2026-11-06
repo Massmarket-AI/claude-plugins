@@ -3,10 +3,10 @@ import { describe, expect, test } from 'claude-code/testing'
 import { fakeApp, mm, pid as appPid } from './fake-app.test-helper'
 import type { FakeThread } from './fake-app.test-helper'
 import {
-  NO_REPLY_WHAT, buildLists, clientInTitle, clockAndDue, draftsLine, fastState, keptPace, mayStart, needsYouNow, noDateGroup, paceOf, pastCutClients, pinReason, pinTitle, pinsFor, rowLine, shownDue, teamLate, threadTitleShort, threadWhy, titleFor, titleNames, waitingOnClient, withTeammate,
+  NO_REPLY_WHAT, afterPackage, buildLists, clientInTitle, clockAndDue, draftsLine, fastState, goWithMail, holdBanner, noReplyNow, noteText, owesNoReply, keptPace, mayStart, needsYouNow, noDateGroup, paceOf, pastCutClients, pinReason, pinTitle, pinsFor, rowLine, shownDue, teamLate, threadTitleShort, threadWhy, titleFor, titleNames, waitingOnClient, withTeammate,
 } from './queue'
 import type { Feed, FeedAsk, FeedDraft, FeedMail, FeedPace, FeedTicket, QueueItem } from './queue'
-import { autoUpdatable, kickoffText, pinReport, rowExtra, signatureOf, waitingText } from './threads'
+import { asksForPrep, autoUpdatable, draftsComing, kickoffText, pinReport, rowExtra, signatureOf, waitingText } from './threads'
 import { isBusinessTime } from './business-time'
 import { VERSION } from './register'
 
@@ -751,5 +751,161 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
     expect([plain.kind, plain.packageId]).toEqual(['reply', null])
     // and a package with drafts ready reads as it always did
     expect(titleFor(one(feed({ drafts: [pkg(1, { due_at: iso(NOW + 5 * H) })] })), NOW)).toBe(`🔴 5h left · ${ACME} · reply ready`)
+  })
+})
+
+// ⛔ (0.7.32) Since 2026-11-04 a client message that needs no reply still gets a reply package, with `reply_owed` false and
+// no client email or text, and a person's one go closes it (client-reply-prep §2b). BST Executive Search, 2026-11-06:
+// package bf68fd64 had been prepared for 9 hours when the kickoff said "no package exists yet, so run prep (§2) to build
+// one", and the band said no reply drafts were prepared. A thread that obeys that researches again or builds a second package.
+describe('0.7.32: an open package that owes no reply and has no draft reaches its thread as a package', () => {
+  const WHO = `${ACME} Jeff (OW project ${P(1)})`
+  const PKG = P(201)
+  const SHORT = PKG.slice(0, 8)
+  const STOP = 'Do not run prep and do not draft a reply. Send nothing without my go.'
+  const noReply = (over: Partial<FeedDraft> = {}): FeedDraft => pkg(1, { no_reply: true, drafts_ready: 0, drafts_unsent: 0, due_at: iso(NOW + 5 * H), ...over })
+  /** The client's message the package covers: `pkg` covers through two hours ago. */
+  const covered = (over: Partial<FeedMail> = {}): FeedMail => mail(1, NOW - 2 * H, { reply_due_at: iso(NOW + 20 * H), ...over })
+  /** What a thread is never told about such a package, whichever way it reaches it. */
+  const neverPrep = (text: string): void => {
+    for (const words of ['no package exists', 'so run prep', 'run prep first', 'run prep (§2)', 'Lane-2 is building', 'reply drafts', 'draft(s)', 'five-part']) expect(text).not.toContain(words)
+  }
+  /** Sent by itself or pressed, as the client's item or as an update of its thread. */
+  const everyKickoff = (it: QueueItem): string[] => [kickoffText(it), kickoffText(it, { auto: true }), kickoffText(it, { auto: true, wait: true }), kickoffText(it, { update: true }), kickoffText(it, { update: true, auto: true })]
+
+  test('the viewer\'s own, with no drafts and its message unanswered: the kickoff points at the page for that package, never at prep', () => {
+    const it = one(feed({ drafts: [noReply()], mail: [covered()] }))
+    expect([it.kind, it.packageId, it.messages, it.noReply]).toEqual(['ready', PKG, 1, true])
+    expect(asksForPrep(it)).toBe(false)
+    expect(draftsComing(it, NOW, undefined)).toBe(false)
+    expect(kickoffText(it)).toBe(`[mm-link ${P(1)}] ${WHO}: package ${SHORT} owes no reply and has no draft, and one go closes it. Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for package ${SHORT} and wait for me. ${STOP}`)
+    expect(kickoffText(it, { auto: true })).toBe(`[mm-link ${P(1)}] ${WHO}: package ${SHORT} owes no reply and has no draft, and one go closes it. Load the client's project skill first, then follow client-reply-prep §9 to show the one-package page for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. ${STOP}`)
+    for (const text of everyKickoff(it)) {
+      neverPrep(text)
+      expect(text).toContain(SHORT)
+      expect(text).toContain('client-reply-prep §9')
+    }
+  })
+
+  test('one the viewer holds: no count of drafts, and read again rather than built again', () => {
+    const it = one(feed({ drafts: [noReply({ status: 'picked_up', picked_up_by: ME, picked_up_at: iso(NOW - H) })], mail: [covered()] }))
+    expect(it.open?.state).toBe('held_by_me')
+    expect(kickoffText(it)).toBe(`[mm-link ${P(1)}] ${WHO}: I already picked up package ${SHORT}, which owes no reply and has no draft, and one go closes it. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the one-package page and wait for me. ${STOP}`)
+    for (const text of everyKickoff(it)) neverPrep(text)
+    expect(noteText(it, ME)).toBe(`Reply package ${SHORT} owes no reply, is already picked up by Builder A, the person in this session, and has no draft: one go closes it. The one-package page is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${PKG}; do not run prep.`)
+    expect(holdBanner(it)).toContain('No reply needed, one go closes it.')
+    expect(holdBanner(it)).not.toContain('draft')
+    expect(waitingText(it)).toBe(NO_REPLY_WHAT)
+  })
+
+  test('one a teammate holds, or a teammate\'s prepared one beside the viewer\'s own message: still a package, never prep', () => {
+    const held = one(feed({ drafts: [noReply({ status: 'picked_up', picked_up_by: ASIF })], mail: [covered()] }))
+    expect(held.open).toMatchObject({ state: 'held_by_other', by: 'Asif', noReply: true })
+    expect(owesNoReply(held)).toBe(true)
+    expect(asksForPrep(held)).toBe(false)
+    expect(kickoffText(held)).toBe(`[mm-link ${P(1)}] ${WHO}: package ${SHORT} owes no reply, and Asif holds it. Load the client's project skill first, then show me what the client sent and wait for me. ${STOP}`)
+    for (const text of everyKickoff(held)) neverPrep(text)
+    expect(noteText(held, ME)).toBe(`Reply package ${SHORT} owes no reply, and Asif holds it. There is nothing to draft: ask Asif before writing anything.`)
+    expect(draftsLine(held)).toBe('_No reply needed, and Asif holds this package. Ask Asif before writing anything._')
+    expect(waitingText(held)).toContain('no reply needed, with Asif')
+    expect(waitingText(held)).not.toContain('drafts')
+
+    const theirs = one(feed({ drafts: [noReply({ project_owner_email: ASIF })], mail: [covered()] }))
+    expect([theirs.packageId, theirs.open?.state, theirs.open?.noReply]).toEqual([null, 'prepared', true])
+    expect(asksForPrep(theirs)).toBe(false)
+    for (const text of everyKickoff(theirs)) {
+      neverPrep(text)
+      expect(text).toContain(SHORT)
+    }
+    expect(waitingText(theirs)).toContain(NO_REPLY_WHAT)
+    expect(waitingText(theirs)).not.toContain('drafts')
+  })
+
+  test('the band, the pane and the row say what §9.3 says, and never that no drafts are prepared', () => {
+    const it = one(feed({ drafts: [noReply()], mail: [covered()] }))
+    expect(noteText(it, ME)).toBe(`Reply package ${SHORT} owes no reply and has no draft: one go closes it. The one-package page is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${PKG}; do not run prep.`)
+    expect(draftsLine(it)).toBe(`_No reply needed, one go closes it. Ask Claude: "Show me the reply package for ${ACME}"._`)
+    // the message it covers is not waiting on a reply: §9.3's words alone
+    expect(waitingText(it)).toBe(NO_REPLY_WHAT)
+    expect(rowLine(it, NOW)).toBe(`🔴 ${ACME} · no reply needed, one go closes it · 5h left`)
+    expect(titleFor(it, NOW)).toBe(`🔴 5h left · ${ACME} · no reply needed, one go closes it`)
+  })
+
+  test('a client message after the package: it stops saying no reply is needed, and tells the thread to read it first', () => {
+    const it = one(feed({ drafts: [noReply()], mail: [covered(), mail(1, NOW - H, { reply_due_at: iso(NOW + 20 * H) })] }))
+    expect(afterPackage(it)).toBe(1)
+    expect(noReplyNow(it)).toBe(false)
+    expect(asksForPrep(it)).toBe(false)
+    expect(waitingText(it)).toBe('package says no reply, 1 message waiting')
+    expect(titleFor(it, NOW)).toBe(`🔴 5h left · ${ACME} · reply · 2 new`)
+    expect(kickoffText(it)).toContain(`package ${SHORT} owes no reply and has no draft, and one go closes it. 1 client message(s) arrived after it, so read them before it closes.`)
+    neverPrep(kickoffText(it))
+    expect(noteText(it, ME)).toContain('1 client message arrived after it: read it before anyone closes it.')
+    expect(draftsLine(it)).toBe(`_This package said no reply was needed, but the client wrote again after it. Ask Claude: "Show me the reply package for ${ACME}"._`)
+    // something new for the thread that has the package, unlike a change of words
+    expect(signatureOf(it)).not.toBe(signatureOf(one(feed({ drafts: [noReply()], mail: [covered()] }))))
+  })
+
+  test('a change of words updates nobody\'s thread: a signature reads as it did in 0.7.31', () => {
+    const OLD = `[mm-link ${P(1)}] Pick up the reply drafts for ${WHO}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${SHORT} and wait for me. Send nothing without my go.`
+    const first = (it: QueueItem): string => signatureOf(it).split('\n')[0] ?? ''
+    // the page's new name, on a package with drafts ready
+    const ready = one(feed({ drafts: [pkg(1, { due_at: iso(NOW + 5 * H) })], mail: [covered()] }))
+    expect(kickoffText(ready)).toContain('the one-package page')
+    expect(kickoffText(ready)).not.toContain('five-part')
+    expect(first(ready)).toBe(OLD)
+    // the new words for a package that owes no reply, prepared or held: the thread that has it is not sent it again
+    expect(first(one(feed({ drafts: [noReply()], mail: [covered()] })))).toBe(OLD)
+    expect(first(one(feed({ drafts: [noReply({ status: 'picked_up', picked_up_by: ME })], mail: [covered()] })))).toBe(OLD)
+    expect(first(one(feed({ drafts: [noReply({ status: 'picked_up', picked_up_by: ASIF })], mail: [covered()] })))).toBe(`[mm-link ${P(1)}] ${WHO}: Asif picked up the reply drafts (package ${SHORT}) and has 0 not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`)
+  })
+
+  test('a follow-ups-only package that covers the client\'s message is the client\'s package (Money Badger, 2026-11-06), never prep', () => {
+    const GO = P(301)
+    const GO_SHORT = GO.slice(0, 8)
+    /** The project row of a follow-ups-only package covering through an hour ago: `covered` came an hour before that. */
+    const project = (by: string, through: string | undefined = iso(NOW - H)) => ({ project_id: P(1), name: `${ACME} — Jeff`, followups: { active: 0, next_at: null, next_kind: null, awaiting_go: 3, go_package_id: GO, go_first_at: iso(NOW + 72 * H), go_first_kind: 'client_email', go_by: by, go_steps: 3, ...(through ? { go_covers_through: through } : {}) } })
+    const it = one(feed({ mail: [covered()], projects: [project(ME)] as Feed['projects'] }))
+    expect([it.kind, it.packageId, it.open, it.messages, it.go?.packageId]).toEqual(['reply', null, null, 1, GO])
+    expect(goWithMail(it)).toBe(true)
+    expect(asksForPrep(it)).toBe(false)
+    expect(draftsComing(it, NOW, undefined)).toBe(false)
+    const text = kickoffText(it)
+    expect(text.split(', the first')[0]).toBe(`[mm-link ${P(1)}] ${WHO} has 3 follow-up step(s) that nobody has approved, in package ${GO_SHORT}`)
+    expect(text.split(' ET. ').slice(1).join(' ET. ')).toBe(`It already covers the 1 client message(s) waiting, so do not run prep and do not build a second package. Nothing goes until I give the go. Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for package ${GO_SHORT} with every step in full and wait for me. Send nothing without my go.`)
+    // one paragraph about the package: not again as "also holds"
+    expect(text).not.toContain('also holds')
+    for (const sent of [kickoffText(it, { auto: true }), kickoffText(it, { auto: true, wait: true })]) expect(sent).toBe(text)
+    expect(text).not.toContain('no package exists')
+    expect(noteText(it, ME).startsWith('1 client message waiting on our reply and 0 committed tasks due; the package named next covers it, so there is no reply to prepare. Package ')).toBe(true)
+    expect(noteText(it, ME)).not.toContain('no reply drafts are prepared')
+    expect(draftsLine(it)).toBe(`_Package ${GO_SHORT} covers the client's message and holds follow-up steps, with no reply drafts. Ask Claude: "Show me the follow-ups for ${ACME}"._`)
+    expect(waitingText(it)).toBe('3 follow-ups need your go')
+    expect(titleFor(it, NOW).split(' · ').slice(1, 3)).toEqual([ACME, 'follow-ups need your go'])
+
+    // a teammate's go, for the PM: shown, not taken and not approved
+    const pm = one(feed({ role: 'pm', mail: [covered()], projects: [project(ASIF)] as Feed['projects'] }))
+    expect(goWithMail(pm)).toBe(true)
+    expect(asksForPrep(pm)).toBe(false)
+    expect(kickoffText(pm)).toContain(`It already covers the 1 client message(s) waiting, so do not run prep and do not build a second package. Load the client's project skill first`)
+    expect(kickoffText(pm)).toContain(`do not take it and do not approve it: the go is Asif's.`)
+    expect(kickoffText(pm)).not.toContain('no package exists')
+
+    // with no message beside them the kickoff is as it was, in the page's new name
+    const alone = one(feed({ projects: [project(ME)] as Feed['projects'] }))
+    expect(kickoffText(alone)).not.toContain('do not run prep')
+    expect(kickoffText(alone)).toContain('the one-package page')
+    // ⛔ a message after what the package covers is new: it gets a package of its own, so the reply leads and prep is right
+    const newer = one(feed({ mail: [mail(1, NOW - 0.5 * H, { reply_due_at: iso(NOW + 20 * H) })], projects: [project(ME)] as Feed['projects'] }))
+    expect(goWithMail(newer)).toBe(false)
+    expect(asksForPrep(newer)).toBe(true)
+    expect(kickoffText(newer)).toContain('no package exists yet, so run prep first')
+    // ⛔ and so it does when the feed does not say what the package covers, and with no package at all
+    const unsaid = one(feed({ mail: [covered()], projects: [{ ...project(ME), followups: { ...project(ME).followups, go_covers_through: null } }] as Feed['projects'] }))
+    expect(goWithMail(unsaid)).toBe(false)
+    expect(asksForPrep(unsaid)).toBe(true)
+    const none = one(feed({ mail: [covered()] }))
+    expect(asksForPrep(none)).toBe(true)
+    expect(kickoffText(none)).toContain('no package exists yet, so run prep first')
   })
 })
