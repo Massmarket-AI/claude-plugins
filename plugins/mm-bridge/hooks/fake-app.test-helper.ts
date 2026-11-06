@@ -173,6 +173,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           if (feedStatus !== 200 && url.includes('/closeout')) return { status: feedStatus, ok: false, headers: {}, text: 'unavailable' }
           // (0.6.0) an OW without the time routes yet
           if (url.includes('/skill-map') || url.includes('/client-time')) return { status: 404, ok: false, headers: {}, text: '{"error":"not_found"}' }
+          // (0.7.23) an OW without the pin report's route yet
+          if (url.endsWith('/bridge-pins')) return { status: 404, ok: false, headers: {}, text: '{"error":"not_found"}' }
           return { status: 200, ok: true, headers: {}, text: JSON.stringify(url.includes('/reply-package') ? { markdown: '## A client\n\n1. What the client sent' } : feed) }
         },
       },

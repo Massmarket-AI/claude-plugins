@@ -8,7 +8,8 @@ import {
   asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText, undatedOnly,
   hasDue, clientActivity, isRecent, mayStart,
   pinsFor, pinTitle,
-  lateOnly, teamLate, teamLateCount, teamLateSegment, teamLateWho, LATE_WITH_TEAM,
+  teamLate, teamLateCount, teamLateSegment, teamLateWho, LATE_WITH_TEAM,
+  teamLateOnly,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
@@ -20,9 +21,10 @@ import {
   teamCount, teamHeading, teamOf, teamPane, teamPerson,
   START_ALL_MAX, startAllKickoff, startAllLabel, startMissingLabel, AWAY_REASON, ownThreads, START_ALL_WORDS, startWords, startFillSaid, kickoffsAnswer,
   ARCHIVED_REASON, KICKOFF_PENDING_MS,
+  lookupOrder, pinReport,
   awayBandText, awayButton, awayHandoverText, awayPromptLine, awaySorted, carryKickoff, switchPromptLine, transcriptPath,
 } from './threads'
-import type { AppThread, AwayClient, Fold, Kickoff, Pairs, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
+import type { AppThread, AwayClient, Fold, Kickoff, LookupSeen, Pairs, PinReport, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
 import {
   INTERNAL_NAME, INTERNAL_NOTE, NUDGE_AFTER, NUDGE_INTERNAL, NUDGE_NONE, NUDGE_TEXT, SKILL_KEY, afterPersonClose, clientName, displayName, kindOf, mergeCurrent, mergeTime, opensBySelf,
   parseClientTime, parseSkillMap, pressNote, secondLine, skillName, taskFrom, thisThread, titleForClaude, trackLabel, trackLines, trackStatus, weekIsDue,
@@ -196,7 +198,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.21'
+export const VERSION = '0.7.23'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -261,6 +263,12 @@ const SESSION_ID = /^[A-Za-z0-9_-]{1,100}$/
 // feed's threads (the last 14 days) stop listing its thread. Its record keeps `miss` (always 0) for older versions.
 /** The most threads asked for by id in one sync: linked or pinned threads the app's list (its 60 most recent) left out. */
 const LOOKUPS_PER_SYNC = 10
+/** (0.7.23) The most threads `mm.lookups` keeps a record of (when each was last asked for by id). */
+const LOOKUPS_SEEN_MAX = 1000
+/** (0.7.23) An unchanged pin report goes to OW again after this long; a changed one at the next sync. Real minutes. */
+const PIN_REPORT_EVERY_MS = 30 * 60_000
+/** (0.7.23) After OW answers 404 or 405 for the pin report (the route is not deployed yet), the bridge waits this long. */
+const PIN_REPORT_MISSING_MS = 6 * 3_600_000
 /**
  * (0.7.20) The most threads past the app's list one sync asks for by id to find a missing client's thread here by the
  * bridge's name for it (`namedBeyond`), apart from LOOKUPS_PER_SYNC. Each is a local call that answers at once; what was
@@ -1871,7 +1879,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     await storeLast($, feed, last)
     const rowsOf = (list: readonly QueueItem[], needsYou = false): Row[] => list.map(it => rowFor(it, recs[it.projectId] as Recommendation, now, { needsYou }))
     // (0.7.21) a client listed by the founder's teammates' late tickets alone is Team · late's, not With a teammate's
-    await showQueue($, member, items, rowsOf(items, true), last.pinned, now, { teammate: rowsOf(lists.teammate.filter(it => !lateOnly(it))), checking: rowsOf(checking), team: teamPane([...items, ...quiet, ...checking], now) }, now, last)
+    await showQueue($, member, items, rowsOf(items, true), last.pinned, now, { teammate: rowsOf(lists.teammate.filter(it => !teamLateOnly(it))), checking: rowsOf(checking), team: teamPane([...items, ...quiet, ...checking], now) }, now, last)
     // (0.6.0) a terminal session's own current project, by the feed's rows for its session: no thread is touched
     if (!known) await currentPass($, { now, links: {}, was: {}, moved: [], live, gone: new Set(), feedThreads, pairs: {}, complete: false, lookups: LOOKUPS_PER_SYNC }).catch(() => {})
     return { last, live, pairs: known ?? {}, listed: false, unseen: new Set() }
@@ -1934,7 +1942,27 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   const records = recordReader($, now, me)
   /** The threads this pass has asked the app for by id: at most LOOKUPS_PER_SYNC. */
   let asked = 0
-  const missing = [...new Set([...Object.values(links), ...Object.keys(pins), ...released])].filter(sid => !live.has(sid))
+  // ⛔ (0.7.23, measured on Rob's computer 2026-11-05: 107 linked or pinned threads past the app's list, asked in link order,
+  // so the same first 10 were asked every sync and the rest stayed `unseen` for good; a thread the bridge pinned in 0.7.20
+  // sat 29th and kept its pin and its old `check on <teammate>` name after 0.7.21) They are asked in `lookupOrder`'s order:
+  // a thread whose pin record is the bridge's first, unless a lookup since found it not pinned, then every other one, the
+  // one asked longest ago first. Still at most LOOKUPS_PER_SYNC in all; what each answer means is unchanged.
+  /** (0.7.23) The threads in play here: what `mm.lookups` keeps a record for. */
+  const tracked = new Set([...Object.values(links), ...Object.keys(pins), ...released])
+  const lookedUp = await storeGet<Record<string, LookupSeen>>($, 'mm.lookups', {})
+  /** (0.7.23) The record of each thread this pass asked the app for. */
+  const askedNow: Record<string, LookupSeen> = {}
+  const missing = lookupOrder([...tracked].filter(sid => !live.has(sid)), sid => pins[sid]?.byUs === true, lookedUp && typeof lookedUp === 'object' ? lookedUp : {})
+  /** (0.7.23) The app asked for one thread by id, within the sync's lookups, and what it answered on record. */
+  const lookUp = async (sid: string): Promise<AppThread | 'archived' | 'notfound' | 'unknown'> => {
+    if (asked >= LOOKUPS_PER_SYNC) return 'unknown'
+    asked++
+    const found = await askApp($, sid)
+    // a thread whose pin record is ours, shown open and not pinned: its record no longer goes first
+    const off = typeof found === 'object' && pins[sid]?.byUs === true && found.pinned !== true
+    askedNow[sid] = { at: now, ...(off ? { off: true as const } : {}) }
+    return found
+  }
   for (const sid of missing) {
     // a thread whose record is only in another profile's folder: its record says, and the app is not asked
     const there = await records.elsewhere(sid)
@@ -1948,7 +1976,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       else unseen.add(sid)
       continue
     }
-    const found = asked < LOOKUPS_PER_SYNC ? (asked++, await askApp($, sid)) : 'unknown'
+    const found = await lookUp(sid)
     if (found === 'unknown') unseen.add(sid)
     else if (found === 'notfound') {
       notHere.add(sid)
@@ -1962,6 +1990,27 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       archivedHere.add(sid)
     } else unseen.add(sid)
   }
+  // (0.7.23) when each thread was asked, over a fresh copy: a record of a thread no longer linked, pinned or released goes,
+  // and a thread seen pinned again goes first again once it falls off the list. A write refused here costs only the order.
+  await patchStore<Record<string, LookupSeen>>($, 'mm.lookups', {}, fresh => {
+    let changed = false
+    for (const [sid, seen] of Object.entries(askedNow)) {
+      delete fresh[sid]
+      fresh[sid] = seen
+      changed = true
+    }
+    for (const [sid, seen] of Object.entries(fresh)) {
+      if (!tracked.has(sid) || !seen || typeof seen !== 'object') {
+        delete fresh[sid]
+        changed = true
+      } else if (seen.off && !(sid in askedNow) && live.get(sid)?.pinned === true) {
+        fresh[sid] = { at: Number(seen.at) || 0 }
+        changed = true
+      }
+    }
+    if (!changed) return false
+    capped(fresh, LOOKUPS_SEEN_MAX)
+  }).catch(err => noteFailure($, 'the record of lookups', err))
   const pairs = known ?? (await allPairs($, now, live, feedThreads))
 
   // A link to a thread that is gone, or that the person unlinked (a sync in another thread may have written
@@ -2619,9 +2668,14 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     const fast = fastState(it, now)
     if (sid && live.has(sid) && !named.has(sid) && fast) named.set(sid, { it, unpin: unpinFor(it, 'any'), title: checkingTitle(it.client, fast.at, now) })
   }
+  /** (0.7.23) The threads named here because the person's unpin stands: what the pin report calls `person_unpinned`. */
+  const stayedOff = new Set<string>()
   for (const it of [...items, ...quiet]) {
     const sid = links[it.projectId]
-    if (sid && live.has(sid) && !named.has(sid) && staysOff(sid, it)) named.set(sid, { it, unpin: false, title: threadTitle(it, now) })
+    if (sid && live.has(sid) && !named.has(sid) && staysOff(sid, it)) {
+      named.set(sid, { it, unpin: false, title: threadTitle(it, now) })
+      stayedOff.add(sid)
+    }
   }
   // (0.7.18) a client whose drafts or tickets a teammate has pins once the PM should check on them (`pinsFor`: late, or
   // within PM_CHECK_AHEAD_MS); named and never pinned until then, as before. ⛔ (0.7.21) For the founder, never: such a
@@ -2719,8 +2773,11 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     delete pins[sid]
   }
 
+  /** (0.7.23) The threads this pass wanted pinned and had no writes left for: the pin report's `write_cap`. */
+  const outOfWrites = new Set<string>()
   for (const [sid, it] of want) {
     const s = live.get(sid)
+    if (s && writes >= MAX_WRITES) outOfWrites.add(sid)
     if (!s || writes >= MAX_WRITES) continue
     // The record first, as the thread stands (a pin the person put on stays theirs), so a failed rename
     // leaves a record to give the name back by; then, just before we pin it, the record that the pin is
@@ -2903,11 +2960,12 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   }
   const rows = items.map(it => rowOf(it, true))
   // (R8, Opus decision 2) a client being checked is under `Checking your reply`, with a recommendation on record
+  // (0.7.23) and so is one listed by a teammate's late package flagged for his OK alone (`okLateOnly`, `teamLateOnly`)
   // (0.7.21) a client listed by the founder's teammates' late tickets alone (`lateOnly`) keeps its recommendation, and is
   // drawn under Team · late alone, never under With a teammate; Team · late holds every late ticket of theirs, whichever
   // client's item carries it
   const mateRows = lists.teammate.map(it => ({ it, row: rowOf(it) }))
-  const folds = { teammate: mateRows.filter(m => !lateOnly(m.it)).map(m => m.row), checking: checking.map(it => rowOf(it)), team: teamPane([...items, ...quiet, ...checking], now) }
+  const folds = { teammate: mateRows.filter(m => !teamLateOnly(m.it)).map(m => m.row), checking: checking.map(it => rowOf(it)), team: teamPane([...items, ...quiet, ...checking], now) }
 
   await patchStore<string[]>($, 'mm.released', [], fresh => applyListChanges(fresh, was.released, waiting))
 
@@ -2915,6 +2973,27 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // pinned once the pass is done: what the sidebar shows, never a pin record, and never a thread of another profile
   const pinnedHere = new Set(Object.values(links).filter(sid => live.get(sid)?.pinned === true && !gone.has(sid))).size
   const last: Last = { at: now, member, items, ...also, pinned: pinnedHere, recs, projects, ...newPeople }
+  // (0.7.23, Rob 2026-11-05: "it should be everything that should be pinned, and there should be another indicator, like a
+  // green light beside it, to show if it is or not.") What should be pinned and whether it is, once the pass is done: sent to
+  // OW for the team's daily "Pins by person" image after everything else of this pass (`sendPinReport`). ⛔ Built from what
+  // the pass already holds: no app call, no write, and a failure here costs the report alone.
+  let report: PinReport | undefined
+  try {
+    const listedNow = [...items, ...quiet, ...checking]
+    report = pinReport({
+      now,
+      listed: listedNow,
+      links,
+      thread: sid => (gone.has(sid) ? undefined : live.get(sid)),
+      hidden: sid => unseen.has(sid) || away.has(sid),
+      stayedOff,
+      capped: outOfWrites,
+      byUs: sid => pins[sid]?.byUs === true,
+      client: (pid, sid) => listedNow.find(i => i.projectId === pid)?.client ?? pins[sid]?.client,
+    })
+  } catch {
+    report = undefined
+  }
   // ⛔ What this pass changed, and nothing else: a link, a pin, a name or a record another session wrote
   // while it ran is the store's, and stays. (A map the store does not hold yet is written, empty or not, as
   // a sync always left these five.)
@@ -3063,6 +3142,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     await $.store.set('mm.profile', { dir: own, since: now, ...from }).catch(() => undefined)
   }
   await showQueue($, member, items, rows, last.pinned, now, folds, now, last)
+  // (0.7.23) the pin report last, once every pin, name and record of this pass is written and the pane is drawn
+  if (report) await sendPinReport($, report, now)
   return { last, live, pairs, listed: true, unseen }
 }
 
@@ -3251,8 +3332,9 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
   const teammate = list(last.teammate)
   const checking = list(last.checking)
   // (0.7.21) Team · late from what that sync stored, worded at its moment too; its `lateOnly` clients are drawn there alone
+  // ((0.7.23) and its `okLateOnly` ones)
   const team = teamPane([...items, ...teammate, ...checking], at)
-  await showQueue($, memberText(last.member), items, rowsOf(items, true), Number(last.pinned) || 0, now, { teammate: rowsOf(teammate.filter(it => !lateOnly(it))), checking: rowsOf(checking), team }, at, last)
+  await showQueue($, memberText(last.member), items, rowsOf(items, true), Number(last.pinned) || 0, now, { teammate: rowsOf(teammate.filter(it => !teamLateOnly(it))), checking: rowsOf(checking), team }, at, last)
 }
 
 /** The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that waits for his OK. */
@@ -7251,6 +7333,39 @@ const KNOWN_SKILLS: Readonly<Record<string, Omit<SkillEntry, 'skill_key'>>> = {
 }
 
 const authHeaders = async ($: EngineInterface): Promise<Record<string, string>> => ({ Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER })
+
+/** (0.7.23) What the bridge keeps of the pin reports it sent (`mm.pinReport`): the last one's hash and when, and how long OW said it has no such route. */
+type PinReportSent = { hash?: string; at?: number; missingUntil?: number }
+
+/**
+ * (0.7.23, Rob 2026-11-05: "it should be everything that should be pinned, and there should be another indicator, like a
+ * green light beside it, to show if it is or not.") The sync's pin report to OW (`POST /api/ext/bridge-pins`, `pinReport`),
+ * for the team's daily "Pins by person" image. Sent only when it differs from the last one sent (its hash, without `at`), or
+ * PIN_REPORT_EVERY_MS after that one; at most once a sync. A 404 or 405 (an OW without the route yet) is not asked again for
+ * PIN_REPORT_MISSING_MS; any other failure, or no answer within APP_WAIT_MS, is tried again at the next sync. ⛔ Never throws
+ * into the sync, and the report is never logged or noted anywhere: it goes to OW alone.
+ */
+async function sendPinReport($: EngineInterface, report: PinReport, now: number): Promise<void> {
+  try {
+    const kept = await storeGet<unknown>($, 'mm.pinReport', {})
+    const was: PinReportSent = kept && typeof kept === 'object' && !Array.isArray(kept) ? (kept as PinReportSent) : {}
+    if (Number(was.missingUntil) > now) return
+    const hash = sigHash(JSON.stringify({ items: report.items, extra: report.extra }))
+    if (was.hash === hash && now - (Number(was.at) || 0) < PIN_REPORT_EVERY_MS) return
+    const body = JSON.stringify(report)
+    const asked = await within($, $.http.fetch(`${EXT}/bridge-pins`, { method: 'POST', headers: { ...(await authHeaders($)), 'Content-Type': 'application/json' }, body }))
+    if (!asked.ok) return
+    const status = asked.value.status
+    if (status === 404 || status === 405) {
+      await $.store.set('mm.pinReport', { ...(was.hash ? { hash: was.hash, at: was.at } : {}), missingUntil: now + PIN_REPORT_MISSING_MS } satisfies PinReportSent)
+      return
+    }
+    if (status < 200 || status >= 300) return
+    await $.store.set('mm.pinReport', { hash, at: now } satisfies PinReportSent)
+  } catch {
+    // the next sync tries again; nothing of the report is kept or noted
+  }
+}
 
 /**
  * (0.6.0) OW's skill map read into `mm.skills` (`GET /api/ext/skill-map`): which project each skill counts time to. A

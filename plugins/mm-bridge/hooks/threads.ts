@@ -20,7 +20,7 @@ import type { MmRow, MmTeam } from '../types'
 
 import {
   MAY_NEED_OK, NOBODY, assignAsksOf, assignOnly, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, committedCount, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
-  pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
+  checkNow, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
   TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine,
 } from './queue'
 import type { AskRef, FeedThread, QueueItem } from './queue'
@@ -1779,4 +1779,124 @@ export function bandText(f: BandFacts): string {
     out.push(tail ? `${tail.replace(/\.$/, '')} · ${newer}` : newer)
   }
   return out.join(' ')
+}
+
+// ---------------------------------------------------------------- 0.7.23: lookups past the app's list, and the pin report
+
+/**
+ * (0.7.23) What the sync keeps of each linked or pinned thread it asked the app for by id because the app's list left it
+ * out (`mm.lookups`): when it last asked (`at`), and (`off`) that the app showed that thread open and not pinned while its
+ * pin record said the pin was the bridge's.
+ */
+export type LookupSeen = { at: number; off?: true }
+
+/**
+ * (0.7.23) The order the sync asks the app, by id, for the linked or pinned threads its list of the 60 most recent left out
+ * (at most LOOKUPS_PER_SYNC of them a sync). Measured on Rob's computer on 2026-11-05: 107 such threads, asked in the same
+ * order every sync (links first, then pin records, then released threads), so the same 10 were asked each time and the rest
+ * never were; a thread the bridge pinned in 0.7.20 sat 29th, so it kept its pin and its old `check on <teammate>` name after
+ * 0.7.21 should have taken both off. Now the threads whose pin record is the bridge's (`ours`) go first, unless a lookup
+ * since found them not pinned (`off`: such a record no longer counts as a bridge pin here, so stale records cannot take every
+ * lookup); then every other one. Within each, the one asked longest ago first (never asked first), then the order they came
+ * in: round-robin, so every thread is asked within a few syncs and none waits for good.
+ */
+export function lookupOrder(missing: readonly string[], ours: (sid: string) => boolean, seen: Readonly<Record<string, LookupSeen>>): string[] {
+  const at = (sid: string): number => {
+    const s = seen[sid]
+    return s && typeof s === 'object' && Number.isFinite(s.at) ? s.at : 0
+  }
+  const first = (sid: string): boolean => ours(sid) && (seen[sid] as Partial<LookupSeen> | undefined)?.off !== true
+  return missing
+    .map((sid, i) => ({ sid, i, rank: first(sid) ? 0 : 1, at: at(sid) }))
+    .sort((a, b) => a.rank - b.rank || a.at - b.at || a.i - b.i)
+    .map(x => x.sid)
+}
+
+/** (0.7.23) Why a client that should be pinned is not, as the pin report says it. */
+export type PinWhyNot = 'no_thread' | 'unseen' | 'person_unpinned' | 'write_cap' | 'unknown'
+
+/** (0.7.23) One client in the pin report: one that should be pinned (R1, `pinsFor`), and whether it is. */
+export type PinReportItem = {
+  project_id: string
+  client: string
+  kind: string
+  tone: 'red' | 'yellow'
+  due_at: string | null
+  pinned: boolean
+  why_not: PinWhyNot | null
+}
+
+/** (0.7.23) A client thread that is pinned though its client is not in the report's items: who pinned it. */
+export type PinReportExtra = { project_id: string | null; client: string | null; by: 'bridge' | 'person' }
+
+/** (0.7.23) The pin report, exactly as OW's `POST /api/ext/bridge-pins` takes it. */
+export type PinReport = { at: string; items: PinReportItem[]; extra: PinReportExtra[] }
+
+/** (0.7.23) The most items and extra rows a report carries: past that it is trimmed, never refused. */
+export const PIN_REPORT_ITEMS_MAX = 200
+export const PIN_REPORT_EXTRA_MAX = 100
+
+/** (0.7.23) A text cut to `max` characters (by code point), as the report's contract caps its strings. */
+const capText = (text: string, max: number): string => [...text].slice(0, max).join('')
+
+/**
+ * (0.7.23, Rob 2026-11-05, for the team's daily "Pins by person" image: "it should be everything that should be pinned, and
+ * there should be another indicator, like a green light beside it, to show if it is or not.") What one sync reports to OW
+ * after its pin pass. `items`: every client on the person's lists (the Needs-you list, then With a teammate, then Checking
+ * your reply; a client once, the first wins) that should be pinned by R1's test (`pinsFor`), with whether its linked thread
+ * is pinned once the pass is done and, when not, why: `no_thread` (no link), `unseen` (its thread could not be seen this
+ * sync: `unseen` or `away`), `person_unpinned` (the person's unpin stands: `staysOff`), `write_cap` (the pass wanted it pinned
+ * but had no writes left, MAX_WRITES), else `unknown`. `tone` is red once the clock its thread's name shows is past, and
+ * `due_at` that clock. `extra`: the client threads pinned once the pass is done whose client is not in `items`, and whether
+ * the pin is the bridge's or the person's; never a thread linked to no client (the person's own). ⛔ Pure: it reads only what
+ * it is given.
+ */
+export function pinReport(o: {
+  now: number
+  listed: readonly QueueItem[]
+  links: Readonly<Record<string, string>>
+  thread: (sid: string) => AppThread | undefined
+  hidden: (sid: string) => boolean
+  stayedOff: ReadonlySet<string>
+  capped: ReadonlySet<string>
+  byUs: (sid: string) => boolean
+  client: (projectId: string, sid: string) => string | undefined
+}): PinReport {
+  const seen = new Set<string>()
+  const items: PinReportItem[] = []
+  for (const it of o.listed) {
+    if (!it || typeof it !== 'object' || seen.has(it.projectId)) continue
+    seen.add(it.projectId)
+    if (!pinsFor(it, o.now)) continue
+    const sid = o.links[it.projectId]
+    const s = sid ? o.thread(sid) : undefined
+    const pinned = s?.pinned === true
+    const whyNot: PinWhyNot | null = pinned
+      ? null
+      : !sid
+        ? 'no_thread'
+        : !s
+          ? o.hidden(sid) ? 'unseen' : 'unknown'
+          : o.stayedOff.has(sid) ? 'person_unpinned' : o.capped.has(sid) ? 'write_cap' : 'unknown'
+    // the clock its thread's name shows (`pinTitle`): a teammate's part to check on (the PM's), else the client's due time
+    const c = ownPins(it, o.now) ? null : checkNow(it, o.now)
+    const at = c ? c.due : hasDue(it) ? it.dueAt : NaN
+    items.push({
+      project_id: it.projectId,
+      client: capText(cleanText(it.client, 80), 80),
+      kind: capText(String(it.kind ?? ''), 16),
+      tone: Number.isFinite(at) && at <= o.now ? 'red' : 'yellow',
+      due_at: Number.isFinite(at) ? new Date(at).toISOString() : null,
+      pinned,
+      why_not: whyNot,
+    })
+  }
+  const inItems = new Set(items.map(i => i.project_id))
+  const extra: PinReportExtra[] = []
+  for (const [pid, sid] of Object.entries(o.links)) {
+    if (inItems.has(pid) || o.thread(sid)?.pinned !== true) continue
+    const name = cleanText(o.client(pid, sid) ?? '', 80)
+    extra.push({ project_id: isUuid(pid) ? pid : null, client: name ? capText(name, 80) : null, by: o.byUs(sid) ? 'bridge' : 'person' })
+  }
+  return { at: new Date(o.now).toISOString(), items: items.slice(0, PIN_REPORT_ITEMS_MAX), extra: extra.slice(0, PIN_REPORT_EXTRA_MAX) }
 }
