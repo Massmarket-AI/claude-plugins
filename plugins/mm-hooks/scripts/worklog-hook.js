@@ -36,6 +36,10 @@
  * the mm-hooks plugin registers, runs the required-skill check before a client
  * reply, a quote, a voice render or a lead room (SAME SETUP AS ROB).
  *
+ * The send gate's sha (0.12.1, 2026-11-05): the setup report undoes the
+ * installer's note and pins before hashing, so a current copy matches main
+ * (gateBytesAsOnMain).
+ *
  * Turn origin (0.11.5, 2026-10-12): every worklog POST also says who started the
  * work it belongs to, `person` or `auto`, read from the stamp Claude Code writes
  * on the turn's opening entry in the session's transcript. A turn the system
@@ -165,7 +169,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.12.0";
+const HOOK_VERSION = "0.12.1";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -8787,7 +8791,30 @@ function commandFile(command, fileName) {
   return m[1].replace(/^(~|\$HOME|\$\{HOME\}|%USERPROFILE%|\$env:USERPROFILE)/, os.homedir());
 }
 
-/** One gate: registered under which events, and the sha of the file it runs. */
+/**
+ * A gate's bytes as main has them (0.12.1). The control tower's
+ * scripts/install-send-gate.sh makes the copy the hook runs by adding a 3-line
+ * note after the shebang and pinning two lookups of the control tower to the
+ * checkout's folder. OW compares what this reports with the checkout's own file,
+ * so even a current copy could never match, and every tower machine was told its
+ * send gate was out of date. This undoes exactly those two edits, reading the
+ * folder from the note. Any other difference stays: a stale or hand-edited copy
+ * still reports a different sha, and if the installer's note ever changes the
+ * copy is flagged rather than passed.
+ */
+const INSTALLED_GATE_NOTE =
+  /^(#![^\n]*\n)?\/\/ INSTALLED COPY of global-config\/hooks\/send-gate\.js in ([^\n]+), made by scripts\/install-send-gate\.sh\.\n\/\/ Never edit it: [^\n]*\n\/\/ "the control tower's own" [^\n]*\n/;
+
+function gateBytesAsOnMain(buf) {
+  const text = buf.toString("utf8");
+  const m = INSTALLED_GATE_NOTE.exec(text);
+  if (!m) return buf;
+  const pinned = `path.resolve(${JSON.stringify(m[2])}, `;
+  const body = text.slice(m[0].length).split(pinned).join("path.resolve(__dirname, '..', '..', ");
+  return Buffer.from((m[1] || "") + body, "utf8");
+}
+
+/** One gate: registered under which events, and the sha of the file it runs, as main would have it. */
 function gateState(commands, fileName) {
   const rec = { registered: [], present: false, sha: null };
   let file = null;
@@ -8803,7 +8830,7 @@ function gateState(commands, fileName) {
       const st = fs.statSync(file);
       if (st.isFile() && st.size <= 8 * 1024 * 1024) {
         rec.present = true;
-        rec.sha = sha256Hex(fs.readFileSync(file));
+        rec.sha = sha256Hex(gateBytesAsOnMain(fs.readFileSync(file)));
       }
     } catch {
       /* registered, file gone */
