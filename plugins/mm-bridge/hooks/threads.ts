@@ -16,10 +16,13 @@
 // session or title matched it: it is not linked to a second, and it is never the thread Update acts on
 // for a second (`ownerOf`).
 
-import type { MmRow } from '../types'
+import type { MmRow, MmTeam } from '../types'
 
 import {
-  MAY_NEED_OK, NOBODY, assignAsksOf, assignOnly, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, committedCount, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate, goOf, goOnly, stepWord,
+  MAY_NEED_OK, NOBODY, assignAsksOf, assignOnly, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, committedCount, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
+  pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
+  TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine,
+  goOf, goOnly, stepWord,
 } from './queue'
 import type { AskRef, FeedThread, QueueItem } from './queue'
 
@@ -729,7 +732,7 @@ export function waitingText(it: QueueItem): string {
     owners > 0 ? `${owners} need${owners > 1 ? '' : 's'} an owner` : '',
     nodate > 0 ? `${nodate} task${nodate > 1 ? 's' : ''} with no date` : '',
   ]
-  // (0.7.21) follow-up steps that wait for a go: `3 follow-ups need your go` (a teammate's: `3 follow-ups need Asif's go`)
+  // (0.7.22) follow-up steps that wait for a go: `3 follow-ups need your go` (a teammate's: `3 follow-ups need Asif's go`)
   const g = goOf(it)
   const go = g ? `${g.steps} follow-up${g.steps > 1 ? 's' : ''} need${g.steps > 1 ? '' : 's'} ${g.mine ? 'your' : `${g.by}'s`} go` : ''
   const parts = [ok, it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', ...tasks, drafts, go]
@@ -741,8 +744,9 @@ export function waitingText(it: QueueItem): string {
   // (0.7.3, internal queue) and last the viewer's internal queue, `312 tickets in the internal queue`: never a due time
   const q = queuedOf(it).length ? queueTotal(it) : 0
   const queued = q ? `${q} ticket${q > 1 ? 's' : ''} in the internal queue` : ''
-  // (0.7.4, for the founder) and his teammates' late internal tickets: `2 late with Asif`
-  const m = matesOf(it)
+  // (0.7.4, for the founder) and his teammates' late internal tickets: `2 late with Asif`. ⛔ (0.7.21) Only on a client listed
+  // by them alone (`lateOnly`): on a row of his own they no longer ride along (Team · late lists them)
+  const m = lateOnly(it) ? matesOf(it) : []
   const late = m.length ? `${m.length} late with ${whoseLate(m)}` : ''
   if (!asked && !queued && !late) return base || 'drafts ready'
   const extra = [asked, queued, late].filter(Boolean).join(', ')
@@ -781,9 +785,8 @@ export function rowExtra(it: QueueItem): string {
   // the viewer's open asks, past the one the first line names
   const asks = openAsks(it).length
   if (asks && !(it.kind === 'ask' && asks === 1)) parts.push(`${asks} internal ask${asks > 1 ? 's' : ''}`)
-  // (for the founder) his teammates' late internal tickets
-  const m = matesOf(it)
-  if (m.length) parts.push(`${m.length} late with ${whoseLate(m)}`)
+  // ⛔ (0.7.21, Rob 2026-11-05: "it's making it hard for me to know what I still need to handle") never the founder's
+  // teammates' late internal tickets: Team · late lists them (`teamPane`). 0.7.4 to 0.7.20 added `2 late with Asif` here.
   return parts.join(' · ')
 }
 
@@ -854,7 +857,7 @@ export function askParagraph(a: Pick<AskRef, 'id' | 'asker' | 'dueAt'>): string 
 }
 
 /**
- * (0.7.21, Rob 2026-11-04) The first line of a kickoff for a client listed by follow-up steps that wait for a go alone. The
+ * (0.7.22, Rob 2026-11-04) The first line of a kickoff for a client listed by follow-up steps that wait for a go alone. The
  * viewer's own go: show the steps on the follow-ups-only package's pickup view and wait for the go (client-reply-prep §9;
  * the same approve schedules them, §9.5 step 5). A teammate's (for the founder and the PM): show them and wait, approving
  * nothing for the teammate.
@@ -872,7 +875,7 @@ export function goKickoff(it: QueueItem, who: string): string {
 }
 
 /**
- * (0.7.21) The paragraph a kickoff and an Update carry for follow-up steps that wait for a go, on a client listed for
+ * (0.7.22) The paragraph a kickoff and an Update carry for follow-up steps that wait for a go, on a client listed for
  * something else as well (a client listed by them alone opens with `goKickoff` instead). '' with none.
  */
 export function goParagraph(it: QueueItem): string {
@@ -965,7 +968,7 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
                     `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep: no package exists yet, so run prep (§2) to build one, then show the five-part pickup view without taking the package: no pickup call until I answer here. Then wait for me. Send nothing without my go.`
                   : `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
                 : goOnly(it)
-                  ? // (0.7.21) listed by follow-up steps that wait for a go alone
+                  ? // (0.7.22) listed by follow-up steps that wait for a go alone
                     goKickoff(it, who)
                 : it.tasks === 0 && asks.length
                   ? // (0.5.28, internal asks) listed by its asks alone: a first line that names the client, then each ask's paragraph
@@ -1179,12 +1182,14 @@ export const KICKOFF_PENDING_MS = 10 * 60_000
  * (0.5.25) What the mm tool's `kickoffs` answers: how to use what follows, the threads to start (one JSON line), the
  * clients it skipped and why, and how many more need a thread after START_ALL_MAX. (0.7.10) And the clients held back:
  * `pending`, whose kickoff went out in the last KICKOFF_PENDING_MS, and `restore`, whose own thread is archived.
+ * (0.7.20) And `here`: each client the sync `kickoffs` ran first found a thread of its own in this profile for and linked
+ * it to, with that thread's name.
  */
 export function kickoffsAnswer(
   kicks: readonly Kickoff[],
   skipped: ReadonlyArray<{ client: string; why: string }>,
   left: number,
-  held: { pending?: readonly string[]; restore?: readonly string[] } = {},
+  held: { pending?: readonly string[]; restore?: readonly string[]; here?: readonly string[] } = {},
 ): string {
   const out: string[] = []
   if (kicks.length) {
@@ -1204,6 +1209,14 @@ export function kickoffsAnswer(
   if (restore.length) {
     out.push(
       `Own thread archived: ${restore.join(', ')}. Never start a new thread for ${restore.length === 1 ? 'it' : 'them'}: bring ${restore.length === 1 ? 'it' : 'each'} back with mm ${restore.map(c => `"restore ${c}"`).join(', ')} (the app may ask the person first).`,
+    )
+  }
+  // (0.7.20, 11-04: Agile Process Solutions and Legacy Law were handed out with an open thread of their own here) a client
+  // whose thread here the sync before the hand-out found and linked: named with its thread, never started again
+  const here = held.here ?? []
+  if (here.length) {
+    out.push(
+      `Already has a thread in this profile, now linked: ${here.join(', ')}. Never start a new thread for ${here.length === 1 ? 'it' : 'them'}: its work goes on in that thread.`,
     )
   }
   if (left > 0) out.push(`${left} more need${left === 1 ? 's' : ''} a thread: once these have started, call mm with "kickoffs" again.`)
@@ -1598,21 +1611,21 @@ export const BUILD_SHOWN = 3
 export const BUILD_TITLE_MAX = 72
 
 /** (0.7.5) The pane's part for the viewer's internal queue, as it holds it (`MmBuild`). */
-export type Build = { total: number; top: readonly string[]; row: Row; late?: string }
+export type Build = { total: number; top: readonly string[]; row: Row }
 
 /**
  * (0.7.5, spec 2026-10-27: "'Your build queue · N' follows, only for a viewer with internal tickets ... The panel shows the
  * top 3, then '+ N more in your Massmarket AI thread'") The part for the internal-ops item that lists the viewer's internal
  * queue: its total, its top tickets' titles in rank order (one line each), and its row (the button opens its linked
- * thread). For the founder, his teammates' late internal tickets that rode along on that item's row (0.7.4) ride along
- * here: `9 late with Has9 and 2 more`. Undefined for an item with no queue.
+ * thread). Undefined for an item with no queue. ((0.7.5 to 0.7.20, for the founder, his teammates' late internal tickets
+ * rode along here too: `9 late with Has9 and 2 more`. Since 0.7.21 they are Team · late's alone.)
  */
 export function buildOf(it: QueueItem, row: Row): Build | undefined {
   const shown = shownQueue(it)
   if (!shown.length) return undefined
-  const m = matesOf(it)
-  const late = m.length ? `${m.length} late with ${whoseLate(m)}` : ''
-  return { total: queueTotal(it), top: shown.slice(0, BUILD_SHOWN).map(q => shownText(q.title, BUILD_TITLE_MAX)), row, ...(late ? { late } : {}) }
+  // ⛔ (0.7.21) the founder's teammates' late internal tickets no longer ride along here (0.7.5 to 0.7.20: `9 late with Has9
+  // and 2 more`): Team · late lists them
+  return { total: queueTotal(it), top: shown.slice(0, BUILD_SHOWN).map(q => shownText(q.title, BUILD_TITLE_MAX)), row }
 }
 
 /** (0.7.5) The heading of `Your build queue`, and what its last line says of the tickets it does not list. */
@@ -1631,7 +1644,7 @@ export const buildShown = (b: Build | undefined, here: string | undefined): b is
  * The pane as plain text, one line per thing drawn: for tests and for a surface that draws no buttons. `folds` are the groups under the list, each drawn open.
  * `here` (0.5.5): the thread drawing it, as for `rowDetail` and `buttonLabel`.
  */
-export function paneText(rows: readonly Row[], header: string, note: string, folds: Folds & { build?: Build } = {}, here?: string): string {
+export function paneText(rows: readonly Row[], header: string, note: string, folds: Folds & { build?: Build; team?: readonly TeamPane[] } = {}, here?: string): string {
   const out = [header]
   const draw = (row: Row, lead: string): void => {
     out.push(`${lead} ${row.title}`)
@@ -1648,17 +1661,74 @@ export function paneText(rows: readonly Row[], header: string, note: string, fol
     out.push('', buildHeading(b), ...b.top.map((t, i) => ` ${i + 1}. ${t}`))
     const more = buildMore(b)
     if (more) out.push(` ${more}`)
-    if (b.late) out.push(` ${b.late}`)
     if (b.row.target) out.push(`   [ ${LABEL.open} ]`)
   }
   const groups = foldGroups({ rows, ...folds })
-  if (groups.length) out.push('', groups.map(g => g.heading).join(' · '))
+  // (0.7.21) Team · late last, after the founder's own groups
+  const team = Array.isArray(folds.team) ? folds.team : []
+  const headings = [...groups.map(g => g.heading), ...(team.length ? [teamHeading(team)] : [])]
+  if (headings.length) out.push('', headings.join(' · '))
   for (const group of groups) {
     out.push('', group.heading)
     for (const { row, n } of group.rows) draw(row, `${n}.`)
   }
+  if (team.length) out.push('', ...teamLines(team))
   out.push('', note)
   return out.join('\n')
+}
+
+// ---------------------------------------------------------------- 0.7.21: Team · late in the pane
+
+/** (0.7.21) Team · late as the pane holds it (`MmTeam`): each teammate, their count, and their tickets' lines by client. */
+export type TeamPane = MmTeam
+
+/**
+ * (0.7.21, Rob 2026-11-05: "It should show people and which tasks are overdue for which clients, so I can run through those
+ * with the team in the morning") Team · late for the pane, worded at `now`: `teamLate`'s people, clients and tickets, each
+ * ticket one line (`teamLateLine`). Empty for every viewer but the founder.
+ */
+export function teamPane(items: readonly QueueItem[], now: number): TeamPane[] {
+  return teamLate(items).map(p => ({ by: p.by, count: p.count, clients: p.clients.map(c => ({ client: c.client, lines: c.refs.map(r => teamLateLine(r, now)) })) }))
+}
+
+/** (0.7.21) Team · late as the pane stores it, each part checked again: a pane an older version stored has none. */
+export function teamOf(v: unknown): TeamPane[] {
+  if (!Array.isArray(v)) return []
+  const text = (t: unknown): t is string => typeof t === 'string' && t !== ''
+  return v.filter(
+    (p): p is TeamPane =>
+      Boolean(p) &&
+      typeof p === 'object' &&
+      text(p.by) &&
+      Number.isFinite(p.count) &&
+      Array.isArray(p.clients) &&
+      p.clients.every((c: unknown) => {
+        const one = c as Partial<TeamPane['clients'][number]> | null
+        return one !== null && typeof one === 'object' && text(one.client) && Array.isArray(one.lines) && one.lines.every(text)
+      }),
+  )
+}
+
+/** (0.7.21) How many tickets Team · late holds, as the pane stores it. */
+export const teamCount = (team: readonly TeamPane[]): number => teamLateCount(team)
+
+/** (0.7.21) Team · late's heading, with how many tickets it holds: `Team · late (5)`. */
+export const teamHeading = (team: readonly TeamPane[]): string => `${TEAM_LATE} (${teamCount(team)})`
+
+/** (0.7.21) A teammate's heading in it: `Asif (3)`. */
+export const teamPerson = (p: Pick<TeamPane, 'by' | 'count'>): string => `${p.by} (${p.count})`
+
+/**
+ * (0.7.21) Team · late as plain lines, as the pane draws it open: its heading, then each teammate (`Asif (3)`), each of
+ * their clients under them, and each ticket under its client.
+ */
+export function teamLines(team: readonly TeamPane[]): string[] {
+  const out = [teamHeading(team)]
+  for (const p of team) {
+    out.push(teamPerson(p))
+    for (const c of p.clients) out.push(`  ${c.client}`, ...c.lines.map(l => `    - ${l}`))
+  }
+  return out
 }
 
 // ---------------------------------------------------------------- the band (R9)
