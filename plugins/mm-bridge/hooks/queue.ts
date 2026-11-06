@@ -127,7 +127,7 @@ export type FeedTicket = {
    */
   status?: string | null
   /**
-   * (0.7.23) OW's `details.waiting_on` (src/lib/team-ops/eta.ts `isWaitingOnClient`): `client` while the ticket's next move
+   * (0.7.24) OW's `details.waiting_on` (src/lib/team-ops/eta.ts `isWaitingOnClient`): `client` while the ticket's next move
    * is the client's, set by a reply package's `waiting` outcome and cleared by the next one. Such a ticket is skipped
    * (`waitingOnClient`). Absent on a server that does not send it yet: read as before.
    */
@@ -135,7 +135,7 @@ export type FeedTicket = {
 }
 
 /**
- * (0.7.23, Rob 2026-11-05, on a thread pinned for tickets of a client who never approved the plan: "I don't know why this
+ * (0.7.24, Rob 2026-11-05, on a thread pinned for tickets of a client who never approved the plan: "I don't know why this
  * is pinned or what. Antu doesn't have anything to do for them... Why is this pinned?") A ticket waiting on the client is
  * nobody's late work: it never lists, pins, counts late or names a thread, whoever it is assigned to and whatever date it
  * carries. OW already drops its ETA ask (closeout.ts, "WAITING ON THE CLIENT"); this is the bridge's half.
@@ -347,10 +347,17 @@ export type QueueItem = {
   /**
    * For the founder alone: the teammate a client's package is with when it is theirs to see through, not his
    * (0.5.1). R1: a stale package a teammate sends, with a client message waiting after its drafts. R2: a
-   * current package flagged for his OK that a teammate sends, until its reply is due. The client then lists
-   * under With a teammate. Absent otherwise, and on an item an older version stored.
+   * current package flagged for his OK that a teammate sends, until its reply is due; ⛔ (0.7.23) and after it too, unless
+   * that teammate asks him about the client (an open ask of theirs in the feed). The client then lists under With a
+   * teammate. Absent otherwise, and on an item an older version stored.
    */
   theirs?: string
+  /**
+   * (0.7.23, for the founder alone) The package flagged for his OK that a teammate holds or sends (R2, `theirs`), once its
+   * reply is due: who has it, the package's id, and since when it is late. Listed under Team · late (`teamLate`), never
+   * pinned. Absent otherwise, and on an item an older version stored.
+   */
+  okLate?: { by: string; id: string; lateSince: number }
   /**
    * (0.5.2, R1) The soonest time something of the client's must be acted on: a reply's due time, a package's,
    * a task's start-by time when the feed gives one, else its due time. Its thread is pinned while this is past
@@ -442,8 +449,12 @@ export type EtaRef = { id: string; title: string; neededBy: number }
 /** (0.7.15, owner asks) A ticket of the viewer's to give an owner: its id (a lower-case uuid), its title, and the `assign_by` clock. */
 export type AssignRef = { id: string; title: string; assignBy: number }
 
-/** (0.7.4) A teammate's late internal ticket, for the founder: whose (their name), its id, title and since when it is late; `eta` when no ETA was ever given. */
-export type MateRef = { by: string; id: string; title: string; lateSince: number; eta: boolean }
+/**
+ * (0.7.4) A teammate's late internal ticket, for the founder: whose (their name), its id, title and since when it is late;
+ * `eta` when no ETA was ever given. (0.7.23) `ok`: not a ticket but a reply package flagged for his OK that the teammate
+ * holds or sends, late since its reply was due (`okLate`); its id is the package's.
+ */
+export type MateRef = { by: string; id: string; title: string; lateSince: number; eta: boolean; ok?: true }
 
 /** (0.7.4, ETA asks) What a ticket that owes an ETA says, in OW's words (ETA_ASK_TEXT): the feed's own copy of it is never shown. */
 export const ETA_ASK_TEXT = '⏳ NO ETA — give one in Claude Code'
@@ -930,10 +941,10 @@ export function pinTitle(it: QueueItem, now: number, again = false): string {
   return again ? `${title} · ${STILL_NEEDS_YOU}` : title
 }
 
-// ---------------------------------------------------------------- 0.7.23: why a thread is pinned, said in the thread
+// ---------------------------------------------------------------- 0.7.24: why a thread is pinned, said in the thread
 
 /**
- * (0.7.23) Who wrote a client message, as a sentence names them: the display name before the address (`Jeff Smith
+ * (0.7.24) Who wrote a client message, as a sentence names them: the display name before the address (`Jeff Smith
  * <jeff@acme.com>`), else the address's own part (`jeff.smith@acme.com` is `Jeff Smith`), cleaned; '' when neither.
  */
 export function senderName(sender: unknown): string {
@@ -946,8 +957,8 @@ export function senderName(sender: unknown): string {
 
 const several = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`
 
-/** (0.7.23) The first thing of the viewer's own on a client, in plain words: what a pinned thread's reason names. */
-function ownWhat(it: QueueItem): string {
+/** (0.7.24) The first thing of the viewer's own on a client, in plain words: what a pinned thread's reason names. */
+function ownReason(it: QueueItem): string {
   const o = it.open ?? null
   if (o?.state === 'held_by_me') return `your draft to ${it.client} is not sent yet${o.unsent > 1 ? ` (${o.unsent} left)` : ''}`
   if (it.messages > 0 && !withTeammate(it) && !it.theirs && o?.state !== 'held_by_other') {
@@ -972,7 +983,7 @@ function ownWhat(it: QueueItem): string {
 }
 
 /**
- * (0.7.23) Why a client's thread is pinned, or why it is not, in one sentence the thread's band shows (Rob asked about 52
+ * (0.7.24) Why a client's thread is pinned, or why it is not, in one sentence the thread's band shows (Rob asked about 52
  * times in the six weeks to 2026-11-05 why a thread was pinned; 11-03: "Why does it say there's 23 hours left here? Do I
  * owe him something?" and "I don't know if this is supposed to be pinned for me or if the team is handling this"). It
  * says who must act, what is owed and to whom, and by when, from the same tests the pin itself is decided by (`ownPins`,
@@ -995,11 +1006,11 @@ export function pinReason(it: QueueItem, now: number): string {
     if (own < it.dueAt && committedCount(it) > 0 && it.messages === 0) {
       const due = clockText(shownDue(it.dueAt), now)
       return own <= now
-        ? `Pinned for you: ${ownWhat(it)} is due ${due}, and to land on time its work had to start ${dueWhen(own, now)}.`
-        : `Pinned for you: ${ownWhat(it)} is due ${due}, and to land on time its work must start by ${clockText(shownDue(own), now)}.`
+        ? `Pinned for you: ${ownReason(it)} is due ${due}, and to land on time its work had to start ${dueWhen(own, now)}.`
+        : `Pinned for you: ${ownReason(it)} is due ${due}, and to land on time its work must start by ${clockText(shownDue(own), now)}.`
     }
     const when = own <= now ? clockAndDue(own, now) : `due ${clockText(shownDue(own), now)} (${clockLead(own, now)})`
-    return `Pinned for you, ${when}: ${ownWhat(it)}.`
+    return `Pinned for you, ${when}: ${ownReason(it)}.`
   }
   const c = checkNow(it, now)
   if (c) {
@@ -1007,6 +1018,8 @@ export function pinReason(it: QueueItem, now: number): string {
     const when = c.late ? `is ${clockAndDue(c.due, now)}` : `${c.notStarted ? 'has not started and ' : ''}is due ${clockText(shownDue(c.due), now)} (${clockLead(c.due, now)})`
     return `Pinned to check on ${by}: their ${c.what} ${when}.`
   }
+  // (0.7.23's Team · late) a teammate's late package flagged for the founder's OK, with nothing of his own beside it
+  if (okLateOnly(it)) return `No pin needed: ${cleanText(it.okLate?.by, 40) || 'a teammate'} holds the late reply to ${it.client}, flagged for your OK, and it is listed under ${TEAM_LATE}.`
   if (withTeammate(it)) return `No pin needed: ${it.theirs ?? it.open?.by ?? 'a teammate'} has ${it.client}'s reply drafts, so nothing here needs you.`
   if (lateOnly(it)) return `No pin needed: only ${whoseLate(matesOf(it))}'s late tickets are here, and they are listed under ${TEAM_LATE}.`
   if (it.kind === 'ok' && it.theirs) return `No pin needed: ${it.theirs} decides whether the reply to ${it.client} needs your OK.`
@@ -1017,7 +1030,7 @@ export function pinReason(it: QueueItem, now: number): string {
 }
 
 /**
- * (0.7.23) The line a client's own thread shows under its band: `pinReason`, with how a pin stands beside it. `it`: the
+ * (0.7.24) The line a client's own thread shows under its band: `pinReason`, with how a pin stands beside it. `it`: the
  * client as the last sync listed it (Needs you, With a teammate or checking); undefined once the client is clear, named
  * by `client`. `pin.person`: the last sync found the person's own pin on the thread (`Pin.byUs` false), which the bridge
  * leaves (Rob, 2026-11-03: "if I pin something myself, it should stay there until I unpin it"). `pin.again`: the bridge
@@ -1093,6 +1106,23 @@ export function whoseLate(refs: readonly Pick<MateRef, 'by'>[]): string {
 export const lateOnly = (it: QueueItem): boolean =>
   matesOf(it).length > 0 && it.kind === 'task' && it.tasks === 0 && it.messages === 0 && !it.packageId && !(it.open ?? null) && openAsks(it).length === 0 && queuedOf(it).length === 0
 
+/**
+ * (0.7.23) Whether something of the founder's own lists a client beside a package of a teammate's: a task, an internal ask
+ * or his internal queue, or a client message whose drafts no teammate holds.
+ */
+export const ownBesides = (it: QueueItem): boolean =>
+  it.tasks > 0 || openAsks(it).length > 0 || queuedOf(it).length > 0 || (it.messages > 0 && (it.open ?? null)?.state !== 'held_by_other')
+
+/**
+ * (0.7.23) A client listed for the founder by a teammate's late package flagged for his OK alone (`okLate`, nothing of his
+ * own there): it stays in the quiet list, its thread named for the teammate (`🟡 with Asif · Acme Legal · may need your OK
+ * · Asif decides`) and never pinned, and the pane draws it under Team · late alone, as a `lateOnly` client is.
+ */
+export const okLateOnly = (it: QueueItem): boolean => it.kind === 'ok' && Boolean(it.okLate) && !ownBesides(it)
+
+/** (0.7.23) A client the pane draws under Team · late alone, never under With a teammate. */
+export const teamLateOnly = (it: QueueItem): boolean => lateOnly(it) || okLateOnly(it)
+
 /** (0.7.21) The pane group's title, and what the status line says after its count (`MM: 4 need you · 2 pinned · 5 late with the team`). */
 export const TEAM_LATE = 'Team · late'
 export const LATE_WITH_TEAM = 'late with the team'
@@ -1106,14 +1136,18 @@ export type TeamLate = { by: string; count: number; clients: Array<{ projectId: 
  * them: his own rows' and `lateOnly` ones alike), each ticket once, grouped by person, then client. People by how many are
  * late, most first (a tie by name); a person's clients by their first late ticket; a client's tickets by when each went
  * late. Empty for every viewer but the founder: no other feed gives `mates`. ⛔ Feed text is data: an id that is not a
- * lower-case uuid, a time that is not one, or a title with nothing left once cleaned drops the ticket.
+ * lower-case uuid, a time that is not one, or a title with nothing left once cleaned drops the ticket. (0.7.23) A package
+ * flagged for his OK that a teammate holds or sends and whose reply is late (`okLate`) is one more line under that
+ * teammate and client (`reply 1d late, flagged for your OK`), counted with the tickets.
  */
 export function teamLate(items: readonly QueueItem[]): TeamLate[] {
   const seen = new Set<string>()
   const people = new Map<string, Map<string, { projectId: string; client: string; refs: MateRef[] }>>()
   for (const it of items) {
     if (!it || typeof it !== 'object') continue
-    for (const r of matesOf(it)) {
+    // (0.7.23) and a package flagged for his OK that a teammate holds or sends, once late (`okLate`): one line, `reply`
+    const ok = it.okLate && typeof it.okLate === 'object' ? [{ by: it.okLate.by, id: it.okLate.id, title: 'reply', lateSince: it.okLate.lateSince, eta: false, ok: true as const }] : []
+    for (const r of [...matesOf(it), ...ok]) {
       if (!r || typeof r !== 'object' || !isUuid(r.id) || seen.has(r.id) || !Number.isFinite(r.lateSince)) continue
       const title = cleanText(r.title, MATE_TITLE_MAX)
       if (!title) continue
@@ -1121,7 +1155,7 @@ export function teamLate(items: readonly QueueItem[]): TeamLate[] {
       const by = cleanText(r.by, 40) || 'a teammate'
       const clients = people.get(by) ?? new Map<string, { projectId: string; client: string; refs: MateRef[] }>()
       const at = clients.get(it.projectId) ?? { projectId: it.projectId, client: cleanName(it.client) || cleanName(it.projectName) || 'a client', refs: [] }
-      at.refs.push({ by, id: r.id, title, lateSince: r.lateSince, eta: r.eta === true })
+      at.refs.push({ by, id: r.id, title, lateSince: r.lateSince, eta: r.eta === true, ...(r.ok === true ? { ok: true as const } : {}) })
       clients.set(it.projectId, at)
       people.set(by, clients)
     }
@@ -1147,7 +1181,9 @@ export const teamLateWho = (team: readonly Pick<TeamLate, 'by' | 'count'>[]): st
  * time (`dueWhen`: `3 PM` today, `Mon 3 PM` this week, `Oct 14` before that, never a weekend day), and why it is late:
  * `no ETA given` (its ETA was needed by then and none came), else `past its ETA`.
  */
-export function teamLateLine(r: Pick<MateRef, 'title' | 'lateSince' | 'eta'>, now: number): string {
+export function teamLateLine(r: Pick<MateRef, 'title' | 'lateSince' | 'eta' | 'ok'>, now: number): string {
+  // (0.7.23) a teammate's late package flagged for his OK: how late its reply is, `reply 1d late, flagged for your OK`
+  if (r.ok === true) return `reply ${clockLead(r.lateSince, now)}, flagged for your OK`
   return `${cleanText(r.title, MATE_TITLE_MAX)} · late since ${dueWhen(r.lateSince, now)} · ${r.eta ? 'no ETA given' : 'past its ETA'}`
 }
 
@@ -1673,8 +1709,11 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
   }
 
   const me = typeof feed.member === 'string' ? feed.member.toLowerCase() : ''
-  /** (the founder) The clients whose row is a package that waits for his OK and that a teammate sends (R2). */
-  const okTheirs = new Set<string>()
+  /**
+   * (the founder) The clients whose row is a package that waits for his OK and that a teammate sends (R2). (0.7.23) With that
+   * teammate's address (the holder's, else the owner's on record): an ask of theirs about the client hands him the OK.
+   */
+  const okTheirs = new Map<string, string>()
   /** (the founder) The teammate who sends a stale package of the client's, where a client message waits after its drafts (R1). */
   const staleTheirs = new Map<string, string>()
   /**
@@ -1786,11 +1825,11 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     if (forOk && (held || !isMine(d.project_owner_email, feed))) {
       it.kind = 'ok'
       it.ok = { sends: d.project_owner_email ? holderName(d.project_owner_email) : NOBODY }
-      // R2: one a teammate sends is theirs to decide until its reply is due (below)
-      if (mates) okTheirs.add(d.project_id)
+      // R2: one a teammate sends is theirs to decide (below)
+      if (mates) okTheirs.set(d.project_id, held ? holder : sender)
       else okTheirs.delete(d.project_id)
       if (inReach) {
-        it.dueAt = Math.min(it.dueAt, due)
+        // (0.7.23) its due time goes on the client's clock below, once it is known whose it is
         act(it, due)
         soonest(okAct, it, due)
         seen(it, 'pkg', ms(d.covers_through))
@@ -1814,7 +1853,7 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
   const lists: [FeedTicket[] | undefined, '' | 'undated'][] = [[t.overdue, ''], [t.due_today, ''], [t.due_soon, ''], [t.start_now, ''], [t.undated, 'undated']]
   for (const [list, k] of lists) {
     for (const tk of list ?? []) {
-      // (0.7.23) the client's move, not ours: no row, no pin, no late count, for the viewer, the PM or the founder
+      // (0.7.24) the client's move, not ours: no row, no pin, no late count, for the viewer, the PM or the founder
       if (!tk || waitingOnClient(tk)) continue
       // (R17) a ticket with no due time (internal work nobody dated) has no due source either: it lists, undated
       const undatedRow = tk.due_at === null
@@ -1905,6 +1944,8 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
   // package's is; the project, as any row's (`usable`). An ask alone makes no package. Its time counts as a task's for
   // "something new arrived" (`newest.task`): it is work the person was asked for.
   const askIds = new Set<string>()
+  /** (0.7.23) Who asked the viewer about each client in an open ask of theirs (addresses, lower case). */
+  const askers = new Map<string, Set<string>>()
   for (const a of Array.isArray(feed.asks) ? feed.asks : []) {
     if (!a || typeof a !== 'object' || !isUuid(a.ask_id) || askIds.has(a.ask_id)) continue
     if (!usable(a.project_id, a.project_name)) continue
@@ -1913,6 +1954,7 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     const due = Number.isFinite(ms(a.due_at)) ? ms(a.due_at as string) : Number.isFinite(asked) ? businessDeadline(asked, DAY) : NaN
     if (!inWindow(due)) continue
     askIds.add(a.ask_id)
+    if (typeof a.asker_email === 'string' && a.asker_email) askers.set(a.project_id, (askers.get(a.project_id) ?? new Set<string>()).add(a.asker_email.toLowerCase()))
     const it = item(a.project_id, a.project_name)
     it.dueAt = Math.min(it.dueAt, due)
     mine(it, due)
@@ -1973,11 +2015,29 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     }
     for (const it of byProject.values()) {
       const o = it.open ?? null
+      // ⛔ (0.7.23, Rob 2026-11-05: "I thought we made it so that when a teammate's holding it, but it's late, it shows up on
+      // the morning meeting post instead of pinned on my side panel"; and the same day: "When things are overdue but not
+      // assigned to me, I don't think they should be pinned here.") A package flagged for his OK that a teammate holds or
+      // sends stays theirs after its reply is due too: until 0.7.21 it became his then (`needs your OK`, pinned, and
+      // pinned again as `still needs you` when he took the pin off). Once late it is listed under Team · late (`okLate`).
+      // It is his only when that teammate asks him about the client (an open ask of theirs in the feed: the one signal OW
+      // sends for it); his own client's flagged package (`ready`) is his as before.
+      const mate = okTheirs.get(it.projectId)
+      const askedHim = mate !== undefined && mate !== '' && (askers.get(it.projectId)?.has(mate) ?? false)
       const name =
         it.kind === 'ok'
-          ? okTheirs.has(it.projectId) && it.dueAt > now ? (o?.state === 'held_by_other' ? o.by : (it.ok ?? null)?.sends) : undefined
+          ? mate !== undefined && !askedHim ? (o?.state === 'held_by_other' ? o.by : (it.ok ?? null)?.sends) : undefined
           : it.kind === 'ready' ? undefined : staleTheirs.get(it.projectId)
       if (name) it.theirs = name
+      if (it.kind !== 'ok') continue
+      const okDue = okAct.get(it.projectId)
+      if (okDue === undefined) continue
+      // late once past its due time, as its clock reads (`clockLead`: at the minute it is due it is `<1h left`)
+      const late = Boolean(name) && okDue < now && o !== null && isUuid(o.id)
+      if (late) it.okLate = { by: name as string, id: (o as OpenPackage).id, lateSince: okDue }
+      // its due time is on the client's clock, unless it is a teammate's and late and something of his own lists the
+      // client: his row and his thread's name are then for what is his (as his teammates' late tickets are, 0.7.21)
+      if (!(late && ownBesides(it))) it.dueAt = Math.min(it.dueAt, okDue)
     }
   }
 
@@ -2140,7 +2200,17 @@ export function clockText(t: number, now: number): string {
 const whatOf = (it: QueueItem): string =>
   it.open?.state === 'held_by_me'
     ? 'your draft'
-    : it.kind === 'ok' ? (it.theirs ? decidesText(it.theirs) : 'needs your OK') : it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : it.kind === 'ask' ? 'internal ask' : it.kind === 'queue' ? 'internal queue' : taskWhat(it)
+    : it.kind === 'ok' ? (it.okLate && ownBesides(it) ? ownWhat(it) : it.theirs ? decidesText(it.theirs) : 'needs your OK') : it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : it.kind === 'ask' ? 'internal ask' : it.kind === 'queue' ? 'internal queue' : taskWhat(it)
+
+/**
+ * (0.7.23) What is the founder's own on a client whose package flagged for his OK is a teammate's and late (`okLate`): his
+ * thread's name and row say that, never the package (it is listed under Team · late).
+ */
+function ownWhat(it: QueueItem): string {
+  if (it.messages > 0 && (it.open ?? null)?.state !== 'held_by_other') return 'reply'
+  if (it.tasks > 0) return taskWhat(it)
+  return openAsks(it).length > 0 ? 'internal ask' : 'internal queue'
+}
 
 /** (0.7.4) What a `task` item is due for: see whatOf. */
 function taskWhat(it: QueueItem): string {

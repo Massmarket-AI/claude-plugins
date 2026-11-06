@@ -199,7 +199,7 @@ export type MmNotice = { text: string; at: number }
  * `startAll` is no longer written or read.)
  */
 /**
- * `why` (0.7.23): in a client's own thread, the one line under the band that says why the thread is pinned or why no pin
+ * `why` (0.7.24): in a client's own thread, the one line under the band that says why the thread is pinned or why no pin
  * is needed (`threadWhy`); absent in any other thread.
  */
 export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string }

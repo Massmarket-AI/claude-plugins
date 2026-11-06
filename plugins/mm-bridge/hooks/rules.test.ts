@@ -57,7 +57,7 @@ const one = (f: Feed, now = NOW): QueueItem => {
 }
 const pins = (f: Feed, now = NOW): boolean => all(f, now).some(it => pinsFor(it, now))
 
-describe("Rob's pin and clock rules, one test each (0.7.23)", () => {
+describe("Rob's pin and clock rules, one test each (0.7.24)", () => {
   // -------------------------------------------------------------------------------------------------------- what pins
   test('P1 (10-14, 11-04: "the clock is supposed to pin it when I have something due in less than 24 hours (like a reply or an ETA)"): due within 24 business hours or late pins; further out does not', () => {
     expect(pins(feed({ mail: [mail(1, NOW - 4 * H, { reply_due_at: iso(NOW + 20 * H) })] }))).toBe(true)
@@ -254,20 +254,20 @@ describe("Rob's pin and clock rules, one test each (0.7.23)", () => {
     expect(w.app.get('local_c1')?.pinned).toBe(false)
   })
 
-  test('C6 (10-26: "Shouldn\'t this be in a team member\'s Claude Code thread? I thought I gave them everything they needed"; R2 kept by 0.7.21): a package handed to a teammate leaves the founder\'s pins; one still flagged for his OK is the teammate\'s until its reply is due, then his', () => {
+  test('C6 (10-26: "Shouldn\'t this be in a team member\'s Claude Code thread? I thought I gave them everything they needed"; 11-05: "when a teammate\'s holding it, but it\'s late, it shows up on the morning meeting post instead of pinned on my side panel"): a package a teammate holds never pins the founder, flagged or not, late or not, unless that teammate asks him', () => {
     const founder = (over: Partial<Feed>) => feed({ member: ROB, role: 'founder', ...over })
-    // handed over with his answers (nothing flagged for him): never his, late or not
+    // handed over with his answers (nothing flagged for him), late: never his
     const handed = pkg(1, { status: 'picked_up', picked_up_by: ASIF, picked_up_at: iso(NOW - H), project_owner_email: ASIF, covers_through: iso(NOW - 30 * H) })
-    expect(pins(founder({ drafts: [handed], mail: [mail(1, NOW - 30 * H, { project_owner_email: ASIF })] }))).toBe(false)
-    // still flagged for his OK, with time left: Asif's to decide, under With a teammate, not pinned
-    const flagged = { ...handed, flagged_for_rob: true, covers_through: iso(NOW - 2 * H) }
-    const f2 = founder({ drafts: [flagged] })
-    expect(pins(f2)).toBe(false)
-    expect(buildLists(f2, NOW).teammate.map(i => i.projectId)).toEqual([P(1)])
-    // flagged and late: his (R2; on 10-26, told why such a thread was pinned, Rob said "Leave it pinned")
-    const f3 = founder({ drafts: [{ ...flagged, covers_through: iso(NOW - 30 * H) }] })
-    expect(pins(f3)).toBe(true)
-    expect(pinReason(one(f3), NOW)).toBe(`Pinned for you, 6h late, due 9 AM: the reply to ${ACME} waits on your OK (Asif sends it).`)
+    expect(pins(founder({ drafts: [handed] }))).toBe(false)
+    // still flagged for his OK and late: still Asif's, listed under Team · late (0.7.23), and the thread says so
+    const flagged = { ...handed, flagged_for_rob: true }
+    const late = founder({ drafts: [flagged] })
+    expect(pins(late)).toBe(false)
+    expect(teamLate(all(late)).map(p => [p.by, p.count])).toEqual([['Asif', 1]])
+    expect(pinReason(one(late), NOW)).toBe(`No pin needed: Asif holds the late reply to ${ACME}, flagged for your OK, and it is listed under Team · late.`)
+    // Asif asks him about the client: then it is his (his ask's 24-hour clock, P8)
+    const ask: FeedAsk = { ask_id: P(300), project_id: P(1), project_name: `${ACME} — Jeff`, asker_name: 'Asif', asker_email: ASIF, asked_email: ROB, asked_at: iso(NOW - H), due_at: null }
+    expect(pins(founder({ drafts: [flagged], asks: [ask] }))).toBe(true)
   })
 
   // --------------------------------------------------------------------------------------------------------- labels
@@ -348,6 +348,6 @@ describe("Rob's pin and clock rules, one test each (0.7.23)", () => {
 
   test('T4 (10-12: "some of them got renamed in an older fashion"; 11-04: "appearing and disappearing"): the newest bridge on the machine holds the sync (sessions.test.ts 0.7.19); this release is newer than every one before it', () => {
     const [a = 0, b = 0, c = 0] = VERSION.split('.').map(Number)
-    expect(a * 1e6 + b * 1e3 + c).toBeGreaterThan(7 * 1e3 + 21)
+    expect(a * 1e6 + b * 1e3 + c).toBeGreaterThan(7 * 1e3 + 23)
   })
 })
