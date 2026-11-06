@@ -577,6 +577,26 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
     for (const state of ['behind', 'overbooked', 'late'] as const) expect(pinsFor(one(feed({ pace: [paceRow(state, { hours_logged_today: 9 })] })), NOW), state).toBe(true)
   })
 
+  test('S4b (the same, on a thread): hours done takes the bridge\'s pin off and renames it; hours starting again the next business day pin it again, with no `still needs you`', async () => {
+    const row = (logged: number) => [onTrack({ project_id: appPid(1), hours_logged_today: logged })]
+    const f = feed({ pace: row(0.5) })
+    const w = fakeApp(f, [{ sessionId: 'local_hub', title: 'Hub' }, { sessionId: 'local_c1', title: 'Client work' }], [], { now: NOW })
+    w.put('mm.links', { [appPid(1)]: 'local_c1' })
+    const pass = async () => {
+      await mm(w.session('local_hub'), '')
+      await w.advance(6 * 60_000)
+    }
+    await pass()
+    expect(w.app.get('local_c1')).toMatchObject({ pinned: true, title: `🟢 ${ACME} · on track · due Mon 3 PM · 1.5 h/day` })
+    f.pace = row(1.5)
+    await pass()
+    expect(w.app.get('local_c1')).toMatchObject({ pinned: false, title: `🟢 ${ACME} · today's hours done · due Mon 3 PM` })
+    // OW's count starts again with the Eastern day
+    f.pace = row(0)
+    await pass()
+    expect(w.app.get('local_c1')).toMatchObject({ pinned: true, title: `🟢 ${ACME} · on track · due Mon 3 PM · 1.5 h/day` })
+  })
+
   test('S5 (11-05: "Shouldn\'t it be pinned?"): an undated open item inside the window pins for its owner as `needs a due date`; outside it counts nowhere; waiting on the client is skipped; nothing to measure by reads as before', () => {
     const f = (...rows: FeedTicket[]) => founder({ tickets: { undated: rows } })
     const inside = one(f(undatedRow({ last_activity_at: '2026-11-01' })))

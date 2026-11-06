@@ -3942,7 +3942,7 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     await ui.unmount()
     expect(String(w.statuses.at(-1) ?? '')).toMatch(/^MM: clear(  |$)/)
     // /mm status keeps its count
-    expect(await mm($, 'status')).toContain('late with the team: 1 (Builder B)')
+    expect(await mm($, 'status')).toContain('late with the team: 1 (Builder B 1)')
     for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
     expect(chipTitles(w)).toEqual([])
     expect(w.acted()).toEqual([])
@@ -4014,7 +4014,7 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     const late = await pane($)
     expect((await buttons(late)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([])
     await late.unmount()
-    expect(await mm($, 'status')).toContain('late with the team: 1 (J Smith)')
+    expect(await mm($, 'status')).toContain('late with the team: 1 (J Smith 1)')
     // J Smith asks him about Bolt: his then: who has the drafts in its one line, who sends it (nobody on record) on its second
     const drafts = [packageFor(BOLT, 'Bolt Staffing (Sam)', { flagged_for_rob: true, project_owner_email: null, ...heldBy('J.Smith@example.com'), covers_through: ago(2) })]
     w.setFeed({ member: FOUNDER, role: 'founder', mail: [], tickets: {}, drafts, asks: [askOf('j.smith@example.com', BOLT, 'Bolt Staffing (Sam)')] })
@@ -9246,7 +9246,7 @@ describe('(0.7.4) a teammate\'s internal ticket owes an ETA: listed with its clo
     expect(all.some(l => l.includes('with Builder A') || l.includes('Team · late'))).toBe(false)
     await ui.unmount()
     expect(String(w.statuses.at(-1) ?? '')).toMatch(/^MM: clear(  |$)/)
-    expect(await mm($, 'status')).toContain('late with the team: 1 (Builder A)')
+    expect(await mm($, 'status')).toContain('late with the team: 1 (Builder A 1)')
     for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
     expect(chipTitles(w)).toEqual([])
     expect(sends(w)).toEqual([])
