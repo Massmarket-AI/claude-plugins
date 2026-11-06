@@ -1171,15 +1171,16 @@ describe('R1 and R2: a row under With a teammate, for the founder', () => {
     }
   })
 
-  test('R2, once its reply is due: an ordinary row of his, with its one action, no sentence, and today\'s words', async () => {
+  test('R2, once its reply is due: (0.7.23) still the teammate\'s row, Drafts and no action, never one of his', async () => {
     const due = et('2026-10-13 09:00')
-    const row = rowOf(founderFeed([pkgOf()]), 'queue', due)
-    expect(row.note).toBeUndefined()
-    expect(row.theirs).toBeUndefined()
-    // (0.7.5) one line: `needs your OK` reads `your OK`, the clock after it; (0.7.12) and when it was due (until 0.7.12: `1h late`)
-    expect(row.title).toBe('🔴 Acme Roofing · your OK · 1h late, due 8 AM')
-    expect(row.waiting).toBe('needs your OK · Builder B sends, drafts ready')
-    expect(rowButtons(row)).toEqual(['start', 'drafts'])
+    // ⛔ (0.7.23, Rob 11-05: "when a teammate's holding it, but it's late, it shows up on the morning meeting post instead of
+    // pinned on my side panel") until 0.7.21 an ordinary row of his then: `🔴 Acme Roofing · your OK · 1h late, due 8 AM`
+    expect(buildLists(founderFeed([pkgOf()]), due).queue).toEqual([])
+    const row = rowOf(founderFeed([pkgOf()]), 'teammate', due)
+    expect(row.theirs).toBe(true)
+    expect(row.title).toBe('🟡 Acme Roofing · may need your OK · Builder B decides · with Builder B')
+    expect(row.waiting).toBe('may need your OK · Builder B decides, drafts ready')
+    expect(rowButtons(row)).toEqual(['drafts'])
   })
 
   test('R1, flagged or not, with a client message after its drafts: who sends it, no sentence of its own, Drafts and no action', async () => {

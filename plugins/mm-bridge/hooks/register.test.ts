@@ -3,9 +3,10 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine, FoundElement } from 'claude-code/testing'
 
 import type { Feed, FeedAsk, FeedQueueTicket, FeedTicket } from './queue'
-import { cleanTitle, clockText, isNewerVersion } from './queue'
+import { buildLists, cleanTitle, clockText, isNewerVersion } from './queue'
 import { VERSION } from './register'
-import { REFRESH_FAILED, carryKickoff, freshParagraph, recommend } from './threads'
+import { REFRESH_FAILED, carryKickoff, freshParagraph, lookupOrder, pinReport, recommend } from './threads'
+import type { PinReport } from './threads'
 import { localClock } from './track'
 
 // The bridge against a pretend desktop app, a pretend feed and a pretend store. Nothing here reaches the
@@ -139,6 +140,8 @@ type WorldOptions = {
   scopeLink?: (body: Record<string, unknown>) => { status: number; body?: unknown } | 'network'
   /** (0.7.0) How OW answers `POST /scope-proposal`. Left out, 404. */
   scopeProposal?: (body: Record<string, unknown>) => { status: number; body?: unknown } | 'network'
+  /** (0.7.23) How OW answers the sync's pin report (`POST /bridge-pins`): a status, or no answer at all. Left out, 404: an OW without the route yet. */
+  bridgePins?: (body: PinReport) => { status: number; body?: unknown } | 'network'
   /**
    * (0.7.6) How the app answers `unarchive_session`: left out, the thread is unarchived and the app says so; `refuse`,
    * the person said no to the app's question (an error answer); `error`, the call itself fails; `silent`, the app never
@@ -266,8 +269,17 @@ function world(on: On, opts: WorldOptions = {}) {
   const resolves: Array<{ method: string; headers: Record<string, string>; body: Record<string, unknown> }> = []
   /** (0.7.0) Every call to OW's scope-line link and scope-proposal routes, as it was made. */
   const scopePosts: Array<{ url: string; method: string; headers: Record<string, string>; body: Record<string, unknown> }> = []
+  /** (0.7.23) Every pin report the bridge sent, as it was sent. */
+  const pinPosts: Array<{ method: string; headers: Record<string, string>; body: PinReport }> = []
   on('http.fetch', async (_$, e) => {
     fetched.push(e.url)
+    if (e.url.endsWith('/api/ext/bridge-pins')) {
+      const body = JSON.parse(String(e.init?.body ?? '{}')) as PinReport
+      pinPosts.push({ method: String(e.init?.method ?? 'GET'), headers: { ...(e.init?.headers ?? {}) }, body })
+      const answer = opts.bridgePins ? opts.bridgePins(body) : { status: 404, body: { error: 'not_found' } }
+      if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
+      return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: JSON.stringify(answer.body ?? {}) } }
+    }
     if (e.url.endsWith('/api/ext/scope-line/link') || e.url.endsWith('/api/ext/scope-proposal')) {
       const body = JSON.parse(String(e.init?.body ?? '{}')) as Record<string, unknown>
       scopePosts.push({ url: e.url, method: String(e.init?.method ?? 'GET'), headers: { ...(e.init?.headers ?? {}) }, body })
@@ -429,7 +441,7 @@ function world(on: On, opts: WorldOptions = {}) {
   /** The chips this session asked the app for. */
   const minted = () => calls.filter(c => c.tool === 'spawn_task')
   return {
-    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, ran, shell, box, fills, resolves, statuses, closes, scopePosts,
+    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, ran, shell, box, fills, resolves, statuses, closes, scopePosts, pinPosts,
     /** The app calls that change a thread: a rename, a pin, a message, a chip. (Reading this session's own usage, and withdrawing a chip, change none.) */
     writes: () => calls.filter(c => !['get_session', 'list_sessions', 'get_usage', 'dismiss_task'].includes(c.tool)).map(c => [c.tool, c.args.session_id ?? '', c.args.title ?? c.args.pinned ?? ''].join(' | ')),
     /** The chips this session asked the app to withdraw, by their ids. */
@@ -3890,6 +3902,11 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     world(on, { feed: { member: FOUNDER, role: 'founder', drafts: [packageFor(ACME, 'Acme Roofing — Pat', { flagged_for_rob: true, project_owner_email: TEAMMATE_B, ...over })], mail: [], tickets: {} }, ...more })
   /** Tuesday 9 AM: an hour past the reply time of a package covering Monday 8 AM. */
   const PAST_DUE = 22 * HOUR
+  /** (0.7.23) An open ask of the founder's about `projectId` from `asker`: the signal that hands him a teammate's flagged package. */
+  const askOf = (asker: string, projectId = ACME, projectName = 'Acme Roofing — Pat'): FeedAsk => ({
+    ask_id: '5c1e2f3a-8b4d-4e6f-9a0b-000000000722', project_id: projectId, project_name: projectName, internal: false, asker_name: 'A teammate', asker_email: asker,
+    asked_email: FOUNDER, asked_at: ago(1), due_at: new Date(NOW + 47 * HOUR).toISOString(), snippet: 'Can you OK the reply?', has_draft: false, draft_sha256: null,
+  })
 
   test('R2: a teammate sends it, so it is theirs to decide until its reply is due: under With a teammate, "may need your OK · Builder B decides", Drafts shows him the package', async ($, on) => {
     const w = flaggedWorld(on)
@@ -3915,26 +3932,53 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     expect(w.acted()).toEqual([])
   })
 
-  test('R2: once its reply is due it moves up to his list, as the `ok` kind always was: who sends it, and Start makes its chip', async ($, on) => {
+  // ⛔ (0.7.23, Rob 11-05: "I thought we made it so that when a teammate's holding it, but it's late, it shows up on the
+  // morning meeting post instead of pinned on my side panel.") Until 0.7.21, once its reply was due, it moved up to his list
+  // (`1 client need you`, its row `◆ 1. 🔴 Acme Roofing · your OK · 1h late, due 8 AM · no thread`, `Builder B sends`) and
+  // pinned his thread. Now it stays Builder B's: Team · late lists it, and it is his only once Builder B asks him.
+  test('R2, (0.7.23) once its reply is due: still Builder B\'s, listed under Team · late by person, then client; never his row, pin or chip', async ($, on) => {
     const w = flaggedWorld(on)
+    await w.clock.advance(PAST_DUE)
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    const ui = await pane($)
+    expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([['mm-fold:team', 'Team · late (1)']])
+    await ui.press({ key: 'mm-fold:team' })
+    const all = await lines(ui)
+    const head = all.indexOf('Team · late (1)')
+    expect(head).toBeGreaterThan(-1)
+    expect(all.slice(head, head + 4)).toEqual(['Team · late (1)', 'Builder B (1)', '  Acme Roofing', '    - reply 1h late, flagged for your OK'])
+    expect(all.some(l => l.includes('needs your OK') || l.includes('your OK ·'))).toBe(false)
+    expect(await buttonsOf(ui, ACME)).toEqual([])
+    await ui.unmount()
+    expect(String(w.statuses.at(-1) ?? '')).toMatch(/^MM: clear · 1 late with the team/)
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(chipTitles(w)).toEqual([])
+    expect(w.acted()).toEqual([])
+  })
+
+  test('R2, (0.7.23) late, and Builder B asks him about the client: his then, as the `ok` kind always was: who sends it, and Start makes its chip', async ($, on) => {
+    const w = flaggedWorld(on, {}, {})
+    w.setFeed({ member: FOUNDER, role: 'founder', drafts: [packageFor(ACME, 'Acme Roofing — Pat', { flagged_for_rob: true, project_owner_email: TEAMMATE_B })], mail: [], tickets: {}, asks: [askOf(TEAMMATE_B)] })
     await w.clock.advance(PAST_DUE)
     expect(await mm($, '')).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
     const ui = await pane($)
-    // (0.7.12) the late clock says when it was due (until 0.7.12: `1h late`). (0.7.5) one line (`needs your OK` reads `your OK`), then who sends it; one clock
-    expect(await lines(ui)).toEqual([
-      'Needs you now (1)',
-      '◆ 1. 🔴 Acme Roofing · your OK · 1h late, due 8 AM · no thread',
-      'Builder B sends',
-      `Updated ${localClock(NOW + PAST_DUE)}`,
-    ])
+    // as before 0.7.23, with Builder B's ask beside it
+    expect((await lines(ui)).slice(0, 3)).toEqual(['Needs you now (1)', '◆ 1. 🔴 Acme Roofing · your OK · 1h late, due 8 AM · no thread', 'Builder B sends · 1 internal ask'])
+    expect((await buttons(ui)).some(b => b[0] === 'mm-fold:team')).toBe(false)
     expect(await buttonsOf(ui, ACME)).toEqual(['Start thread', 'Drafts'])
     await ui.press({ key: `start:${ACME}` })
     await ui.unmount()
-    expect(w.acted().map(c => [c.tool, c.args.title])).toEqual([['spawn_task', 'Acme Roofing: needs your OK']])
+    expect(w.acted().map(c => c.tool)).toEqual(['spawn_task'])
     expect(String(w.acted()[0]?.args.prompt)).toContain('reply package aaaaaaaa is flagged for my OK, and Builder B sends it.')
     expect(String(w.acted()[0]?.args.prompt)).toContain('Do not pick the package up and do not draft a second reply. Send nothing without my go.')
-    // (0.7.12) the chip's line says when it was due as well (until 0.7.12: `overdue 1h.`)
-    expect(String(w.acted()[0]?.args.tldr)).toBe('Acme Roofing needs you: Acme Roofing · needs your OK overdue 1h, due 8 AM. Start this to open a thread for that client with the drafts or the messages waiting.')
+    // an ask from anyone else is not Builder B asking: still Builder B's
+    w.setFeed({ member: FOUNDER, role: 'founder', drafts: [packageFor(ACME, 'Acme Roofing — Pat', { flagged_for_rob: true, project_owner_email: TEAMMATE_B })], mail: [], tickets: {}, asks: [askOf('builder-c@example.com')] })
+    const other = await mm($, '')
+    expect(other).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
+    const again = await pane($)
+    expect((await lines(again)).some(l => /needs your OK|· your OK ·/.test(l))).toBe(false)
+    expect((await buttons(again)).filter(b => b[0].startsWith('mm-fold:'))).toContainEqual(['mm-fold:team', 'Team · late (1)'])
+    await again.unmount()
   })
 
   for (const flagged of [true, false]) {
@@ -3957,7 +4001,7 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     })
   }
 
-  test('the holder counts (Opus, 10-13): a flagged package a teammate picked up on a client with no owner is theirs to decide until its reply is due', async ($, on) => {
+  test('the holder counts (Opus, 10-13): a flagged package a teammate picked up on a client with no owner is theirs to decide, (0.7.23) its reply due or late, until the holder asks him', async ($, on) => {
     const w = world(on, {
       feed: {
         member: FOUNDER, role: 'founder', mail: [], tickets: {},
@@ -3976,13 +4020,27 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     ])
     expect(await buttonsOf(ui, BOLT)).toEqual(['Drafts'])
     await ui.unmount()
-    // once its reply is due it is his: (0.7.5) who has the drafts in its one line, who sends it (nobody on record) on its second
-    await w.clock.advance(PAST_DUE)
+    // ⛔ (0.7.23) past its reply time it is still J Smith's: under Team · late (until 0.7.21 his then, `◆ 1. 🔴 Bolt
+    // Staffing · your OK · … · with J Smith · no thread`, `nobody on record sends`). (Its reply is due Tuesday 9 AM.)
+    await w.clock.advance(PAST_DUE + HOUR)
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    const late = await pane($)
+    await late.press({ key: 'mm-fold:team' })
+    const lateLines = await lines(late)
+    const head = lateLines.indexOf('Team · late (1)')
+    expect(head).toBeGreaterThan(-1)
+    expect(lateLines.slice(head + 1, head + 3)).toEqual(['J Smith (1)', '  Bolt Staffing'])
+    expect(lateLines[head + 3]).toBe('    - reply 1h late, flagged for your OK')
+    await late.unmount()
+    // J Smith asks him about Bolt: his then: who has the drafts in its one line, who sends it (nobody on record) on its second
+    const drafts = [packageFor(BOLT, 'Bolt Staffing (Sam)', { flagged_for_rob: true, project_owner_email: null, ...heldBy('J.Smith@example.com'), covers_through: ago(2) })]
+    w.setFeed({ member: FOUNDER, role: 'founder', mail: [], tickets: {}, drafts, asks: [askOf('j.smith@example.com', BOLT, 'Bolt Staffing (Sam)')] })
     expect(await mm($, '')).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
     const later = await pane($)
-    const row = (await lines(later)).find(l => l.startsWith('◆ 1. 🔴 Bolt Staffing · your OK · '))
+    const row = (await lines(later)).find(l => l.startsWith('◆ 1. 🔴 Bolt Staffing · '))
+    expect(row).toMatch(/your OK/)
     expect(row).toMatch(/ · with J Smith · no thread$/)
-    expect(await under(later, String(row))).toBe('nobody on record sends')
+    expect(await under(later, String(row))).toContain('nobody on record sends')
     await later.unmount()
     expect(w.acted()).toEqual([])
   })
@@ -4013,14 +4071,32 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     expect(w.acted()).toEqual([])
   })
 
-  test('it counts toward the pin cap like any other row once it is his: before that its linked thread is named for who has it, and not pinned', async ($, on) => {
+  test('its linked thread is named for who has it and never pinned, (0.7.23) late too; a pin 0.7.21 put on it comes off and the thread is renamed', async ($, on) => {
     const w = flaggedWorld(on, {}, { threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.links': { [ACME]: 'local_a' } } })
     expect(await mm($, '')).toBe('Nothing needs you right now.')
-    expect(w.threads.get('local_a')).toMatchObject({ title: '🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides', pinned: false })
+    const THEIRS = '🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides'
+    expect(w.threads.get('local_a')).toMatchObject({ title: THEIRS, pinned: false })
     await w.clock.advance(PAST_DUE)
-    expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
-    // (0.7.12) with when it was due (until 0.7.12: `🔴 1h late · Acme Roofing · needs your OK`)
-    expect(w.threads.get('local_a')).toMatchObject({ title: '🔴 1h late, due 8 AM · Acme Roofing · needs your OK', pinned: true })
+    // ⛔ (0.7.23) until 0.7.21 `1 client need you; 1 thread pinned`, the thread `🔴 1h late, due 8 AM · Acme Roofing · needs your OK`, pinned
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    expect(w.threads.get('local_a')).toMatchObject({ title: THEIRS, pinned: false })
+    expect(w.writes().filter(c => c.startsWith('set_pinned | local_a '))).toEqual([])
+  })
+
+  test('(0.7.23) a pin 0.7.21 put on the thread of a late package Builder B sends comes off on the next pass, and the thread is named for whose it is', async ($, on) => {
+    const w = flaggedWorld(on, {}, {
+      threads: [thread('local_a', '🔴 1h late, due 8 AM · Acme Roofing · needs your OK', 30, { pinned: true })],
+      store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.pins': { local_a: ourPin(ACME, 'Acme Roofing') } },
+    })
+    await w.clock.advance(PAST_DUE)
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    expect(w.threads.get('local_a')).toMatchObject({ title: '🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides', pinned: false })
+    expect(w.writes().filter(c => c.startsWith('set_pinned | local_a '))).toEqual(['set_pinned | local_a | false'])
+    expect((w.stored['mm.pins'] as Record<string, { byUs: boolean }>).local_a?.byUs).toBe(false)
+    expect((w.stored['mm.last'] as { pinned: number }).pinned).toBe(0)
+    // and it is not on the pin report as something that should be pinned: nothing about it is his
+    expect(w.pinPosts).toHaveLength(1)
+    expect((w.pinPosts[0]?.body as PinReport).items.map(i => i.project_id)).not.toContain(ACME)
   })
 
   test('a builder with the same feed sees no such row', async ($, on) => {
@@ -8540,9 +8616,9 @@ describe('New people: the founder and a PM route, start or dismiss someone no pr
       ])
       await ui.unmount()
     }
-    // nothing but the feed was fetched: no resolve until a press
+    // nothing but the feed was fetched (and (0.7.23) the sync's pin report): no resolve until a press
     expect(w.resolves).toEqual([])
-    expect(w.fetched.every(u => u.startsWith('https://onboarding-wizard.massmarket.ai/api/ext/closeout?'))).toBe(true)
+    expect(w.fetched.filter(u => !u.endsWith('/api/ext/bridge-pins')).every(u => u.startsWith('https://onboarding-wizard.massmarket.ai/api/ext/closeout?'))).toBe(true)
   })
 
   test('a feed with no person_alerts key (an OW that does not send them yet) draws the pane exactly as before', async ($, on) => {
@@ -9369,8 +9445,9 @@ const trackPart = (drawn: string[]): string[] => {
   return drawn.slice(at, end < 0 ? undefined : end)
 }
 /** Every fetch the bridge made is a read of one of its own GET routes: never a pickup, a hold or a resolve. */
+// (0.7.23) and the sync's pin report (`/bridge-pins`): what is pinned and what should be, never a pickup, a hold or a claim
 const onlyReads = (w: { fetched: string[] }) =>
-  w.fetched.every(u => /\/api\/ext\/(?:closeout\?|skill-map$|client-time\?project_ids=|reply-package\?package_id=[0-9a-f-]+&format=pickup$|team-ask\?)/.test(u))
+  w.fetched.every(u => /\/api\/ext\/(?:closeout\?|skill-map$|client-time\?project_ids=|reply-package\?package_id=[0-9a-f-]+&format=pickup$|team-ask\?|bridge-pins$)/.test(u))
 const skill = async ($: Engine, name: string, over: Record<string, unknown> = {}) => $.tool.call({ tool: 'Skill', skill: name, ...over } as never)
 const person = async ($: Engine, text: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
 /** Everything a mounted drawing shows, in order: each Text, and each Button as `[label]`. */
@@ -10418,7 +10495,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.21', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.23', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10487,7 +10564,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.21', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.23', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10553,7 +10630,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.21', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.23', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
@@ -12406,5 +12483,319 @@ describe('0.7.21 (Rob, 11-05: "When things are overdue but not assigned to me, I
     await mm($, '')
     expect(String(w.statuses.at(-1) ?? '')).not.toContain('late with the team')
     expect(await mm($, 'status')).not.toContain('late with the team')
+  })
+})
+
+// ⛔ (0.7.23, measured on Rob's computer 2026-11-05: 107 linked or pinned threads past the app's list of 60, asked by id in
+// link order, 10 a sync, so the same first 10 every sync; a thread the bridge pinned in 0.7.20 sat 29th and kept its pin and
+// its `check on <teammate>` name after 0.7.21) The clients and threads here are made up.
+describe('0.7.23 (A): threads past the app\'s list are asked for by id in turn, the bridge\'s own pins first', () => {
+  const pidOf = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-0000000a0722`
+  const sidOf = (n: number) => `local_n${String(n).padStart(2, '0')}`
+  /** The threads the app was asked for by id (never this one), from call `from` on. */
+  const asked = (w: { calls: Call[] }, from = 0) => w.calls.slice(from).filter(c => c.tool === 'get_session' && c.args.session_id !== 'self' && c.args.session_id !== SELF).map(c => String(c.args.session_id))
+  /** A teammate's ticket on Acme that owes an ETA, needed `h` hours ago. */
+  const mateLate = (n: number, who: string, h: number, title: string) => ({
+    ticket_id: `${String(n).padStart(8, '0')}-0000-4000-8000-0000000b0722`, project_id: ACME, project_name: 'Acme Roofing — Pat', title, due_at: null, due_source: null,
+    assignee_email: who, eta_needed_by: new Date(NOW - h * HOUR).toISOString(), eta_ask: '⏳ NO ETA — give one in Claude Code',
+  })
+  /** The founder's feed: Builder B's and Builder C's late tickets on Acme, nothing of his. */
+  const lateFeed = (): Feed => ({
+    member: FOUNDER, role: 'founder', mail: [], drafts: [], threads: [],
+    tickets: { overdue: [mateLate(1, TEAMMATE_B, 2, 'Build the quote page'), mateLate(2, 'builder-c@example.com', 1, 'Send the roof photos')] },
+  })
+  /** `n` made-up clients, each with a linked thread the app does not list. */
+  const pastTheList = (n: number) => {
+    const threads = Array.from({ length: n }, (_, i) => thread(sidOf(i + 1), `Notes ${i + 1}`, 40 + i))
+    return { threads, links: Object.fromEntries(threads.map((t, i) => [pidOf(i + 1), t.sessionId])) as Record<string, string> }
+  }
+
+  test('lookupOrder: the bridge\'s own pins first unless a lookup found them unpinned; then the one asked longest ago; a tie in link order', async () => {
+    const ours = (sid: string) => sid === 'c' || sid === 'd'
+    expect(lookupOrder(['a', 'b', 'c', 'd'], ours, { a: { at: 5 }, b: { at: 1 }, c: { at: 9, off: true }, d: { at: 9 } })).toEqual(['d', 'b', 'a', 'c'])
+    // never asked counts as asked longest ago; a malformed record is never asked
+    expect(lookupOrder(['a', 'b', 'c'], () => false, { a: { at: 3 }, b: null as never, c: { at: Number.NaN } })).toEqual(['b', 'c', 'a'])
+    expect(lookupOrder([], ours, {})).toEqual([])
+  })
+
+  test('(a) a thread the bridge pinned, 14th of 14 past the list in link order, is asked on the first sync: its pin comes off and it is named for what is there', async ($, on) => {
+    const { threads, links } = pastTheList(13)
+    const w = world(on, {
+      feed: lateFeed(),
+      threads: [...threads, thread('local_a', '🔴 Acme Roofing · check on Builder B · task 2h late', 30, { pinned: true })],
+      unlisted: [...threads.map(t => t.sessionId), 'local_a'],
+      store: { 'mm.links': { ...links, [ACME]: 'local_a' }, 'mm.pins': { local_a: ourPin(ACME, 'Acme Roofing') } },
+    })
+    await mm($, '')
+    const first = asked(w)
+    // (until 0.7.23: local_n01 to local_n10, every sync, and local_a never)
+    expect(first[0]).toBe('local_a')
+    expect(first.length).toBeLessThanOrEqual(10)
+    expect(w.threads.get('local_a')).toMatchObject({ title: '🟡 with Builder B and Builder C · Acme Roofing · no ETA', pinned: false })
+    expect(w.writes().filter(c => c.startsWith('set_pinned | local_a '))).toEqual(['set_pinned | local_a | false'])
+    expect((w.stored['mm.pins'] as Record<string, { byUs: boolean }>).local_a?.byUs).toBe(false)
+    // and every other one is asked by the second sync
+    const mark = w.calls.length
+    await w.clock.advance(6 * 60_000)
+    await mm($, '')
+    const second = asked(w, mark)
+    expect(second.length).toBeLessThanOrEqual(10)
+    expect(new Set([...first, ...second])).toEqual(new Set([...threads.map(t => t.sessionId), 'local_a']))
+  })
+
+  test('(b) every thread past the list is asked within ceil(n/10)+1 syncs, each once before any is asked again', async ($, on) => {
+    const n = 25
+    const { threads, links } = pastTheList(n)
+    const ids = threads.map(t => t.sessionId)
+    const w = world(on, { feed: lateFeed(), threads, unlisted: ids, store: { 'mm.links': links } })
+    const all: string[] = []
+    for (let sync = 0; sync < Math.ceil(n / 10) + 1; sync++) {
+      const mark = w.calls.length
+      await mm($, '')
+      const now = asked(w, mark).filter(sid => ids.includes(sid))
+      expect(now.length).toBeLessThanOrEqual(10)
+      all.push(...now)
+      await w.clock.advance(6 * 60_000)
+    }
+    // (until 0.7.23: local_n01 to local_n10 each sync, local_n11 to local_n25 never)
+    expect(new Set(all.slice(0, n))).toEqual(new Set(ids))
+    expect(all.slice(0, n)).toHaveLength(n)
+    // the record of when each was asked is in the store, and only for threads in play
+    expect(Object.keys(w.stored['mm.lookups'] as Record<string, unknown>).sort()).toEqual([...ids].sort())
+  })
+
+  test('(2) a thread whose pin record is ours, found open and not pinned, stops going first even while its record stays ours', async ($, on) => {
+    const { threads, links } = pastTheList(12)
+    const stale = ['local_s1', 'local_s2', 'local_s3']
+    const staleLinks = Object.fromEntries(stale.map((sid, i) => [`${String(i + 1).padStart(8, '0')}-0000-4000-8000-0000000c0722`, sid]))
+    const records = Object.fromEntries(Object.entries(staleLinks).map(([pid, sid]) => [sid, ourPin(pid, `Stale Client ${sid.slice(-1)}`)]))
+    const w = world(on, {
+      feed: lateFeed(),
+      threads: [...threads, ...stale.map((sid, i) => thread(sid, `Old work ${i + 1}`, 60 + i))],
+      unlisted: [...threads.map(t => t.sessionId), ...stale],
+      store: { 'mm.links': { ...links, ...staleLinks }, 'mm.pins': records },
+    })
+    await mm($, '')
+    const first = asked(w)
+    // ours first, though last in link order
+    expect(first.slice(0, 3)).toEqual(stale)
+    expect(first.slice(3)).toEqual(['local_n01', 'local_n02', 'local_n03', 'local_n04', 'local_n05', 'local_n06', 'local_n07'])
+    const seen = w.stored['mm.lookups'] as Record<string, { at: number; off?: boolean }>
+    expect(stale.map(sid => seen[sid]?.off)).toEqual([true, true, true])
+    // the records left as a pass that ran out of writes would leave them: still ours
+    w.stored['mm.pins'] = JSON.parse(JSON.stringify(records))
+    const mark = w.calls.length
+    await w.clock.advance(6 * 60_000)
+    await mm($, '')
+    // not first again: the ones never asked, then the one asked longest ago (until the fix's (2) they went first every sync)
+    expect(asked(w, mark)).toEqual(['local_n08', 'local_n09', 'local_n10', 'local_n11', 'local_n12', 'local_n01', 'local_n02', 'local_n03', 'local_n04', 'local_n05'])
+  })
+})
+
+// (0.7.23, Rob 2026-11-05: "it should be everything that should be pinned, and there should be another indicator, like a green
+// light beside it, to show if it is or not.") The clients here are made up.
+describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and why not', () => {
+  const DUNE = '44444444-4444-4444-4444-444444444444'
+  const pidOf = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-0000000d0722`
+  const nameOf = (n: number) => `Willow Client ${String(n).padStart(2, '0')}`
+  const OK = { status: 200, body: { ok: true } }
+  /** The founder's own task on a client, due in `h` hours. */
+  const taskOn = (n: number, pid: string, name: string, h: number) => ({
+    ticket_id: `${String(n).padStart(8, '0')}-0000-4000-8000-0000000e0722`, project_id: pid, project_name: name, title: 'Send the intake form',
+    due_at: new Date(NOW + h * HOUR).toISOString(), due_source: 'commitment', assignee_email: FOUNDER,
+  })
+  /**
+   * The founder: his own tasks on 13 clients (each with a linked thread on the list), due one after another; Bolt's late
+   * mail (no thread); Dune's task, its thread past the list (`unseen` once a lookup cannot answer); Acme: his teammates'
+   * late tickets alone, its thread pinned by the person.
+   */
+  const reportFeed = (n = 13): Feed => ({
+    member: FOUNDER, role: 'founder', drafts: [], threads: [],
+    mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 74, { project_owner_email: FOUNDER })],
+    tickets: {
+      due_today: [...Array.from({ length: n }, (_, i) => taskOn(i + 1, pidOf(i + 1), nameOf(i + 1), 1 + i * 0.25)), taskOn(20, DUNE, 'Dune Labs', 0.75)],
+      overdue: [{ ticket_id: '00000030-0000-4000-8000-0000000e0722', project_id: ACME, project_name: 'Acme Roofing — Pat', title: 'Build the quote page', due_at: null, due_source: null, assignee_email: TEAMMATE_B, eta_needed_by: new Date(NOW - 2 * HOUR).toISOString(), eta_ask: '⏳ NO ETA — give one in Claude Code' }],
+    },
+  })
+  /** `n` of the 13 Willow clients (13: the pass runs out of writes for the 13th; 3: it never does). */
+  const reportWorld = (on: On, more: WorldOptions = {}, n = 13) => {
+    const threads = Array.from({ length: n }, (_, i) => thread(`local_w${String(i + 1).padStart(2, '0')}`, `Willow work ${i + 1}`, 2 + i))
+    return world(on, {
+      feed: reportFeed(n),
+      threads: [...threads, thread('local_d', 'Dune work', 50), thread('local_acme', 'Acme work', 3, { pinned: true })],
+      unlisted: ['local_d'],
+      lookupFails: 'internal error',
+      store: { 'mm.links': { ...Object.fromEntries(threads.map((t, i) => [pidOf(i + 1), t.sessionId])), [DUNE]: 'local_d', [ACME]: 'local_acme' } },
+      bridgePins: () => OK,
+      ...more,
+    })
+  }
+  /** What a pass left: every thread's name and pin, the pin records, and how many it counted pinned. */
+  const outcome = (w: ReturnType<typeof reportWorld>) => ({
+    threads: [...w.threads.values()].map(t => [t.sessionId, t.title, t.pinned]),
+    pins: w.stored['mm.pins'],
+    pinned: (w.stored['mm.last'] as { pinned: number }).pinned,
+  })
+
+  test('the payload: each item that should be pinned once, whether it is, and why not; the threads pinned for nothing on the list', async ($, on) => {
+    const w = reportWorld(on)
+    await mm($, '')
+    expect(w.pinPosts).toHaveLength(1)
+    const sent = w.pinPosts[0] as (typeof w.pinPosts)[number]
+    expect(sent.method).toBe('POST')
+    expect(sent.headers).toEqual({ Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.23', 'Content-Type': 'application/json' })
+    const body = sent.body
+    expect(Object.keys(body).sort()).toEqual(['at', 'extra', 'items'])
+    expect(body.at).toBe(new Date(NOW).toISOString())
+    const by = (pid: string) => body.items.find(i => i.project_id === pid)
+    // pinned: a green light, no reason
+    expect(by(pidOf(1))).toEqual({ project_id: pidOf(1), client: nameOf(1), kind: 'task', tone: 'yellow', due_at: new Date(NOW + HOUR).toISOString(), pinned: true, why_not: null })
+    // no thread of its own; red: its reply is past due
+    expect(by(BOLT)).toMatchObject({ client: 'Bolt Staffing', kind: 'reply', tone: 'red', pinned: false, why_not: 'no_thread' })
+    // its thread past the app's list, and the lookup could not say
+    expect(by(DUNE)).toMatchObject({ client: 'Dune Labs', kind: 'task', tone: 'yellow', pinned: false, why_not: 'unseen' })
+    // wanted pinned, and the pass had no writes left for it
+    expect(by(pidOf(13))).toMatchObject({ client: nameOf(13), pinned: false, why_not: 'write_cap' })
+    // each item once; every one pins (`pinsFor`); why_not null exactly when pinned
+    expect(new Set(body.items.map(i => i.project_id)).size).toBe(body.items.length)
+    for (const i of body.items) expect(i.why_not === null).toBe(i.pinned)
+    // the threads pinned: the items' green lights and the extra
+    expect(body.items.filter(i => i.pinned).length + body.extra.length).toBe((w.stored['mm.last'] as { pinned: number }).pinned)
+    // Acme: nothing of his (Team · late alone), its thread pinned by the person: extra, never an item
+    expect(by(ACME)).toBeUndefined()
+    expect(body.extra).toEqual([{ project_id: ACME, client: 'Acme Roofing', by: 'person' }])
+    // the whole of it, as OW gets it: Bolt's late reply, Dune's task, then the Willow tasks by when they are due
+    const due = (h: number) => new Date(NOW + h * HOUR).toISOString()
+    const willow = (n: number, pinned: boolean) => ({ project_id: pidOf(n), client: nameOf(n), kind: 'task', tone: 'yellow', due_at: due(1 + (n - 1) * 0.25), pinned, why_not: pinned ? null : 'write_cap' })
+    expect(body).toEqual({
+      at: '2026-10-12T15:00:00.000Z',
+      items: [
+        { project_id: BOLT, client: 'Bolt Staffing', kind: 'reply', tone: 'red', due_at: '2026-10-12T13:00:00.000Z', pinned: false, why_not: 'no_thread' },
+        { project_id: DUNE, client: 'Dune Labs', kind: 'task', tone: 'yellow', due_at: due(0.75), pinned: false, why_not: 'unseen' },
+        ...Array.from({ length: 13 }, (_, i) => willow(i + 1, i < 12)),
+      ],
+      extra: [{ project_id: ACME, client: 'Acme Roofing', by: 'person' }],
+    })
+    // ⛔ never kept, logged or written anywhere: only its hash and when it went
+    expect(Object.keys(w.stored['mm.pinReport'] as Record<string, unknown>).sort()).toEqual(['at', 'hash'])
+    expect(JSON.stringify(w.written)).not.toContain('why_not')
+    expect(JSON.stringify(w.stored)).not.toContain('why_not')
+  })
+
+  test('pinReport: an item listed twice (a row and a quiet one) is reported once, the first; one that does not pin is not reported; extra names only linked threads pinned', async () => {
+    // his task on Cedar an hour late, and one on Bolt 30 hours out (listed; it does not pin: past 24 business hours)
+    const l = buildLists({ member: FOUNDER, role: 'founder', mail: [], drafts: [], tickets: { overdue: [taskOn(1, CEDAR, 'Cedar Dental', -1)], due_soon: [taskOn(2, BOLT, 'Bolt Staffing (Sam)', 30)] } }, NOW)
+    const listed = [...l.queue, ...l.queue.filter(i => i.projectId === CEDAR).map(i => ({ ...i, client: 'Cedar Dental again' }))]
+    expect(listed.map(i => i.projectId)).toEqual([CEDAR, BOLT, CEDAR])
+    const r = pinReport({
+      now: NOW,
+      listed,
+      links: { [CEDAR]: 'local_c', [ACME]: 'local_a', [DUNE]: 'local_d' },
+      thread: sid => ({ local_c: { sessionId: 'local_c', title: 'x', pinned: true }, local_a: { sessionId: 'local_a', title: 'y', pinned: true }, local_d: { sessionId: 'local_d', title: 'z', pinned: false } } as Record<string, never>)[sid],
+      hidden: () => false,
+      stayedOff: new Set(),
+      capped: new Set(),
+      byUs: sid => sid === 'local_a',
+      client: () => 'Acme Roofing',
+    })
+    expect(r.items).toEqual([{ project_id: CEDAR, client: 'Cedar Dental', kind: 'task', tone: 'red', due_at: new Date(NOW - HOUR).toISOString(), pinned: true, why_not: null }])
+    expect(r.extra).toEqual([{ project_id: ACME, client: 'Acme Roofing', by: 'bridge' }])
+  })
+
+  test('change detection: unchanged, it goes again only once 30 minutes have passed; changed, at the next sync; never twice in one sync', async ($, on) => {
+    const w = reportWorld(on, {}, 3)
+    await mm($, '')
+    expect(w.pinPosts).toHaveLength(1)
+    await w.clock.advance(6 * 60_000)
+    await mm($, '')
+    expect(w.pinPosts).toHaveLength(1)
+    await w.clock.advance(25 * 60_000)
+    await mm($, '')
+    expect(w.pinPosts).toHaveLength(2)
+    expect(w.pinPosts[1]?.body.items).toEqual(w.pinPosts[0]?.body.items)
+    // a change: Bolt's mail answered, so Bolt is off the report, and it goes at the next sync
+    w.setFeed({ ...reportFeed(3), mail: [] })
+    await w.clock.advance(6 * 60_000)
+    await mm($, '')
+    expect(w.pinPosts).toHaveLength(3)
+    expect(w.pinPosts[2]?.body.items.some(i => i.project_id === BOLT)).toBe(false)
+  })
+
+  for (const status of [404, 405]) {
+    test(`OW without the route (${status}): the bridge waits 6 hours before it sends again, changed or not`, async ($, on) => {
+      const w = reportWorld(on, { bridgePins: () => ({ status }) }, 3)
+      await mm($, '')
+      expect(w.pinPosts).toHaveLength(1)
+      expect((w.stored['mm.pinReport'] as { missingUntil: number }).missingUntil).toBe(NOW + 6 * HOUR)
+      await w.clock.advance(31 * 60_000)
+      w.setFeed({ ...reportFeed(3), mail: [] })
+      await mm($, '')
+      expect(w.pinPosts).toHaveLength(1)
+      await w.clock.advance(6 * HOUR)
+      await mm($, '')
+      expect(w.pinPosts).toHaveLength(2)
+    })
+  }
+
+  // (`200` here is the yardstick: the same sync, with OW taking the report)
+  for (const answer of [{ status: 200 }, { status: 500 }, 'network'] as const) {
+    const label = typeof answer === 'string' ? 'no answer' : String(answer.status)
+    test(`whatever OW answers the report (${label}), the sync is the same; a failed one goes again at the next sync`, async ($, on) => {
+      const w = reportWorld(on, { bridgePins: () => answer }, 3)
+      expect(await mm($, '')).toBe('5 clients need you; 4 threads pinned. The list is in the side pane.')
+      const after = outcome(w)
+      expect(after.pinned).toBe(4)
+      expect(after.threads.filter(t => t[2] === true).map(t => t[0]).sort()).toEqual(['local_acme', 'local_w01', 'local_w02', 'local_w03'])
+      // the same names, pins and records whatever OW answered
+      expect(after.threads).toEqual([
+        ['local_self', 'Morning hub', false],
+        ['local_w01', '🔴 1h left · Willow Client 01 · task', true],
+        ['local_w02', '🔴 1h left · Willow Client 02 · task', true],
+        ['local_w03', '🔴 2h left · Willow Client 03 · task', true],
+        ['local_d', 'Dune work', false],
+        ['local_acme', '🟡 with Builder B · Acme Roofing · no ETA', true],
+      ])
+      expect(after.pins).toEqual({
+        ...Object.fromEntries([1, 2, 3].map(n => [`local_w0${n}`, { projectId: pidOf(n), client: nameOf(n), byUs: true }])),
+        local_acme: { projectId: ACME, client: 'Acme Roofing', byUs: false },
+      })
+      expect(w.pinPosts).toHaveLength(1)
+      const took = typeof answer !== 'string' && answer.status === 200
+      expect(w.stored['mm.pinReport'] !== undefined).toBe(took)
+      await w.clock.advance(6 * 60_000)
+      await mm($, '')
+      expect(w.pinPosts).toHaveLength(took ? 1 : 2)
+      // (the names' clocks moved on six minutes; the pins and records did not)
+      const later = outcome(w)
+      expect(later.threads.map(t => [t[0], t[2]])).toEqual(after.threads.map(t => [t[0], t[2]]))
+      expect([later.pins, later.pinned]).toEqual([after.pins, after.pinned])
+    })
+  }
+
+  // (0.7.23, coordinator 2026-11-05) R8 takes a client whose newer send is being checked off the person's plate and unpins its
+  // thread whoever pinned it: never one that should be pinned, so never in the report's items
+  test('a client in checking with a newer send being checked is not in the items; the rest are as before', async ($, on) => {
+    const w = acmeWorld(on, { bridgePins: () => OK })
+    await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: ACME_TITLE, pinned: true })
+    expect(w.pinPosts.at(-1)?.body.items.find(i => i.project_id === ACME)).toMatchObject({ pinned: true, why_not: null })
+    // our send is in the feed, newer than any check: the checking loop names its thread and unpins it
+    w.setFeed(acmeFeed({ last_outbound_at: ago(0.25) }))
+    await w.clock.advance(6 * 60_000)
+    await mm($, '')
+    expect(w.threads.get('local_a')).toMatchObject({ title: '✓ Acme Roofing · sent 10:45 AM · checking', pinned: false })
+    expect(w.pinPosts).toHaveLength(2)
+    const body = w.pinPosts[1]?.body as PinReport
+    expect(body.items.map(i => i.project_id)).not.toContain(ACME)
+    expect(body.extra.map(e => e.project_id)).not.toContain(ACME)
+    // Cedar and Bolt, with no thread, as before
+    expect(body.items.map(i => [i.project_id, i.why_not])).toEqual(expect.arrayContaining([[CEDAR, 'no_thread'], [BOLT, 'no_thread']]))
+  })
+
+  test('a teammate\'s view sends its own report too', async ($, on) => {
+    const w = world(on, { feed: feed(), bridgePins: () => OK })
+    await mm($, '')
+    expect(w.pinPosts).toHaveLength(1)
+    expect(Array.isArray(w.pinPosts[0]?.body.items)).toBe(true)
   })
 })
