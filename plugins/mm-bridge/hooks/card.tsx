@@ -472,7 +472,7 @@ async function recordSignature($: EngineInterface, card: MmCard, signer: string,
       package_id: card.packageId,
       package_sha256: sha,
       label: sha.slice(0, 12),
-      signer,
+      signer: signer.trim() || 'Approver',
       at: new Date(await $.clock.now()).toISOString(),
     })
     const path = `${log.home}/.claude/mm-hooks/card-signed.jsonl`

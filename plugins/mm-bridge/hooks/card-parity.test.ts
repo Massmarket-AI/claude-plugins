@@ -102,21 +102,21 @@ describe('0.7.30 the card against the page: every content line of the page is in
 
   test('a stored HTML body: the page prints it raw, the card rendered. The same words pass; different words do not', () => {
     const html = (body: string) => `### Client reply\n\n\`\`\`text\n${body}\n\`\`\`\n\n${CLOSE}`
-    const body = '<html><head><title>x</title><style>p{color:red}</style></head><body><p>Hi Dana &amp; team,</p><p>The <a href="https://example.com/book">booking link</a> is&nbsp;live.</p><script>nope()</script></body></html>'
-    expect(contentPieces(html(body))).toEqual(['Hi Dana & team,', 'The', 'booking link', 'is live.'])
+    const body = '<!doctype html><html><head><title>x</title><style>p{color:red}</style></head><body><!-- [if mso]><p>not shown</p><![endif] --><p>Hi Dana &amp; team,</p><p>The <a href="https://example.com/book">booking link</a> is&nbsp;live.</p><script>nope()</script></body></html>'
+    expect(contentPieces(html(body))).toEqual(['Hi Dana & team,', 'The', 'booking link', 'is live.'])
     expect(pageGap(html(body), cardWith('Hi Dana & team,', 'The booking link (https://example.com/book) is live.'))).toBe('')
-    expect(pageGap(html(body), cardWith('Hi Dana & team,', 'The booking link is broken.'))).toBe('the page holds a line the card does not (is live.)')
+    expect(pageGap(html(body), cardWith('Hi Dana & team,', 'The booking link is broken.'))).toBe('the page holds a line the card does not (is live.)')
     // not HTML: angle brackets in plain words stay words
     expect(contentPieces('```text\nDana <dana@example.com> said 1 < 2\n```')).toEqual(['Dana <dana@example.com> said 1 < 2'])
   })
 
   test('a roster name on the page and an address on the card are not the same words: not ready', () => {
-    expect(pageGap(`#### Pat Builder · Thu Nov 5, 10:02 AM ET\n\n${CLOSE}`, cardWith('pat@massmarket.ai · Thu Nov 5, 10:02 AM ET'))).toBe('the page holds a line the card does not (#### Pat Builder)')
+    expect(pageGap(`#### Pat Builder · Thu Nov 5, 10:02 AM ET\n\n${CLOSE}`, cardWith('pat@massmarket.ai · Thu Nov 5, 10:02 AM ET'))).toBe('the page holds a line the card does not (Pat Builder)')
   })
 
   test('a mail sender\'s address: the page prints it, so the card must', () => {
     const page = `#### Dana Example <dana@example.com> · Thu Nov 5, 10:02 AM ET · gmail\n\n${CLOSE}`
-    expect(pageGap(page, cardWith('Dana Example', 'Thu Nov 5, 10:02 AM ET · gmail'))).toBe('the page holds a line the card does not (#### Dana Example <dana@example.com>)')
+    expect(pageGap(page, cardWith('Dana Example', 'Thu Nov 5, 10:02 AM ET · gmail'))).toBe('the page holds a line the card does not (Dana Example <dana@example.com>)')
     expect(pageGap(page, cardWith('Dana Example <dana@example.com>', 'Thu Nov 5, 10:02 AM ET · gmail'))).toBe('')
   })
 

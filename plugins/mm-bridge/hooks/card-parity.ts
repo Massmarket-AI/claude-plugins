@@ -34,7 +34,7 @@ const LABEL = /^(?:\*\*[^*]+:\*\*|To:|Cc:|From:|Subject:|hash|Status:)\s*/
 const MENTION = /<@!?\d{15,20}>/g
 /** A body the page prints raw that the card draws as its reader sees it, by the tags render_pickup's HTML_HINT knows. */
 const HTML_HINT = /<(?:p|br|div|a|ul|ol|li|table|span|b|strong|i|em|h[1-6])\b[^>]*>/i
-const HIDDEN = /<(style|script|head|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi
+const HIDDEN = /<(style|script|head|title)\b[^>]*>[\s\S]*?<\/\1\s*>|<!--[\s\S]*?-->|<![^>]*>/gi
 const TAG = /<\/?[a-z][a-z0-9]*(?:\s[^<>]*)?\/?>/gi
 const ENTITY: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' }
 
@@ -105,7 +105,7 @@ export function contentPieces(page: string): string[] {
       continue
     }
     if (!line || STRUCTURAL.some(p => p.test(line))) continue
-    const bare = line.replace(/^- /, '')
+    const bare = line.replace(/^(?:- |#{1,6} )/, '')
     const cells = bare.startsWith('|') ? bare.replace(/^\||\|$/g, '').split('|') : [bare]
     for (const cell of cells) for (const part of cell.trim().split(' · ')) add(part.replace(LABEL, ''))
   }
