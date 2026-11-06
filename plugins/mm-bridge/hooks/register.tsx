@@ -2727,6 +2727,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // thread of every ACTIVE client whatever its time, so threads named only `🟡 <client> · task`, whose items were undated
   // tickets, were pinned with no clock. A pin needs a clock again: an undated client is never pinned, active or not, and
   // the pins 0.7.11 put on such threads come off here (they are ours). The internal queue was never pinned that way.
+  // (0.7.27, Rob 2026-11-05, over that: "Shouldn't it be pinned?") An undated ticket with a known last activity inside the
+  // window pins for its owner as `needs a due date`, and a client's own pace row pins as its status says (`ownPins`); an
+  // undated item with nothing to measure it by still never pins.
   // ⛔ (0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you, not when something has a timer left for a
   // teammate to answer") Only what needs the person pins by R1's 24 business hours (`ownActBy`): a reply whose drafts a
   // teammate holds, a package a teammate decides on and a teammate's ticket pin only once the PM should check on them
