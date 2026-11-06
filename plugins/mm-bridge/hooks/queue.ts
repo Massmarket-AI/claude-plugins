@@ -22,7 +22,7 @@
 //     it was asked, internal or not (kind `ask` when nothing else lists the client)
 //   - (0.7.3, internal queue) the viewer's own internal-ops tickets with no committed date, in rank order, on the
 //     internal-ops project's item, with no due time and no clock (kind `queue` when nothing else lists it)
-//   - (0.7.22, follow-ups that need a go) proposed follow-up steps on a follow-ups-only package (an ask we sent by hand)
+//   - (0.7.24, follow-ups that need a go) proposed follow-up steps on a follow-ups-only package (an ask we sent by hand)
 //     that nobody approved: for whoever must give the go, due when the first step's window opens, and pinned at once
 //     (kind `go` when nothing else lists the client); for the founder and the PM, a teammate's to check on (`watch`)
 // A listed client pins while what it must act by is past or within the next 24 business hours (`pinsNow`).
@@ -237,7 +237,7 @@ export type InternalQueue = { tickets: QueueRef[]; total: number }
 export type FeedProject = { project_id: string; name: string; followups?: FeedFollowups | null }
 
 /**
- * (0.7.22) A feed project's `followups` (OW closeout.ts `CloseoutFollowups`, migration 299 and R7 2026-10-21): the client's
+ * (0.7.24) A feed project's `followups` (OW closeout.ts `CloseoutFollowups`, migration 299 and R7 2026-10-21): the client's
  * running steps and the proposed ones waiting for a go. The bridge reads only the `go_` keys (OW, 2026-11-04), which OW
  * sends only when proposed steps sit on a FOLLOW-UPS-ONLY package (an ask we sent by hand, `package.followups_anchor`):
  * a package with a reply to send is approved with its reply, so its steps never need a go of their own. Rob, 2026-11-04:
@@ -260,7 +260,7 @@ export type FeedFollowups = {
 }
 
 /**
- * (0.7.22) Follow-up steps that wait for a go, as a client's item keeps them: the follow-ups-only package (a lower-case
+ * (0.7.24) Follow-up steps that wait for a go, as a client's item keeps them: the follow-ups-only package (a lower-case
  * uuid: it goes into the kickoff and the pickup request), how many steps, when the first one's window opens (ms; null when
  * OW could not date it) and its step kind as OW names it (`client_sms`; '' when it is not one: lower-case letters and _ only),
  * and whose go it is: `mine` when it is the
@@ -348,7 +348,7 @@ export type QueueItem = {
    * listed by the viewer's internal asks alone (no client message, no package of theirs, no task): its title says
    * `internal ask` where a task's says `task`. A client with any of those as well keeps that kind, and its asks beside it.
    * (0.7.3, internal queue) `queue`: the internal-ops item listed by the viewer's internal queue alone: `internal queue`.
-   * (0.7.22) `go`: listed by follow-up steps that wait for a go alone: `follow-ups need your go`.
+   * (0.7.24) `go`: listed by follow-up steps that wait for a go alone: `follow-ups need your go`.
    */
   kind: 'ready' | 'reply' | 'task' | 'ok' | 'ask' | 'queue' | 'go'
   messages: number
@@ -368,10 +368,17 @@ export type QueueItem = {
   /**
    * For the founder alone: the teammate a client's package is with when it is theirs to see through, not his
    * (0.5.1). R1: a stale package a teammate sends, with a client message waiting after its drafts. R2: a
-   * current package flagged for his OK that a teammate sends, until its reply is due. The client then lists
-   * under With a teammate. Absent otherwise, and on an item an older version stored.
+   * current package flagged for his OK that a teammate sends, until its reply is due; ⛔ (0.7.23) and after it too, unless
+   * that teammate asks him about the client (an open ask of theirs in the feed). The client then lists under With a
+   * teammate. Absent otherwise, and on an item an older version stored.
    */
   theirs?: string
+  /**
+   * (0.7.23, for the founder alone) The package flagged for his OK that a teammate holds or sends (R2, `theirs`), once its
+   * reply is due: who has it, the package's id, and since when it is late. Listed under Team · late (`teamLate`), never
+   * pinned. Absent otherwise, and on an item an older version stored.
+   */
+  okLate?: { by: string; id: string; lateSince: number }
   /**
    * (0.5.2, R1) The soonest time something of the client's must be acted on: a reply's due time, a package's,
    * a task's start-by time when the feed gives one, else its due time. Its thread is pinned while this is past
@@ -449,7 +456,7 @@ export type QueueItem = {
   /** (0.7.18) How far ahead of a watched part's due time it pins for this viewer: PM_CHECK_AHEAD_MS (the PM alone since 0.7.21). Absent: never. */
   checkAhead?: number
   /**
-   * (0.7.22, Rob 2026-11-04) Proposed follow-up steps of the client's that nobody approved and that wait for a go (`GoRef`).
+   * (0.7.24, Rob 2026-11-04) Proposed follow-up steps of the client's that nobody approved and that wait for a go (`GoRef`).
    * The viewer's own (`mine`): due when the first step's window opens, and it pins at once, whatever that time (Rob: "it
    * should show up for them as soon as possible"); once the go is given OW stops sending it and it is gone. A teammate's,
    * for the founder and the PM: a watched part (`watch`, `what` 'follow-ups go'), pinned only once nearly due or late.
@@ -471,8 +478,12 @@ export type EtaRef = { id: string; title: string; neededBy: number }
 /** (0.7.15, owner asks) A ticket of the viewer's to give an owner: its id (a lower-case uuid), its title, and the `assign_by` clock. */
 export type AssignRef = { id: string; title: string; assignBy: number }
 
-/** (0.7.4) A teammate's late internal ticket, for the founder: whose (their name), its id, title and since when it is late; `eta` when no ETA was ever given. */
-export type MateRef = { by: string; id: string; title: string; lateSince: number; eta: boolean }
+/**
+ * (0.7.4) A teammate's late internal ticket, for the founder: whose (their name), its id, title and since when it is late;
+ * `eta` when no ETA was ever given. (0.7.23) `ok`: not a ticket but a reply package flagged for his OK that the teammate
+ * holds or sends, late since its reply was due (`okLate`); its id is the package's.
+ */
+export type MateRef = { by: string; id: string; title: string; lateSince: number; eta: boolean; ok?: true }
 
 /** (0.7.4, ETA asks) What a ticket that owes an ETA says, in OW's words (ETA_ASK_TEXT): the feed's own copy of it is never shown. */
 export const ETA_ASK_TEXT = '⏳ NO ETA — give one in Claude Code'
@@ -593,33 +604,33 @@ export const heldInternal = (it: Pick<QueueItem, 'projectId' | 'asks' | 'interna
 /** (R17) Whether a client has a due time at all (an item stored by the bridge keeps Infinity as null). */
 export const hasDue = (it: Pick<QueueItem, 'dueAt'>): boolean => typeof it.dueAt === 'number' && Number.isFinite(it.dueAt)
 
-/** (0.7.22) The client's follow-up steps that wait for a go, checked again (an item an older version stored, or a store edited by hand, is read as data); null with none. */
+/** (0.7.24) The client's follow-up steps that wait for a go, checked again (an item an older version stored, or a store edited by hand, is read as data); null with none. */
 export function goOf(it: Pick<QueueItem, 'go'>): GoRef | null {
   const g = it.go
   if (!g || typeof g !== 'object' || !isUuid(g.packageId) || !Number.isSafeInteger(g.steps) || g.steps < 1) return null
   return g
 }
 
-/** (0.7.22) Whether the viewer must give a go on follow-up steps of this client's: what pins it at once (`ownPins`). */
+/** (0.7.24) Whether the viewer must give a go on follow-up steps of this client's: what pins it at once (`ownPins`). */
 export const goMine = (it: Pick<QueueItem, 'go'>): boolean => goOf(it)?.mine === true
 
-/** (0.7.22) A client listed by follow-up steps that wait for a go and nothing else: no client message, no package, no task, no ask, no queue. */
+/** (0.7.24) A client listed by follow-up steps that wait for a go and nothing else: no client message, no package, no task, no ask, no queue. */
 export const goOnly = (it: QueueItem): boolean =>
   goOf(it) !== null && it.messages === 0 && it.tasks === 0 && !it.packageId && !(it.open ?? null) && openAsks(it).length === 0 && queuedOf(it).length === 0
 
-/** (0.7.22) What a row, a thread's name and a chip say for follow-up steps that wait for the viewer's go (Rob's words, 2026-11-04). */
+/** (0.7.24) What a row, a thread's name and a chip say for follow-up steps that wait for the viewer's go (Rob's words, 2026-11-04). */
 export const GO_WHAT = 'follow-ups need your go'
 
-/** (0.7.22) The same for a teammate's go, on the founder's or the PM's row (`with <Name>` stands beside it). */
+/** (0.7.24) The same for a teammate's go, on the founder's or the PM's row (`with <Name>` stands beside it). */
 export const GO_THEIRS = 'follow-ups need a go'
 
-/** (0.7.22) A step kind as a word: `text`, `email`, `LinkedIn`, `call`, else `step`. */
+/** (0.7.24) A step kind as a word: `text`, `email`, `LinkedIn`, `call`, else `step`. */
 export function stepWord(kind: unknown): string {
   const k = typeof kind === 'string' ? kind : ''
   return k === 'client_sms' ? 'text' : k === 'client_email' ? 'email' : k.startsWith('linkedin') ? 'LinkedIn' : k === 'call_task' ? 'call' : 'step'
 }
 
-/** (0.7.22) The first step and its date, as a row and a thread's name end with it: `first text Fri Nov 6`; with no date, `first text`. */
+/** (0.7.24) The first step and its date, as a row and a thread's name end with it: `first text Fri Nov 6`; with no date, `first text`. */
 export function goFirstText(g: Pick<GoRef, 'firstAt' | 'firstKind'>): string {
   const word = stepWord(g.firstKind)
   if (typeof g.firstAt !== 'number' || !Number.isFinite(g.firstAt)) return `first ${word}`
@@ -655,11 +666,11 @@ export function clientActivity(feed: Feed): Map<string, number> {
   return out
 }
 
-/** (0.7.11) Something of the client's waits now: a message of theirs with no reply, or a reply package; (0.7.22) or follow-up steps that wait for a go. */
+/** (0.7.11) Something of the client's waits now: a message of theirs with no reply, or a reply package; (0.7.24) or follow-up steps that wait for a go. */
 export const clientWaiting = (it: QueueItem): boolean => it.messages > 0 || Boolean(it.packageId) || Boolean(it.open ?? null) || goOf(it) !== null
 
 /**
- * (0.7.11) Something due for the viewer himself: a client's reply, or a dated ticket of his own; (0.7.22) or a go he must
+ * (0.7.11) Something due for the viewer himself: a client's reply, or a dated ticket of his own; (0.7.24) or a go he must
  * give on follow-up steps. Never a teammate's ticket past its ETA (`mates`, `theirs`), a ticket with no date, one that
  * only owes an ETA, or an internal ask.
  */
@@ -851,7 +862,7 @@ export type Lists = { queue: QueueItem[]; teammate: QueueItem[]; checking: Queue
  * task of the viewer's own due there, and (for the founder) no package waiting for his OK. For the founder
  * too: a client whose package a teammate sends and that is theirs to see through (`theirs`, R1 and R2).
  * (0.5.28, internal asks) An open ask of the viewer's keeps the client in their list as a task of theirs does: it was
- * asked of them, whoever holds the client's drafts. (0.7.3, internal queue) So does their internal queue. (0.7.22) So
+ * asked of them, whoever holds the client's drafts. (0.7.3, internal queue) So does their internal queue. (0.7.24) So
  * does a go of theirs on follow-up steps.
  */
 export const withTeammate = (it: QueueItem): boolean =>
@@ -963,7 +974,7 @@ export function checkNow(it: Pick<QueueItem, 'watch' | 'checkAhead'>, now: numbe
  * within the next 24 business hours), or (the PM's) a teammate's part to check on (`checkNow`). A reply a teammate holds the
  * drafts of, a package a teammate decides on and a teammate's ticket never pin while their time is left. ⛔ (0.7.21) For the
  * founder, never at all: his own items alone pin his threads (`ownPins`), and his teammates' late tickets are Team · late's.
- * (0.7.22) Nor does a teammate's go on follow-up steps (the PM's checks it 5 business hours out); the viewer's own go pins
+ * (0.7.24) Nor does a teammate's go on follow-up steps (the PM's checks it 5 business hours out); the viewer's own go pins
  * at once (`ownPins`).
  */
 export function pinsFor(it: Pick<QueueItem, 'dueAt' | 'actBy' | 'own' | 'watch' | 'checkAhead' | 'go'>, now: number): boolean {
@@ -971,7 +982,7 @@ export function pinsFor(it: Pick<QueueItem, 'dueAt' | 'actBy' | 'own' | 'watch' 
 }
 
 /**
- * (0.7.18) Whether what needs the viewer pins now (R1's rule, on `ownActBy`). (0.7.22, Rob 2026-11-04: "If the other one's
+ * (0.7.18) Whether what needs the viewer pins now (R1's rule, on `ownActBy`). (0.7.24, Rob 2026-11-04: "If the other one's
  * supposed to give approval, it should show up for them as soon as possible") A go the viewer must give on follow-up steps
  * pins at once, however far off the first step is: `goMine`.
  */
@@ -1060,6 +1071,23 @@ export function whoseLate(refs: readonly Pick<MateRef, 'by'>[]): string {
 export const lateOnly = (it: QueueItem): boolean =>
   matesOf(it).length > 0 && it.kind === 'task' && it.tasks === 0 && it.messages === 0 && !it.packageId && !(it.open ?? null) && openAsks(it).length === 0 && queuedOf(it).length === 0
 
+/**
+ * (0.7.23) Whether something of the founder's own lists a client beside a package of a teammate's: a task, an internal ask
+ * or his internal queue, a client message whose drafts no teammate holds, or (0.7.24) his own go on follow-up steps.
+ */
+export const ownBesides = (it: QueueItem): boolean =>
+  it.tasks > 0 || openAsks(it).length > 0 || queuedOf(it).length > 0 || (it.messages > 0 && (it.open ?? null)?.state !== 'held_by_other') || goMine(it)
+
+/**
+ * (0.7.23) A client listed for the founder by a teammate's late package flagged for his OK alone (`okLate`, nothing of his
+ * own there): it stays in the quiet list, its thread named for the teammate (`🟡 with Asif · Acme Legal · may need your OK
+ * · Asif decides`) and never pinned, and the pane draws it under Team · late alone, as a `lateOnly` client is.
+ */
+export const okLateOnly = (it: QueueItem): boolean => it.kind === 'ok' && Boolean(it.okLate) && !ownBesides(it)
+
+/** (0.7.23) A client the pane draws under Team · late alone, never under With a teammate. */
+export const teamLateOnly = (it: QueueItem): boolean => lateOnly(it) || okLateOnly(it)
+
 /** (0.7.21) The pane group's title, and what the status line says after its count (`MM: 4 need you · 2 pinned · 5 late with the team`). */
 export const TEAM_LATE = 'Team · late'
 export const LATE_WITH_TEAM = 'late with the team'
@@ -1073,14 +1101,18 @@ export type TeamLate = { by: string; count: number; clients: Array<{ projectId: 
  * them: his own rows' and `lateOnly` ones alike), each ticket once, grouped by person, then client. People by how many are
  * late, most first (a tie by name); a person's clients by their first late ticket; a client's tickets by when each went
  * late. Empty for every viewer but the founder: no other feed gives `mates`. ⛔ Feed text is data: an id that is not a
- * lower-case uuid, a time that is not one, or a title with nothing left once cleaned drops the ticket.
+ * lower-case uuid, a time that is not one, or a title with nothing left once cleaned drops the ticket. (0.7.23) A package
+ * flagged for his OK that a teammate holds or sends and whose reply is late (`okLate`) is one more line under that
+ * teammate and client (`reply 1d late, flagged for your OK`), counted with the tickets.
  */
 export function teamLate(items: readonly QueueItem[]): TeamLate[] {
   const seen = new Set<string>()
   const people = new Map<string, Map<string, { projectId: string; client: string; refs: MateRef[] }>>()
   for (const it of items) {
     if (!it || typeof it !== 'object') continue
-    for (const r of matesOf(it)) {
+    // (0.7.23) and a package flagged for his OK that a teammate holds or sends, once late (`okLate`): one line, `reply`
+    const ok = it.okLate && typeof it.okLate === 'object' ? [{ by: it.okLate.by, id: it.okLate.id, title: 'reply', lateSince: it.okLate.lateSince, eta: false, ok: true as const }] : []
+    for (const r of [...matesOf(it), ...ok]) {
       if (!r || typeof r !== 'object' || !isUuid(r.id) || seen.has(r.id) || !Number.isFinite(r.lateSince)) continue
       const title = cleanText(r.title, MATE_TITLE_MAX)
       if (!title) continue
@@ -1088,7 +1120,7 @@ export function teamLate(items: readonly QueueItem[]): TeamLate[] {
       const by = cleanText(r.by, 40) || 'a teammate'
       const clients = people.get(by) ?? new Map<string, { projectId: string; client: string; refs: MateRef[] }>()
       const at = clients.get(it.projectId) ?? { projectId: it.projectId, client: cleanName(it.client) || cleanName(it.projectName) || 'a client', refs: [] }
-      at.refs.push({ by, id: r.id, title, lateSince: r.lateSince, eta: r.eta === true })
+      at.refs.push({ by, id: r.id, title, lateSince: r.lateSince, eta: r.eta === true, ...(r.ok === true ? { ok: true as const } : {}) })
       clients.set(it.projectId, at)
       people.set(by, clients)
     }
@@ -1114,7 +1146,9 @@ export const teamLateWho = (team: readonly Pick<TeamLate, 'by' | 'count'>[]): st
  * time (`dueWhen`: `3 PM` today, `Mon 3 PM` this week, `Oct 14` before that, never a weekend day), and why it is late:
  * `no ETA given` (its ETA was needed by then and none came), else `past its ETA`.
  */
-export function teamLateLine(r: Pick<MateRef, 'title' | 'lateSince' | 'eta'>, now: number): string {
+export function teamLateLine(r: Pick<MateRef, 'title' | 'lateSince' | 'eta' | 'ok'>, now: number): string {
+  // (0.7.23) a teammate's late package flagged for his OK: how late its reply is, `reply 1d late, flagged for your OK`
+  if (r.ok === true) return `reply ${clockLead(r.lateSince, now)}, flagged for your OK`
   return `${cleanText(r.title, MATE_TITLE_MAX)} · late since ${dueWhen(r.lateSince, now)} · ${r.eta ? 'no ETA given' : 'past its ETA'}`
 }
 
@@ -1640,8 +1674,11 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
   }
 
   const me = typeof feed.member === 'string' ? feed.member.toLowerCase() : ''
-  /** (the founder) The clients whose row is a package that waits for his OK and that a teammate sends (R2). */
-  const okTheirs = new Set<string>()
+  /**
+   * (the founder) The clients whose row is a package that waits for his OK and that a teammate sends (R2). (0.7.23) With that
+   * teammate's address (the holder's, else the owner's on record): an ask of theirs about the client hands him the OK.
+   */
+  const okTheirs = new Map<string, string>()
   /** (the founder) The teammate who sends a stale package of the client's, where a client message waits after its drafts (R1). */
   const staleTheirs = new Map<string, string>()
   /**
@@ -1753,11 +1790,11 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     if (forOk && (held || !isMine(d.project_owner_email, feed))) {
       it.kind = 'ok'
       it.ok = { sends: d.project_owner_email ? holderName(d.project_owner_email) : NOBODY }
-      // R2: one a teammate sends is theirs to decide until its reply is due (below)
-      if (mates) okTheirs.add(d.project_id)
+      // R2: one a teammate sends is theirs to decide (below)
+      if (mates) okTheirs.set(d.project_id, held ? holder : sender)
       else okTheirs.delete(d.project_id)
       if (inReach) {
-        it.dueAt = Math.min(it.dueAt, due)
+        // (0.7.23) its due time goes on the client's clock below, once it is known whose it is
         act(it, due)
         soonest(okAct, it, due)
         seen(it, 'pkg', ms(d.covers_through))
@@ -1870,6 +1907,8 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
   // package's is; the project, as any row's (`usable`). An ask alone makes no package. Its time counts as a task's for
   // "something new arrived" (`newest.task`): it is work the person was asked for.
   const askIds = new Set<string>()
+  /** (0.7.23) Who asked the viewer about each client in an open ask of theirs (addresses, lower case). */
+  const askers = new Map<string, Set<string>>()
   for (const a of Array.isArray(feed.asks) ? feed.asks : []) {
     if (!a || typeof a !== 'object' || !isUuid(a.ask_id) || askIds.has(a.ask_id)) continue
     if (!usable(a.project_id, a.project_name)) continue
@@ -1878,6 +1917,7 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     const due = Number.isFinite(ms(a.due_at)) ? ms(a.due_at as string) : Number.isFinite(asked) ? businessDeadline(asked, DAY) : NaN
     if (!inWindow(due)) continue
     askIds.add(a.ask_id)
+    if (typeof a.asker_email === 'string' && a.asker_email) askers.set(a.project_id, (askers.get(a.project_id) ?? new Set<string>()).add(a.asker_email.toLowerCase()))
     const it = item(a.project_id, a.project_name)
     it.dueAt = Math.min(it.dueAt, due)
     mine(it, due)
@@ -1908,7 +1948,7 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     it.queue = { tickets: shown, total: Math.max(queued.length, typeof total === 'number' && Number.isSafeInteger(total) && total > 0 ? total : 0) }
   }
 
-  // (0.7.22, Rob 2026-11-04: "if it's approved, it shouldn't show up to me at all ... unless the system comes up with some
+  // (0.7.24, Rob 2026-11-04: "if it's approved, it shouldn't show up to me at all ... unless the system comes up with some
   // new follow-ups that I had left off somewhere that aren't approved. That's the only time it should surface to me";
   // "If the other one's supposed to give approval, it should show up for them as soon as possible") Follow-up steps nobody
   // approved, on a follow-ups-only package (OW's `go_` keys: an ask we sent by hand). The go is the package's sender's (OW's
@@ -1918,7 +1958,7 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
   // drafts list carries is a reply package: its steps are approved with its reply, and it is not listed twice. ⛔ The
   // package id goes into the kickoff and the pickup request: a lower-case uuid, or the row is dropped, as a package's is.
   // ⛔ (0.7.12) A first step whose window opened before the cut is not considered, as anything due before it.
-  /** (0.7.22) A teammate's go the viewer watches, by project: when the first step's window opens. */
+  /** (0.7.24) A teammate's go the viewer watches, by project: when the first step's window opens. */
   const goAct = new Map<string, number>()
   const draftPackages = new Set((feed.drafts ?? []).map(d => d?.package_id).filter(isUuid))
   const watchesGo = founder || feed.role === 'pm'
@@ -1974,11 +2014,29 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     }
     for (const it of byProject.values()) {
       const o = it.open ?? null
+      // ⛔ (0.7.23, Rob 2026-11-05: "I thought we made it so that when a teammate's holding it, but it's late, it shows up on
+      // the morning meeting post instead of pinned on my side panel"; and the same day: "When things are overdue but not
+      // assigned to me, I don't think they should be pinned here.") A package flagged for his OK that a teammate holds or
+      // sends stays theirs after its reply is due too: until 0.7.21 it became his then (`needs your OK`, pinned, and
+      // pinned again as `still needs you` when he took the pin off). Once late it is listed under Team · late (`okLate`).
+      // It is his only when that teammate asks him about the client (an open ask of theirs in the feed: the one signal OW
+      // sends for it); his own client's flagged package (`ready`) is his as before.
+      const mate = okTheirs.get(it.projectId)
+      const askedHim = mate !== undefined && mate !== '' && (askers.get(it.projectId)?.has(mate) ?? false)
       const name =
         it.kind === 'ok'
-          ? okTheirs.has(it.projectId) && it.dueAt > now ? (o?.state === 'held_by_other' ? o.by : (it.ok ?? null)?.sends) : undefined
+          ? mate !== undefined && !askedHim ? (o?.state === 'held_by_other' ? o.by : (it.ok ?? null)?.sends) : undefined
           : it.kind === 'ready' ? undefined : staleTheirs.get(it.projectId)
       if (name) it.theirs = name
+      if (it.kind !== 'ok') continue
+      const okDue = okAct.get(it.projectId)
+      if (okDue === undefined) continue
+      // late once past its due time, as its clock reads (`clockLead`: at the minute it is due it is `<1h left`)
+      const late = Boolean(name) && okDue < now && o !== null && isUuid(o.id)
+      if (late) it.okLate = { by: name as string, id: (o as OpenPackage).id, lateSince: okDue }
+      // its due time is on the client's clock, unless it is a teammate's and late and something of his own lists the
+      // client: his row and his thread's name are then for what is his (as his teammates' late tickets are, 0.7.21)
+      if (!(late && ownBesides(it))) it.dueAt = Math.min(it.dueAt, okDue)
     }
   }
 
@@ -2016,7 +2074,7 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     }
   }
 
-  // (0.7.22, for the founder and the PM) A teammate's go on follow-up steps, where nothing of the viewer's own lists the
+  // (0.7.24, for the founder and the PM) A teammate's go on follow-up steps, where nothing of the viewer's own lists the
   // client: it lists under With a teammate, named for whose it is, as their late tickets do above.
   for (const it of byProject.values()) {
     const g = goOf(it)
@@ -2044,7 +2102,7 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     if (mailTheirs && Number.isFinite(mail)) watch.push({ by: o?.state === 'held_by_other' ? o.by : (staleTheirs.get(pid) ?? it.theirs ?? ''), due: mail, what: 'reply' })
     if (okIsTheirs && Number.isFinite(ok)) watch.push({ by: o?.state === 'held_by_other' ? o.by : (it.theirs as string), due: ok, what: 'reply' })
     watch.push(...(pmRefs.get(pid) ?? []))
-    // (0.7.22) a teammate's go on follow-up steps, due when the first step's window opens
+    // (0.7.24) a teammate's go on follow-up steps, due when the first step's window opens
     const go = goAct.get(pid) ?? Infinity
     const g = goOf(it)
     if (g && !g.mine && Number.isFinite(go)) watch.push({ by: g.by, due: go, what: 'follow-ups go' })
@@ -2149,19 +2207,31 @@ export function clockText(t: number, now: number): string {
  * <teammate> decides` (R2). (0.5.28) A client listed by the viewer's internal asks alone: `internal ask`. (0.7.3) The
  * internal-ops item listed by the viewer's internal queue alone: `internal queue`. (0.7.4) A client whose only tasks owe
  * an ETA: `ETA needed`; for the founder, a client listed by a teammate's late tickets alone: `no ETA` while one of them
- * never had an ETA, else `past ETA`. (0.7.15) A client whose only tasks are to give an owner: `assign an owner`. (0.7.22) A
+ * never had an ETA, else `past ETA`. (0.7.15) A client whose only tasks are to give an owner: `assign an owner`. (0.7.24) A
  * client listed by follow-up steps that wait for a go alone: `follow-ups need your go · first text Fri Nov 6`.
  */
 const whatOf = (it: QueueItem): string =>
   it.open?.state === 'held_by_me'
     ? 'your draft'
-    : it.kind === 'ok' ? (it.theirs ? decidesText(it.theirs) : 'needs your OK') : it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : it.kind === 'ask' ? 'internal ask' : it.kind === 'queue' ? 'internal queue' : it.kind === 'go' ? goWhat(it) : taskWhat(it)
+    : it.kind === 'ok' ? (it.okLate && ownBesides(it) ? ownWhat(it) : it.theirs ? decidesText(it.theirs) : 'needs your OK') : it.kind === 'ready' ? 'reply ready' : it.kind === 'reply' ? 'reply' : it.kind === 'ask' ? 'internal ask' : it.kind === 'queue' ? 'internal queue' : it.kind === 'go' ? goWhat(it) : taskWhat(it)
 
-/** (0.7.22) What a `go` item is due for: `follow-ups need your go · first text Fri Nov 6`, or for a teammate's, `follow-ups need a go · ...`. */
+/** (0.7.24) What a `go` item is due for: `follow-ups need your go · first text Fri Nov 6`, or for a teammate's, `follow-ups need a go · ...`. */
 function goWhat(it: QueueItem): string {
   const g = goOf(it)
   if (!g) return GO_THEIRS
   return `${g.mine ? GO_WHAT : GO_THEIRS} · ${goFirstText(g)}`
+}
+
+/**
+ * (0.7.23) What is the founder's own on a client whose package flagged for his OK is a teammate's and late (`okLate`): his
+ * thread's name and row say that, never the package (it is listed under Team · late).
+ */
+function ownWhat(it: QueueItem): string {
+  if (it.messages > 0 && (it.open ?? null)?.state !== 'held_by_other') return 'reply'
+  if (it.tasks > 0) return taskWhat(it)
+  // (0.7.24) his own go on the client's follow-up steps
+  if (goMine(it)) return goWhat(it)
+  return openAsks(it).length > 0 ? 'internal ask' : 'internal queue'
 }
 
 /** (0.7.4) What a `task` item is due for: see whatOf. */
@@ -2419,7 +2489,7 @@ export function noteText(it: QueueItem, member: string): string {
   // (0.7.4, for the founder) and his teammates' late internal tickets: whose, never his to do
   const late = lateSentence(matesOf(it))
   const mates = late ? ` ${late} (late); the side pane lists them. They are the teammate's to answer, not ${holderName(member)}'s.` : ''
-  // (0.7.22) and follow-up steps that wait for a go, where the body is not already about them
+  // (0.7.24) and follow-up steps that wait for a go, where the body is not already about them
   const go = goOnly(it) ? '' : goSentence(it, member)
   return `${noteBody(it, member)}${more}${queue}${etas}${owners}${mates}${go ? ` ${go}` : ''}`
 }
@@ -2484,7 +2554,7 @@ function taskPhrase(it: QueueItem): string {
 }
 
 /**
- * (0.7.22) What the bridge note says of follow-up steps that wait for a go: whose go, which package, how many steps, when
+ * (0.7.24) What the bridge note says of follow-up steps that wait for a go: whose go, which package, how many steps, when
  * the first opens, and how to show them. '' with none.
  */
 export function goSentence(it: QueueItem, member: string): string {
@@ -2554,7 +2624,7 @@ export function clientMarkdown(it: QueueItem, now: number, pages: Readonly<Recor
     for (const t of undatedTitles.slice(0, UNDATED_SHOWN_MAX)) out.push(`- ${t}`)
     if (undatedTitles.length > UNDATED_SHOWN_MAX) out.push(`- and ${undatedTitles.length - UNDATED_SHOWN_MAX} more`)
   }
-  // (0.7.22) follow-up steps that wait for a go
+  // (0.7.24) follow-up steps that wait for a go
   const go = goMarkdown(it, now)
   if (go) out.push('', go)
   // (0.7.4) nothing of a reply's in play (no client message, no package): no word of reply drafts, whatever else lists
@@ -2572,7 +2642,7 @@ export function clientMarkdown(it: QueueItem, now: number, pages: Readonly<Recor
 }
 
 /**
- * (0.7.22) The pane's part for follow-up steps that wait for a go: whose go, how many steps, the first and when its window
+ * (0.7.24) The pane's part for follow-up steps that wait for a go: whose go, how many steps, the first and when its window
  * opens (`late` once it has passed), and the package. '' with none.
  */
 export function goMarkdown(it: QueueItem, now: number): string {

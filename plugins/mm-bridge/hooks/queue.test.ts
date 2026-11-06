@@ -12,6 +12,7 @@ import {
   PM_CHECK_AHEAD_MS, STILL_NEEDS_YOU, checkAheadOf, checkNow, ownActBy, pinTitle, pinsFor, watchMarkdown, watchOf,
   LATE_WITH_TEAM, TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine, teamLateSegment, teamLateWho,
   GO_THEIRS, GO_WHAT, clientWaiting, goFirstText, goMarkdown, goMine, goOf, goOnly, goSentence, mayStart, ownPins, stepWord,
+  okLateOnly, ownBesides, teamLateOnly,
 } from './queue'
 import type { Feed, FeedAsk, FeedFollowups, FeedQueueTicket, FeedTicket, QueueItem } from './queue'
 import { assignParagraph, autoUpdatable, etaParagraph, goKickoff, goParagraph, handoverText, kickoffText, rowExtra, signatureOf, waitingText } from './threads'
@@ -649,6 +650,11 @@ const draft = (pid: string, name: string, over: Record<string, unknown> = {}) =>
 })
 const pickedUp = (by: string, over: Record<string, unknown> = {}) => ({ status: 'picked_up', picked_up_by: by, picked_up_at: at('2026-10-12 16:30'), drafts_ready: 1, drafts_unsent: 1, ...over })
 const asFounder = (over: Partial<Feed> = {}): Feed => ({ member: FOUNDER, role: 'founder', ...over })
+/** (0.7.23) An open ask of the founder's about Acme, from `asker`: the one signal that hands him a teammate's package flagged for his OK. */
+const askFrom = (asker: string): FeedAsk => ({
+  ask_id: 'dddddddd-3333-4333-8333-333333333333', project_id: P1, project_name: 'Acme Roofing — Pat', asker_name: 'A teammate', asker_email: asker, asked_email: FOUNDER,
+  asked_at: at('2026-10-13 08:00'), due_at: at('2026-10-14 08:00'),
+})
 const ids = (items: readonly QueueItem[]) => items.map(i => i.projectId)
 
 describe('(m) a package the caller holds is the caller\'s, whatever the owner on record', () => {
@@ -687,7 +693,7 @@ const TUE = et('2026-10-13 10:00')
 describe('(r) for the founder alone: a package flagged for his OK is listed whoever owns the client', () => {
   const flagged = (over: Record<string, unknown> = {}) => draft(P1, 'Acme Roofing — Pat', { flagged_for_rob: true, project_owner_email: TEAMMATE_B, ...over })
 
-  test('a teammate\'s client, drafts ready and flagged: its own kind, and the row says who sends it; theirs to decide until its reply is due (R2)', async () => {
+  test('a teammate\'s client, drafts ready and flagged: its own kind, and the row says who sends it; theirs to decide, (0.7.23) its reply due or late (R2)', async () => {
     const before = buildLists(asFounder({ drafts: [flagged()] }), MON)
     expect(before.queue).toEqual([])
     const [it] = before.teammate
@@ -698,20 +704,26 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
     expect(titleFor(it as QueueItem, MON)).toBe('🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides')
     // it is due when a prepared package is: 24 business hours after the mail it covers
     expect(it?.dueAt).toBe(et('2026-10-13 09:52'))
-    // and from then it is his, in the list that pins, worded as before
-    const [due] = buildQueue(asFounder({ drafts: [flagged()] }), TUE)
-    expect(due).toMatchObject({ projectId: P1, kind: 'ok', ok: { sends: 'Builder B' } })
-    expect(due?.theirs).toBeUndefined()
-    expect(waitingText(due as QueueItem)).toBe('needs your OK · Builder B sends, drafts ready')
-    // (0.5.14) eight minutes late; (0.7.12) and when it was due
-    expect(titleFor(due as QueueItem, TUE)).toBe('🔴 <1h late, due 9:52 AM · Acme Roofing · needs your OK')
+    // ⛔ (0.7.23, Rob 11-05) and from then still Builder B's: never in the list that pins, and listed under Team · late
+    // (until 0.7.21 his then: `🔴 <1h late, due 9:52 AM · Acme Roofing · needs your OK`)
+    expect(buildQueue(asFounder({ drafts: [flagged()] }), TUE)).toEqual([])
+    const [due] = buildLists(asFounder({ drafts: [flagged()] }), TUE).teammate
+    expect(due).toMatchObject({ projectId: P1, kind: 'ok', ok: { sends: 'Builder B' }, theirs: 'Builder B', okLate: { by: 'Builder B', id: PKG_A, lateSince: et('2026-10-13 09:52') } })
+    expect(waitingText(due as QueueItem)).toBe('may need your OK · Builder B decides, drafts ready')
+    expect(titleFor(due as QueueItem, TUE)).toBe('🟡 with Builder B · Acme Roofing · may need your OK · Builder B decides')
+    // Builder B asks him about the client (an open ask of theirs): his then, worded as before 0.7.23
+    const [asked] = buildQueue(asFounder({ drafts: [flagged()], asks: [askFrom(TEAMMATE_B)] }), TUE)
+    expect(asked).toMatchObject({ projectId: P1, kind: 'ok', ok: { sends: 'Builder B' } })
+    expect(asked?.theirs).toBeUndefined()
+    expect(asked?.okLate).toBeUndefined()
+    expect(titleFor(asked as QueueItem, TUE)).toBe('🔴 <1h late, due 9:52 AM · Acme Roofing · needs your OK')
   })
 
   test('nobody else gets such a row: for a builder or a pm the same feed lists nothing', async () => {
     for (const role of ['builder', 'pm', 'member']) expect(buildQueue({ member: FOUNDER, role, drafts: [flagged()] }, MON), role).toEqual([])
   })
 
-  test('no owner on record, and a teammate holds it: the holder\'s to decide until its reply is due, then his, and "nobody on record" sends', async () => {
+  test('no owner on record, and a teammate holds it: the holder\'s to decide, (0.7.23) late or not, until the holder asks him; then his, and "nobody on record" sends', async () => {
     const f = asFounder({ drafts: [flagged({ ...pickedUp('J.Smith@example.com'), project_owner_email: null })] })
     // (Opus, 10-13: the holder counts) before the due time: With a teammate, J Smith decides
     const [theirs] = buildLists(f, MON).teammate
@@ -719,11 +731,14 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
     expect(withTeammate(theirs as QueueItem)).toBe(true)
     expect(waitingText(theirs as QueueItem)).toBe('may need your OK · J Smith decides, drafts with J Smith')
     expect(titleFor(theirs as QueueItem, MON)).toBe('🟡 with J Smith · Acme Roofing · may need your OK · J Smith decides')
-    // once due: his to act on (his OK), in the list that pins, with who has it at the end of its name, as before
-    const [it] = buildQueue(f, TUE)
+    // ⛔ (0.7.23) once due: still J Smith's (Team · late), never in the list that pins
+    expect(buildQueue(f, TUE)).toEqual([])
+    expect(buildLists(f, TUE).teammate[0]).toMatchObject({ kind: 'ok', theirs: 'J Smith', okLate: { by: 'J Smith', id: PKG_A } })
+    // J Smith asks him about the client: his to act on (his OK), in the list that pins, with who has it at the end of its name
+    const [it] = buildQueue({ ...f, asks: [askFrom('J.Smith@example.com')] }, TUE)
     expect(it).toMatchObject({ kind: 'ok', ok: { sends: NOBODY } })
     expect(NOBODY).toBe('nobody on record')
-    expect(waitingText(it as QueueItem)).toBe('needs your OK · nobody on record sends, drafts with J Smith')
+    expect(waitingText(it as QueueItem)).toContain('needs your OK · nobody on record sends, drafts with J Smith')
     expect(withTeammate(it as QueueItem)).toBe(false)
     // ((0.7.12) with when it was due after the clock)
     expect(titleFor(it as QueueItem, TUE)).toBe('🔴 <1h late, due 9:52 AM · Acme Roofing · needs your OK · with J Smith')
@@ -731,9 +746,10 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
 
   test('a stale one a teammate sends is no such row (R1); the words a stale package has stay for the kickoff', async () => {
     for (const now of [MON, TUE]) expect(buildLists(asFounder({ drafts: [flagged({ status: 'stale' })] }), now)).toEqual({ queue: [], teammate: [], checking: [] })
-    // (a package that waits for his OK and is marked out of date, as the kickoff words it)
-    const [it] = buildQueue(asFounder({ drafts: [flagged()] }), TUE)
-    const stale = { ...(it as QueueItem), open: { ...((it as QueueItem).open as NonNullable<QueueItem['open']>), state: 'stale' as const } }
+    // (a package that waits for his OK and is marked out of date, as the kickoff words it; (0.7.23) his once Builder B asks
+    // him, as the item reads with no `theirs`)
+    const [it] = buildLists(asFounder({ drafts: [flagged()] }), TUE).teammate
+    const stale = { ...(it as QueueItem), theirs: undefined, okLate: undefined, open: { ...((it as QueueItem).open as NonNullable<QueueItem['open']>), state: 'stale' as const } }
     expect(waitingText(stale)).toBe('needs your OK · Builder B sends, drafts out of date')
     expect(kickoffText(stale)).toContain('reply package aaaaaaaa is flagged for my OK and is marked out of date, and Builder B sends it.')
   })
@@ -749,10 +765,10 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
     expect(mon.teammate.map(i => [i.projectId, i.kind])).toEqual([[P1, 'ok']])
     // ⛔ (0.7.12, Rob 10-30) Cedar's, due Fri Oct 2, is past the cut: in no list (until 0.7.12: under Older)
     expect([...mon.queue, ...mon.teammate, ...mon.checking].map(i => i.projectId)).not.toContain(P3)
-    // Tuesday 10 AM: Bolt's reply was due 8 AM, Acme's OK 9:52 AM
+    // Tuesday 10 AM: Bolt's reply was due 8 AM; Acme's OK, due 9:52 AM, is (0.7.23) still Builder B's
     const l = buildLists(f, TUE)
-    expect(l.queue.map(i => [i.projectId, i.kind])).toEqual([[P2, 'reply'], [P1, 'ok']])
-    expect(l.teammate).toEqual([])
+    expect(l.queue.map(i => [i.projectId, i.kind])).toEqual([[P2, 'reply']])
+    expect(l.teammate.map(i => [i.projectId, i.kind])).toEqual([[P1, 'ok']])
     expect(l.checking).toEqual([])
   })
 
@@ -767,7 +783,8 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
   })
 
   test('the kickoff for it: he is shown the package and what needs his OK, and picks nothing up', async () => {
-    for (const [now, list] of [[MON, 'teammate'], [TUE, 'queue']] as const) {
+    // ((0.7.23) late, still under With a teammate)
+    for (const [now, list] of [[MON, 'teammate'], [TUE, 'teammate']] as const) {
       const [it] = buildLists(asFounder({ drafts: [flagged()] }), now)[list]
       expect(kickoffText(it as QueueItem)).toBe(
         `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}): reply package aaaaaaaa is flagged for my OK, and Builder B sends it. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go.`,
@@ -791,7 +808,7 @@ describe('B4: a package flagged for the founder lists for him whoever owns the c
     return { queue: ids(l.queue), teammate: ids(l.teammate) }
   }
 
-  test('flagged, current, on a client a teammate owns: under With a teammate until its reply is due, then in his Needs-you list (0.5.1, R2)', async () => {
+  test('flagged, current, on a client a teammate owns: under With a teammate, its reply due or (0.7.23) late; until 0.7.21 his Needs-you list once due (0.5.1, R2)', async () => {
     for (const [name, over, holder] of [
       ['nobody holds it', {}, 'Builder B'],
       ['the owner holds it', pickedUp(TEAMMATE_B), 'Builder B'],
@@ -802,13 +819,13 @@ describe('B4: a package flagged for the founder lists for him whoever owns the c
       // with whoever holds it, else the one who sends it
       expect(lists(f).teammate[0], name).toMatchObject({ kind: 'ok', ok: { sends: 'Builder B' }, theirs: holder })
       const due = buildLists(f, TUE)
-      expect({ queue: ids(due.queue), teammate: ids(due.teammate) }, name).toEqual({ queue: [P1], teammate: [] })
-      expect(due.queue[0], name).toMatchObject({ kind: 'ok', ok: { sends: 'Builder B' } })
+      expect({ queue: ids(due.queue), teammate: ids(due.teammate) }, name).toEqual({ queue: [], teammate: [P1] })
+      expect(due.teammate[0], name).toMatchObject({ kind: 'ok', ok: { sends: 'Builder B' }, theirs: holder, okLate: { by: holder } })
     }
     // with mail of the teammate's own waiting there too (not his to answer), the same
     const withMail = asFounder({ drafts: [flagged(pickedUp(TEAMMATE_B))], mail: [{ ...mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 10:30'), project_owner_email: TEAMMATE_B }] })
     expect(where(withMail)).toEqual({ queue: [], teammate: [P1] })
-    expect(ids(buildLists(withMail, TUE).queue)).toEqual([P1])
+    expect(ids(buildLists(withMail, TUE).queue)).toEqual([])
   })
 
   test('flagged and out of date, on a client a teammate owns: listed nowhere, before its reply time or after (0.5.1, R1)', async () => {
@@ -856,7 +873,8 @@ describe('B4: a package flagged for the founder lists for him whoever owns the c
     // (a stale one a teammate sends, after it or before it, does not take its place either: R1)
     const stale = draft(P1, 'Acme Roofing — Pat', { package_id: PKG_B, status: 'stale', flagged_for_rob: true, project_owner_email: TEAMMATE_B, covers_through: at('2026-10-12 11:00') })
     for (const drafts of [[flagged(), other], [other, flagged()], [flagged(), stale], [stale, flagged()]]) {
-      for (const [now, list] of [[MON, 'teammate'], [TUE, 'queue']] as const) {
+      // ((0.7.23) late, still under With a teammate)
+      for (const [now, list] of [[MON, 'teammate'], [TUE, 'teammate']] as const) {
         const [it] = buildLists(asFounder({ drafts }), now)[list]
         expect(it).toMatchObject({ projectId: P1, kind: 'ok' })
         expect(it?.open).toMatchObject({ id: PKG_A, state: 'prepared' })
@@ -905,14 +923,16 @@ describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the 
         for (const now of [MON, TUE]) expect(where(f, now)).toEqual({ queue: [], teammate: [] })
         return
       }
-      // flagged: theirs to decide before its reply time, his once it has passed (the same due time the row shows)
+      // flagged: theirs to decide before its reply time, and (0.7.23) after it too (until 0.7.21 his once it had passed)
       expect(where(f, MON)).toEqual({ queue: [], teammate: [P1] })
-      const [mine] = buildLists(f, TUE).queue
-      expect(where(f, TUE)).toEqual({ queue: [P1], teammate: [] })
-      expect(mine?.dueAt).toBe(et('2026-10-13 09:52'))
-      // the line exactly at the due time: still theirs a minute before it, his a minute after
+      const [late] = buildLists(f, TUE).teammate
+      expect(where(f, TUE)).toEqual({ queue: [], teammate: [P1] })
+      expect(late?.dueAt).toBe(et('2026-10-13 09:52'))
+      // the line exactly at the due time: a minute before it, not late; a minute after, late (Team · late), still theirs
       expect(where(f, et('2026-10-13 09:51'))).toEqual({ queue: [], teammate: [P1] })
-      expect(where(f, et('2026-10-13 09:53'))).toEqual({ queue: [P1], teammate: [] })
+      expect(buildLists(f, et('2026-10-13 09:51')).teammate[0]?.okLate).toBeUndefined()
+      expect(where(f, et('2026-10-13 09:53'))).toEqual({ queue: [], teammate: [P1] })
+      expect(buildLists(f, et('2026-10-13 09:53')).teammate[0]?.okLate).toMatchObject({ by: 'Builder B', lateSince: et('2026-10-13 09:52') })
     })
   }
 
@@ -942,8 +962,8 @@ describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the 
       const [it] = buildLists(held, MON).teammate
       expect(it, String(owner)).toMatchObject({ kind: 'ok', theirs: 'J Smith' })
       expect(titleFor(it as QueueItem, MON)).toBe('🟡 with J Smith · Acme Roofing · may need your OK · J Smith decides')
-      // his once its reply is due, as the `ok` kind always was
-      expect(where(held, TUE), String(owner)).toEqual({ queue: [P1], teammate: [] })
+      // ⛔ (0.7.23) still J Smith's once its reply is due (until 0.7.21 his then, as the `ok` kind always was)
+      expect(where(held, TUE), String(owner)).toEqual({ queue: [], teammate: [P1] })
       // not flagged: a reply a teammate holds, With a teammate as in 0.5.0 (with the client's mail his)
       const plain = asFounder({ drafts: [pkg({ project_owner_email: owner, ...pickedUp('J.Smith@example.com') })], mail: [{ ...mailAt(P1, 'Acme Roofing — Pat', '2026-10-12 10:30'), project_owner_email: owner }] })
       expect(where(plain, MON), String(owner)).toEqual({ queue: [], teammate: [P1] })
@@ -2820,7 +2840,7 @@ describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from
     expect(STILL_NEEDS_YOU).toBe('still needs you')
   })
 
-  test('[11-03] the founder: "may need your OK · Asif decides" does not pin while it is Asif\'s, 19 hours left or (0.7.21) 1, his own undated task beside it or not; late, it is his', async () => {
+  test('[11-03] the founder: "may need your OK · Asif decides" does not pin while it is Asif\'s, 19 hours left or (0.7.21) 1, his own undated task beside it or not; (0.7.23) late, still Asif\'s', async () => {
     const f = (dueH: number): Feed => ({ member: ROB, role: 'founder', drafts: [flagged(dueH)], tickets: { undated: [ticket(1, ROB, 0, { due_at: null, due_source: null })] } })
     const far = listed(f(19))
     expect(far.theirs).toBe('Asif')
@@ -2841,12 +2861,14 @@ describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from
     expect(pinTitle(near, wed)).toBe(titleFor(near, wed))
     expect(pinTitle(near, wed)).toBe('🔴 1h left · Acme Legal · may need your OK · Asif decides')
     expect(pinTitle(near, wed, true)).not.toContain('check on')
-    // once its reply is due it is his (R2): his own clock pins it, and the name is what is due, as always
+    // ⛔ (0.7.23, Rob 11-05) once its reply is due it is still Asif's: never pinned, and his thread is named for what is his,
+    // his undated task (until 0.7.21 his then, pinned and named `needs your OK`); it is listed under Team · late
     const late = listed(f(-1))
-    expect(late.theirs).toBeUndefined()
-    expect(pinsFor(late, wed)).toBe(true)
+    expect(late.theirs).toBe('Asif')
+    expect(late.okLate).toMatchObject({ by: 'Asif', id: PKG })
+    expect(pinsFor(late, wed)).toBe(false)
     expect(pinTitle(late, wed)).toBe(titleFor(late, wed))
-    expect(pinTitle(late, wed)).toContain('needs your OK')
+    expect(pinTitle(late, wed)).toBe('🟡 Acme Legal · task · no due date')
   })
 
   test('a reply whose drafts a teammate holds: the PM checks on them 5 business hours out; (0.7.21) the founder and a teammate never; nothing of the viewer\'s own is lost', async () => {
@@ -3142,7 +3164,7 @@ describe('0.7.21 (Rob, 11-05): the founder\'s teammates\' late tickets leave his
   })
 })
 
-describe('(0.7.22, Rob 2026-11-04) follow-up steps nobody approved pin at once for whoever gives the go; approved ones never show', () => {
+describe('(0.7.24, Rob 2026-11-04) follow-up steps nobody approved pin at once for whoever gives the go; approved ones never show', () => {
   /** Wed 2026-11-04 11:52 AM in New York: the bridge sync that had no Dealerosity item. */
   const wed = Date.parse('2026-11-04T16:52:00Z')
   const H = 3_600_000
@@ -3322,5 +3344,178 @@ describe('(0.7.22, Rob 2026-11-04) follow-up steps nobody approved pin at once f
     expect(pinsFor(back, wed)).toBe(true)
     // a store edited by hand is data: a go with a bad package id is none
     expect(goOf({ go: { ...(goOf(it) as NonNullable<ReturnType<typeof goOf>>), packageId: 'x' } })).toBeNull()
+  })
+})
+
+// ======================================================================== 0.7.23 (Rob, 2026-11-05)
+
+// Rob, 2026-11-05: "I thought we made it so that when a teammate's holding it, but it's late, it shows up on the morning
+// meeting post instead of pinned on my side panel." And the same day: "When things are overdue but not assigned to me, I
+// don't think they should be pinned here." Measured on his computer (0.7.21): a client's package flagged for his OK, held by
+// a teammate, was pinned and named `… needs your OK · with <teammate> … 1d late` once its reply was due. Every client,
+// package and address below is made up.
+describe('0.7.23 C (Rob, 11-05: "when a teammate\'s holding it, but it\'s late, it shows up on the morning meeting post"): a package flagged for the founder\'s OK stays the teammate\'s once late', () => {
+  /** Wed 2026-10-28 3 PM in New York. */
+  const wed = Date.parse('2026-10-28T19:00:00Z')
+  const H = 3_600_000
+  const at = (h: number) => new Date(wed + h * H).toISOString()
+  const ROB = 'rob@massmarket.ai'
+  const ASIF = 'asif@example.com'
+  const CLIENT = 'bbbbbbbb-0000-4000-8000-000000000722'
+  const PKG = 'cccccccc-0000-4000-8000-000000000722'
+  const tid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-000000000722`
+  /** The package flagged for his OK, its reply due in `dueH` hours: held by Asif (`held`), or prepared and sent by Asif. */
+  const flagged = (dueH: number, held = true) => ({
+    package_id: PKG, project_id: CLIENT, project_name: 'Acme Legal', covers_through: at(-30), due_at: at(dueH), drafts_ready: 2, flagged_for_rob: true, project_owner_email: ASIF,
+    ...(held ? { status: 'picked_up', picked_up_by: ASIF, picked_up_at: at(-20), drafts_unsent: 2 } : { status: 'prepared' }),
+  })
+  const robFeed = (over: Partial<Feed> = {}): Feed => ({ member: ROB, role: 'founder', mail: [], ...over })
+  const listed = (f: Feed): QueueItem => {
+    const l = buildLists(f, wed)
+    const it = [...l.queue, ...l.teammate, ...l.checking][0]
+    if (!it) throw new Error('nothing listed')
+    return it
+  }
+  /** An open ask of the founder's about the client, from `asker`. */
+  const askFrom = (asker: string): FeedAsk => ({ ask_id: 'dddddddd-0000-4000-8000-000000000722', project_id: CLIENT, project_name: 'Acme Legal', asker_name: 'Asif', asker_email: asker, asked_email: ROB, asked_at: at(-2), due_at: at(22), snippet: 'can you OK the Acme reply?' })
+
+  test('before its reply is due: the teammate\'s, with a teammate, never pinned (as in 0.7.21)', async () => {
+    for (const held of [true, false]) {
+      const f = robFeed({ drafts: [flagged(5, held)] })
+      expect(buildLists(f, wed).queue, String(held)).toEqual([])
+      const it = listed(f)
+      expect(it).toMatchObject({ kind: 'ok', theirs: 'Asif' })
+      expect(it.okLate).toBeUndefined()
+      expect(pinsFor(it, wed)).toBe(false)
+      expect(titleFor(it, wed)).toBe('🟡 with Asif · Acme Legal · may need your OK · Asif decides')
+      expect(teamLate([it])).toEqual([])
+    }
+  })
+
+  test('once its reply is due: still the teammate\'s, never pinned and never named for him; listed under Team · late by person, then client', async () => {
+    for (const held of [true, false]) {
+      const f = robFeed({ drafts: [flagged(-24, held)] })
+      // until 0.7.21: in his Needs-you list, `needs your OK`, pinned
+      expect(buildLists(f, wed).queue, String(held)).toEqual([])
+      const it = listed(f)
+      expect(it).toMatchObject({ kind: 'ok', theirs: 'Asif', okLate: { by: 'Asif', id: PKG, lateSince: wed - 24 * H } })
+      expect(withTeammate(it)).toBe(true)
+      expect(pinsFor(it, wed)).toBe(false)
+      expect(ownActBy(it)).toBe(Infinity)
+      expect(pinTitle(it, wed)).toBe('🟡 with Asif · Acme Legal · may need your OK · Asif decides')
+      expect(pinTitle(it, wed)).not.toMatch(/needs your OK/)
+      // drawn under Team · late alone, never under With a teammate
+      expect(okLateOnly(it)).toBe(true)
+      expect(teamLateOnly(it)).toBe(true)
+      expect(lateOnly(it)).toBe(false)
+      const team = teamLate([it])
+      expect(team.map(p => [p.by, p.count, p.clients.map(c => [c.projectId, c.client, c.refs.map(r => [r.id, r.ok])])])).toEqual([['Asif', 1, [[CLIENT, 'Acme Legal', [[PKG, true]]]]]])
+      expect(teamLateLine(team[0]?.clients[0]?.refs[0] as Parameters<typeof teamLateLine>[0], wed)).toBe('reply 1d late, flagged for your OK')
+      expect(teamLines(teamPane([it], wed))).toEqual(['Team · late (1)', 'Asif (1)', '  Acme Legal', '    - reply 1d late, flagged for your OK'])
+    }
+  })
+
+  test('with his teammates\' late tickets: one person, one client, the package and the tickets by when they went late', async () => {
+    const f = robFeed({
+      drafts: [flagged(-24)],
+      tickets: { overdue: [{ ticket_id: tid(2), project_id: CLIENT, project_name: 'Acme Legal', title: 'Send the intake form', due_at: null, due_source: null, assignee_email: ASIF, eta_needed_by: at(-3), eta_ask: ETA_ASK_TEXT }] },
+    })
+    const team = teamLate(buildLists(f, wed).teammate)
+    expect(teamLines(teamPane(buildLists(f, wed).teammate, wed))).toEqual(['Team · late (2)', 'Asif (2)', '  Acme Legal', '    - reply 1d late, flagged for your OK', '    - Send the intake form · late since 12 PM · no ETA given'])
+    expect(teamLateCount(team)).toBe(2)
+  })
+
+  test('something of his own beside it: his row and his thread\'s name are for what is his, and only that pins', async () => {
+    const own = (dueH: number): FeedTicket => ({ ticket_id: tid(3), project_id: CLIENT, project_name: 'Acme Legal', title: 'Own task', due_at: at(dueH), due_source: 'commitment', assignee_email: ROB })
+    const near = listed(robFeed({ drafts: [flagged(-24)], tickets: { due_today: [own(5)] } }))
+    expect(near.okLate).toMatchObject({ by: 'Asif', id: PKG })
+    expect(near.dueAt).toBe(wed + 5 * H)
+    expect(pinsFor(near, wed)).toBe(true)
+    expect(pinTitle(near, wed)).toBe('🔴 5h left · Acme Legal · task · with Asif')
+    expect(okLateOnly(near)).toBe(false)
+    expect(teamLateCount(teamLate([near]))).toBe(1)
+    // his task further out: nothing of his pins it, and the name is still his
+    const far = listed(robFeed({ drafts: [flagged(-24)], tickets: { due_soon: [own(30)] } }))
+    expect(pinsFor(far, wed)).toBe(false)
+    expect(titleFor(far, wed)).toBe('🟡 1d left · Acme Legal · task · with Asif')
+  })
+
+  test('the teammate asks him about the client (an open ask of theirs): the OK is his, it pins and is named for him, and it leaves Team · late', async () => {
+    const it = listed(robFeed({ drafts: [flagged(-24)], asks: [askFrom(ASIF)] }))
+    expect(it.theirs).toBeUndefined()
+    expect(it.okLate).toBeUndefined()
+    expect(pinsFor(it, wed)).toBe(true)
+    expect(pinTitle(it, wed)).toContain('Acme Legal · needs your OK')
+    expect(teamLate([it])).toEqual([])
+    // an ask from anyone else is no such signal: still Asif's
+    const other = listed(robFeed({ drafts: [flagged(-24)], asks: [askFrom('nayan@example.com')] }))
+    expect(other.theirs).toBe('Asif')
+    expect(other.okLate).toMatchObject({ by: 'Asif' })
+  })
+
+  test('his own client\'s flagged package is his as before: late, it pins, named for him; nothing under Team · late', async () => {
+    for (const owner of [ROB, null]) {
+      const it = listed(robFeed({ drafts: [{ package_id: PKG, project_id: CLIENT, project_name: 'Acme Legal', status: 'prepared', covers_through: at(-30), due_at: at(-24), drafts_ready: 2, flagged_for_rob: true, project_owner_email: owner }] }))
+      expect(it, String(owner)).toMatchObject({ kind: 'ready', flagged: true, packageId: PKG })
+      expect(it.theirs).toBeUndefined()
+      expect(pinsFor(it, wed)).toBe(true)
+      expect(pinTitle(it, wed)).toBe('🔴 1d late, due Tue 3 PM · Acme Legal · reply ready · flagged')
+      expect(teamLate([it])).toEqual([])
+    }
+  })
+
+  test('⛔ feed text is data, and a teammate\'s own view is unchanged', async () => {
+    // a package id that is not a lower-case uuid never reaches the list at all
+    expect(buildLists(robFeed({ drafts: [{ ...flagged(-24), package_id: 'not-a-uuid' }] }), wed)).toEqual({ queue: [], teammate: [], checking: [] })
+    // a stored item whose okLate is not well formed is left out of Team · late
+    const it = listed(robFeed({ drafts: [flagged(-24)] }))
+    expect(teamLate([{ ...it, okLate: { by: 'Asif', id: 'x', lateSince: wed } }])).toEqual([])
+    expect(teamLate([{ ...it, okLate: { by: 'Asif', id: PKG, lateSince: NaN } }])).toEqual([])
+    // Asif's own feed: the package he holds is his, as before
+    const mine = buildLists({ member: ASIF, role: 'builder', mail: [], drafts: [flagged(-24)] }, wed)
+    expect(mine.queue.map(i => [i.kind, i.okLate])).toEqual([['ready', undefined]])
+  })
+})
+
+describe('0.7.24 beside 0.7.23: the founder\'s own go on a client whose package flagged for his OK is a teammate\'s and late', () => {
+  /** Wed 2026-10-28 3 PM in New York. Every client, package and address below is made up. */
+  const wed = Date.parse('2026-10-28T19:00:00Z')
+  const H = 3_600_000
+  const at = (h: number) => new Date(wed + h * H).toISOString()
+  const ROB = 'rob@massmarket.ai'
+  const ASIF = 'asif@example.com'
+  const CLIENT = 'bbbbbbbb-0000-4000-8000-000000000724'
+  const PKG = 'cccccccc-0000-4000-8000-000000000724'
+  const GO = 'eeeeeeee-0000-4000-8000-000000000724'
+  const flagged = {
+    package_id: PKG, project_id: CLIENT, project_name: 'Acme Legal', covers_through: at(-30), due_at: at(-24), drafts_ready: 2, flagged_for_rob: true, project_owner_email: ASIF,
+    status: 'picked_up', picked_up_by: ASIF, picked_up_at: at(-20), drafts_unsent: 2,
+  }
+  const followups = (by: string): FeedFollowups => ({ active: 0, next_at: null, next_kind: null, awaiting_go: 2, go_package_id: GO, go_first_at: at(20), go_first_kind: 'client_email', go_by: by, go_steps: 2 })
+  const feed = (by: string): Feed => ({ member: ROB, role: 'founder', mail: [], drafts: [flagged], projects: [{ project_id: CLIENT, name: 'Acme Legal', followups: followups(by) }] })
+
+  test('his go is his own: listed and pinned for it, named for it, the late package still under Team · late', async () => {
+    const l = buildLists(feed(ROB), wed)
+    expect(l.queue).toHaveLength(1)
+    const it = l.queue[0] as QueueItem
+    expect(it).toMatchObject({ kind: 'ok', theirs: 'Asif', okLate: { by: 'Asif', id: PKG } })
+    expect(goMine(it)).toBe(true)
+    expect(ownBesides(it)).toBe(true)
+    expect(okLateOnly(it)).toBe(false)
+    expect(teamLateOnly(it)).toBe(false)
+    expect(pinsFor(it, wed)).toBe(true)
+    expect(pinTitle(it, wed)).toContain('Acme Legal · follow-ups need your go · first email Thu Oct 29')
+    expect(pinTitle(it, wed)).not.toMatch(/needs your OK/)
+    expect(teamLate([it]).flatMap(t => t.clients.flatMap(c => c.refs.map(r => r.id)))).toEqual([PKG])
+  })
+
+  test('a teammate\'s go there is not his: the client stays the teammate\'s, never pinned', async () => {
+    const l = buildLists(feed(ASIF), wed)
+    expect(l.queue).toEqual([])
+    const it = [...l.teammate, ...l.checking][0] as QueueItem
+    expect(goMine(it)).toBe(false)
+    expect(ownBesides(it)).toBe(false)
+    expect(okLateOnly(it)).toBe(true)
+    expect(pinsFor(it, wed)).toBe(false)
   })
 })
