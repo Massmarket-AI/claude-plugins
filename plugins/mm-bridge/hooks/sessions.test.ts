@@ -26,6 +26,274 @@ const mail = (n: number, name: string, hoursAgo = 2) => ({
   project_id: pid(n), project_name: name, reply_status: 'unanswered', project_owner_email: ME,
 })
 
+// ⛔ (0.7.28, measured 2026-11-06) One scheduled task's run linked as a client's thread: the app refused its pin, and that
+// refusal stopped the pin pass of every sync for every client after it.
+describe('0.7.28: a scheduled task\'s run is never a client\'s thread, and one refused pin never stops the pass', () => {
+  const RUN = 'local_run'
+  /** Client One's only session ran in the run and declared it alone, so R1 would link it; Client Two has a thread of its own. */
+  const twoClients: Feed = {
+    // (Client One's reply is due first: its thread comes first in the pin pass)
+    member: ME, role: 'founder', tickets: {}, mail: [mail(1, 'Client One', 3), mail(2, 'Client Two')],
+    threads: [{ project_id: pid(1), session_id: 'cli-run', last_activity_at: ago(1), sole: true }],
+  }
+  const world = (feed: Feed = twoClients) => {
+    const w = fakeApp(feed, [{ sessionId: 'local_hub' }, { sessionId: RUN, title: 'Ramp check' }, { sessionId: 'local_two', title: 'Two work' }])
+    w.put('mm.threads', { 'cli-run': { app: RUN, at: Date.parse(ago(0)) } })
+    return w
+  }
+  /** What the bridge asked the app to change on a thread. */
+  const writesOn = (w: ReturnType<typeof fakeApp>, sid: string) => w.calls.filter(c => (c.tool === 'set_pinned' || c.tool === 'set_session_title') && c.args.session_id === sid)
+  /** A client reads as having no thread here: the normal Start path. */
+  const startsNew = (w: ReturnType<typeof fakeApp>, n: number) => {
+    const rec = (w.stored('mm.last') as { recs: Record<string, { state: string; target?: unknown }> }).recs[pid(n)]
+    expect(rec?.state).toBe('start')
+    expect(rec?.target).toBeUndefined()
+  }
+
+  test('(a) a run linked first, as on Rob\'s computer: the client after it is pinned, the link and pin record go, the run is not renamed, and the client reads as having no thread', async () => {
+    const w = world()
+    w.runs.set(RUN, true)
+    // the client's link first, so the run comes first in the pass
+    w.put('mm.links', { [pid(1)]: RUN, [pid(2)]: 'local_two' })
+    w.put('mm.pins', { [RUN]: { projectId: pid(1), client: 'Client One', byUs: false } })
+    const hub = w.session('local_hub')
+    await mm(hub, '')
+    expect(w.app.get('local_two')?.pinned).toBe(true)
+    expect(w.stored('mm.links')).toEqual({ [pid(2)]: 'local_two' })
+    expect(Object.keys(w.stored('mm.pins') as object)).toEqual(['local_two'])
+    expect(writesOn(w, RUN)).toEqual([])
+    expect(w.app.get(RUN)?.title).toBe('Ramp check')
+    expect(Object.keys(w.stored('mm.scheduled') as object)).toEqual([RUN])
+    expect((w.stored('mm.last') as { error?: string }).error).toBeUndefined()
+    startsNew(w, 1)
+    // and from then on: the feed still gives it to Client One, and nothing links it, names it or pins it
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(w.stored('mm.links')).toEqual({ [pid(2)]: 'local_two' })
+    expect(writesOn(w, RUN)).toEqual([])
+    startsNew(w, 1)
+  })
+
+  test('a run only the refusal gives away: the pass goes on, the refusal is on the record and in /mm status, the link goes, and it is not tried again', async () => {
+    const w = world()
+    w.runs.set(RUN, false)
+    w.put('mm.links', { [pid(1)]: RUN, [pid(2)]: 'local_two' })
+    const hub = w.session('local_hub')
+    await mm(hub, '')
+    // refused first, and the pass went on to the next client
+    expect(w.calls.filter(c => c.tool === 'set_pinned').map(c => [c.args.session_id, c.args.pinned])).toEqual([[RUN, true], ['local_two', true]])
+    expect(w.app.get('local_two')?.pinned).toBe(true)
+    expect(w.stored('mm.links')).toEqual({ [pid(2)]: 'local_two' })
+    expect(Object.keys(w.stored('mm.pins') as object)).toEqual(['local_two'])
+    expect(Object.keys(w.stored('mm.scheduled') as object)).toEqual([RUN])
+    const last = w.stored('mm.last') as { error?: string; pinRefused?: Array<{ thread: string; client?: string; pinned: boolean; why: string }> }
+    expect(last.error).toBeUndefined()
+    expect(last.pinRefused?.map(r => [r.thread, r.client, r.pinned])).toEqual([[RUN, 'Client One', true]])
+    expect(last.pinRefused?.[0]?.why).toContain('is a scheduled task run')
+    expect(await mm(hub, 'status')).toContain('pins the app refused: Client One (')
+    startsNew(w, 1)
+    const after = writesOn(w, RUN).length
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(writesOn(w, RUN).length).toBe(after)
+    expect(w.stored('mm.links')).toEqual({ [pid(2)]: 'local_two' })
+    expect((w.stored('mm.last') as { pinRefused?: unknown }).pinRefused).toBeUndefined()
+    expect(await mm(hub, 'status')).not.toContain('pins the app refused')
+  })
+
+  test('a run R1 would link for the first time: asked by id first, so it is never named or pinned', async () => {
+    const w = world()
+    w.runs.set(RUN, true)
+    w.put('mm.links', { [pid(2)]: 'local_two' })
+    const hub = w.session('local_hub')
+    await mm(hub, '')
+    expect(writesOn(w, RUN)).toEqual([])
+    expect(w.stored('mm.links')).toEqual({ [pid(2)]: 'local_two' })
+    expect(w.stored('mm.auto') ?? {}).toEqual({})
+    startsNew(w, 1)
+  })
+
+  test('a run linked to a client that does not pin: asked by id the first time the bridge would name it, and not named', async () => {
+    const undated = { ticket_id: 't1-none', project_id: pid(1), project_name: 'Client One', title: 'Send the plan', due_at: null, due_source: null, assignee_email: ME }
+    const w = world({ member: ME, role: 'builder', mail: [], drafts: [], tickets: { due_soon: [undated] }, threads: [], client_activity: [{ project_id: pid(1), at: ago(72) }] } as unknown as Feed)
+    w.runs.set(RUN, true)
+    w.put('mm.links', { [pid(1)]: RUN })
+    await mm(w.session('local_hub'), '')
+    expect(writesOn(w, RUN)).toEqual([])
+    expect(w.stored('mm.links') ?? {}).toEqual({})
+  })
+
+  test('a link to a run the app shows archived: the run is not brought back, and the link goes', async () => {
+    const w = world()
+    w.runs.set(RUN, true)
+    const run = w.app.get(RUN)
+    if (run) run.isArchived = true
+    w.put('mm.links', { [pid(1)]: RUN, [pid(2)]: 'local_two' })
+    await mm(w.session('local_hub'), '')
+    expect(w.calls.filter(c => c.tool === 'unarchive_session')).toEqual([])
+    expect(run?.isArchived).toBe(true)
+    expect(w.stored('mm.links')).toEqual({ [pid(2)]: 'local_two' })
+    expect(Object.keys(w.stored('mm.scheduled') as object)).toEqual([RUN])
+    startsNew(w, 1)
+  })
+
+  test('the thread of a scheduled task\'s run sees itself as one: it is not linked, and /mm link says why', async () => {
+    const w = world()
+    w.runs.set(RUN, true)
+    const run = w.session(RUN)
+    expect(await tool(run, 'link Client One')).toBe('This thread is a scheduled task\'s run, so it is not linked to a client.')
+    expect((w.stored('mm.links') as Record<string, string>)[pid(1)]).toBeUndefined()
+    expect(writesOn(w, RUN)).toEqual([])
+  })
+
+  test('a refused unpin stops nothing either: the other threads are unpinned, its record is kept, and the next sync finishes it', async () => {
+    const w = fakeApp({ member: ME, role: 'founder', mail: [mail(3, 'Client Three')], tickets: {}, threads: [] }, [
+      { sessionId: 'local_hub' }, { sessionId: 'local_a', pinned: true, title: 'A' }, { sessionId: 'local_b', pinned: true, title: 'B' }, { sessionId: 'local_c', title: 'C' },
+    ])
+    // ours, and their clients are clear: the loop over the pin records takes both pins off
+    w.put('mm.links', { [pid(1)]: 'local_a', [pid(2)]: 'local_b', [pid(3)]: 'local_c' })
+    w.put('mm.pins', { local_a: { projectId: pid(1), client: 'Client One', byUs: true }, local_b: { projectId: pid(2), client: 'Client Two', byUs: true } })
+    w.failPins.add('local_a')
+    const hub = w.session('local_hub')
+    await mm(hub, '')
+    expect(w.app.get('local_a')?.pinned).toBe(true)
+    expect(w.app.get('local_b')?.pinned).toBe(false)
+    expect(w.app.get('local_c')?.pinned).toBe(true)
+    expect((w.stored('mm.pins') as Record<string, { byUs: boolean }>).local_a?.byUs).toBe(true)
+    const last = w.stored('mm.last') as { error?: string; pinRefused?: Array<{ thread: string; pinned: boolean }> }
+    expect(last.error).toBeUndefined()
+    expect(last.pinRefused?.map(r => [r.thread, r.pinned])).toEqual([['local_a', false]])
+    w.failPins.clear()
+    // (0.7.29) not asked again before its 6 hours are out
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(w.app.get('local_a')?.pinned).toBe(true)
+    await w.advance(6 * 3_600_000)
+    await mm(hub, '')
+    expect(w.app.get('local_a')?.pinned).toBe(false)
+    expect((w.stored('mm.pins') as Record<string, unknown>).local_a).toBeUndefined()
+  })
+})
+
+// ⛔ (0.7.29, on 0.7.28) A refusal for any other reason than a scheduled task's run: the thread waits 6 hours, the refusal is
+// reported once per thread and reason, and everything else in the pass goes on. A typed /mm says why a pass failed.
+describe('0.7.29: a pin the app refuses waits 6 hours and is reported once; a typed /mm says why a pass failed', () => {
+  const SIX_HOURS = 6 * 3_600_000
+  const threeClients = (): Feed => ({ member: ME, role: 'founder', tickets: {}, threads: [], mail: [mail(1, 'Client One', 3), mail(2, 'Client Two', 2), mail(3, 'Client Three')] })
+  /** Client One's thread comes first in the pin pass, and the app refuses to pin it. */
+  const world = () => {
+    const w = fakeApp(threeClients(), [{ sessionId: 'local_hub' }, { sessionId: 'local_a', title: 'A work' }, { sessionId: 'local_b', title: 'B work' }, { sessionId: 'local_c', title: 'C work' }])
+    w.put('mm.links', { [pid(1)]: 'local_a', [pid(2)]: 'local_b', [pid(3)]: 'local_c' })
+    w.failPins.add('local_a')
+    return w
+  }
+  const pinCalls = (w: ReturnType<typeof fakeApp>, sid: string) => w.calls.filter(c => c.tool === 'set_pinned' && c.args.session_id === sid).length
+  /** The refusals of a thread in bridge-notices.log: one line a write, since the fake's file reads back as empty. */
+  const noticesOf = (w: ReturnType<typeof fakeApp>, sid: string) => w.written.filter(f => f.path.endsWith('bridge-notices.log') && f.text.includes(`thread ${sid}: the app refused`))
+  const lastAt = (w: ReturnType<typeof fakeApp>) => (w.stored('mm.last') as { at: number }).at
+
+  test('a refused pin: every other thread is pinned and named, a typed /mm answers, the sync advances, and our record goes back to not ours', async () => {
+    const w = world()
+    const hub = w.session('local_hub')
+    expect(await mm(hub, '')).toContain('3 clients need you; 2 threads pinned.')
+    expect(w.app.get('local_a')?.pinned).toBeFalsy()
+    expect(w.app.get('local_a')?.title).toContain('Client One')
+    for (const [sid, name] of [['local_b', 'Client Two'], ['local_c', 'Client Three']] as const) {
+      expect(w.app.get(sid)?.pinned).toBe(true)
+      expect(w.app.get(sid)?.title).toContain(name)
+    }
+    expect((w.stored('mm.pins') as Record<string, { byUs: boolean }>).local_a?.byUs).toBe(false)
+    expect((w.stored('mm.last') as { error?: string }).error).toBeUndefined()
+    const first = lastAt(w)
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(lastAt(w)).toBeGreaterThan(first)
+  })
+
+  test('asked again no sooner than 6 hours, for that thread alone; reported once per thread and reason; /mm status says so the whole time', async () => {
+    const w = world()
+    const hub = w.session('local_hub')
+    await mm(hub, '')
+    expect(pinCalls(w, 'local_a')).toBe(1)
+    expect(noticesOf(w, 'local_a').length).toBe(1)
+    // no lookup and no record flip for it either while it waits
+    const lookups = () => w.calls.filter(c => c.tool === 'get_session' && c.args.session_id === 'local_a').length
+    const asked = lookups()
+    const a = w.app.get('local_b')
+    if (a) a.pinned = false
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(pinCalls(w, 'local_a')).toBe(1)
+    expect(lookups()).toBe(asked)
+    expect(await mm(hub, 'status')).toContain('pins the app refused: Client One (')
+    expect((w.stored('mm.pins') as Record<string, { byUs: boolean }>).local_a?.byUs).toBe(false)
+    // just short of 6 hours since the refusal
+    await w.advance(SIX_HOURS - 7 * 60_000)
+    await mm(hub, '')
+    expect(pinCalls(w, 'local_a')).toBe(1)
+    // past them: asked again, refused in the same words, so it waits again and is not reported again
+    await w.advance(2 * 60_000)
+    await mm(hub, '')
+    expect(pinCalls(w, 'local_a')).toBe(2)
+    expect(noticesOf(w, 'local_a').length).toBe(1)
+    await w.advance(60_000)
+    await mm(hub, '')
+    expect(pinCalls(w, 'local_a')).toBe(2)
+    // a new reason is a new report
+    w.failPins.clear()
+    w.refusePins.set('local_a', 'The sidebar is busy.')
+    await w.advance(SIX_HOURS)
+    await mm(hub, '')
+    expect(pinCalls(w, 'local_a')).toBe(3)
+    expect(noticesOf(w, 'local_a').length).toBe(2)
+    expect(noticesOf(w, 'local_a')[1]?.text).toContain('The sidebar is busy.')
+    // the app takes it: pinned, the wait goes, and it never read as the person's unpin
+    w.refusePins.clear()
+    await w.advance(SIX_HOURS)
+    await mm(hub, '')
+    expect(w.app.get('local_a')?.pinned).toBe(true)
+    expect(w.stored('mm.pinwait')).toEqual({})
+    expect(w.stored('mm.unpinned') ?? {}).toEqual({})
+    expect(await mm(hub, 'status')).not.toContain('pins the app refused')
+  })
+
+  test('a refusal that waits is in the heartbeat file, as `refreshError` is', async () => {
+    const w = world()
+    const hub = w.session('local_hub')
+    await mm(hub, '')
+    w.feedAnswers(503)
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    const state = JSON.parse(w.written.filter(f => f.path.endsWith('bridge-state.json')).at(-1)?.text ?? '{}') as { pinRefused?: Array<{ thread: string; why: string; until: string }>; refreshError?: unknown }
+    expect(state.pinRefused?.map(r => r.thread)).toEqual(['local_a'])
+    expect(state.pinRefused?.[0]?.why).toContain('set_pinned failed')
+    expect(state.refreshError).toBeTruthy()
+  })
+
+  test('a thread that is gone takes its wait with it', async () => {
+    const w = world()
+    const hub = w.session('local_hub')
+    await mm(hub, '')
+    expect(Object.keys(w.stored('mm.pinwait') as object)).toEqual(['local_a'])
+    w.app.delete('local_a')
+    await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(w.stored('mm.pinwait')).toEqual({})
+  })
+
+  test('a typed /mm answers why a pass failed, with the list as last loaded', async () => {
+    const w = fakeApp(threeClients(), [{ sessionId: 'local_hub' }, { sessionId: 'local_a', title: 'A work' }])
+    const hub = w.session('local_hub')
+    await mm(hub, '')
+    w.feedAnswers(503)
+    await w.advance(6 * 60_000)
+    const said = await mm(hub, '')
+    expect(said).toContain('/mm queue did not finish: closeout HTTP 503')
+    expect(said).toContain('From the list as last loaded: 3 clients need you')
+    expect(await mm(hub, 'link Client One')).toContain('/mm link Client One did not finish: closeout HTTP 503')
+  })
+})
+
 // (0.7.12) Older is gone: what was due before the cut is considered nowhere. These tests asked for Older until 0.7.12.
 describe('F1: the feed is asked for mail far enough back for the list to hold any ((0.7.12) no Older)', () => {
   test('the closeout feed is asked for 168 business hours of mail on a clock before Thu Oct 22 (the least, mailLookbackHours)', async () => {
@@ -191,9 +459,8 @@ describe('F2: a write the engine refuses midway leaves nothing half done', () =>
     w.put('mm.threads', { 'cli-a': { app: 'local_p2a', at: Date.parse(ago(0)) } })
     const hub = w.session('local_p2hub')
     w.refuse('mm.auto', 1)
-    let failed = ''
-    await mm(hub, '').catch((err: unknown) => void (failed = String(err)))
-    expect(failed).toContain('Lock file is already being held')
+    // (0.7.29) a typed /mm answers with why; until 0.7.28 it threw
+    expect(await mm(hub, '')).toContain('Lock file is already being held')
     // the link was never written without its auto record; what the sync did to the thread is on record
     expect(linksOf(w)[pid(1)]).toBeUndefined()
     expect((w.stored('mm.titles') as Record<string, string>).local_p2a).toBe('Pipeline speed work')
@@ -394,16 +661,13 @@ describe('re-review of a446f5ab: Start after a chip was spent, a re-check after 
     const w = fakeApp(feed, [{ sessionId: 'local_l3thub' }, { sessionId: 'local_l3ta', title: 'A work' }])
     w.put('mm.links', { [pid(1)]: 'local_l3ta' })
     const hub = w.session('local_l3thub')
-    // the app refuses a pin (2026-11-06: a linked thread that is a scheduled task run), and every pass stops there
-    w.failPins.add('local_l3ta')
-    expect(await tool(hub, 'queue')).toContain('/mm queue did not finish: ')
-    expect(await tool(hub, '')).toContain('set_pinned failed')
-    // what reads no feed still answers, as it did in the session this was seen in
-    expect(await tool(hub, 'status')).toContain('member: ')
-    w.failPins.clear()
     // OW's feed answering 5xx (2026-10-19)
     w.feedAnswers(503)
-    expect(await tool(hub, 'link Client One')).toContain('did not finish: closeout HTTP 503')
+    expect(await tool(hub, 'queue')).toContain('/mm queue did not finish: closeout HTTP 503')
+    expect(await tool(hub, '')).toContain('/mm queue did not finish: closeout HTTP 503')
+    expect(await tool(hub, 'link Client One')).toContain('/mm link Client One did not finish: closeout HTTP 503')
+    // what reads no feed still answers, as it did in the session this was seen in
+    expect(await tool(hub, 'status')).toContain('last sync: ')
     w.feedAnswers(200)
     expect(await tool(hub, 'queue')).toContain('The list is in the side pane.')
   })
@@ -414,12 +678,17 @@ describe('re-review of a446f5ab: Start after a chip was spent, a re-check after 
     w.put('mm.links', { [pid(1)]: 'local_l3a' })
     const hub = w.session('local_l3hub')
     w.failPins.add('local_l3a')
-    let failed = ''
-    await mm(hub, '').catch((err: unknown) => void (failed = String(err)))
-    expect(failed).toContain('set_pinned failed')
+    // (0.7.28) the pass goes on past it, and the refusal is on the sync record; until 0.7.27 it stopped the pass
+    await mm(hub, '')
+    expect((w.stored('mm.last') as { pinRefused?: Array<{ why: string }> }).pinRefused?.[0]?.why).toContain('set_pinned failed')
     expect((w.stored('mm.pins') as Record<string, { byUs: boolean }>).local_l3a?.byUs).toBe(false)
     w.failPins.clear()
+    // (0.7.29) not asked again before its 6 hours are out
     await w.advance(6 * 60_000)
+    await mm(hub, '')
+    expect(w.app.get('local_l3a')?.pinned).toBe(false)
+    expect((w.stored('mm.pins') as Record<string, { byUs: boolean }>).local_l3a?.byUs).toBe(false)
+    await w.advance(6 * 3_600_000)
     await mm(hub, '')
     expect(w.app.get('local_l3a')?.pinned).toBe(true)
     expect(w.stored('mm.unpinned') ?? {}).toEqual({})

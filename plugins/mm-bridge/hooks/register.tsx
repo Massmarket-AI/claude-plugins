@@ -200,7 +200,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.28'
+export const VERSION = '0.7.29'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -235,6 +235,10 @@ const LEASE_MS = 150_000
  */
 const LEASE_RENEW_MS = 30_000
 const MAX_WRITES = 24
+/** (0.7.28) The most refused pins one sync record keeps. */
+const PIN_REFUSED_MAX = 10
+/** (0.7.29) How long a thread the app refused a pin or an unpin for waits before it is asked again (`mm.pinwait`). */
+const PIN_WAIT_MS = 6 * 3_600_000
 const DAY_MS = 24 * 3_600_000
 /** A session's own pair (Claude Code session id → app thread) is kept this long after it last ran. */
 const PAIR_KEEP_MS = 30 * DAY_MS
@@ -488,6 +492,15 @@ type Mcp = { content?: Array<{ type: string; text?: string }>; isError?: boolean
  * them, and the bridge pinned it again; its name says so (` · still needs you`) until nothing of the client pins it.
  */
 type Pin = { projectId: string; client: string; byUs: boolean; internal?: true; again?: true }
+/** (0.7.28) One `set_pinned` the app refused: which thread, whose, which way, and in its own words. */
+type PinRefused = { thread: string; client?: string; pinned: boolean; why: string }
+/**
+ * (0.7.29) A thread the app refused a pin or an unpin for, as anything but a scheduled task's run (`mm.pinwait`): not asked
+ * again before `until`. `why` outlives `until`, so the same refusal is reported once however many times it is retried.
+ */
+type PinWait = { until: number; why: string }
+/** (0.7.28) The words the app refuses to pin a scheduled task's run in. */
+const SCHEDULED_RUN = 'is a scheduled task run'
 type Last = {
   at: number
   member: string
@@ -504,6 +517,8 @@ type Last = {
   /** Every project id the last feed carried: the only ids an [mm-link] marker may name. */
   projects?: string[]
   error?: string
+  /** (0.7.28) What the app refused this pass when asked to pin or unpin a thread: the pass went on past each one. Absent: nothing. */
+  pinRefused?: PinRefused[]
   /** (New people) For the founder and a PM: who wrote to us with no project matched, newest first, worded at `at`. Absent: none. */
   people?: MmPerson[]
   /** (New people) What Route to project offers: kept only while somebody is under `New people`. */
@@ -916,7 +931,15 @@ function asThread(raw: unknown): AppThread | null {
     ...(link ? { link } : {}),
     // (0.7.10) the folder the app says it runs in: where a client's new thread starts (`clientFolder`)
     ...(isFolder(t.cwd) ? { cwd: t.cwd } : {}),
+    // (0.7.28) a scheduled task's run: never a client's thread
+    ...(scheduledRun(t) ? { scheduled: true } : {}),
   }
+}
+
+/** (0.7.28) Whether the app's answer for a thread says it is a scheduled task's run: `get_session` does, its list does not (measured 2026-11-06). */
+function scheduledRun(raw: unknown): boolean {
+  const id = (raw as { scheduledTaskId?: unknown } | null | undefined)?.scheduledTaskId
+  return typeof id === 'string' && id !== ''
 }
 
 /** (0.7.10) An absolute folder path on this computer, on one line: a Mac or Linux path, or a Windows drive path. */
@@ -957,7 +980,7 @@ async function sessions($: EngineInterface): Promise<Listed | null> {
  */
 async function lookup($: EngineInterface, sid: string): Promise<AppThread | 'gone' | 'unknown'> {
   const found = await askApp($, sid)
-  return found === 'archived' || found === 'notfound' ? 'gone' : found
+  return found === 'archived' || found === 'notfound' || (typeof found === 'object' && found.isArchived) ? 'gone' : found
 }
 
 /**
@@ -982,7 +1005,11 @@ async function askApp($: EngineInterface, sid: string): Promise<AppThread | 'arc
       return 'unknown' // an answer that is not a thread says nothing about this one
     }
     if (!raw || typeof raw !== 'object' || raw.sessionId !== sid) return 'unknown'
-    return raw.isArchived ? 'archived' : (asThread(raw) ?? 'unknown')
+    // (0.7.28) a scheduled task's run is answered as one, archived too: never a client's own thread to bring back
+    if (raw.isArchived && scheduledRun(raw)) return { sessionId: sid, isArchived: true, scheduled: true }
+    if (raw.isArchived) return 'archived'
+    const thread = asThread(raw)
+    return thread ? { ...thread, byId: true } : 'unknown'
   } catch (err) {
     // the call itself was refused: "no such thread" only when that is what the app said, about this thread
     return noSuchThread(errorText(err)) ? 'notfound' : 'unknown'
@@ -1091,9 +1118,7 @@ async function restoreThread($: EngineInterface, it: QueueItem, last: Last, show
 /** (0.7.10) /mm restore <client> (and the mm tool's `restore`): Restore thread for the client named, then the list brought up to date. */
 async function restoreCommand($: EngineInterface, arg: string): Promise<string> {
   if (!arg) return 'Name the client: /mm restore <client>.'
-  const now = await $.clock.now()
-  let last = await storeGet<Last | null>($, 'mm.last', null)
-  if (!last || last.error || !Array.isArray(last.items) || !Number.isFinite(last.at) || now - last.at > STALE_SYNC_MS) last = await sync($)
+  const last = await syncedList($, 'restore')
   const found = clientsNamed(arg, listedIn(last))
   if (found.length > 1) return severalClients(arg, found)
   const it = found[0]
@@ -1965,6 +1990,35 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   const notHere = new Set<string>()
   const me = await selfId($)
   const records = recordReader($, now, me)
+  // ⛔ (0.7.28, measured on Rob's computer 2026-11-06: a scheduled task's run had declared a client, so R1 linked it; the app
+  // refuses to pin a run, and that refusal stopped the pin pass of every sync, for every client after it) A SCHEDULED TASK'S
+  // RUN IS NEVER A CLIENT'S THREAD. `get_session` says a thread is one (`scheduledTaskId`); the app's list does not. So a run
+  // is found out by that answer (this thread's own, one past the list, and one the bridge is about to name or pin: `isRun`,
+  // below), and failing that by the words of the refusal (`SCHEDULED_RUN`). Once found it is on record (`mm.scheduled`), since
+  // the feed goes on giving it to its client, and in this pass and every later one it is out of the app's list and `gone`:
+  // its link and pin record go, nothing renames it and nothing links it, and its client reads as having no thread here.
+  /** (0.7.28) The scheduled runs on record: thread → when found. */
+  const runs = await storeGet<Record<string, number>>($, 'mm.scheduled', {})
+  /** (0.7.28) The runs this pass found: written at its end. */
+  const runsFound: string[] = []
+  const letGoRun = (sid: string): void => {
+    if (!Object.hasOwn(runs, sid)) {
+      runs[sid] = now
+      runsFound.push(sid)
+    }
+    live.delete(sid)
+    gone.add(sid)
+    for (const [pid, linked] of Object.entries(links)) {
+      if (linked !== sid) continue
+      delete links[pid]
+      delete auto[pid]
+    }
+    delete pins[sid]
+    delete titles[sid]
+    delete unpinned[sid]
+  }
+  for (const sid of Object.keys(runs)) letGoRun(sid)
+  for (const s of [...live.values()]) if (s.scheduled) letGoRun(s.sessionId)
   /** The threads this pass has asked the app for by id: at most LOOKUPS_PER_SYNC. */
   let asked = 0
   // ⛔ (0.7.23, measured on Rob's computer 2026-11-05: 107 linked or pinned threads past the app's list, asked in link order,
@@ -1977,7 +2031,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   const lookedUp = await storeGet<Record<string, LookupSeen>>($, 'mm.lookups', {})
   /** (0.7.23) The record of each thread this pass asked the app for. */
   const askedNow: Record<string, LookupSeen> = {}
-  const missing = lookupOrder([...tracked].filter(sid => !live.has(sid)), sid => pins[sid]?.byUs === true, lookedUp && typeof lookedUp === 'object' ? lookedUp : {})
+  const missing = lookupOrder([...tracked].filter(sid => !live.has(sid) && !gone.has(sid)), sid => pins[sid]?.byUs === true, lookedUp && typeof lookedUp === 'object' ? lookedUp : {})
   /** (0.7.23) The app asked for one thread by id, within the sync's lookups, and what it answered on record. */
   const lookUp = async (sid: string): Promise<AppThread | 'archived' | 'notfound' | 'unknown'> => {
     if (asked >= LOOKUPS_PER_SYNC) return 'unknown'
@@ -2002,7 +2056,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       continue
     }
     const found = await lookUp(sid)
-    if (found === 'unknown') unseen.add(sid)
+    if (typeof found === 'object' && found.scheduled) letGoRun(sid)
+    else if (found === 'unknown') unseen.add(sid)
     else if (found === 'notfound') {
       notHere.add(sid)
       const said = await records.where(sid)
@@ -2296,7 +2351,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     let best: { s: AppThread; at: number } | undefined
     for (const s of pool) {
       const sid = s.sessionId
-      if (s.isArchived || !THREAD_ID.test(sid) || away.has(sid) || ownerOf(sid, links) !== undefined || sid in unlinked || left.includes(sid) || neverOwn.has(sid)) continue
+      if (s.isArchived || s.scheduled || !THREAD_ID.test(sid) || away.has(sid) || ownerOf(sid, links) !== undefined || sid in unlinked || left.includes(sid) || neverOwn.has(sid)) continue
       if (declaredOther(pid, sid, feedThreads, pairs, marked)) continue
       const pin = pins[sid]
       if (pin !== undefined && pin.projectId !== pid) continue
@@ -2357,7 +2412,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
             if (asked < LOOKUPS_PER_SYNC && !(said === 'archived' && (await records.elsewhere(sid)) === 'archived')) {
               asked++
               const found = await askApp($, sid)
-              if (typeof found === 'object') {
+              if (typeof found === 'object' && found.scheduled) letGoRun(sid)
+              else if (typeof found === 'object') {
                 live.set(sid, found)
                 there = 'live'
               } else if (found === 'archived') {
@@ -2370,9 +2426,11 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
           else if (said === 'here' && asked < LOOKUPS_PER_SYNC) {
             asked++
             const found = await askApp($, sid)
-            if (typeof found === 'object') live.set(sid, found)
+            const run = typeof found === 'object' && found.scheduled === true
+            if (run) letGoRun(sid)
+            else if (typeof found === 'object') live.set(sid, found)
             if (found === 'archived') archivedHere.add(sid)
-            there = typeof found === 'object' ? 'live' : found === 'unknown' ? 'stop' : found === 'archived' ? 'archived' : 'skip'
+            there = run ? 'skip' : typeof found === 'object' ? 'live' : found === 'unknown' ? 'stop' : found === 'archived' ? 'archived' : 'skip'
             if (found === 'unknown') heldHere.add(pid)
           }
         }
@@ -2742,6 +2800,80 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     else named.set(sid, { it, unpin: unpinFor(it, 'ours'), title: threadTitle(it, now) })
   }
 
+  /**
+   * (0.7.28) Whether a thread the bridge is about to name or pin is a scheduled task's run, asked by id just before: the
+   * app's list does not say, and a run must get no name from us. One the app does not answer for now goes on as before.
+   */
+  const isRun = async (sid: string): Promise<boolean> => {
+    if (live.get(sid)?.byId) return false
+    const found = await askApp($, sid)
+    if (typeof found !== 'object' || !found.scheduled) return false
+    letGoRun(sid)
+    want.delete(sid)
+    named.delete(sid)
+    return true
+  }
+  /** (0.7.28) What the app refused this pass: on the sync record, and in /mm status. */
+  const refused: PinRefused[] = []
+  /** (0.7.29) The refusals on record. */
+  const pinWaits = await storeGet<Record<string, PinWait>>($, 'mm.pinwait', {})
+  const waitingOnPin = (sid: string): boolean => {
+    const w = pinWaits[sid]
+    return w !== undefined && now < w.until
+  }
+  /**
+   * ⛔ (0.7.29) A thread whose refusal is still waiting: not asked, and still on the record and in /mm status for as long as
+   * the pass wants it changed.
+   */
+  const heldBack = (sid: string, pinned: boolean): boolean => {
+    if (!waitingOnPin(sid)) return false
+    if (!refused.some(r => r.thread === sid)) {
+      const client = pins[sid]?.client
+      refused.push({ thread: sid, ...(client ? { client } : {}), pinned, why: pinWaits[sid]?.why ?? '' })
+    }
+    return true
+  }
+  /**
+   * ⛔ (0.7.28) One `set_pinned`, for every pin and unpin of this pass: false when the app refused it, and ONE REFUSAL NEVER
+   * STOPS THE PASS. Each caller leaves that thread as it would with no writes left, for a later sync to finish, and goes on
+   * to the next. A refusal in the words the app uses for a scheduled task's run lets that run go (above). ⛔ (0.7.29) Any
+   * other refusal waits PIN_WAIT_MS for that thread (`mm.pinwait`), and is reported once per thread and reason: a line in
+   * bridge-notices.log, and `pinRefused` in the heartbeat file, where `refreshError` is.
+   */
+  const setPin = async (sid: string, pinned: boolean): Promise<boolean> => {
+    // (the clear sweep comes to a thread the loop before it was just refused for: once per pass is enough)
+    if (refused.some(r => r.thread === sid && r.pinned === pinned)) return false
+    if (heldBack(sid, pinned)) return false
+    try {
+      await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: sid, pinned })
+      if (pinWaits[sid]) {
+        delete pinWaits[sid]
+        await patchStore<Record<string, PinWait>>($, 'mm.pinwait', {}, fresh => {
+          delete fresh[sid]
+        }).catch(() => {})
+      }
+      return true
+    } catch (err) {
+      const why = errorText(err)
+      const client = pins[sid]?.client
+      refused.push({ thread: sid, ...(client ? { client } : {}), pinned, why })
+      if (why.includes(SCHEDULED_RUN)) {
+        letGoRun(sid)
+        want.delete(sid)
+        named.delete(sid)
+        return false
+      }
+      const known = pinWaits[sid]?.why === why
+      const wait: PinWait = { until: now + PIN_WAIT_MS, why }
+      pinWaits[sid] = wait
+      await patchStore<Record<string, PinWait>>($, 'mm.pinwait', {}, fresh => {
+        fresh[sid] = wait
+        capped(fresh)
+      }).catch(() => {})
+      if (!known) await logAuto($, `thread ${sid}: the app refused to ${pinned ? 'pin' : 'unpin'} it (${why}); not asked again for 6 hours`)
+      return false
+    }
+  }
   let writes = 0
   const rename = async (s: AppThread, title: string): Promise<void> => {
     // The thread's own name is kept from before the first time we rename it, so /mm unlink can give it back.
@@ -2795,7 +2927,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     if (want.has(sid) || named.has(sid)) continue
     const s = live.get(sid)
     if (s && pins[sid]?.byUs && s.pinned) {
-      await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: sid, pinned: false })
+      // (0.7.28) refused: its records stay, and the loop over the pin records below finishes it on a later sync
+      if (!(await setPin(sid, false))) continue
       s.pinned = false
       writes++
     }
@@ -2815,6 +2948,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     const s = live.get(sid)
     if (s && writes >= MAX_WRITES) outOfWrites.add(sid)
     if (!s || writes >= MAX_WRITES) continue
+    // (0.7.28) a run is never pinned, so only a thread that is not pinned is asked about
+    if (!s.pinned && !waitingOnPin(sid) && (await isRun(sid))) continue
     // The record first, as the thread stands (a pin the person put on stays theirs), so a failed rename
     // leaves a record to give the name back by; then, just before we pin it, the record that the pin is
     // ours. (Recorded as ours any earlier, a rename that failed would read later as the person's unpin.)
@@ -2825,14 +2960,15 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     const title = pinTitle(it, now, back)
     if (s.title !== title) await rename(s, title)
     if (!s.pinned) {
+      // (0.7.29) waiting on a refusal: its name is right, and its record stays not ours until the app is asked again
+      if (heldBack(sid, true)) continue
       await recordPin(sid, record(true))
-      try {
-        await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: sid, pinned: true })
-      } catch (err) {
+      if (!(await setPin(sid, true))) {
         // ⛔ The app refused the pin: our record goes back to not ours, so the next sync pins it again
-        // instead of reading a pin that never was as one the person took off (L3).
-        await recordPin(sid, record(false)).catch(() => {})
-        throw err
+        // instead of reading a pin that never was as one the person took off (L3). (0.7.28) And the pass goes on to the
+        // next thread. A run the refusal let go has no record to put back.
+        if (live.has(sid)) await recordPin(sid, record(false)).catch(() => {})
+        continue
       }
       s.pinned = true
       writes++
@@ -2846,8 +2982,11 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   for (const [sid, n] of named) {
     const s = live.get(sid)
     if (!s || writes >= MAX_WRITES) continue
+    // (0.7.28) the first time the bridge names this thread for this client: not if it is a scheduled task's run
+    if (!s.pinned && pins[sid]?.projectId !== n.it.projectId && (await isRun(sid))) continue
     if (((n.unpin === 'ours' && pins[sid]?.byUs) || n.unpin === 'any') && s.pinned) {
-      await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: sid, pinned: false })
+      // (0.7.28) refused: its record stays as it is, so the next sync tries again
+      if (!(await setPin(sid, false))) continue
       s.pinned = false
       writes++
     }
@@ -2884,7 +3023,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       const inside = internalPin(pin)
       // ⛔ (0.7.12) a client the cut alone cleared (`pastCut`): only our own pin comes off; the person's stays
       if ((pin.byUs || (clear && !inside && !pastCut.has(pin.projectId))) && s.pinned) {
-        await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: sid, pinned: false })
+        // (0.7.28) refused: its record is kept, as for a sync with no writes left, and the next sync finishes it
+        if (!(await setPin(sid, false))) continue
         s.pinned = false
         writes++
       }
@@ -2934,7 +3074,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     // the person's, and it stays. (Our own pin there came off in the loop above, from its record.)
     if (s.pinned && !pastCut.has(pid)) {
       if (writes >= MAX_WRITES) continue
-      await mcpJson($, 'ccd_sidebar', 'set_pinned', { session_id: sid, pinned: false })
+      // (0.7.28) refused: not recorded as cleared, so the next sync tries again
+      if (!(await setPin(sid, false))) continue
       s.pinned = false
       writes++
     }
@@ -3008,7 +3149,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // (0.7.11, 10-30: the status said 3 pinned while the sidebar showed 8) the client threads this profile's app shows
   // pinned once the pass is done: what the sidebar shows, never a pin record, and never a thread of another profile
   const pinnedHere = new Set(Object.values(links).filter(sid => live.get(sid)?.pinned === true && !gone.has(sid))).size
-  const last: Last = { at: now, member, items, ...also, ...founderMark, pinned: pinnedHere, recs, projects, ...newPeople }
+  const last: Last = { at: now, member, items, ...also, ...founderMark, pinned: pinnedHere, recs, projects, ...newPeople, ...(refused.length ? { pinRefused: refused.slice(0, PIN_REFUSED_MAX) } : {}) }
   // (0.7.23, Rob 2026-11-05: "it should be everything that should be pinned, and there should be another indicator, like a
   // green light beside it, to show if it is or not.") What should be pinned and whether it is, once the pass is done: sent to
   // OW for the team's daily "Pins by person" image after everything else of this pass (`sendPinReport`). ⛔ Built from what
@@ -3083,6 +3224,20 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       if (before) auto[pid] = copyOf(before)
       else delete auto[pid]
     }
+  }
+  // (0.7.29) a refusal whose thread is gone, or a run now, or that nothing has asked about for a day past its wait, goes
+  if (Object.keys(pinWaits).some(sid => gone.has(sid) || Object.hasOwn(runs, sid) || now - Number(pinWaits[sid]?.until) > DAY_MS)) {
+    await patchStore<Record<string, PinWait>>($, 'mm.pinwait', {}, fresh => {
+      for (const sid of Object.keys(fresh)) if (gone.has(sid) || Object.hasOwn(runs, sid) || !(now - Number(fresh[sid]?.until) <= DAY_MS)) delete fresh[sid]
+    }).catch(() => {})
+  }
+  // (0.7.28) the scheduled runs this pass found, before their links go: a link dropped with no record would be made again
+  if (runsFound.length) {
+    await patchStore<Record<string, number>>($, 'mm.scheduled', {}, fresh => {
+      for (const sid of runsFound) fresh[sid] ??= now
+      capped(fresh)
+    })
+    for (const sid of runsFound) await logAuto($, `thread ${sid} is a scheduled task's run: not a client's thread, its link and pin record are dropped`)
   }
   // (0.5.11, review of PR #15, F6) No context reading is kept or taken any more: Claude Code compacts a long thread,
   // and nothing reads one. (`mm.ctx`, which an older version wrote, is left as it is.)
@@ -3169,7 +3324,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     }
   }
   // (0.6.0) each thread's current project, from what this pass read and the links it wrote (once per feed)
-  if (!known) await currentPass($, { now, links, was: was.links, moved: moves, live, gone, feedThreads, pairs, complete: listed.complete, lookups: asked }).catch(() => {})
+  // (0.7.28) a scheduled task's run is `gone` to the links and pins alone: its current project is left as it is
+  if (!known) await currentPass($, { now, links, was: was.links, moved: moves, live, gone: new Set([...gone].filter(sid => !Object.hasOwn(runs, sid))), feedThreads, pairs, complete: listed.complete, lookups: asked }).catch(() => {})
   await storeLast($, feed, last)
   // (0.7.11) a sync in another profile than the last one: the person switched Claude profiles now (`awayNote` tells
   // Claude once a switch). Written after the sync record, so the switch is never seen before its away clients.
@@ -3262,6 +3418,24 @@ async function showQueue(
 
 async function sync($: EngineInterface): Promise<Last> {
   return (await reconcile($, await fetchFeed($))).last
+}
+
+/**
+ * The list a command acts on: the stored sync, read again when it is stale or failed. ⛔ (0.7.28) A sync that fails then does
+ * not stop the command while the store holds a list: it goes on with that one (Start missing threads put nothing in the
+ * prompt box on 2026-11-06, and `kickoffs` did not answer). Only with no list at all does the failure stand.
+ */
+async function syncedList($: EngineInterface, what: string): Promise<Last> {
+  const now = await $.clock.now()
+  const stored = await storeGet<Last | null>($, 'mm.last', null)
+  if (stored && !stored.error && Array.isArray(stored.items) && Number.isFinite(stored.at) && now - stored.at <= STALE_SYNC_MS) return stored
+  try {
+    return await sync($)
+  } catch (err) {
+    if (!stored || !Array.isArray(stored.items)) throw err
+    await noteFailure($, `${what}: the sync first`, err)
+    return stored
+  }
 }
 
 /** A press's refresh (S2): the list brought up to date after the press drew its answer, with a feed OW gave this session less than a minute ago when there is one. */
@@ -3627,7 +3801,7 @@ async function showList($: EngineInterface, press: boolean): Promise<string> {
     last = (await reconcile($, press ? await recentFeed($) : await fetchFeed($))).last
   } catch (err) {
     // the list it opened with stays, and the pane says it is the one last loaded (L3). A typed /mm still
-    // answers with the failure, as before; the band's button has said all there is to say.
+    // answers with the failure (`didNotFinish`); the band's button has said all there is to say.
     await refreshFailed($, err)
     if (!press) throw err
     return REFRESH_FAILED
@@ -3639,9 +3813,32 @@ async function showList($: EngineInterface, press: boolean): Promise<string> {
     if (after) await showClient($, after, true)
     else await clearClient($)
   }
-  // (0.7.5) counted as the pane's header counts them: not the internal queue, not the clients with no due date
+  return listSaid(last)
+}
+
+/** (0.7.5) The list in a sentence, counted as the pane's header counts them: not the internal queue, not the clients with no due date. */
+function listSaid(last: Last): string {
   const n = last.items.filter(needsYouNow).length
   return n ? `${n} client${n === 1 ? '' : 's'} need you; ${last.pinned} thread${last.pinned === 1 ? '' : 's'} pinned. The list is in the side pane.` : 'Nothing needs you right now.'
+}
+
+/** (0.7.28) What /mm and the mm tool answer for a hook that ran out of its time. */
+const NOT_IN_TIME = 'The bridge did not finish that in time. /mm status says how its last sync went.'
+
+/**
+ * (0.7.28) What the mm tool, and (0.7.29) a typed /mm, answer when a command failed: which, why, and the list as last stored
+ * when there is one. ⛔ It must answer: a hook that throws is skipped, and the engine then calls the plugin's tool itself,
+ * which says only that "no tool.call hook answered this call" (`queue` and `kickoffs`, every sync, on 2026-11-06; `status`
+ * runs no sync).
+ */
+async function didNotFinish($: EngineInterface, args: string, err: unknown): Promise<string> {
+  const said = `/mm ${args.trim() || 'queue'} did not finish: ${errorText(err)}`
+  try {
+    const last = await storeGet<Last | null>($, 'mm.last', null)
+    return last && Array.isArray(last.items) ? `${said}\nFrom the list as last loaded: ${listSaid(last)}` : said
+  } catch {
+    return said
+  }
 }
 
 /**
@@ -3809,9 +4006,11 @@ async function beat($: EngineInterface, extra: Record<string, unknown>): Promise
     const appPairs = Object.values(await storeGet<Records>($, 'mm.records', {})).filter(r => r && r.cli).length
     // (0.5.4) the last refresh that failed, in any thread: its session, thread, time and reason
     const refreshError = await storeGet<unknown>($, 'mm.refreshError', null)
+    // (0.7.29) the pins and unpins the app refused and that are still waiting: thread, why, when it is asked again
+    const pinRefused = Object.entries(await storeGet<Record<string, PinWait>>($, 'mm.pinwait', {})).slice(0, PIN_REFUSED_MAX).map(([thread, w]) => ({ thread, why: w?.why, until: new Date(Number(w?.until)).toISOString() }))
     await $.fs.write(
       `${await home($)}/.claude/mm-hooks/bridge-state.json`,
-      JSON.stringify({ version: VERSION, at: new Date(await $.clock.now()).toISOString(), session: await instanceId($), lastSync: last ? new Date(last.at).toISOString() : null, member: last?.member, need: last?.items.length ?? 0, pinned: last?.pinned ?? 0, appPairs, error: last?.error ?? null, refreshError, ...extra }, null, 1),
+      JSON.stringify({ version: VERSION, at: new Date(await $.clock.now()).toISOString(), session: await instanceId($), lastSync: last ? new Date(last.at).toISOString() : null, member: last?.member, need: last?.items.length ?? 0, pinned: last?.pinned ?? 0, appPairs, error: last?.error ?? null, refreshError, ...(pinRefused.length ? { pinRefused } : {}), ...extra }, null, 1),
     )
   } catch {
     // a heartbeat must never break the bridge
@@ -5264,8 +5463,7 @@ async function kickoffs($: EngineInterface, arg: string): Promise<string> {
   if (!(await sessionTools($)).start) return 'This thread has no start_session (the desktop app\'s Code tab has it), so no thread can be started from here.'
   const me = await selfId($)
   const now = await $.clock.now()
-  const stored = await storeGet<Last | null>($, 'mm.last', null)
-  let last: Last = !stored || stored.error || !Array.isArray(stored.items) || !Number.isFinite(stored.at) || now - stored.at > STALE_SYNC_MS ? await sync($) : stored
+  let last = await syncedList($, 'kickoffs')
   const one = Boolean(arg) && arg.toLowerCase() !== 'all'
   let links = await storeGet<Record<string, string>>($, 'mm.links', {})
   /**
@@ -5535,8 +5733,7 @@ async function claimStart($: EngineInterface, pid: string, key: string, me: stri
 async function startAllWords($: EngineInterface): Promise<string> {
   if (!(await sessionTools($)).start) return 'Start all needs the app\'s start_session, which this thread does not have: press Start thread on each row.'
   const now = await $.clock.now()
-  let last = await storeGet<Last | null>($, 'mm.last', null)
-  if (!last || last.error || !Array.isArray(last.items) || !Number.isFinite(last.at) || now - last.at > STALE_SYNC_MS) last = await sync($)
+  const last = await syncedList($, 'start all')
   const links = await storeGet<Record<string, string>>($, 'mm.links', {})
   // (0.7.11) or a client off the list whose thread is in another Claude profile, with none of its own here
   if (!needingThreads(last, links, now).length && !awayOffList(last, links).length) return 'No client needs a new thread now.'
@@ -6860,6 +7057,8 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       `auto-update: ${(await autoStartOn($)) ? 'on' : 'off'}`,
       `remote control follows the pin: ${(await rcPinOn($)) ? 'on' : 'off'}`,
       `last error: ${last?.error ?? 'none'}`,
+      // (0.7.28) what the app refused in the last sync's pin pass, which went on past each
+      ...(last?.pinRefused?.length ? [`pins the app refused: ${last.pinRefused.map(r => `${r.client || r.thread} (${r.why})`).join('; ')}`] : []),
     ].join('\n')
   }
   if (verb === 'view') {
@@ -6999,6 +7198,8 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
   }
   const me = await selfId($)
   if (!me) return 'Linking a thread works in the desktop app\'s Code tab only.'
+  // (0.7.28) this thread is a scheduled task's run, as the sync above found: never a client's thread
+  if (Object.hasOwn(await storeGet<Record<string, number>>($, 'mm.scheduled', {}), me)) return 'This thread is a scheduled task\'s run, so it is not linked to a client.'
   await forgetUnlink($, me)
   /** (0.5.9) For anything but the person: the bridge's own link for the client as the store has it now (the sync above may have moved it). */
   const autoNow = by !== 'person' ? (await storeGet<Auto>($, 'mm.auto', {}))[pid]?.sid : undefined
@@ -7673,7 +7874,7 @@ async function currentPass(
     if (checks < CURRENT_CHECKS_PER_SYNC && o.lookups + checks < LOOKUPS_PER_SYNC && !(now - (Number(c.chk) || 0) < DAY_MS)) {
       checks++
       const found = await askApp($, key)
-      if (found === 'archived') drop.add(key)
+      if (found === 'archived' || (typeof found === 'object' && found.isArchived)) drop.add(key)
       else seen.set(key, { ...(typeof found === 'object' ? { seen: now } : {}), chk: now })
     }
   }
@@ -8586,28 +8787,35 @@ export const register: Register = on => {
 
   // ⛔ The person's own /mm only: typed here, or sent from their phone. A /mm that arrived any other way is
   // answered like the tool.
+  // ⛔ (0.7.29) It always answers, as the tool does (`didNotFinish`): a typed /mm threw out on a failed pass, and said nothing.
   on('command.run', { command: 'mm' }, async ($, e) => {
-    const text = await runCommand($, String(e.args ?? ''), PERSON_ORIGINS.has(String((e.origin as { kind?: string } | undefined)?.kind)) ? 'person' : 'other')
-    await refreshBand($)
+    const args = String(e.args ?? '')
+    let text: string
+    try {
+      text = await runCommand($, args, PERSON_ORIGINS.has(String((e.origin as { kind?: string } | undefined)?.kind)) ? 'person' : 'other')
+    } catch (err) {
+      text = await didNotFinish($, args, err)
+    }
+    await refreshBand($).catch(() => {})
     return { text }
-  })
+  }).catch(() => ({ text: NOT_IN_TIME }))
 
   // ⛔ Claude calls this. It never starts or updates a thread: `runCommand` refuses both for it.
-  // (0.7.28) ⛔ A failure is this tool's answer. The engine skips a hook that throws and runs what is beneath it, and beneath
-  // this one is the app's own end of the tool, which says "registered the tool mm but no tool.call hook answered": a pass that
-  // failed (the app refused a pin, OW's feed answered 5xx) read as a bridge with no hook, in the same session where `status`
-  // answered (2026-10-19 and 2026-11-06).
+  // ⛔ (0.7.28) It always answers (`didNotFinish`), and its `.catch` answers for a hook that ran out of its time. The engine
+  // skips a hook that throws and runs what is beneath it, and beneath this one is the app's own end of the tool, which says
+  // "registered the tool mm but no tool.call hook answered": a pass that failed (the app refused a pin, OW's feed answered
+  // 5xx) read as a bridge with no hook, in the same session where `status` answered (2026-10-19 and 2026-11-06).
   on('tool.call', { tool: 'mcp__mm-bridge__mm' }, async ($, e) => {
     const args = String((e as Record<string, unknown>).args ?? '')
     let result: string
     try {
       result = await runCommand($, args, 'other')
     } catch (err) {
-      result = `/mm ${args.trim() || 'queue'} did not finish: ${errorText(err)}`
+      result = await didNotFinish($, args, err)
     }
-    await refreshBand($)
+    await refreshBand($).catch(() => {})
     return { result }
-  })
+  }).catch(() => ({ result: NOT_IN_TIME }))
 
   // A route that can close something was called from this thread and worked (R6: a reply draft sent or
   // discarded, a team draft posted, any write to a reply package; (0.5.28, internal asks) an ask's reply stored,

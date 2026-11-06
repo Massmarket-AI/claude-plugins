@@ -39,7 +39,11 @@ const TZ = 'America/New_York'
 
 /** A thread as the desktop app lists it. `link` is the app's own link to it, kept only when it is that thread's. */
 /** (0.7.10) `cwd`: the folder the app says the thread runs in (the folder it was started in, never where its shell moved to). */
-export type AppThread = { sessionId: string; title?: string; pinned?: boolean; isArchived?: boolean; lastActivityAt?: string; link?: string; cwd?: string }
+/**
+ * (0.7.28) `scheduled`: the app said this thread is a scheduled task's run (`get_session`'s `scheduledTaskId`; its list does not
+ * say). `byId`: this is its answer by id, so a thread without `scheduled` is known not to be one.
+ */
+export type AppThread = { sessionId: string; title?: string; pinned?: boolean; isArchived?: boolean; lastActivityAt?: string; link?: string; cwd?: string; scheduled?: boolean; byId?: boolean }
 
 /**
  * Claude Code session id → the app thread it runs in, as each session records about itself. `at` is when the
