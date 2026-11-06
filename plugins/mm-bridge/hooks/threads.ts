@@ -20,7 +20,7 @@ import type { MmRow, MmTeam } from '../types'
 
 import {
   MAY_NEED_OK, NOBODY, assignAsksOf, assignOnly, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, committedCount, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
-  checkNow, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
+  checkNow, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, tasksBesidesUndated, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
   TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine,
   goOf, goOnly, stepWord,
   NO_REPLY_WHAT, checkDot, paceOf, paceOnly, paceStatus, paceWord, statusOf,
@@ -572,7 +572,7 @@ export const asksForPrep = (it: QueueItem): boolean => it.messages > 0 && !it.pa
  */
 export function autoUpdatable(it: QueueItem, now: number): boolean {
   const o = it.open ?? null
-  // (0.7.4) never for the founder's undated client tickets alone (`undatedOnly`): they ride along with what does update it
+  // (0.7.4) never for the viewer's undated client tickets alone (`undatedOnly`): they ride along with what does update it
   // (0.7.27) nor for its pace row alone: quoted work left is nothing new for its thread
   return !heldInternal(it) && !it.theirs && !withTeammate(it) && !(o && withHolder(o)) && fastState(it, now) === null && !undatedOnly(it) && !paceOnly(it)
 }
@@ -982,10 +982,10 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
                 : paceOnly(it)
                   ? // (0.7.27) listed by the viewer's own pace row alone: no state or numbers here, they change by the day and this text is what `signatureOf` compares
                     `[mm-link ${id}] ${who} has quoted work left on my plate and nothing else waiting. Load the client's project skill first, then show me what is left on the quote and wait for me. Send nothing without my go.`
-                : it.tasks === 0 && asks.length
+                : tasksBesidesUndated(it) === 0 && asks.length
                   ? // (0.5.28, internal asks) listed by its asks alone: a first line that names the client, then each ask's paragraph
                     `[mm-link ${id}] ${who} has ${asks.length} internal ask(s) waiting on my reply. Load the client's project skill first.`
-                  : it.tasks === 0 && queue
+                  : tasksBesidesUndated(it) === 0 && queue
                     ? // (0.7.3, internal queue) listed by its queue alone: a first line that names it, with no due time, then the queue
                       `[mm-link ${id}] ${who} has ${queueTotal(it)} ticket(s) in my internal queue, with no due dates. Load massmarket-internal-ops first, then show me the queue below as it stands now and wait for me to pick what to work on here.`
                     : etaOnly(it)
@@ -1079,7 +1079,7 @@ export function secondThreadSentence(client: string, title: string, skill?: stri
 export function startKickoff(it: QueueItem, replaces: Replaced | undefined, now: number): string {
   const fast = fastState(it, now)
   const o = it.open ?? null
-  if (fast?.state === 'still_open' && !it.packageId && it.messages === 0 && it.tasks === 0 && openAsks(it).length === 0 && queuedOf(it).length === 0 && !(o && withHolder(o))) {
+  if (fast?.state === 'still_open' && !it.packageId && it.messages === 0 && tasksBesidesUndated(it) === 0 && openAsks(it).length === 0 && queuedOf(it).length === 0 && !(o && withHolder(o))) {
     const body = `[mm-link ${it.projectId}] ${claimText(it.client, fast.at, fast.items, now)}`
     const handover = replaces ? handoverText(it, replaces) : ''
     return handover ? `${body}\n\n${handover}` : body
@@ -1121,7 +1121,7 @@ export const startMissingLabel = (n: number): string => (n > 0 ? startAllLabel(n
 export function startAllKickoff(it: QueueItem, replaces: Replaced | undefined, now: number): string {
   const fast = fastState(it, now)
   const o = it.open ?? null
-  if (fast?.state === 'still_open' && !it.packageId && it.messages === 0 && it.tasks === 0 && openAsks(it).length === 0 && queuedOf(it).length === 0 && !(o && withHolder(o))) return startKickoff(it, replaces, now)
+  if (fast?.state === 'still_open' && !it.packageId && it.messages === 0 && tasksBesidesUndated(it) === 0 && openAsks(it).length === 0 && queuedOf(it).length === 0 && !(o && withHolder(o))) return startKickoff(it, replaces, now)
   return kickoffText(it, { replaces, auto: true })
 }
 
@@ -1940,7 +1940,7 @@ export function pinReport(o: {
     // the clock its thread's name shows (`pinTitle`): a teammate's part to check on (the PM's), else the client's due time
     const c = ownPins(it, o.now) ? null : checkNow(it, o.now)
     // (0.7.27, Rob 2026-11-05: "Every status shows by name in each person's row on the 9 AM image") the status that names the
-    // thread, when one does: its kind, its colour and its date (`needs_date` has none)
+    // thread, when one does: its kind, its colour and its date
     const status = c ? (c.pace ? paceStatus(c.pace, o.now) : null) : statusOf(it, o.now)
     const notStarted = c !== null && c.pace === undefined && c.notStarted && checkDot(c, o.now) === '🟡'
     const at = status ? status.at : c ? c.due : hasDue(it) ? it.dueAt : NaN

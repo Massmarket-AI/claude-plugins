@@ -200,7 +200,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.31'
+export const VERSION = '0.7.32'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -1164,7 +1164,7 @@ function feedProjects(feed: Feed): string[] {
   for (const d of feed.drafts ?? []) add(d.project_id)
   // (fix round 1, F5) `start_now` too
   for (const k of [feed.tickets?.overdue, feed.tickets?.due_today, feed.tickets?.due_soon, feed.tickets?.start_now]) for (const t of k ?? []) add(t.project_id)
-  // (0.7.18, A) and the founder's undated client tickets (`tickets.undated`): on 11-03 `/mm link <id>` answered "No client
+  // (0.7.18, A) and the viewer's undated client tickets (`tickets.undated`): on 11-03 `/mm link <id>` answered "No client
   // named ... is in your feed" for Black-Peak and Ground Crew Systems, listed by those alone, because the ids were looked up
   // here while the lists (`buildLists`) and the names (`feedClients`) read `tickets.undated` since 0.7.4
   for (const t of feed.tickets?.undated ?? []) add(t?.project_id)
@@ -2785,9 +2785,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // thread of every ACTIVE client whatever its time, so threads named only `🟡 <client> · task`, whose items were undated
   // tickets, were pinned with no clock. A pin needs a clock again: an undated client is never pinned, active or not, and
   // the pins 0.7.11 put on such threads come off here (they are ours). The internal queue was never pinned that way.
-  // (0.7.27, Rob 2026-11-05, over that: "Shouldn't it be pinned?") An undated ticket with a known last activity inside the
-  // window pins for its owner as `needs a due date`, and a client's own pace row pins as its status says (`ownPins`); an
-  // undated item with nothing to measure it by still never pins.
+  // (0.7.27) A client's own pace row pins as its status says (`ownPins`). ⛔ (0.7.32, Rob 2026-11-06, over 0.7.27's "Shouldn't
+  // it be pinned?": "a ticket with no due date never pins and never asks for a date, for anyone") An undated ticket never
+  // does, and a pin 0.7.27 to 0.7.31 put on one comes off here (it is ours).
   // ⛔ (0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you, not when something has a timer left for a
   // teammate to answer") Only what needs the person pins by R1's 24 business hours (`ownActBy`): a reply whose drafts a
   // teammate holds, a package a teammate decides on and a teammate's ticket pin only once the PM should check on them
@@ -3370,7 +3370,7 @@ async function showQueue(
   now: number,
   folds: { teammate: Row[]; checking?: Row[]; team?: MmTeam[] },
   syncedAt = now,
-  found: Pick<Last, 'people' | 'routeTo' | 'away' | 'founder'> = {},
+  found: Pick<Last, 'people' | 'routeTo' | 'away' | 'founder' | 'teammate'> = {},
 ): Promise<void> {
   const teammateRows = found.founder === true ? [] : folds.teammate
   const teamRows = found.founder === true ? [] : (folds.team ?? [])
@@ -3385,10 +3385,13 @@ async function showQueue(
   const home = items.find(it => queuedOf(it).length > 0)
   const homeRow = home ? rows.find(r => r.projectId === home.projectId) : undefined
   const build = home && homeRow ? buildOf(home, homeRow) : undefined
-  const undated = rows.filter(r => {
+  // (0.7.32, Rob 2026-11-06: "so it's still one press away") The founder's page has no With a teammate (0.7.27): an undated
+  // ticket of his on a client listed there is under `No due date` too, or it would be on no part of his page.
+  const besideMate = new Set(found.founder === true ? (found.teammate ?? []).filter(it => (it.undatedTasks ?? 0) > 0).map(it => it.projectId) : [])
+  const undated = [...rows.filter(r => {
     const it = byPid.get(r.projectId)
     return it !== undefined && noDateGroup(it)
-  })
+  }), ...folds.teammate.filter(r => besideMate.has(r.projectId))]
   const listed = rows.filter(r => {
     const it = byPid.get(r.projectId)
     return !it || needsYouNow(it) || (it.kind === 'queue' && !build)
