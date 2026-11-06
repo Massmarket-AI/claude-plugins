@@ -30,6 +30,16 @@
  * most once every 10 minutes, so the extension can tell a member's sessions
  * apart. Display text only.
  *
+ * Same setup as Rob (0.12.0, 2026-11-05): a Skill call's row names the skill
+ * it loaded (SKILL LOADS); SessionStart reports this machine's setup to
+ * /api/ext/setup-report and repairs stale skills at once; and PreToolUse, which
+ * the mm-hooks plugin registers, runs the required-skill check before a client
+ * reply, a quote, a voice render or a lead room (SAME SETUP AS ROB).
+ *
+ * The send gate's sha (0.12.1, 2026-11-05): the setup report undoes the
+ * installer's note and pins before hashing, so a current copy matches main
+ * (gateBytesAsOnMain).
+ *
  * Turn origin (0.11.5, 2026-10-12): every worklog POST also says who started the
  * work it belongs to, `person` or `auto`, read from the stamp Claude Code writes
  * on the turn's opening entry in the session's transcript. A turn the system
@@ -159,7 +169,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.11.14";
+const HOOK_VERSION = "0.12.1";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -915,7 +925,10 @@ function pruneStateFiles(dir) {
         const p = path.join(dir, name);
         const stat = fs.lstatSync(p);
         if (stat.isFile() && stat.mtimeMs < cutoff) fs.unlinkSync(p);
-        else if (stat.isDirectory() && stat.mtimeMs < cutoff) pruneTaskOriginsDir(dir, name);
+        else if (stat.isDirectory() && stat.mtimeMs < cutoff) {
+          pruneTaskOriginsDir(dir, name);
+          pruneSessionSkillsDir(dir, name);
+        }
       } catch {
         /* this entry only */
       }
@@ -940,7 +953,7 @@ function deadlinePassed(deadlineAt) {
   return Boolean(deadlineAt) && Date.now() >= deadlineAt;
 }
 
-async function postWorklog({ contentMd, title, source, declarations }, deadlineAt) {
+async function postWorklog({ contentMd, title, source, declarations, skillLoad }, deadlineAt) {
   // ⛔ Consent first, before the token, before the timer, before anything. This
   // is the second of the two senders the gate in main() covers; the check is
   // repeated here so a future call site cannot route around it.
@@ -1015,6 +1028,13 @@ async function postWorklog({ contentMd, title, source, declarations }, deadlineA
           // left out of the body altogether; the server then stores NULL, which
           // every reader counts as the person's.
           turn_origin: TURN_ORIGIN || undefined,
+          // ⛔ SKILL LOADS (0.12.0) — on the row of a call that loaded a skill
+          // only: its NAME, how ("skill" = the Skill tool, "read" = a Read of
+          // its SKILL.md) and whether an agent loaded it. Left out of every
+          // other row. OW records it in session_skill_loads (migration 344).
+          skill_loaded: skillLoad && skillLoad.name ? scrubText(String(skillLoad.name)).text : undefined,
+          skill_loaded_via: skillLoad && skillLoad.name ? skillLoad.via : undefined,
+          skill_loaded_in_agent: skillLoad && skillLoad.name ? skillLoad.inAgent === true : undefined,
         },
         homedirReplacer,
       ),
@@ -3899,7 +3919,8 @@ async function fetchChipFeed() {
       method: "GET",
       // Which hook, plugin and auto-update setting sent this (0.11.7), and
       // which Claude profile (0.11.14): OW holds a task per profile.
-      headers: Object.assign({ Authorization: `Bearer ${TOKEN}` }, hookClientHeaders(), profileHeaders()),
+      // And which machine (0.12.0): OW serves this machine's setup differences.
+      headers: Object.assign({ Authorization: `Bearer ${TOKEN}` }, hookClientHeaders(), profileHeaders(), machineHeaders()),
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -5772,6 +5793,131 @@ function captureDeclaration(toolName, toolInput, toolResponse, state) {
   }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// SKILL LOADS (0.12.0, 2026-11-05) — which skills this session has loaded.
+//
+// Rob, 2026-11-05: "A lot of my teammates probably are also not loading the
+// skills... we can make sure they're all running basically in the same setup I
+// am." The deep pass that day found the skill holding the rule unloaded in 434
+// of 1,002 grouped corrections, with every skill on disk.
+//
+// A load is a Skill tool call (its skill NAME, skillNameFrom), or a Read of a
+// file whose path ends in `skills/<name>/SKILL.md` (the folder NAME). Two uses:
+//
+//   1. The worklog row of that call carries `skill_loaded`, `skill_loaded_via`
+//      ("skill" | "read") and `skill_loaded_in_agent`, so OW records it in
+//      session_skill_loads (migration 344). The name only: no argument, no file
+//      content. (The row's content_md already says `- Skill: <name>`; OW reads
+//      that for older hooks.)
+//   2. A marker file per skill, `state/sessions/<session>.skills/k-<hash>.json`,
+//      holding `{"n": <name>, "v": <via>}`, which the REQUIRED-SKILL CHECK below
+//      reads. One file per skill, because parallel tool calls each save the
+//      whole state object and only one save survives (see TASK ORIGINS): a
+//      marker created beside it cannot be lost that way. Pruned with the state
+//      file (pruneStateFiles → pruneSessionSideDir).
+//
+// ⛔ NEVER THROWS, NEVER SENDS ANYTHING ELSE. A failed marker write only means
+// the check falls back to the transcript.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** A Read of a skill's own file: the folder name before `/SKILL.md`. */
+const SKILL_READ_PATH_RE = /(?:^|[\\/])skills[\\/]([A-Za-z0-9][A-Za-z0-9._-]{0,126})[\\/]SKILL\.md$/;
+
+/** A marker file in a session's `.skills` folder. */
+const SKILL_MARK_FILE_RE = /^k-[0-9a-f]{16}\.json$/;
+
+/** At most this many markers are read for one check (a real session loads a few dozen). */
+const SKILL_MARKS_MAX = 400;
+
+/** The skill this tool call loads, `{name, via}`, or null. Never throws. */
+function skillLoadFrom(toolName, toolInput) {
+  try {
+    const input =
+      toolInput && typeof toolInput === "object" && !Array.isArray(toolInput) ? toolInput : {};
+    if (toolName === "Skill") {
+      const name = skillNameFrom(input);
+      return name ? { name, via: "skill" } : null;
+    }
+    if (toolName === "Read") {
+      const file = typeof input.file_path === "string" ? input.file_path : "";
+      if (file.length > 4096) return null;
+      const m = SKILL_READ_PATH_RE.exec(file);
+      return m ? { name: m[1], via: "read" } : null;
+    }
+  } catch {
+    /* not a load */
+  }
+  return null;
+}
+
+/** This session's markers folder: its state file with `.skills` where `.json` is, or null. */
+function sessionSkillsDir(sessionId) {
+  if (!isSessionKey(sessionId)) return null;
+  const file = stateFilePath(sessionId);
+  return file ? file.replace(/\.json$/, ".skills") : null;
+}
+
+/** Write this load's marker. Idempotent; never throws; false when nothing was written. */
+function markSkillLoaded(sessionId, load) {
+  try {
+    const dir = sessionSkillsDir(sessionId);
+    if (!dir || !load || !load.name) return false;
+    const key = require("crypto").createHash("sha256").update(String(load.name)).digest("hex").slice(0, 16);
+    const file = path.join(dir, `k-${key}.json`);
+    fs.mkdirSync(dir, { recursive: true });
+    // A Skill load wins over a Read of the same skill: never downgrade.
+    const prev = readJsonObject(file);
+    if (prev && prev.v === "skill") {
+      const now = new Date();
+      fs.utimesSync(file, now, now);
+      return true;
+    }
+    fs.writeFileSync(file, JSON.stringify({ n: String(load.name), v: load.via === "read" ? "read" : "skill" }), "utf8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The skill names this session's markers hold. Never throws. */
+/** `c-<sha16>.json`: one observe-mode finding already sent for this session. */
+const SKILL_CHECK_SEEN_FILE_RE = /^c-[0-9a-f]{16}\.json$/;
+
+/**
+ * True when this session already sent this finding (same rule, same missing
+ * skills), so observe mode logs each one once a session instead of on every
+ * matching tool call. Claims it otherwise. Any error answers false: the row
+ * goes out, a duplicate is cheaper than a lost finding.
+ */
+function skillCheckSeen(sessionId, key) {
+  try {
+    const dir = sessionSkillsDir(sessionId);
+    if (!dir) return false;
+    fs.mkdirSync(dir, { recursive: true });
+    const id = require("crypto").createHash("sha256").update(String(key)).digest("hex").slice(0, 16);
+    fs.writeFileSync(path.join(dir, `c-${id}.json`), "{}", { encoding: "utf8", flag: "wx" });
+    return false;
+  } catch (err) {
+    return Boolean(err && err.code === "EEXIST");
+  }
+}
+
+function markedSkills(sessionId) {
+  const out = new Set();
+  try {
+    const dir = sessionSkillsDir(sessionId);
+    if (!dir) return out;
+    const names = fs.readdirSync(dir).filter((n) => SKILL_MARK_FILE_RE.test(n)).slice(0, SKILL_MARKS_MAX);
+    names.forEach((n) => {
+      const rec = readJsonObject(path.join(dir, n));
+      if (rec && typeof rec.n === "string" && rec.n) out.add(rec.n);
+    });
+  } catch {
+    /* no folder: nothing marked */
+  }
+  return out;
+}
+
 /**
  * One compact line describing a tool call, for the generic activity stream.
  *
@@ -6683,6 +6829,31 @@ function pruneTaskOriginsDir(dir, name) {
 }
 
 /**
+ * A session's `.skills` markers folder (SKILL LOADS, 0.12.0) goes the way its
+ * `.tasks` folder does: only once its state file is gone, only this hook's own
+ * marker files, then the folder. Never throws.
+ */
+function pruneSessionSkillsDir(dir, name) {
+  try {
+    if (!/\.skills$/.test(name)) return;
+    if (fs.existsSync(path.join(dir, name.replace(/\.skills$/, ".json")))) return;
+    const folder = path.join(dir, name);
+    fs.readdirSync(folder).forEach((entry) => {
+      if (!SKILL_MARK_FILE_RE.test(entry) && !SKILL_CHECK_SEEN_FILE_RE.test(entry)) return;
+      try {
+        const p = path.join(folder, entry);
+        if (fs.lstatSync(p).isFile()) fs.unlinkSync(p);
+      } catch {
+        /* this entry only */
+      }
+    });
+    fs.rmdirSync(folder);
+  } catch {
+    /* best-effort: something else is in there, or it is already gone */
+  }
+}
+
+/**
  * The tasks THIS tool call started or resumed, by id, read from the tool's own
  * result (`tool_response`, the object Claude Code also writes to the transcript
  * as `toolUseResult`). Measured on Rob's Mac over 3 days, the task a later
@@ -7362,6 +7533,14 @@ async function handlePostToolUse(payload) {
   // carries it — and is the one row marked with `declaration_event`.
   const declarationEvent = captureDeclaration(toolName, toolInput, payload.tool_response, state);
 
+  // ⛔ SKILL LOADS (0.12.0). The marker the required-skill check reads, and the
+  // fields this call's own row carries. The name only.
+  const skillLoad = skillLoadFrom(toolName, toolInput);
+  if (skillLoad) {
+    skillLoad.inAgent = typeof payload.agent_id === "string" && payload.agent_id !== "";
+    markSkillLoaded(sessionId, skillLoad);
+  }
+
   // ⛔ UNDECLARED-SESSION REMINDER (0.11.11). Decided after the declaration
   // capture, so the call that loads a client skill is never counted. The write
   // starts now, before the network phase, and is awaited with the POSTs: a slow
@@ -7381,6 +7560,7 @@ async function handlePostToolUse(payload) {
         contentMd: `- ${describeToolCall(toolName, toolInput)}`,
         source: "claude-code",
         declarations: declarationFields(sessionId, state, declarationEvent),
+        skillLoad,
       },
       deadlineAt,
     ),
@@ -8216,7 +8396,7 @@ function skillsComeFromControlTower(root) {
  * The Stop-time top-up. Never throws, never blocks: at most once an hour, 4 s
  * at most, and silent on every outcome (the counts land in skills-sync.json).
  */
-async function syncRegistrySkills() {
+async function syncRegistrySkills(budgetMs) {
   try {
     if (!CONSENT_OK || !TOKEN) return;
     const startedAt = Date.now();
@@ -8226,7 +8406,7 @@ async function syncRegistrySkills() {
     if (!claim) return;
     const hardExitAt = HARD_EXIT_AT || startedAt + HARD_EXIT_DEFAULT_MS;
     const deadlineAt = Math.min(
-      startedAt + SKILLS_SYNC_BUDGET_MS,
+      startedAt + (typeof budgetMs === "number" && budgetMs > 0 ? budgetMs : SKILLS_SYNC_BUDGET_MS),
       hardExitAt - POST_TOOL_USE_SAVE_MARGIN_MS,
     );
     const result = {
@@ -8264,6 +8444,1206 @@ async function syncRegistrySkills() {
     }
   } catch (err) {
     debugLog(`skill sync failed: ${err && err.message}`);
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// SAME SETUP AS ROB (0.12.0, 2026-11-05): the setup report and the required-
+// skill check.
+//
+// Rob, 2026-11-05: "I think it's important that we can uncover the same kinds
+// of things so we can make sure they're all running basically in the same
+// setup I am (obviously with their different permissions)." The deep pass that
+// day: in 434 of 1,002 grouped corrections and questions the skill that holds
+// the rule was not loaded, though every skill was present and current. Quote
+// fixes ran without build-hour-estimator 34 of 38 times, voice notes without
+// elevenlabs-production 32 of 39, lead rooms without the sourcing skill 52 of
+// 53, client-status answers without client-reply-prep 70 of 100.
+//
+// ── THE SETUP REPORT (SessionStart) ────────────────────────────────────────
+// At most once an hour per machine (and at once after this hook changes
+// version), the hook reads this machine's setup and POSTs it to
+// /api/ext/setup-report: every skill folder's content sha (the registry's own
+// formula, computeContentSha in the control tower's skill-registry-sync.mjs),
+// the global rules file, the gates and how they are registered, the plugin
+// versions, the Claude Code version and CLAUDE_CODE_AUTO_COMPACT_WINDOW. OW
+// compares it with the canonical setup, stores it (member_setup_reports,
+// migration 344), turns what differs into a task for the member, and answers
+// with what the hook may repair itself and the check's mode.
+//   ⛔ What is sent: names, versions, shas, true/false. Never a file's content,
+//   a path under the home folder, a host name or a user name. machine_id is
+//   the first 12 hex of sha256(host name + home folder), computed here.
+//   ⛔ The repair: a skill the registry says is stale or missing is synced NOW,
+//   by a detached child of this hook (event MMSkillRepair on its stdin, so it
+//   passes the same consent gate as every event) that runs the Stop-time
+//   top-up without its hourly slot; this session start is not held.
+//   Nothing else is changed on the machine.
+//
+// ── THE REQUIRED-SKILL CHECK (PreToolUse) ──────────────────────────────────
+// Before a guarded action (SKILL_CHECK_RULES: a client reply draft, package or
+// send; a quote, invoice or hour estimate; a voice render; a lead room or
+// sample), the hook looks up which skills this session has loaded (the SKILL
+// LOADS markers, then the transcript) and, when the owning skill is missing:
+//   · observe mode (the default, and the first week): POSTs one row to
+//     /api/ext/skill-check saying what it would have stopped, and lets the call
+//     run;
+//   · enforce mode: answers `permissionDecision: "deny"` with a reason naming
+//     the skill to load. That stops CLAUDE, not the person: Claude reads the
+//     reason, loads the skill and runs the step again. Then the row.
+// The mode is OW's answer to the last setup report, kept in
+// state/skill-check.json; with no answer on file it is observe.
+//   ⛔ NEVER IN: a run with MM_UNATTENDED=1, a Lane-2 run (LANE2_RUN_ID,
+//   MM_RUN_SESSION), a session no person is at (isInteractiveSession), Codex, a
+//   mod's own call, or a machine with no token. Those are never checked.
+//   ⛔ FAIL-OPEN, ALWAYS. Any error, a slow disk or a hard exit is "no
+//   objection". The check never asks the person anything.
+//   ⛔ Registered by the mm-hooks plugin (hooks/hooks.json, PreToolUse →
+//   scripts/skill-check.js, which runs this file); the installer registers
+//   only SessionStart, PostToolUse and Stop.
+// ───────────────────────────────────────────────────────────────────────────
+
+const SETUP_REPORT_URL = `${API_BASE}/api/ext/setup-report`;
+const SKILL_CHECK_URL = `${API_BASE}/api/ext/skill-check`;
+/** A setup report goes at most this often from one machine (unless the hook version changed). */
+const SETUP_REPORT_INTERVAL_MS = 3600 * 1000;
+/** The report's own budget inside SessionStart's 12 s: it runs beside the chip feed. */
+const SETUP_REPORT_BUDGET_MS = 6000;
+/** At most this many skill folders are hashed. */
+const SETUP_SKILLS_MAX = 2000;
+/** The guarded call waits at most this long for its observe/enforce row. */
+const SKILL_CHECK_POST_BUDGET_MS = 2500;
+/** The transcript is read whole up to this size; past it, the head and the tail. */
+const SKILL_CHECK_TRANSCRIPT_MAX = 64 * 1024 * 1024;
+const SKILL_CHECK_TRANSCRIPT_HEAD = 8 * 1024 * 1024;
+
+/** The registry's limits (skill-registry-sync.mjs): per file, per skill, files per skill. */
+const REG_MAX_FILE_BYTES = 256 * 1024;
+const REG_MAX_SKILL_BYTES = 2 * 1024 * 1024;
+const REG_MAX_SKILL_FILES = 500;
+const REG_MAX_HELPER_PATH = 300;
+
+/** Like readTextBounded, but follows a link (settings.json and plugin files may be links). */
+function readTextFollow(file, maxBytes) {
+  const st = fs.statSync(file);
+  if (!st.isFile() || st.size > maxBytes) throw new Error("not a small regular file");
+  return fs.readFileSync(file, "utf8");
+}
+
+/** The first `maxBytes` of a file as text. */
+function readHeadText(file, maxBytes) {
+  const fd = fs.openSync(file, "r");
+  try {
+    const buf = Buffer.alloc(maxBytes);
+    const n = fs.readSync(fd, buf, 0, maxBytes, 0);
+    return buf.slice(0, n).toString("utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function sha256Hex(data) {
+  return require("crypto").createHash("sha256").update(data).digest("hex");
+}
+
+/** This machine's 12-hex id: never the host or user name itself. */
+function setupMachineId() {
+  try {
+    return sha256Hex(`${os.hostname()}\u0000${os.homedir()}`).slice(0, 12);
+  } catch {
+    return null;
+  }
+}
+
+/** The registry's isServableHelperPath, verbatim in effect. */
+function registryServablePath(rel) {
+  if (typeof rel !== "string" || !rel || rel.length > REG_MAX_HELPER_PATH) return false;
+  if (/[\\:*?"<>|\u0000-\u001f]/.test(rel) || rel.startsWith("/")) return false;
+  const parts = rel.split("/");
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (!part || part.startsWith(".") || part === "node_modules") return false;
+    if (/[. ]$/.test(part)) return false;
+    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(part)) return false;
+  }
+  return true;
+}
+
+/** NUL byte or not valid UTF-8: the registry's isBinary. */
+function registryIsBinary(buf) {
+  if (buf.includes(0)) return true;
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(buf);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The registry's content sha for one skill folder (collectHelperFiles +
+ * computeContentSha), and the sha of SKILL.md alone the same way. `dir` is the
+ * folder's real path. Null when there is no readable SKILL.md. Never throws.
+ */
+function skillFolderShas(dir) {
+  try {
+    const mdBuf = fs.readFileSync(path.join(dir, "SKILL.md"));
+    const md = mdBuf.toString("utf8");
+    const mdBytes = Buffer.byteLength(md, "utf8");
+    const pairsSha = (all) =>
+      sha256Hex(Buffer.from(JSON.stringify(Object.keys(all).sort().map((p) => [p, all[p]])), "utf8"));
+    const mdSha = pairsSha({ "SKILL.md": md });
+    if (mdBytes > REG_MAX_FILE_BYTES) return { sha: null, md_sha: mdSha };
+    const candidates = [];
+    const walk = (d, rel, depth) => {
+      if (depth > 12) return;
+      const entries = fs
+        .readdirSync(d, { withFileTypes: true })
+        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      for (let i = 0; i < entries.length; i++) {
+        const e = entries[i];
+        const relPath = rel ? `${rel}/${e.name}` : e.name;
+        const abs = path.join(d, e.name);
+        if (!rel && e.name === "SKILL.md") continue;
+        if (e.name === ".git" || e.name === "node_modules") continue;
+        const st = fs.lstatSync(abs);
+        if (st.isSymbolicLink()) continue;
+        if (e.name.startsWith(".")) continue;
+        if (st.isDirectory()) {
+          walk(abs, relPath, depth + 1);
+          continue;
+        }
+        if (!st.isFile()) continue;
+        if (!registryServablePath(relPath)) continue;
+        if (st.size > REG_MAX_FILE_BYTES) continue;
+        const buf = fs.readFileSync(abs);
+        if (registryIsBinary(buf)) continue;
+        candidates.push({ path: relPath, text: buf.toString("utf8"), bytes: buf.length });
+      }
+    };
+    walk(dir, "", 0);
+    candidates.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    const files = {};
+    let total = 0;
+    let count = 0;
+    let full = false;
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i];
+      if (!full && (mdBytes + total + c.bytes > REG_MAX_SKILL_BYTES || 1 + count + 1 > REG_MAX_SKILL_FILES)) full = true;
+      if (full) continue;
+      files[c.path] = c.text;
+      total += c.bytes;
+      count += 1;
+    }
+    files["SKILL.md"] = md;
+    return { sha: pairsSha(files), md_sha: mdSha };
+  } catch {
+    return null;
+  }
+}
+
+/** Every skill folder under `~/.claude/skills`: `{key: [sha, md_sha]}`, plus where they come from. */
+function localSkillShas(deadlineAt) {
+  const out = { source: null, shas: {}, count: 0, linked: 0, marked: 0, truncated: false };
+  const claude = homeClaudeDir();
+  if (!claude) return out;
+  const root = path.join(claude, "skills");
+  // Where this machine's skills come from, by the sync's own test: a control-
+  // tower machine is never registry-synced, so OW offers it no repair.
+  out.source = skillsComeFromControlTower(root) ? "control_tower" : "registry";
+  let names = [];
+  try {
+    names = fs.readdirSync(root).sort();
+  } catch {
+    return out;
+  }
+  for (let i = 0; i < names.length; i++) {
+    if (out.count >= SETUP_SKILLS_MAX || deadlinePassed(deadlineAt)) {
+      out.truncated = true;
+      break;
+    }
+    const key = names[i];
+    if (!SKILL_KEY_RE.test(key)) continue;
+    const entry = path.join(root, key);
+    let real = entry;
+    try {
+      if (fs.lstatSync(entry).isSymbolicLink()) {
+        out.linked += 1;
+        real = fs.realpathSync(entry);
+      } else if (fs.lstatSync(path.join(entry, "SKILL.md")).isSymbolicLink()) {
+        // The control tower's install form: a real folder whose SKILL.md (and
+        // helper folders) link into the repo. The registry hashes the repo
+        // folder, so that is the folder hashed here.
+        out.linked += 1;
+        real = path.dirname(fs.realpathSync(path.join(entry, "SKILL.md")));
+      }
+      if (!fs.statSync(real).isDirectory()) continue;
+      if (fs.existsSync(path.join(real, SKILL_MARKER_NAME))) out.marked += 1;
+    } catch {
+      continue;
+    }
+    const s = skillFolderShas(real);
+    if (!s) continue;
+    // [folder sha, SKILL.md sha, the sync's word for the folder]: "o" ours
+    // (marker), "a" adoptable, "l" linked, "f" foreign. The sync replaces only
+    // o and a, so OW asks for a repair of only those.
+    const kind = inspectSkillFolder(root, key).kind;
+    out.shas[key] = [s.sha, s.md_sha, kind === "ours" ? "o" : kind === "adoptable" ? "a" : kind === "linked" ? "l" : "f"];
+    out.count += 1;
+  }
+  return out;
+}
+
+/** `<major>.<minor>.<patch>` of the Claude Code running this hook, or null. */
+function claudeCodeVersion(env, transcriptPath) {
+  const e = env || process.env;
+  const fromAgent = /^claude-code_(\d+)-(\d+)-(\d+)/.exec(String(e.AI_AGENT || ""));
+  if (fromAgent) return `${fromAgent[1]}.${fromAgent[2]}.${fromAgent[3]}`;
+  const fromPath = /[\\/]claude-code[\\/](\d+\.\d+\.\d+)[\\/]/.exec(String(e.CLAUDE_CODE_EXECPATH || ""));
+  if (fromPath) return fromPath[1];
+  try {
+    const file = transcriptPathKept(transcriptPath);
+    if (!file) return null;
+    const text = readHeadText(file, 256 * 1024);
+    const all = text.match(/"version":"(\d+\.\d+\.\d+)"/g);
+    if (all && all.length) return /(\d+\.\d+\.\d+)/.exec(all[all.length - 1])[1];
+  } catch {
+    /* no transcript yet */
+  }
+  return null;
+}
+
+/** The compact window as the report states it: digits, "unset", or "other". */
+function compactWindowValue(env) {
+  const raw = (env || process.env).CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+  if (raw === undefined || raw === null || raw === "") return "unset";
+  const s = String(raw).trim();
+  return /^\d{1,9}$/.test(s) ? s : "other";
+}
+
+/** `{installed, latest}` for mm-hooks and mm-bridge, from Claude Code's own plugin files. */
+function pluginVersions() {
+  const out = {};
+  const claude = homeClaudeDir();
+  if (!claude) return out;
+  const names = ["mm-hooks", "mm-bridge"];
+  let installed = null;
+  try {
+    installed = JSON.parse(readTextFollow(path.join(claude, "plugins", "installed_plugins.json"), 1024 * 1024));
+  } catch {
+    installed = null;
+  }
+  names.forEach((name) => {
+    const rec = { installed: null, scope: null, latest: null };
+    try {
+      const rows = installed && installed.plugins && installed.plugins[`${name}@massmarket`];
+      const row = Array.isArray(rows) ? rows.find((r) => r && r.scope === "user") || rows[0] : null;
+      if (row && typeof row.version === "string" && PLUGIN_SYNC_VERSION_RE.test(row.version)) {
+        rec.installed = row.version;
+        rec.scope = typeof row.scope === "string" ? row.scope.slice(0, 20) : null;
+      }
+    } catch {
+      /* not installed */
+    }
+    try {
+      const manifest = JSON.parse(
+        readTextFollow(
+          path.join(claude, "plugins", "marketplaces", "massmarket", "plugins", name, ".claude-plugin", "plugin.json"),
+          64 * 1024,
+        ),
+      );
+      if (manifest && typeof manifest.version === "string" && PLUGIN_SYNC_VERSION_RE.test(manifest.version)) {
+        rec.latest = manifest.version;
+      }
+    } catch {
+      /* no marketplace copy */
+    }
+    out[name] = rec;
+  });
+  return out;
+}
+
+/** Every hook command in user-level settings.json, by event. Never throws. */
+function settingsHookCommands() {
+  const out = {};
+  try {
+    const settings = JSON.parse(readTextFollow(path.join(os.homedir(), ".claude", "settings.json"), 2 * 1024 * 1024));
+    const hooks = settings && settings.hooks && typeof settings.hooks === "object" ? settings.hooks : {};
+    Object.keys(hooks).forEach((event) => {
+      const list = [];
+      (Array.isArray(hooks[event]) ? hooks[event] : []).forEach((group) => {
+        (group && Array.isArray(group.hooks) ? group.hooks : []).forEach((h) => {
+          if (h && typeof h.command === "string") list.push(h.command);
+        });
+      });
+      out[event] = list;
+    });
+  } catch {
+    /* no settings */
+  }
+  return out;
+}
+
+/** The file a hook command runs, when it names one ending in `fileName`; `~` and $HOME expanded. */
+function commandFile(command, fileName) {
+  const re = new RegExp(`["']?((?:~|\\$HOME|\\$\\{HOME\\}|%USERPROFILE%|\\$env:USERPROFILE)?[^"'\\s]*${fileName.replace(/[.]/g, "\\.")})["']?`);
+  const m = re.exec(String(command || ""));
+  if (!m) return null;
+  return m[1].replace(/^(~|\$HOME|\$\{HOME\}|%USERPROFILE%|\$env:USERPROFILE)/, os.homedir());
+}
+
+/**
+ * A gate's bytes as main has them (0.12.1). The control tower's
+ * scripts/install-send-gate.sh makes the copy the hook runs by adding a 3-line
+ * note after the shebang and pinning two lookups of the control tower to the
+ * checkout's folder. OW compares what this reports with the checkout's own file,
+ * so even a current copy could never match, and every tower machine was told its
+ * send gate was out of date. This undoes exactly those two edits, reading the
+ * folder from the note. Any other difference stays: a stale or hand-edited copy
+ * still reports a different sha, and if the installer's note ever changes the
+ * copy is flagged rather than passed.
+ */
+const INSTALLED_GATE_NOTE =
+  /^(#![^\n]*\n)?\/\/ INSTALLED COPY of global-config\/hooks\/send-gate\.js in ([^\n]+), made by scripts\/install-send-gate\.sh\.\n\/\/ Never edit it: [^\n]*\n\/\/ "the control tower's own" [^\n]*\n/;
+
+function gateBytesAsOnMain(buf) {
+  const text = buf.toString("utf8");
+  const m = INSTALLED_GATE_NOTE.exec(text);
+  if (!m) return buf;
+  const pinned = `path.resolve(${JSON.stringify(m[2])}, `;
+  const body = text.slice(m[0].length).split(pinned).join("path.resolve(__dirname, '..', '..', ");
+  return Buffer.from((m[1] || "") + body, "utf8");
+}
+
+/** One gate: registered under which events, and the sha of the file it runs, as main would have it. */
+function gateState(commands, fileName) {
+  const rec = { registered: [], present: false, sha: null };
+  let file = null;
+  Object.keys(commands).forEach((event) => {
+    commands[event].forEach((c) => {
+      if (c.indexOf(fileName) === -1) return;
+      if (rec.registered.indexOf(event) === -1) rec.registered.push(event);
+      if (!file) file = commandFile(c, fileName);
+    });
+  });
+  if (file) {
+    try {
+      const st = fs.statSync(file);
+      if (st.isFile() && st.size <= 8 * 1024 * 1024) {
+        rec.present = true;
+        rec.sha = sha256Hex(gateBytesAsOnMain(fs.readFileSync(file)));
+      }
+    } catch {
+      /* registered, file gone */
+    }
+  }
+  return rec;
+}
+
+/** The control-tower checkout this machine's rules come from, read without running git. */
+function controlTowerState() {
+  try {
+    const link = path.join(os.homedir(), ".claude", "CLAUDE.md");
+    if (!fs.lstatSync(link).isSymbolicLink()) return null;
+    const target = fs.realpathSync(link);
+    if (!/[\\/]global-config[\\/]CLAUDE\.md$/.test(target)) return null;
+    const root = path.dirname(path.dirname(target));
+    const out = { branch: null, head: null, files: {} };
+    const gitDir = path.join(root, ".git");
+    if (pathKind(gitDir) === "dir") {
+      const head = readTextBounded(path.join(gitDir, "HEAD"), 4096).trim();
+      const ref = /^ref: (refs\/heads\/(.+))$/.exec(head);
+      if (ref) {
+        out.branch = ref[2].slice(0, 120);
+        let sha = "";
+        try {
+          sha = readTextBounded(path.join(gitDir, ref[1]), 4096).trim();
+        } catch {
+          try {
+            const packed = readTextBounded(path.join(gitDir, "packed-refs"), 8 * 1024 * 1024);
+            const line = packed.split(/\r?\n/).find((l) => l.endsWith(` ${ref[1]}`));
+            sha = line ? line.split(" ")[0] : "";
+          } catch {
+            sha = "";
+          }
+        }
+        out.head = /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+      } else if (/^[0-9a-f]{40}$/.test(head)) {
+        out.head = head;
+      }
+    }
+    const want = {
+      claude_md: ["global-config", "CLAUDE.md"],
+      send_gate: ["global-config", "hooks", "send-gate.js"],
+      metered_key_gate: ["global-config", "hooks", "metered-key-gate.js"],
+      secret_read_gate: ["global-config", "hooks", "secret-read-gate.js"],
+    };
+    Object.keys(want).forEach((k) => {
+      try {
+        out.files[k] = sha256Hex(fs.readFileSync(path.join(root, ...want[k])));
+      } catch {
+        out.files[k] = null;
+      }
+    });
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** `~/.claude/CLAUDE.md`: what kind of file it is and its sha. */
+function rulesFileState() {
+  const file = path.join(os.homedir(), ".claude", "CLAUDE.md");
+  const rec = { kind: "missing", sha: null, bytes: null };
+  try {
+    rec.kind = fs.lstatSync(file).isSymbolicLink() ? "symlink" : "file";
+    const buf = fs.readFileSync(file);
+    rec.sha = sha256Hex(buf);
+    rec.bytes = buf.length;
+  } catch {
+    if (rec.kind !== "missing") rec.kind = "broken";
+  }
+  return rec;
+}
+
+/** The whole report for this machine. Never throws; a part that fails is null. */
+function buildSetupReport(payload, deadlineAt) {
+  const safe = (fn) => {
+    try {
+      return fn();
+    } catch {
+      return null;
+    }
+  };
+  const commands = safe(settingsHookCommands) || {};
+  const tracker = { registered: [] };
+  Object.keys(commands).forEach((event) => {
+    if (commands[event].some((c) => c.indexOf("worklog-hook.js") !== -1)) tracker.registered.push(event);
+  });
+  return {
+    v: 1,
+    at: new Date().toISOString(),
+    machine_id: setupMachineId(),
+    platform: process.platform,
+    hook_version: HOOK_VERSION,
+    claude_code_version: safe(() => claudeCodeVersion(process.env, payload && payload.transcript_path)),
+    compact_window: safe(() => compactWindowValue(process.env)),
+    autoupdate: safe(() => forceAutoupdateSet()),
+    desktop: safe(() => isDesktopSession()),
+    plugins: safe(pluginVersions),
+    gates: {
+      tracker,
+      send_gate: safe(() => gateState(commands, "send-gate.js")),
+      metered_key_gate: safe(() => gateState(commands, "metered-key-gate.js")),
+      secret_read_gate: safe(() => gateState(commands, "secret-read-gate.js")),
+    },
+    rules: safe(rulesFileState),
+    control_tower: safe(controlTowerState),
+    skills: safe(() => localSkillShas(deadlineAt)),
+  };
+}
+
+/** `state/setup-report.json`: when this machine last reported, and from which hook. */
+function setupReportStateFile() {
+  const root = stateRootDir();
+  return root ? path.join(root, "setup-report.json") : null;
+}
+
+/** Is a report due? Once an hour, and at once after a hook version change. */
+function setupReportDue(nowMs) {
+  const file = setupReportStateFile();
+  if (!file) return false;
+  const prev = readJsonObject(file);
+  if (!prev) return true;
+  if (prev.hook_version !== HOOK_VERSION) return true;
+  const last = Date.parse(String(prev.sent_at || ""));
+  return !(Number.isFinite(last) && last <= nowMs && nowMs - last < SETUP_REPORT_INTERVAL_MS);
+}
+
+function rememberSetupReport(nowMs, outcome) {
+  const file = setupReportStateFile();
+  if (!file) return;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    writeFileAtomic(
+      file,
+      `${JSON.stringify({ v: 1, sent_at: new Date(nowMs).toISOString(), hook_version: HOOK_VERSION, outcome })}\n`,
+      path.dirname(file),
+    );
+  } catch {
+    /* next session tries again */
+  }
+}
+
+/** `state/skill-check.json`: OW's last word on the check. */
+function skillCheckConfigFile() {
+  const root = stateRootDir();
+  return root ? path.join(root, "skill-check.json") : null;
+}
+
+/** Keep OW's `skill_check` answer, validated: {mode, enforce_from, disabled_rules}. */
+function saveSkillCheckConfig(answer) {
+  try {
+    const file = skillCheckConfigFile();
+    if (!file || !answer || typeof answer !== "object") return;
+    const mode = ["off", "observe", "enforce"].indexOf(answer.mode) !== -1 ? answer.mode : "observe";
+    const from = typeof answer.enforce_from === "string" && Number.isFinite(Date.parse(answer.enforce_from))
+      ? answer.enforce_from
+      : null;
+    const disabled = Array.isArray(answer.disabled_rules)
+      ? answer.disabled_rules.filter((r) => typeof r === "string" && /^[a-z_]+\.[a-z0-9_]+$/.test(r)).slice(0, 100)
+      : [];
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    writeFileAtomic(
+      file,
+      `${JSON.stringify({ v: 1, mode, enforce_from: from, disabled_rules: disabled, saved_at: new Date().toISOString() })}\n`,
+      path.dirname(file),
+    );
+  } catch {
+    /* the old answer stands */
+  }
+}
+
+/** The check's mode now: "off", "observe" or "enforce". Observe with no answer on file. */
+function skillCheckConfig(nowMs) {
+  const cfg = readJsonObject(skillCheckConfigFile() || "") || {};
+  let mode = ["off", "observe", "enforce"].indexOf(cfg.mode) !== -1 ? cfg.mode : "observe";
+  if (mode === "observe" && typeof cfg.enforce_from === "string") {
+    const from = Date.parse(cfg.enforce_from);
+    if (Number.isFinite(from) && from <= (nowMs || Date.now())) mode = "enforce";
+  }
+  return { mode, disabled: Array.isArray(cfg.disabled_rules) ? cfg.disabled_rules : [] };
+}
+
+/**
+ * The repair's event name. Never sent by Claude Code: only startSkillRepair
+ * writes it, on the stdin of this hook's own detached child, so the child runs
+ * main() like any event: parse, the consent gate, then the dispatch.
+ */
+const SKILL_REPAIR_EVENT = "MMSkillRepair";
+const SKILL_REPAIR_HARD_EXIT_MS = 20000;
+
+/**
+ * Start a detached child that runs the Stop-time skill top-up now, for the
+ * stale skills OW named. This session start does not wait for it.
+ */
+function startSkillRepair() {
+  try {
+    const child = require("child_process").spawn(process.execPath, [__filename], {
+      detached: true,
+      stdio: ["pipe", "ignore", "ignore"],
+      windowsHide: true,
+      cwd: process.cwd(),
+      env: process.env,
+    });
+    child.on("error", () => {});
+    child.stdin.on("error", () => {});
+    child.stdin.end(JSON.stringify({ hook_event_name: SKILL_REPAIR_EVENT, cwd: process.cwd() }));
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** `X-MM-Machine` for the chip feed: the same 12-hex id the setup report carries. Never throws. */
+function machineHeaders() {
+  try {
+    const id = setupMachineId();
+    return /^[0-9a-f]{12}$/.test(id) ? { "X-MM-Machine": id } : {};
+  } catch {
+    return {};
+  }
+}
+
+/** POST the report; keep the check's mode; start the repair OW asks for. Never throws. */
+async function sendSetupReport(payload) {
+  try {
+    if (!CONSENT_OK || !TOKEN) return;
+    const nowMs = Date.now();
+    if (!setupReportDue(nowMs)) return;
+    const hardExitAt = HARD_EXIT_AT || nowMs + HARD_EXIT_SESSION_START_MS;
+    const deadlineAt = Math.min(nowMs + SETUP_REPORT_BUDGET_MS, hardExitAt - POST_TOOL_USE_SAVE_MARGIN_MS);
+    // Claimed before the request, so a slow OW is asked at most once an hour too.
+    rememberSetupReport(nowMs, "sending");
+    const report = buildSetupReport(payload, deadlineAt - 2000);
+    const res = await skillsApiRequest(
+      SETUP_REPORT_URL,
+      {
+        method: "POST",
+        headers: Object.assign(
+          { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+          hookClientHeaders(),
+        ),
+        body: JSON.stringify(report),
+      },
+      deadlineAt,
+    );
+    if (!res.ok) {
+      rememberSetupReport(nowMs, res.reason || "failed");
+      return;
+    }
+    const body = res.body || {};
+    if (body.skill_check) saveSkillCheckConfig(body.skill_check);
+    let repaired = false;
+    const repair = body.repair && Array.isArray(body.repair.skills) ? body.repair.skills : [];
+    if (repair.length > 0) repaired = startSkillRepair();
+    rememberSetupReport(nowMs, repaired ? "repairing" : "sent");
+  } catch (err) {
+    debugLog(`setup report failed: ${err && err.message}`);
+  }
+}
+
+/**
+ * The repair (SKILL_REPAIR_EVENT): the top-up without its hourly slot, up to
+ * five runs while a run still changes something. Prints nothing. main() has
+ * passed the consent gate and armed the hard exit before this runs.
+ */
+async function skillsSyncNow() {
+  try {
+    if (!CONSENT_OK || !TOKEN) return;
+    const claude = homeClaudeDir();
+    if (!claude) return;
+    const file = skillsSyncStateFile();
+    const endAt = Math.min(Date.now() + 16000, (HARD_EXIT_AT || Date.now() + SKILL_REPAIR_HARD_EXIT_MS) - 2000);
+    // A run takes at most SKILLS_SYNC_MAX_PER_RUN skills; a repair keeps going
+    // while a run still changes something and time is left.
+    for (let round = 0; round < 5 && Date.now() < endAt - 1000; round++) {
+      if (file) {
+        const prev = readJsonObject(file) || {};
+        if (round > 0) {
+          const last = prev.last_result || {};
+          if (!(Number(last.installed) + Number(last.updated) > 0)) break;
+        }
+        // Give the slot back so syncRegistrySkills claims it now.
+        prev.last_attempt_at = new Date(0).toISOString();
+        try {
+          writeFileAtomic(file, `${JSON.stringify(prev)}\n`, path.dirname(file));
+        } catch {
+          break;
+        }
+      }
+      await syncRegistrySkills(Math.max(1000, endAt - Date.now()));
+    }
+  } catch {
+    /* silent */
+  }
+}
+
+// ── the check ──────────────────────────────────────────────────────────────
+
+/** Words of a command that read or move text but cannot run what they name. */
+const SKILL_CHECK_READERS = new Set([
+  "cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "ag", "sed", "awk", "gawk",
+  "wc", "ls", "file", "stat", "git", "gh", "echo", "printf", "diff", "cmp", "jq", "sort", "uniq",
+  "cut", "tr", "xxd", "od", "strings", "open", "code", "vim", "vi", "nano", "readlink", "realpath",
+  "basename", "dirname", "which", "type", "man", "test", "[", "true", "false", "sleep", "chmod",
+  "cp", "mv", "rm", "mkdir", "touch", "ln", "tee", "pbcopy", "column", "nl", "fold", "comm",
+  "shasum", "sha256sum", "md5", "md5sum", "base64", "ps", "kill", "pgrep", "lsof", "du", "df",
+]);
+
+/** Leading words that only wrap the real program. */
+const SKILL_CHECK_WRAPPERS = new Set(["sudo", "time", "nohup", "exec", "command", "builtin", "nice", "caffeinate"]);
+
+/** A shell command with its heredoc bodies taken out: their lines are text, not commands. */
+function stripHeredocs(command) {
+  const lines = String(command || "").split(/\r?\n/);
+  const out = [];
+  let until = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (until !== null) {
+      if (line.replace(/^\t+/, "").trim() === until) until = null;
+      continue;
+    }
+    out.push(line);
+    const m = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(line);
+    if (m) until = m[2];
+  }
+  return out.join("\n");
+}
+
+/**
+ * The simple commands a shell line runs, each as its program and its text:
+ * split on newlines, `;`, `&&`, `||` and `|`, heredoc bodies out, leading
+ * `VAR=value`, `env …` and wrapper words skipped, `cd …` dropped. Quoting is
+ * not parsed: a separator inside quotes splits too, which only ever errs
+ * toward reading a segment as a reader's.
+ */
+function shellSegments(command) {
+  const text = stripHeredocs(command);
+  const parts = text.split(/\r?\n|;|&&|\|\||\|/);
+  const out = [];
+  for (let i = 0; i < parts.length; i++) {
+    let words = parts[i].trim().replace(/^[({]+\s*/, "").split(/\s+/).filter(Boolean);
+    while (words.length > 0) {
+      const w = words[0];
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
+        words = words.slice(1);
+        continue;
+      }
+      if (w === "env") {
+        words = words.slice(1);
+        while (words.length > 0 && (/^-/.test(words[0]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]))) {
+          if (words[0] === "-u" && words.length > 1) words = words.slice(1);
+          words = words.slice(1);
+        }
+        continue;
+      }
+      if (SKILL_CHECK_WRAPPERS.has(w)) {
+        words = words.slice(1);
+        continue;
+      }
+      break;
+    }
+    if (words.length === 0) continue;
+    const program = words[0].replace(/^["']|["']$/g, "");
+    const base = program.split(/[\\/]/).pop().toLowerCase();
+    if (base === "cd" || base === "pushd" || base === "popd" || base === "export" || base === "set" || base === "source" || base === ".") continue;
+    out.push({ program: base, text: words.join(" ") });
+  }
+  return out;
+}
+
+/** A segment that runs something (not a reader, not a syntax check, not --help). */
+function segmentRuns(seg) {
+  if (SKILL_CHECK_READERS.has(seg.program)) return false;
+  if (/\s--help\b|\s-h$/.test(seg.text)) return false;
+  if (/^(python3?|python3\.\d+)$/.test(seg.program) && /\s-m\s+(py_compile|pyflakes|pytest|unittest)\b/.test(seg.text)) return false;
+  if (/^(node|bun|deno)$/.test(seg.program) && /\s(--check|-c)\b|\s(test|fmt|lint|check)\b|\s--test\b/.test(seg.text)) return false;
+  if (/^(bash|sh|zsh)$/.test(seg.program) && /\s-n\b/.test(seg.text)) return false;
+  if (/^(pytest|vitest|jest|eslint|prettier|ruff|tsc|mypy|pyflakes)$/.test(seg.program)) return false;
+  if (/(^|[\s/])(tests?|__tests__)\/|\.test\.(m?[jt]s)\b|_test\.(py|ts)\b|\btest_[\w-]+\.py\b/.test(seg.text)) return false;
+  return true;
+}
+
+/** A write call in an HTTP command: curl with a write method or a body, or mm-api with a write verb. */
+const HTTP_WRITE_RE = /(?:\s-X\s*["']?(?:POST|PUT|PATCH|DELETE)\b|\s--request\s+["']?(?:POST|PUT|PATCH|DELETE)\b|\s(?:-d|--data(?:-raw|-binary|-urlencode)?|--json|-F|--form)\s|mm-api\.mjs["']?\s+\w+\s+["']?(?:POST|PUT|PATCH|DELETE)\b)/;
+
+/** A message file's own To/Cc/Bcc are all @massmarket.ai: internal mail needs no client skill. */
+function messageFileIsInternal(segText) {
+  try {
+    const m = /--message-file[=\s]+["']?([^"'\s]+)/.exec(segText);
+    if (!m) return false;
+    const file = m[1].replace(/^~(?=$|[\\/])/, os.homedir());
+    const head = readHeadText(path.isAbsolute(file) ? file : path.resolve(file), 16 * 1024);
+    const header = head.split(/\r?\n\r?\n/)[0];
+    const addrs = [];
+    header.split(/\r?\n/).forEach((line) => {
+      if (/^(to|cc|bcc):/i.test(line)) (line.match(/[^\s<>,;:"']+@[^\s<>,;"']+/g) || []).forEach((a) => addrs.push(a));
+    });
+    return addrs.length > 0 && addrs.every((a) => /@massmarket\.ai$/i.test(a));
+  } catch {
+    return false;
+  }
+}
+
+/** A command line whose every address is ours. */
+function onlyInternalAddresses(text) {
+  const addrs = String(text).match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) || [];
+  return addrs.length > 0 && addrs.every((a) => /@massmarket\.ai$/i.test(a));
+}
+
+/** Writes to the machinery itself (skills, hooks, tools, tests) are never checked. */
+function isMachineryPath(file) {
+  return /(^|[\\/])(skills|hooks|tools|scripts|tests?|__tests__|fixtures|\.claude[\\/]worktrees)[\\/]|\.test\.\w+$|_test\.\w+$/.test(String(file || ""));
+}
+
+const SKILL_CHECK_CRP = "client-reply-prep";
+const SKILL_CHECK_BHE = "build-hour-estimator";
+const SKILL_CHECK_ELP = "elevenlabs-production";
+const SKILL_CHECK_CCS = "client-candidate-sourcing-scaffold";
+
+/**
+ * The guarded actions. Each rule: an id (`<action>.<what>`), the action, the
+ * skills it requires, whether the client's own `<client>-project` skill is
+ * required too, and a test over (tool name, input, the command's running
+ * segments). The first rule that matches decides. Sources: the client-reply-prep,
+ * build-hour-estimator, hl-invoice-ops, elevenlabs-production and
+ * client-candidate-sourcing-scaffold skills and their scripts (2026-11-05 survey).
+ */
+const SKILL_CHECK_RULES = [
+  // ── a client reply: draft, package, send ──
+  {
+    id: "reply.send_package", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
+    bash: (seg) => /(^|[\s/])send_package\.py\b/.test(seg.text) && !/--dry-run\b/.test(seg.text),
+  },
+  {
+    id: "reply.send_client_email", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
+    bash: (seg) =>
+      /(^|[\s/])send-client-email\.py\b/.test(seg.text) &&
+      /(^|\s)--send\b/.test(seg.text) &&
+      !onlyInternalAddresses(seg.text) &&
+      !messageFileIsInternal(seg.text),
+  },
+  {
+    id: "reply.ow_route", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
+    bash: (seg) =>
+      /\/(?:api\/ext\/)?(?:reply-draft\/(?:revise|claim-send|sent|send-gmail|post-team|rob-ok)|reply-package\/(?:approve|questions|outcomes|contribute|no-reply|pickup)|reply-followup\/revise)\b/.test(seg.text) &&
+      HTTP_WRITE_RE.test(` ${seg.text}`),
+  },
+  {
+    id: "reply.rq_write", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
+    bash: (seg) => /rq\.sh["']?\s+["']?(?:POST|PATCH)["']?\s+["']?client_reply_(?:packages|drafts|followups|revisions)/.test(seg.text),
+  },
+  {
+    id: "reply.inline_image", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
+    bash: (seg) => /(^|[\s/])stage_inline_image\.py\b/.test(seg.text),
+  },
+  {
+    id: "reply.gmail_draft", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
+    bash: (seg) =>
+      /gmail\.googleapis\.com\/[^\s'"]*\/(?:drafts|messages\/send)\b/.test(seg.text) &&
+      HTTP_WRITE_RE.test(` ${seg.text}`) &&
+      !onlyInternalAddresses(seg.text),
+  },
+  {
+    id: "reply.hl_message", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
+    bash: (seg) =>
+      /(?:leadconnectorhq\.com|mm-api\.mjs["']?\s+highlevel)[^\n]*\/conversations\/messages\b/.test(seg.text) &&
+      HTTP_WRITE_RE.test(` ${seg.text}`),
+  },
+  {
+    id: "reply.mcp_send", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
+    mcp: (name) =>
+      /^mcp__highlevel__conversations_send-a-new-message$/.test(name) ||
+      (/^mcp__.*__(?:create_draft|update_draft|send_message|reply|forward)$/.test(name) &&
+        !/^mcp__(?:ccd_|mm-bridge__|Beeper|beeper|claude-in-chrome__|Claude_)/.test(name)),
+  },
+  {
+    id: "reply.message_file", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
+    write: (file, content) => {
+      if (isMachineryPath(file)) return false;
+      const m = /^To: (.+)\r?\n(?:Cc:.*\r?\n)?(?:Bcc:.*\r?\n)?Subject: /.exec(String(content || "").slice(0, 4096));
+      return Boolean(m) && !/^[^@\n]*@massmarket\.ai(?:\s*,\s*[^@\n]*@massmarket\.ai)*\s*$/i.test(m[1].trim());
+    },
+  },
+  // ── a quote, invoice or hour estimate ──
+  {
+    id: "quote.hl_invoice", action: "quote", requires: [SKILL_CHECK_BHE], client: false,
+    bash: (seg) =>
+      /(?:leadconnectorhq\.com|mm-api\.mjs["']?\s+highlevel)[^\n]*\/invoices\b/.test(seg.text) &&
+      HTTP_WRITE_RE.test(` ${seg.text}`),
+  },
+  {
+    id: "quote.schema", action: "quote", requires: [SKILL_CHECK_BHE], client: false,
+    raw: (command) => /"schema"\s*:\s*"mm\.(?:quote|invoice)\.v1"/.test(String(command || "")),
+    write: (file, content) =>
+      !isMachineryPath(file) && /"schema"\s*:\s*"mm\.(?:quote|invoice)\.v1"/.test(String(content || "").slice(0, 65536)),
+  },
+  {
+    id: "quote.ow_scope", action: "quote", requires: [SKILL_CHECK_BHE], client: false,
+    bash: (seg) =>
+      /\/(?:api\/ext\/)?(?:scope-proposal|scope-line(?:\/(?:split|link|billed))?)(?=["'\s?]|$)/.test(seg.text) &&
+      HTTP_WRITE_RE.test(` ${seg.text}`),
+  },
+  {
+    id: "quote.pdf_build", action: "quote", requires: [SKILL_CHECK_BHE], client: false,
+    bash: (seg) =>
+      (seg.program === "node" && /\bmkdoc[\w.-]*\.js\b/.test(seg.text) && /quote/i.test(`${seg.text} ${HOOK_CWD || ""}`)) ||
+      (/^soffice$|^libreoffice$/.test(seg.program) && /--convert-to\s+pdf\b/.test(seg.text) && /quote/i.test(seg.text)),
+  },
+  {
+    id: "quote.bridge_propose", action: "quote", requires: [SKILL_CHECK_BHE], client: false,
+    mcp: (name, input) =>
+      name === "mcp__mm-bridge__mm" && /^\s*propose\s.*--.*--\s*[\d.]+\s*h\b/.test(String((input && input.args) || "")),
+  },
+  // ── a voice render ──
+  {
+    id: "voice.elevenlabs_api", action: "voice", requires: [SKILL_CHECK_ELP], client: false,
+    bash: (seg) =>
+      /api\.elevenlabs\.io\/v1\/(?:text-to-speech|voices\/add|music|text-to-voice|speech-to-speech|sound-generation)\b/.test(seg.text) ||
+      (/^(python3?|python3\.\d+)$/.test(seg.program) && /\s-c\s/.test(seg.text) && /elevenlabs/i.test(seg.text) && /\.(?:text_to_speech|music|text_to_voice|speech_to_speech)\b|voices\.(?:add|ivc)\b/.test(seg.text)),
+  },
+  {
+    id: "voice.scripts", action: "voice", requires: [SKILL_CHECK_ELP], client: false,
+    bash: (seg) =>
+      (/(^|[\s/])followup-linkedin\.ts\b/.test(seg.text) && /\svoice-make\b/.test(seg.text) && !/--dry-run\b/.test(seg.text)) ||
+      (/(^|[\s/])gen_voice\.py\b/.test(seg.text) && !/--dry\b/.test(seg.text)) ||
+      (/(^|[\s/])fandi-voice-on-accept\.ts\b/.test(seg.text) && /--live\b/.test(seg.text)),
+  },
+  {
+    id: "voice.mcp_audio", action: "voice", requires: [SKILL_CHECK_ELP], client: false,
+    mcp: (name) =>
+      /^mcp__higgsfield__(?:create_voice|create_voice_from_confirmed_audio|generate_audio|generate_audio_batch|voice_change|dubbing)$/.test(name) ||
+      /^mcp__[^_].*elevenlabs.*__(?:text_to_speech|create_voice|voice_clone|generate_audio|text_to_sound_effects|compose_music)$/i.test(name),
+  },
+  // ── a lead room or sample ──
+  {
+    id: "lead_room.sample_room", action: "lead_room", requires: [SKILL_CHECK_CCS], client: false,
+    bash: (seg) => /(^|[\s/])sample_room\.py\s+(?:build|rebuild|publish)\b/.test(seg.text),
+  },
+  {
+    id: "lead_room.room_scripts", action: "lead_room", requires: [SKILL_CHECK_CCS], client: false,
+    bash: (seg) =>
+      /(^|[\s/])(?:create-room|load-leads)\.mjs\b/.test(seg.text) && !/--dry-run\b/.test(seg.text) ||
+      /(^|[\s/])_room\/install\.mjs\b/.test(seg.text),
+  },
+  {
+    id: "lead_room.apollo_sample", action: "lead_room", requires: [SKILL_CHECK_CCS], client: false,
+    bash: (seg) => /(^|[\s/])apollo_pool\.py\s+probe\b/.test(seg.text) && /--consumer[=\s]+\S*-sample\b/.test(seg.text),
+  },
+  {
+    id: "lead_room.files", action: "lead_room", requires: [SKILL_CHECK_CCS], client: false,
+    write: (file) =>
+      !isMachineryPath(file) &&
+      (/sample-spec[^\\/]*\.json$/.test(String(file || "")) ||
+        /[\\/]\.massmarket-rooms[\\/]/.test(String(file || "")) ||
+        /[\\/]\.massmarket-[a-z0-9-]+[\\/]candidates[\\/]/.test(String(file || "")) ||
+        /(^|[\\/])shortlist\.json$/.test(String(file || ""))),
+  },
+];
+
+/** The first rule this call matches, or null. Never throws. */
+function skillCheckRuleFor(toolName, toolInput) {
+  try {
+    const name = typeof toolName === "string" ? toolName : "";
+    const input = toolInput && typeof toolInput === "object" && !Array.isArray(toolInput) ? toolInput : {};
+    if (name === "Bash" || name === "PowerShell") {
+      const command = typeof input.command === "string" ? input.command : typeof input.cmd === "string" ? input.cmd : "";
+      if (!command || command.length > 200000) return null;
+      const segs = shellSegments(command).filter(segmentRuns);
+      for (let i = 0; i < SKILL_CHECK_RULES.length; i++) {
+        const r = SKILL_CHECK_RULES[i];
+        if (r.bash && segs.some((s) => r.bash(s))) return r;
+        if (r.raw && segs.length > 0 && r.raw(command)) return r;
+      }
+      return null;
+    }
+    if (name === "Write" || name === "Edit" || name === "MultiEdit" || name === "NotebookEdit") {
+      const file = typeof input.file_path === "string" ? input.file_path : typeof input.notebook_path === "string" ? input.notebook_path : "";
+      const content =
+        typeof input.content === "string"
+          ? input.content
+          : typeof input.new_string === "string"
+            ? input.new_string
+            : Array.isArray(input.edits)
+              ? input.edits.map((e) => (e && typeof e.new_string === "string" ? e.new_string : "")).join("\n")
+              : "";
+      for (let i = 0; i < SKILL_CHECK_RULES.length; i++) {
+        const r = SKILL_CHECK_RULES[i];
+        if (r.write && r.write(file, name === "Write" ? content : "")) return r;
+      }
+      return null;
+    }
+    if (/^mcp__/.test(name)) {
+      for (let i = 0; i < SKILL_CHECK_RULES.length; i++) {
+        const r = SKILL_CHECK_RULES[i];
+        if (r.mcp && r.mcp(name, input)) return r;
+      }
+    }
+  } catch {
+    /* no rule */
+  }
+  return null;
+}
+
+/** A skill name as the check compares it: the part after any `plugin:` prefix. */
+function skillBaseName(name) {
+  const parts = String(name || "").split(":");
+  return parts[parts.length - 1];
+}
+
+/** The skills a transcript shows loaded: Skill calls, slash commands, skill headers, SKILL.md reads. */
+function transcriptSkills(transcriptPath) {
+  const out = new Set();
+  try {
+    const file = transcriptPathKept(transcriptPath);
+    if (!file) return out;
+    const st = fs.statSync(file);
+    if (!st.isFile()) return out;
+    let text = "";
+    if (st.size <= SKILL_CHECK_TRANSCRIPT_MAX) {
+      text = fs.readFileSync(file, "utf8");
+    } else {
+      const fd = fs.openSync(file, "r");
+      try {
+        const headLen = SKILL_CHECK_TRANSCRIPT_HEAD;
+        const tailLen = SKILL_CHECK_TRANSCRIPT_MAX - headLen;
+        const head = Buffer.alloc(headLen);
+        const tail = Buffer.alloc(tailLen);
+        fs.readSync(fd, head, 0, headLen, 0);
+        fs.readSync(fd, tail, 0, tailLen, st.size - tailLen);
+        text = `${head.toString("utf8")}\n${tail.toString("utf8")}`;
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
+    const res = [
+      /"name":"Skill","input":\{"(?:skill|command)":"\/?([A-Za-z0-9][A-Za-z0-9:._-]{0,127})/g,
+      /<command-name>\/?([A-Za-z0-9][A-Za-z0-9:._-]{0,127})<\/command-name>/g,
+      /Base directory for this skill: [^\n"]*?[\\/]+skills[\\/]+([A-Za-z0-9][A-Za-z0-9._-]{0,126})/g,
+      /"name":"Read","input":\{"file_path":"[^"]*?[\\/]+skills[\\/]+([A-Za-z0-9][A-Za-z0-9._-]{0,126})[\\/]+SKILL\.md"/g,
+    ];
+    res.forEach((re) => {
+      let m;
+      while ((m = re.exec(text)) !== null) out.add(m[1]);
+    });
+  } catch {
+    /* nothing more known */
+  }
+  return out;
+}
+
+/** The skills this session has loaded, as base names: markers, the declared client, then the transcript. */
+function loadedSkillsForCheck(sessionId, transcriptPath, required, needsClient) {
+  const loaded = new Set();
+  markedSkills(sessionId).forEach((n) => loaded.add(skillBaseName(n)));
+  try {
+    const rec = readDeclarationRecord(sessionId);
+    if (rec && typeof rec.declared_skill === "string") loaded.add(skillBaseName(rec.declared_skill));
+  } catch {
+    /* no record */
+  }
+  const satisfied = () =>
+    required.every((n) => loaded.has(n)) && (!needsClient || hasClientSkill(loaded));
+  if (!satisfied()) {
+    transcriptSkills(transcriptPath).forEach((n) => {
+      const base = skillBaseName(n);
+      if (loaded.has(base)) return;
+      loaded.add(base);
+      // Kept as a marker, so the next check this session does not read the transcript again.
+      markSkillLoaded(sessionId, { name: base, via: "skill" });
+    });
+  }
+  return loaded;
+}
+
+/** A client's own skill: a `-project` skill (Massmarket's own two labels do not count for a client reply). */
+function hasClientSkill(loaded) {
+  let found = false;
+  loaded.forEach((n) => {
+    if (/-project$/.test(n)) found = true;
+  });
+  return found;
+}
+
+/** VERBATIM — Opus, 2026-11-05. What the action is, in the deny reason. */
+const SKILL_CHECK_ACTION_WORDS = {
+  reply: "a client reply (a draft, a reply package or a send)",
+  quote: "a quote, an invoice or an hour estimate",
+  voice: "a voice or audio render",
+  lead_room: "a lead room or a sample",
+};
+
+/**
+ * VERBATIM — Opus, 2026-11-05. The reason Claude reads when the check stops a
+ * step. It speaks to Claude, not the person: name the skill, load it, go on.
+ */
+function skillCheckReason(rule, missing, clientMissing) {
+  const names = missing.map((n) => `${n}`);
+  if (clientMissing) names.push("the client's own <client>-project skill");
+  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  const them = names.length === 1 ? "it" : "them";
+  return (
+    `Massmarket skill check: this step is ${SKILL_CHECK_ACTION_WORDS[rule.action]}, and the rules for it are in ${list}, ` +
+    `which this session has not loaded. Load ${them} now with the Skill tool, follow ${them}, then run this step again. ` +
+    `Do not ask the person; this is Claude's step. (Rule ${rule.id}.)`
+  );
+}
+
+/** May this run be checked at all? A person at an attended Claude Code session on a tracked machine. */
+function skillCheckApplies(payload, env) {
+  const e = env || process.env;
+  if (!TOKEN) return false;
+  if (e.MM_UNATTENDED === "1") return false;
+  if (e.LANE2_RUN_ID || e.MM_RUN_SESSION) return false;
+  if (!isInteractiveSession(e)) return false;
+  if (isCodexHookPayload(payload)) return false;
+  if (isPluginToolCall(payload)) return false;
+  return true;
+}
+
+/** The PreToolUse answer that stops this call, with the reason Claude reads. */
+function emitPreToolUseDeny(reason) {
+  return new Promise((resolve) => {
+    try {
+      const out = `${JSON.stringify({
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason },
+      })}\n`;
+      let settled = false;
+      const finish = (ok) => {
+        if (settled) return;
+        settled = true;
+        resolve(ok);
+      };
+      const guard = setTimeout(() => finish(false), 1000);
+      if (typeof guard.unref === "function") guard.unref();
+      process.stdout.write(out, (err) => {
+        clearTimeout(guard);
+        finish(!err);
+      });
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+/** One row to OW: what the check found. The rule id and skill names only. Never throws. */
+async function postSkillCheck(body, deadlineAt) {
+  try {
+    if (!CONSENT_OK || !TOKEN) return { ok: false };
+    return await skillsApiRequest(
+      SKILL_CHECK_URL,
+      {
+        method: "POST",
+        headers: Object.assign({ "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` }, hookClientHeaders()),
+        body: JSON.stringify(body),
+      },
+      deadlineAt,
+    );
+  } catch {
+    return { ok: false };
+  }
+}
+
+async function handlePreToolUse(payload) {
+  try {
+    if (!skillCheckApplies(payload, process.env)) return;
+    const rule = skillCheckRuleFor(payload.tool_name, payload.tool_input);
+    if (!rule) return;
+    const cfg = skillCheckConfig(Date.now());
+    if (cfg.mode === "off" || cfg.disabled.indexOf(rule.id) !== -1) return;
+    const loaded = loadedSkillsForCheck(payload.session_id, payload.transcript_path, rule.requires, rule.client);
+    const missing = rule.requires.filter((n) => !loaded.has(n));
+    const clientMissing = Boolean(rule.client) && !hasClientSkill(loaded);
+    if (missing.length === 0 && !clientMissing) return;
+    const blocked = cfg.mode === "enforce";
+    // Observe mode: each finding once a session. A block is always sent.
+    if (!blocked && skillCheckSeen(payload.session_id, `${rule.id}|${missing.join(",")}|${clientMissing ? 1 : 0}`)) return;
+    const writes = [];
+    if (blocked) writes.push(emitPreToolUseDeny(skillCheckReason(rule, missing, clientMissing)));
+    let declared = null;
+    try {
+      const rec = readDeclarationRecord(payload.session_id);
+      declared = rec && typeof rec.declared_skill === "string" ? rec.declared_skill : null;
+    } catch {
+      declared = null;
+    }
+    const hardExitAt = HARD_EXIT_AT || Date.now() + HARD_EXIT_DEFAULT_MS;
+    writes.push(
+      postSkillCheck(
+        {
+          session_id: stateString(payload.session_id),
+          action: rule.action,
+          rule: rule.id,
+          tool: typeof payload.tool_name === "string" ? payload.tool_name.slice(0, 120) : null,
+          required: rule.requires.concat(rule.client ? ["<client>-project"] : []),
+          missing,
+          client_missing: clientMissing,
+          mode: blocked ? "enforce" : "observe",
+          blocked,
+          in_agent: typeof payload.agent_id === "string" && payload.agent_id !== "",
+          declared_skill: declared,
+        },
+        Math.min(Date.now() + SKILL_CHECK_POST_BUDGET_MS, hardExitAt - POST_TOOL_USE_SAVE_MARGIN_MS),
+      ).then((res) => {
+        // OW's current word on the mode rides every answer: keep it.
+        if (res && res.ok && res.body && res.body.skill_check) saveSkillCheckConfig(res.body.skill_check);
+      }),
+    );
+    await Promise.allSettled(writes);
+  } catch (err) {
+    debugLog(`skill check failed: ${err && err.message}`);
   }
 }
 
@@ -8369,6 +9749,11 @@ async function handleSessionStart(payload) {
     );
   }
 
+  // ── Setup report (0.12.0): beside the chip feed, never in front of it. ───
+  // At most once an hour per machine; its own 6 s budget; silent on every
+  // outcome. See SAME SETUP AS ROB.
+  const setupReport = sendSetupReport(payload);
+
   // ── Chips bridge: fetch + verify + inject. Entirely fail-open. ──────────
   let feed = null;
   try {
@@ -8442,6 +9827,7 @@ async function handleSessionStart(payload) {
     // delivery — recorded only once the context write is confirmed.
     await recordSessionDeliveries(payload && payload.session_id, deliveries, postToolUseDeadline());
   }
+  await setupReport;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -8831,6 +10217,7 @@ function taskCliLine(argv) {
 function hardExitMsFor(raw) {
   try {
     const parsed = safeJsonParse(raw);
+    if (parsed && parsed.hook_event_name === SKILL_REPAIR_EVENT) return SKILL_REPAIR_HARD_EXIT_MS;
     return parsed && parsed.hook_event_name === "SessionStart"
       ? HARD_EXIT_SESSION_START_MS
       : HARD_EXIT_DEFAULT_MS;
@@ -8967,6 +10354,13 @@ async function main() {
       await handleSessionStart(payload);
     } else if (event === "SubagentStart") {
       handleSubagentStart(payload);
+    } else if (event === "PreToolUse") {
+      // ⛔ The required-skill check (0.12.0). Registered by the mm-hooks plugin.
+      await handlePreToolUse(payload);
+    } else if (event === SKILL_REPAIR_EVENT) {
+      // ⛔ The setup report's repair (0.12.0): never a Claude Code event, only
+      // this hook's own detached child, and through the same consent gate.
+      await skillsSyncNow();
     }
   } catch (err) {
     debugLog(`unhandled error for event=${event}: ${err && err.stack}`);

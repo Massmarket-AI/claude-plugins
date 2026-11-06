@@ -11,10 +11,11 @@ import {
   ASSIGN_ASK_TEXT, ASSIGN_BY_BASIS, assignAsksOf, assignMarkdown, assignOnly, committedCount,
   PM_CHECK_AHEAD_MS, STILL_NEEDS_YOU, checkAheadOf, checkNow, ownActBy, pinTitle, pinsFor, watchMarkdown, watchOf,
   LATE_WITH_TEAM, TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine, teamLateSegment, teamLateWho,
-  okLateOnly, teamLateOnly,
+  GO_THEIRS, GO_WHAT, clientWaiting, goFirstText, goMarkdown, goMine, goOf, goOnly, goSentence, mayStart, ownPins, stepWord,
+  okLateOnly, ownBesides, teamLateOnly,
 } from './queue'
-import type { Feed, FeedAsk, FeedQueueTicket, FeedTicket, QueueItem } from './queue'
-import { assignParagraph, autoUpdatable, etaParagraph, handoverText, kickoffText, rowExtra, signatureOf, waitingText } from './threads'
+import type { Feed, FeedAsk, FeedFollowups, FeedQueueTicket, FeedTicket, QueueItem } from './queue'
+import { assignParagraph, autoUpdatable, etaParagraph, goKickoff, goParagraph, handoverText, kickoffText, rowExtra, signatureOf, waitingText } from './threads'
 import { buildOf, paneText, recommend, rowFor, teamCount, teamHeading, teamLines, teamOf, teamPane, teamPerson } from './threads'
 
 // Most tests here run on clocks in early October 2026, before the list's floor (LIST_FLOOR_MS, Wed Oct 14 12:00 AM
@@ -3163,6 +3164,189 @@ describe('0.7.21 (Rob, 11-05): the founder\'s teammates\' late tickets leave his
   })
 })
 
+describe('(0.7.24, Rob 2026-11-04) follow-up steps nobody approved pin at once for whoever gives the go; approved ones never show', () => {
+  /** Wed 2026-11-04 11:52 AM in New York: the bridge sync that had no Dealerosity item. */
+  const wed = Date.parse('2026-11-04T16:52:00Z')
+  const H = 3_600_000
+  const ROB = 'rob@massmarket.ai'
+  const H9 = 'has9@example.com'
+  const ASIF = 'asif@example.com'
+  const DEALEROSITY = 'fa5b36df-dd5d-408d-8723-392eb9838013'
+  const PKG = '3bacdfc2-7533-42e5-b0c4-fbfe0d9c3c68'
+  /** Fri 11/6 9:30 AM ET: the text, 2 business days after Rob's 11/4 email. */
+  const FRI = '2026-11-06T14:30:00.000Z'
+  /** OW's `followups` on the project: three proposed steps on the follow-ups-only package, waiting for `by`'s go. */
+  const waiting = (over: FeedFollowups = {}): FeedFollowups => ({
+    active: 0, next_at: null, next_kind: null, awaiting_go: 3,
+    go_package_id: PKG, go_first_at: FRI, go_first_kind: 'client_sms', go_by: ROB, go_steps: 3, ...over,
+  })
+  const project = (f: FeedFollowups | null) => ({ project_id: DEALEROSITY, name: 'Dealerosity — Nicole Bassuk', ...(f ? { followups: f } : {}) })
+  const as = (member: string, role: string, f: FeedFollowups | null, over: Partial<Feed> = {}): Feed => ({ member, role, projects: [project(f)], tickets: {}, ...over })
+  const listed = (f: Feed, now = wed): QueueItem => {
+    const l = buildLists(f, now)
+    const it = [...l.queue, ...l.teammate][0]
+    if (!it) throw new Error('nothing listed')
+    return it
+  }
+
+  test('[Dealerosity, 11-04] Rob\'s go on 3 proposed steps: on his Needs-you list, due when the text\'s window opens, pinned at once', async () => {
+    const f = as(ROB, 'founder', waiting())
+    const q = buildQueue(f, wed)
+    expect(q.map(i => i.projectId)).toEqual([DEALEROSITY])
+    const it = q[0] as QueueItem
+    expect(it.kind).toBe('go')
+    expect(goOf(it)).toEqual({ packageId: PKG, steps: 3, firstAt: Date.parse(FRI), firstKind: 'client_sms', by: '', mine: true })
+    expect(it.dueAt).toBe(Date.parse(FRI))
+    expect(ownActBy(it)).toBe(Date.parse(FRI))
+    // ~1.9 business days out: R1's 24 business hours would not pin it; the go does, at once
+    expect(pinsNow(it, wed)).toBe(false)
+    expect(ownPins(it, wed)).toBe(true)
+    expect(pinsFor(it, wed)).toBe(true)
+    // the row and the thread's name say it, with the first step's date
+    expect(titleFor(it, wed)).toBe('🟡 1d left · Dealerosity · follow-ups need your go · first text Fri Nov 6')
+    expect(pinTitle(it, wed)).toBe(titleFor(it, wed))
+    expect(rowLine(it, wed, { pins: true })).toBe('🔴 Dealerosity · follow-ups need your go · first text Fri Nov 6 · 1d left')
+    expect(waitingText(it)).toBe('3 follow-ups need your go')
+    expect(rowExtra(it)).toBe('')
+    // a thread may be started for it, as for a client waiting on us
+    expect(goOnly(it)).toBe(true)
+    expect(clientWaiting(it)).toBe(true)
+    expect(mayStart(it, undefined, wed)).toBe(true)
+  })
+
+  test('the kickoff, the note and the pane: the package, every step shown, nothing goes until the go', async () => {
+    const it = listed(as(ROB, 'founder', waiting()))
+    expect(kickoffText(it)).toBe(
+      `[mm-link ${DEALEROSITY}] Dealerosity Nicole Bassuk (OW project ${DEALEROSITY}) has 3 follow-up step(s) that nobody has approved, in package 3bacdfc2, the first (a text) opening Fri, Nov 6 9:30 AM ET. Nothing goes until I give the go. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package 3bacdfc2 with every step in full and wait for me. Send nothing without my go.`,
+    )
+    expect(noteText(it, ROB)).toBe(
+      `Package 3bacdfc2 holds 3 proposed follow-up steps that nobody has approved and that wait for Rob's go; the first, a text, opens Fri, Nov 6 9:30 AM ET. Nothing goes until the go. When the person asks to act on them, follow client-reply-prep §9 with --package ${PKG}.`,
+    )
+    const pane = clientMarkdown(it, wed)
+    expect(pane).toContain('### Follow-ups need your go (3 steps)')
+    expect(pane).toContain('- First text · its window opens Fri 9:30 AM · package 3bacdfc2')
+    expect(pane).toContain('Ask Claude: "Show me the follow-ups for Dealerosity"')
+    // no word of reply drafts: there is no reply to send
+    expect(pane).not.toContain('reply drafts')
+    expect(goMarkdown(it, wed)).toBe(['### Follow-ups need your go (3 steps)', '', '- First text · its window opens Fri 9:30 AM · package 3bacdfc2', '', '_Nobody has approved them and nothing goes until you do. Ask Claude: "Show me the follow-ups for Dealerosity"._'].join('\n'))
+  })
+
+  test('approved steps never show: running steps alone, or no go_ keys (a reply package\'s steps, or an OW before them), list nothing', async () => {
+    const running: FeedFollowups = { active: 3, next_at: FRI, next_kind: 'client_sms', awaiting_go: 0 }
+    expect(buildLists(as(ROB, 'founder', running), wed)).toEqual({ queue: [], teammate: [], checking: [] })
+    // R7's count alone: the steps of a package with a reply to send, approved with its reply
+    expect(buildLists(as(ROB, 'founder', { active: 0, next_at: null, next_kind: null, awaiting_go: 2 }), wed)).toEqual({ queue: [], teammate: [], checking: [] })
+    expect(buildLists(as(ROB, 'founder', null), wed)).toEqual({ queue: [], teammate: [], checking: [] })
+    // once the go is given OW sends no go_ keys: the row is gone and nothing pins it again
+    const before = listed(as(ROB, 'founder', waiting()))
+    expect(pinsFor(before, wed)).toBe(true)
+    expect(buildQueue(as(ROB, 'founder', running), wed + H)).toEqual([])
+  })
+
+  test('⛔ malformed go_ keys are no go: a package id that is not a uuid, no steps, a project id that is not one', async () => {
+    for (const bad of [waiting({ go_package_id: 'not-a-uuid' }), waiting({ go_steps: 0 }), waiting({ go_steps: 2.5 }), waiting({ go_package_id: null })]) {
+      expect(buildQueue(as(ROB, 'founder', bad), wed)).toEqual([])
+    }
+    const f: Feed = { member: ROB, role: 'founder', projects: [{ project_id: 'DEALEROSITY', name: 'Dealerosity', followups: waiting() }] }
+    expect(buildQueue(f, wed)).toEqual([])
+  })
+
+  test('⛔ a package the drafts list carries is a reply package: listed once, as its reply, never also as a go', async () => {
+    const draft = { package_id: PKG, project_id: DEALEROSITY, project_name: 'Dealerosity — Nicole Bassuk', status: 'prepared', covers_through: new Date(wed - 2 * H).toISOString(), drafts_ready: 1, project_owner_email: ROB }
+    const it = listed(as(ROB, 'founder', waiting(), { drafts: [draft] }))
+    expect(it.kind).toBe('ready')
+    expect(it.packageId).toBe(PKG)
+    expect(goOf(it)).toBeNull()
+  })
+
+  test('whose go: the sender\'s; nobody named is the founder\'s; a teammate\'s client gets nothing for a go that is not theirs', async () => {
+    // Asif's own go, on his own feed: his, pinned at once
+    const asif = listed(as(ASIF, 'builder', waiting({ go_by: 'Asif@Example.com' })))
+    expect(goMine(asif)).toBe(true)
+    expect(pinsFor(asif, wed)).toBe(true)
+    expect(withTeammate(asif)).toBe(false)
+    // nobody named: the founder's, never a builder's
+    expect(goMine(listed(as(ROB, 'founder', waiting({ go_by: null }))))).toBe(true)
+    expect(buildQueue(as('builder-a@example.com', 'builder', waiting({ go_by: null })), wed)).toEqual([])
+    // Rob's go, on a builder's feed: nothing
+    expect(buildLists(as('builder-a@example.com', 'builder', waiting()), wed)).toEqual({ queue: [], teammate: [], checking: [] })
+  })
+
+  test('a teammate\'s go, for oversight: the PM checks 5 business hours before the first step; the founder never pins for it (0.7.21); until then With a teammate', async () => {
+    const mate = (role: string, member: string, firstH: number) => listed(as(member, role, waiting({ go_by: ASIF, go_first_at: new Date(wed + firstH * H).toISOString() })))
+    const far = mate('founder', ROB, 30)
+    expect(goOf(far)).toMatchObject({ mine: false, by: 'Asif' })
+    expect(far.theirs).toBe('Asif')
+    expect(withTeammate(far)).toBe(true)
+    expect(buildQueue(as(ROB, 'founder', waiting({ go_by: ASIF })), wed)).toEqual([])
+    expect(titleFor(far, wed)).toBe('🟡 with Asif · Dealerosity · follow-ups need a go · first text Thu Nov 5')
+    // the founder: never pinned for a teammate's part (0.7.21), near or late
+    for (const h of [30, 1, -2]) expect(pinsFor(mate('founder', ROB, h), wed)).toBe(false)
+    expect(watchOf(far)).toEqual([])
+    // the PM: 6 hours out no, 4 yes, named for who to check on
+    const pmFar = mate('pm', H9, 6)
+    expect(watchOf(pmFar)).toEqual([{ by: 'Asif', due: wed + 6 * H, what: 'follow-ups go' }])
+    expect(pinsFor(pmFar, wed)).toBe(false)
+    const near = mate('pm', H9, 4)
+    expect(pinsFor(near, wed)).toBe(true)
+    expect(pinTitle(near, wed)).toBe('🔴 Dealerosity · check on Asif · follow-ups go due 3:52 PM')
+    expect(pinTitle(mate('pm', H9, -2), wed)).toBe('🔴 Dealerosity · check on Asif · follow-ups go 2h late')
+    // the note and the kickoff never tell the viewer to approve them
+    expect(noteText(far, ROB)).toBe(`Package 3bacdfc2 holds 3 proposed follow-up steps that wait for Asif's go; the first, a text, opens Thu, Nov 5 5:52 PM ET. They are Asif's to approve, not Rob's.`)
+    expect(goKickoff(far, 'Dealerosity')).toContain("do not take it and do not approve it: the go is Asif's.")
+    expect(waitingText(far)).toBe("3 follow-ups need Asif's go")
+    // a teammate who is neither the founder nor the PM: nothing of Asif's
+    expect(buildLists(as('builder-a@example.com', 'builder', waiting({ go_by: ASIF })), wed)).toEqual({ queue: [], teammate: [], checking: [] })
+  })
+
+  test('beside a client message: the reply leads, the go rides along in the note, the kickoff and the pane, and it still pins at once', async () => {
+    const msg = { ...mail(DEALEROSITY, 'Dealerosity — Nicole Bassuk', 0, ROB), received_at: new Date(wed - H).toISOString(), reply_due_at: new Date(wed + 23 * H).toISOString() }
+    const it = listed(as(ROB, 'founder', waiting(), { mail: [msg] }))
+    expect(it.kind).toBe('reply')
+    expect(goOnly(it)).toBe(false)
+    expect(goMine(it)).toBe(true)
+    expect(titleFor(it, wed)).toContain('Dealerosity · reply')
+    expect(goParagraph(it)).toBe('Package 3bacdfc2 also holds 3 follow-up step(s) that nobody has approved, the first (a text) opening Fri, Nov 6 9:30 AM ET. Show them with client-reply-prep §9 for package 3bacdfc2 once the rest is done, and wait for my go on them.')
+    expect(kickoffText(it)).toContain(goParagraph(it))
+    expect(noteText(it, ROB)).toContain(goSentence(it, ROB))
+    expect(waitingText(it)).toBe('1 message waiting, 3 follow-ups need your go')
+    expect(clientMarkdown(it, wed)).toContain('### Follow-ups need your go (3 steps)')
+  })
+
+  test('the cut: a first step whose window opened before it is not considered; one late since it lists and pins', async () => {
+    const mon = Date.parse('2026-11-30T14:00:00Z') // Mon 11/30, the cut 3 weeks back is Mon 11/9
+    expect(buildQueue(as(ROB, 'founder', waiting()), mon)).toEqual([])
+    const late = listed(as(ROB, 'founder', waiting({ go_first_at: '2026-11-25T14:30:00.000Z' })), mon)
+    expect(pinsFor(late, mon)).toBe(true)
+    // Wed 9:30 AM to Mon 9 AM: two whole business days (R16), the weekend not counted
+    expect(titleFor(late, mon)).toBe('🔴 2d late, due Wed 9:30 AM · Dealerosity · follow-ups need your go · first text Wed Nov 25')
+  })
+
+  test('an undated first step (OW could not date it): listed with no due date, still the viewer\'s to give, still pinned', async () => {
+    const it = listed(as(ROB, 'founder', waiting({ go_first_at: null })))
+    expect(it.noDue).toBe(true)
+    expect(goFirstText(goOf(it) as NonNullable<ReturnType<typeof goOf>>)).toBe('first text')
+    expect(titleFor(it, wed)).toBe('🟡 Dealerosity · follow-ups need your go · first text · no due date')
+    expect(pinsFor(it, wed)).toBe(true)
+  })
+
+  test('the words, and an item an older version stored (no `go`): read as none', async () => {
+    expect(GO_WHAT).toBe('follow-ups need your go')
+    expect(GO_THEIRS).toBe('follow-ups need a go')
+    expect(['client_sms', 'client_email', 'linkedin_voice', 'call_task', 'other'].map(stepWord)).toEqual(['text', 'email', 'LinkedIn', 'call', 'step'])
+    const it = listed(as(ROB, 'founder', waiting()))
+    const old = JSON.parse(JSON.stringify({ ...it, go: undefined, kind: 'task' })) as QueueItem
+    expect(goOf(old)).toBeNull()
+    expect(goMine(old)).toBe(false)
+    // stored and read back: the same go, the same pin
+    const back = JSON.parse(JSON.stringify(it)) as QueueItem
+    expect(goOf(back)).toEqual(goOf(it))
+    expect(pinsFor(back, wed)).toBe(true)
+    // a store edited by hand is data: a go with a bad package id is none
+    expect(goOf({ go: { ...(goOf(it) as NonNullable<ReturnType<typeof goOf>>), packageId: 'x' } })).toBeNull()
+  })
+})
+
 // ======================================================================== 0.7.23 (Rob, 2026-11-05)
 
 // Rob, 2026-11-05: "I thought we made it so that when a teammate's holding it, but it's late, it shows up on the morning
@@ -3290,5 +3474,48 @@ describe('0.7.23 C (Rob, 11-05: "when a teammate\'s holding it, but it\'s late, 
     // Asif's own feed: the package he holds is his, as before
     const mine = buildLists({ member: ASIF, role: 'builder', mail: [], drafts: [flagged(-24)] }, wed)
     expect(mine.queue.map(i => [i.kind, i.okLate])).toEqual([['ready', undefined]])
+  })
+})
+
+describe('0.7.24 beside 0.7.23: the founder\'s own go on a client whose package flagged for his OK is a teammate\'s and late', () => {
+  /** Wed 2026-10-28 3 PM in New York. Every client, package and address below is made up. */
+  const wed = Date.parse('2026-10-28T19:00:00Z')
+  const H = 3_600_000
+  const at = (h: number) => new Date(wed + h * H).toISOString()
+  const ROB = 'rob@massmarket.ai'
+  const ASIF = 'asif@example.com'
+  const CLIENT = 'bbbbbbbb-0000-4000-8000-000000000724'
+  const PKG = 'cccccccc-0000-4000-8000-000000000724'
+  const GO = 'eeeeeeee-0000-4000-8000-000000000724'
+  const flagged = {
+    package_id: PKG, project_id: CLIENT, project_name: 'Acme Legal', covers_through: at(-30), due_at: at(-24), drafts_ready: 2, flagged_for_rob: true, project_owner_email: ASIF,
+    status: 'picked_up', picked_up_by: ASIF, picked_up_at: at(-20), drafts_unsent: 2,
+  }
+  const followups = (by: string): FeedFollowups => ({ active: 0, next_at: null, next_kind: null, awaiting_go: 2, go_package_id: GO, go_first_at: at(20), go_first_kind: 'client_email', go_by: by, go_steps: 2 })
+  const feed = (by: string): Feed => ({ member: ROB, role: 'founder', mail: [], drafts: [flagged], projects: [{ project_id: CLIENT, name: 'Acme Legal', followups: followups(by) }] })
+
+  test('his go is his own: listed and pinned for it, named for it, the late package still under Team · late', async () => {
+    const l = buildLists(feed(ROB), wed)
+    expect(l.queue).toHaveLength(1)
+    const it = l.queue[0] as QueueItem
+    expect(it).toMatchObject({ kind: 'ok', theirs: 'Asif', okLate: { by: 'Asif', id: PKG } })
+    expect(goMine(it)).toBe(true)
+    expect(ownBesides(it)).toBe(true)
+    expect(okLateOnly(it)).toBe(false)
+    expect(teamLateOnly(it)).toBe(false)
+    expect(pinsFor(it, wed)).toBe(true)
+    expect(pinTitle(it, wed)).toContain('Acme Legal · follow-ups need your go · first email Thu Oct 29')
+    expect(pinTitle(it, wed)).not.toMatch(/needs your OK/)
+    expect(teamLate([it]).flatMap(t => t.clients.flatMap(c => c.refs.map(r => r.id)))).toEqual([PKG])
+  })
+
+  test('a teammate\'s go there is not his: the client stays the teammate\'s, never pinned', async () => {
+    const l = buildLists(feed(ASIF), wed)
+    expect(l.queue).toEqual([])
+    const it = [...l.teammate, ...l.checking][0] as QueueItem
+    expect(goMine(it)).toBe(false)
+    expect(ownBesides(it)).toBe(false)
+    expect(okLateOnly(it)).toBe(true)
+    expect(pinsFor(it, wed)).toBe(false)
   })
 })

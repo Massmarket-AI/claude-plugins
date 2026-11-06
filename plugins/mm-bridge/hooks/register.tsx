@@ -7,9 +7,10 @@ import {
   peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
   asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText, undatedOnly,
   hasDue, clientActivity, isRecent, mayStart,
-  pinsFor, pinTitle,
+  pinsFor, pinTitle, threadWhy,
   teamLate, teamLateCount, teamLateSegment, teamLateWho, LATE_WITH_TEAM,
   teamLateOnly,
+  goOf, goMine, goOnly,
 } from './queue'
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
@@ -3093,7 +3094,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       const client = cleanName(at ? at.it.client : pins[sid]?.client)
       if (!client) continue
       // (a time only for the person's own list: a teammate's late ticket is not his to answer)
-      const what = at && at.listed === 'items' && hasDue(at.it) ? (at.it.kind === 'task' ? 'task' : at.it.kind === 'ask' || at.it.kind === 'queue' ? '' : 'reply') : ''
+      const what = at && at.listed === 'items' && hasDue(at.it) ? (at.it.kind === 'task' ? 'task' : at.it.kind === 'ask' || at.it.kind === 'queue' || at.it.kind === 'go' ? '' : 'reply') : ''
       const transcript = said ? transcriptPath(h, said.cwd, said.cli) : undefined
       const title = typeof titles[sid] === 'string' && titles[sid] ? titles[sid] : undefined
       found.push({
@@ -3350,9 +3351,13 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
 import { cardHooks, cardOf, clearCard, currentOf, drawCard, marksOf, noteCurrent, prepareCard, pressAsk, pressSign, resetCard, showKept, togglePage } from './card'
 import { holderName } from './queue'
 
-/** The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that waits for his OK. */
+/**
+ * The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that
+ * waits for his OK. (0.7.24) A client listed by follow-up steps that wait for a go alone: their follow-ups-only package,
+ * whose page lists every step in full (read, never picked up, by drawing it).
+ */
 function pickupOf(it: QueueItem): string | null {
-  const packageId = it.packageId ?? (it.kind === 'ok' ? ((it.open ?? null)?.id ?? null) : null)
+  const packageId = it.packageId ?? (it.kind === 'ok' ? ((it.open ?? null)?.id ?? null) : null) ?? (goOnly(it) ? (goOf(it)?.packageId ?? null) : null)
   return packageId && isUuid(packageId) ? packageId : null
 }
 
@@ -3733,7 +3738,23 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
   const missing = needingThreads(last, links, now).length + awayOffList(last, links).length
   // In a waiting client's thread the line carries the button that opens its part of the pane.
   const mine = me ? ownerOf(me, links) : undefined
-  return mine && items.some(i => i.projectId === mine) ? { text, drafts: true, at: last.at, missing } : { text, at: last.at, missing }
+  const band: MmBand = mine && items.some(i => i.projectId === mine) ? { text, drafts: true, at: last.at, missing } : { text, at: last.at, missing }
+  // (0.7.25) and, in a client's own thread, why it is pinned or why no pin is needed
+  const why = mine && me ? await whyHere($, last, mine, me, now) : ''
+  return why ? { ...band, why } : band
+}
+
+/**
+ * (0.7.25, Rob asked about 52 times in six weeks why a thread was pinned or not) The band's `why` line in the thread linked
+ * to `pid`: the client as the last sync listed it (Needs you, With a teammate or checking), or clear, and the pin record
+ * the sync left on the thread (the person's own, or one the bridge put back over their unpin). From the store alone.
+ */
+async function whyHere($: EngineInterface, last: Last, pid: string, sid: string, now: number): Promise<string> {
+  const listed = [...last.items, ...(Array.isArray(last.teammate) ? last.teammate : []), ...(Array.isArray(last.checking) ? last.checking : [])].find(i => i && i.projectId === pid)
+  const record = (await storeGet<Record<string, Pin>>($, 'mm.pins', {}))[sid]
+  const pin = record && record.projectId === pid ? record : undefined
+  const client = listed?.client ?? pin?.client ?? clientInTitle((await storeGet<Record<string, string>>($, 'mm.titles', {}))[sid] ?? '')
+  return threadWhy(listed, client, now, { person: pin ? pin.byUs !== true : false, again: pin?.again === true })
 }
 
 /** Works the band's line out again and redraws it when it changed. */
@@ -3742,7 +3763,7 @@ async function refreshBand($: EngineInterface): Promise<void> {
     const band = await bandLine($)
     const { value: was } = await $.state.get(BAND)
     // (0.5.4) the sync it was drawn from is kept with it, so a thread can tell it is behind the store (`catchUp`)
-    if ((was?.text ?? '') !== band.text || Boolean(was?.drafts) !== Boolean(band.drafts) || was?.at !== band.at || (was?.missing ?? 0) !== (band.missing ?? 0)) await $.state.set(BAND, band)
+    if ((was?.text ?? '') !== band.text || Boolean(was?.drafts) !== Boolean(band.drafts) || was?.at !== band.at || (was?.missing ?? 0) !== (band.missing ?? 0) || (was?.why ?? '') !== (band.why ?? '')) await $.state.set(BAND, band)
   } catch {
     // the band is a convenience: it never breaks a sync or a command
   }
@@ -4248,10 +4269,11 @@ function startTitle(it: QueueItem): string {
  * internal asks) A client listed by the viewer's internal asks alone: `<client>: reply to the internal ask`. (0.7.3) The
  * internal-ops item listed by the viewer's internal queue alone: `<client>: work the internal queue`. (0.7.4) Listed by
  * tickets that owe an ETA alone: `<client>: give your ETA`; a teammate's own internal tasks: `<client>: work the internal
- * task`, never a reply. (0.7.15) Listed by tickets to give an owner alone: `<client>: assign an owner`.
+ * task`, never a reply. (0.7.15) Listed by tickets to give an owner alone: `<client>: assign an owner`. (0.7.24) Listed by
+ * follow-up steps that wait for a go alone: `<client>: give the go on the follow-ups` (a teammate's: `check on the follow-ups`).
  */
 function startWhat(it: QueueItem): string {
-  return `${it.client}: ${it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : it.kind === 'ask' ? 'reply to the internal ask' : etaOnly(it) ? 'give your ETA' : assignOnly(it) ? 'assign an owner' : it.kind === 'queue' ? 'work the internal queue' : it.internal === true && it.messages === 0 ? 'work the internal task' : 'reply to the client'}`
+  return `${it.client}: ${goOnly(it) ? (goMine(it) ? 'give the go on the follow-ups' : 'check on the follow-ups') : it.kind === 'ok' ? 'needs your OK' : it.open && withHolder(it.open) ? `reply drafts are with ${it.open.by}` : it.kind === 'ready' ? 'review the reply drafts' : it.kind === 'ask' ? 'reply to the internal ask' : etaOnly(it) ? 'give your ETA' : assignOnly(it) ? 'assign an owner' : it.kind === 'queue' ? 'work the internal queue' : it.internal === true && it.messages === 0 ? 'work the internal task' : 'reply to the client'}`
 }
 
 /** 0.5.1's line under that title. */
@@ -8599,7 +8621,7 @@ export const register: Register = on => {
     const { Box, Button, Text } = $.ui.resolve(e) as Partial<ReturnType<typeof $.ui.resolve>> & Pick<ReturnType<typeof $.ui.resolve>, 'Box' | 'Text'>
     const missing = Number(band?.missing) || 0
     // a surface that draws no button there says how to open the list instead
-    const line = !band?.text ? null : !Button ? (
+    const row = !band?.text ? null : !Button ? (
       <Text>{bandWords(band.text, false)}</Text>
     ) : (
       <Box flexDirection="row" gap={1}>
@@ -8612,6 +8634,14 @@ export const register: Register = on => {
         {band.drafts ? <Button key="mm-open-drafts" label="Drafts" onPress={() => void openDrafts($)} /> : null}
       </Box>
     )
+    // (0.7.25) in a client's own thread, why it is pinned or why no pin is needed, on its own line above the band
+    const why = row && typeof band?.why === 'string' && band.why ? <Text key="mm-why">{band.why}</Text> : null
+    const line = row && why ? (
+      <Box flexDirection="column">
+        {why}
+        {row}
+      </Box>
+    ) : row
     const suggest = asking && Array.isArray(nudge?.suggest) ? nudge.suggest.slice(0, 2) : []
     const ask = !asking ? null : (
       <Box key="mm-nudge" flexDirection="row" gap={1}>

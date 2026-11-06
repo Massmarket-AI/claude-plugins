@@ -3343,8 +3343,12 @@ describe('the band above the prompt: what needs the person, from any thread', ()
     const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }) })
     await started($, w)
     // (0.5.4, C3) the no-thread chips are in this thread, Acme's: the band names a thread of the bridge's by its client
+    // (0.7.25) and above it, in Acme's own thread, why the thread is pinned
     expect(await drawn($)).toEqual({
-      texts: [`Needs you: 1 pinned · 2 with no thread: Cedar Dental, Bolt Staffing. ${chipIn('Cedar Dental', '4 PM', 'Acme Roofing')} ${chipIn('Bolt Staffing', 'Tue 9 AM', 'Acme Roofing')}`],
+      texts: [
+        'Pinned for you, due Tue 8 AM (21h left): the reply to Acme Roofing is drafted and yours to send.',
+        `Needs you: 1 pinned · 2 with no thread: Cedar Dental, Bolt Staffing. ${chipIn('Cedar Dental', '4 PM', 'Acme Roofing')} ${chipIn('Bolt Staffing', 'Tue 9 AM', 'Acme Roofing')}`,
+      ],
       buttons: [['mm-start-missing', 'Start missing threads (2)'], ['mm-open-drafts', 'Drafts']],
     })
   })
