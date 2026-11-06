@@ -198,7 +198,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.23'
+export const VERSION = '0.7.25'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -3346,6 +3346,10 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
   await showQueue($, memberText(last.member), items, rowsOf(items, true), Number(last.pinned) || 0, now, { teammate: rowsOf(teammate.filter(it => !teamLateOnly(it))), checking: rowsOf(checking), team }, at, last)
 }
 
+// (0.7.25) The reply-package card: prepared on arrival, drawn natively above the page (card.tsx).
+import { cardHooks, cardOf, clearCard, currentOf, drawCard, marksOf, noteCurrent, prepareCard, pressAsk, pressSign, resetCard, showKept, togglePage } from './card'
+import { holderName } from './queue'
+
 /** The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that waits for his OK. */
 function pickupOf(it: QueueItem): string | null {
   const packageId = it.packageId ?? (it.kind === 'ok' ? ((it.open ?? null)?.id ?? null) : null)
@@ -3361,7 +3365,9 @@ async function renderPickup($: EngineInterface, it: QueueItem): Promise<string |
       headers: { Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER },
     })
     if (r.ok) {
-      const j = JSON.parse(r.text) as { markdown?: string }
+      const j = JSON.parse(r.text) as { markdown?: string; package_sha256?: unknown }
+      // (0.7.25) the package's hash as it stands: the card is offered for signing only when drawn from it
+      noteCurrent(packageId, j.package_sha256)
       if (j.markdown) return j.markdown
     }
   } catch {
@@ -3458,6 +3464,8 @@ async function beginClient($: EngineInterface, it: QueueItem, own: boolean, atOn
   const self = packageId ? '' : (await selfLiner($, now))(it, storedRec(await storeGet<Last | null>($, 'mm.last', null), it.projectId))
   if (!packageId) {
     await draw(clientMarkdown(it, now, recentAskPages(it, now), self))
+    // (0.7.25) no package, no card
+    if (await newest()) await clearCard($)
     // (0.5.28, internal asks) a client with open asks: their pages are read in the step this answers
     if (!asking) return async () => {}
     return async () => {
@@ -3468,6 +3476,8 @@ async function beginClient($: EngineInterface, it: QueueItem, own: boolean, atOn
   if (atOnce) {
     const seen = pickups.get(packageId)
     await draw(seen && now - seen.at < PICKUP_REUSE_MS ? withAsks(withBanner(seen.text), recentAskPages(it, now), now) : [`## ${it.projectName}`, titleFor(it, now), CHECKING].join('\n\n'))
+    // (0.7.25) the card this session already drew for the package, at once (its box waits for the pickup read)
+    await showKept($, { packageId, projectId: it.projectId, client: it.client, own, current: currentOf(packageId, seen?.text ?? null), isNewest: newest })
   }
   return async () => {
     const view = await renderPickup($, it)
@@ -3479,6 +3489,12 @@ async function beginClient($: EngineInterface, it: QueueItem, own: boolean, atOn
     const pages = asking ? await askPages($, it) : {}
     const at = await $.clock.now()
     await draw(view ? withAsks(withBanner(view), pages, at) : clientMarkdown(it, at, pages))
+    // (0.7.25) the card for this version of the package: kept, or drawn now on this computer (about 4 s)
+    const last = await storeGet<Last | null>($, 'mm.last', null)
+    await prepareCard($, {
+      packageId, projectId: it.projectId, client: it.client, own, current: currentOf(packageId, view), isNewest: newest,
+      signer: last?.member ? holderName(last.member) : 'Approver', home: await home($),
+    })
   }
 }
 
@@ -3486,6 +3502,7 @@ async function beginClient($: EngineInterface, it: QueueItem, own: boolean, atOn
 async function clearClient($: EngineInterface): Promise<() => Promise<void>> {
   await newDraw($)
   await $.state.set(VIEW, { text: '', heading: '' })
+  await resetCard($)
   return async () => {}
 }
 
@@ -8661,6 +8678,11 @@ export const register: Register = on => {
     const routeTo = queue && Array.isArray(queue.routeTo) ? queue.routeTo : []
     const ui = people.length ? await peopleUi($) : {}
     const client = await clientPart($)
+    // (0.7.25) the reply-package card, above the page it draws (the page folds under it once the card is drawn)
+    const card = await cardOf($)
+    const cardMarks = await marksOf($)
+    const cardNow = await $.clock.now()
+    const cardShown = Boolean(client.text && card?.packageId && card.tree)
     // (0.6.0) this thread's Tracking part: what it is counted to, and the time tracked to that project
     const { value: track } = await $.state.get(TRACK)
     const tracking = track && track.pid && Array.isArray(track.lines) && track.lines.length ? track : undefined
@@ -8799,7 +8821,8 @@ export const register: Register = on => {
         {client.text ? (
           <Box key="mm-client" flexDirection="column" marginBottom={1}>
             {client.heading ? <Text bold>{client.heading}</Text> : null}
-            <Markdown text={client.text} />
+            {cardShown ? drawCard($.ui.resolve(e) as Parameters<typeof drawCard>[0], { card: card, marks: cardMarks, now: cardNow, onSign: label => void pressSign($, label), onAsk: words => void pressAsk($, words), onPage: () => void togglePage($) }) : null}
+            {cardShown && !cardMarks.pageOpen ? null : <Markdown text={client.text} />}
           </Box>
         ) : null}
         {hasList && queue ? <Text bold>{queue.header}</Text> : <Text dimColor>{CHECKING}</Text>}
@@ -8878,4 +8901,7 @@ export const register: Register = on => {
       </Box>
     )
   })
+
+  // (0.7.25) A response of this thread that prints a pickup page opens the card's signature for that package's tag.
+  cardHooks(on)
 }
