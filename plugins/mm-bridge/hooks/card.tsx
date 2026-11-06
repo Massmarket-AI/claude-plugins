@@ -21,15 +21,18 @@
  * - It replaces the page. (0.7.30, Rob, 2026-11-06: "the copy passes. I already think we should go ahead and implement that
  *   for everybody.") A thread asks `mm card <package id>` at pickup (`cardVerdict`): ready, it prints one line and waits;
  *   not ready, it prints the whole page, so a computer where the card cannot be drawn blocks nobody.
+ * - The card on screen is the current render. (0.7.30) Plan state, the follow-up switch and rolled dates are in no hash, so
+ *   `mm card` and a press each read OW's page and render again (`refreshCard`). OW with no usable hash means not ready. A
+ *   fresh card that differs replaces the kept one, and a press in that state records nothing: the box says to read it again.
  * - Signing never sends. The box writes the signer's name in, records the signature for the send gate
- *   (~/.claude/mm-hooks/card-signed.jsonl), folds the letter into an envelope, and puts exactly `Send package <12>` in the
- *   person's prompt box, as the Start buttons fill it. The person sends it with Enter; the thread then runs the go of §9.5.
- *   A draft of theirs in the box is never written over.
+ *   (~/.claude/mm-hooks/card-signed.jsonl, with the hash of the page it was checked against), folds the letter into an
+ *   envelope, and puts exactly `Send package <12>` in the person's prompt box, as the Start buttons fill it. The person sends
+ *   it with Enter; the thread then runs the go of §9.5. A draft of theirs in the box is never written over.
  */
 import type { BoxProps, ButtonProps, ElementConstructor, EngineInterface, LinkProps, RenderNode, SvgProps, TextProps } from 'claude-code'
 
 import type { MmCard, MmCardMarks, MmCardNode, MmCardRun, MmCardSigned, MmCardTree } from '../types'
-import { pageGap } from './card-parity'
+import { isOwUrl, pageGap } from './card-parity'
 
 const CARD = { plugin: 'mm-bridge', key: 'card' } as const
 const CARD_MARKS = { plugin: 'mm-bridge', key: 'cardMarks' } as const
@@ -47,6 +50,12 @@ const NODES_MAX = 5_000
 const DEPTH_MAX = 24
 /** The signature records kept in the send gate's file: the newest. */
 const SIGNED_KEEP = 200
+/** The largest record file read (`$.fs.read` refuses past it): a file this large is left alone, and nothing is signed. */
+const SIGNED_MAX_BYTES = 4 * 1024 * 1024
+/** How long a signature stands: the send gate asks for a new one past this, so the box then offers one. */
+export const SIGN_VALID_MS = 2 * 60 * 60 * 1000
+/** A press still checking the package after this has died: the box opens again. */
+const CHECKING_MS = 120_000
 /** How long the signature and the envelope take before the words go in the prompt box (the widget's 3.05 s). */
 export const SIGN_FILL_MS = 3_050
 /** A signature older than this is drawn still, without the animation. */
@@ -61,6 +70,10 @@ const cards = new Map<string, MmCardTree>()
 const running = new Map<string, Promise<MmCardTree | string>>()
 /** The package's hash as the last pickup read gave it, by package id. */
 const currents = new Map<string, string>()
+/** The page a kept card with a gap was last drawn again for, by package id: one new render for each new page, not one a draw. */
+const redrawnFor = new Map<string, string>()
+/** (0.7.30) The card the pane last put on the screen, by what it holds. Nothing while the client part shows none. */
+let onScreen: { packageId: string; key: string } | null = null
 
 /**
  * (0.7.30) What the pane says when the card cannot be drawn on this computer, in place of the renderer's own error: the raw
@@ -112,7 +125,10 @@ function readRun(v: unknown): MmCardRun | null {
   const c = str(o.c, 200)
   if (c) run.c = c
   const href = str(o.href, 2048)
-  if (href && /^https?:\/\/[^\s<>"']+$/.test(href)) run.href = href
+  // ⛔ never a link to the Onboarding Wizard (Rob, 2026-11-06), whichever renderer drew this
+  if (href && /^https?:\/\/[^\s<>"']+$/.test(href) && !isOwUrl(href)) run.href = href
+  const m = str(o.m, 20)
+  if (m && /^\d{15,20}$/.test(m)) run.m = m
   const fp = str(o.fp, 8)
   if (fp && /^[0-9a-f]{8}$/.test(fp)) run.fp = fp
   return run
@@ -176,6 +192,7 @@ export function readTree(v: unknown): MmCardTree | null {
     blocks: Number.isInteger(o.blocks) ? (o.blocks as number) : -1,
     signer: (str(o.signer, 80) ?? '').trim() || 'Approver',
     can_sign: o.can_sign === true,
+    images: Number.isInteger(o.images) && (o.images as number) > 0 ? (o.images as number) : 0,
     rendered_at: str(o.rendered_at, 40) ?? '',
     nodes,
   }
@@ -217,9 +234,10 @@ export function signOf(tree: MmCardTree | null): { label: string; signer: string
 
 // ---------------------------------------------------------------- the package as it stands
 
-/** What the pickup read said of the package's hash: OW's `package_sha256`. Called by the pickup read. */
+/** What the pickup read said of the package's hash: OW's `package_sha256`. An answer with no usable hash clears the old one. */
 export function noteCurrent(packageId: string, sha: unknown): void {
   if (typeof sha === 'string' && SHA.test(sha)) currents.set(packageId, sha)
+  else currents.delete(packageId)
 }
 
 /** The package's hash as last read: OW's full hash, else the 12 of a page drawn locally, else null. */
@@ -284,7 +302,34 @@ async function render($: EngineInterface, home: string, packageId: string, signe
 function keep(packageId: string, tree: MmCardTree): void {
   cards.delete(packageId)
   cards.set(packageId, tree)
-  for (const old of [...cards.keys()].slice(0, Math.max(0, cards.size - CARDS_MAX))) cards.delete(old)
+  for (const old of [...cards.keys()].slice(0, Math.max(0, cards.size - CARDS_MAX))) {
+    cards.delete(old)
+    redrawnFor.delete(old)
+  }
+}
+
+/** One read of OW's page for a package: its markdown and OW's hash from the same answer. Either is null when unusable. */
+export type PageRead = { markdown: string | null; sha: string | null }
+
+/** Lowercase hex SHA-256 of the exact UTF-8 bytes of a string, as the send gate recomputes it for the page. */
+export async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** A short key for all that a card draws, to tell which card reached the screen. */
+function keyOf(tree: MmCardTree): string {
+  return `${tree.package_sha256 ?? ''}:${fnv1a(JSON.stringify(tree.nodes))}`
+}
+
+/** The pane says which card it just drew, or that it drew none. Called from its render. */
+export function noteDrawn(card: MmCard | null): void {
+  onScreen = card?.tree && card.packageId ? { packageId: card.packageId, key: keyOf(card.tree) } : null
+}
+
+/** This card of this package is what the pane last drew. */
+export function isOnScreen(packageId: string, tree: MmCardTree | null): boolean {
+  return Boolean(tree && onScreen && onScreen.packageId === packageId && onScreen.key === keyOf(tree))
 }
 
 export type CardFor = {
@@ -302,6 +347,14 @@ export type CardFor = {
   note: (line: string) => Promise<void>
   /** Whether this draw of the client part is still the session's newest. */
   isNewest: () => Promise<boolean>
+}
+
+/** (0.7.30) The raw error of a render goes in the log, once a reason, and never in the pane. Cut before any JSON it quotes: that is the package. */
+async function noteFailure(note: (line: string) => Promise<void>, packageId: string, got: string): Promise<void> {
+  const key = `${packageId}\n${got}`
+  if (notedFailures.has(key)) return
+  notedFailures.add(key)
+  await note(`card for package ${packageId} could not be drawn: ${got.split('{')[0]?.trim() ?? ''}`).catch(() => {})
 }
 
 /** (0.7.30) The card's gap against the page, for a card drawn from the package as it stands: any other is held as stale. */
@@ -332,10 +385,13 @@ export async function prepareCard($: EngineInterface, f: CardFor): Promise<void>
   try {
     const kept = cards.get(f.packageId) ?? null
     const base = { packageId: f.packageId, projectId: f.projectId, client: f.client, own: f.own, current: f.current }
-    if (kept && isFresh(kept, f.current)) {
-      if (await f.isNewest()) await $.state.set(CARD, { ...base, tree: kept, status: 'ready', ...gapOf(kept, f.page, f.current), at: await $.clock.now() } satisfies MmCard)
+    // (0.7.30) a gap is drawn again once for each new page: rolled dates, a Cc or the follow-up switch are in no hash
+    const gap = gapOf(kept, f.page, f.current)
+    if (kept && isFresh(kept, f.current) && (!gap.gap || !f.page || redrawnFor.get(f.packageId) === f.page)) {
+      if (await f.isNewest()) await $.state.set(CARD, { ...base, tree: kept, status: 'ready', ...gap, at: await $.clock.now() } satisfies MmCard)
       return
     }
+    if (kept && f.page && gap.gap) redrawnFor.set(f.packageId, f.page)
     if (await f.isNewest()) await $.state.set(CARD, { ...base, tree: kept, status: 'rendering', at: await $.clock.now() } satisfies MmCard)
     const got = await render($, f.home, f.packageId, f.signer)
     if (typeof got !== 'string') keep(f.packageId, got)
@@ -343,15 +399,51 @@ export async function prepareCard($: EngineInterface, f: CardFor): Promise<void>
     const at = await $.clock.now()
     if (typeof got === 'string') {
       await $.state.set(CARD, { ...base, tree: kept, status: 'failed', error: got, at } satisfies MmCard)
-      // (0.7.30) the raw error goes here and never in the pane. Cut before any JSON the renderer's error quotes: that is the package.
-      const key = `${f.packageId}\n${got}`
-      if (!notedFailures.has(key)) {
-        notedFailures.add(key)
-        await f.note(`card for package ${f.packageId} could not be drawn: ${got.split('{')[0]?.trim() ?? ''}`).catch(() => {})
-      }
+      await noteFailure(f.note, f.packageId, got)
     } else await $.state.set(CARD, { ...base, tree: got, status: 'ready', ...gapOf(got, f.page, f.current), at } satisfies MmCard)
   } catch {
     // the page stands alone
+  }
+}
+
+/**
+ * (0.7.30) The card brought up to what the package is now, from one read of OW's page: drawn again, and if its words differ
+ * from the kept card's, the kept card replaced. Plan state, the follow-up switch and rolled dates are in no hash, so a hash
+ * that matches proves none of them. OW with no usable hash, or a page it did not give, closes the box. Never throws.
+ * Says what became of it: `same`, `changed`, `no-hash`, `failed`, or `other` when the pane no longer holds this package.
+ */
+export async function refreshCard(
+  $: EngineInterface,
+  f: { packageId: string; signer: string; home: string; note: (line: string) => Promise<void> },
+  read: PageRead,
+): Promise<'same' | 'changed' | 'no-hash' | 'failed' | 'other'> {
+  try {
+    const was = await cardOf($)
+    if (was.packageId !== f.packageId) return 'other'
+    if (!read.sha || !read.markdown) {
+      const { gap: _gap, ...rest } = was
+      await $.state.set(CARD, { ...rest, current: null, at: await $.clock.now() } satisfies MmCard)
+      return 'no-hash'
+    }
+    // a render running began before this read, so it says nothing of the package now: wait for it, then draw again
+    await running.get(f.packageId)?.catch(() => undefined)
+    const got = await render($, f.home, f.packageId, f.signer)
+    const now = await cardOf($)
+    if (now.packageId !== f.packageId) return 'other'
+    const at = await $.clock.now()
+    if (typeof got === 'string') {
+      const { gap: _gap, ...rest } = now
+      await $.state.set(CARD, { ...rest, current: read.sha, status: 'failed', error: got, at } satisfies MmCard)
+      await noteFailure(f.note, f.packageId, got)
+      return 'failed'
+    }
+    keep(f.packageId, got)
+    const same = Boolean(now.tree) && now.tree?.package_sha256 === got.package_sha256 && JSON.stringify(now.tree?.nodes) === JSON.stringify(got.nodes)
+    const { gap: _gap, error: _error, ...rest } = now
+    await $.state.set(CARD, { ...rest, tree: same ? now.tree : got, current: read.sha, status: 'ready', ...gapOf(got, read.markdown, read.sha), at } satisfies MmCard)
+    return same ? 'same' : 'changed'
+  } catch {
+    return 'failed'
   }
 }
 
@@ -379,6 +471,8 @@ export async function marksOf($: EngineInterface): Promise<MmCardMarks> {
   return {
     signed: value?.signed && typeof value.signed === 'object' ? (value.signed as Record<string, MmCardSigned>) : {},
     ...(value?.pageOpen === true ? { pageOpen: true } : {}),
+    ...(value?.checking ? { checking: value.checking } : {}),
+    ...(value?.notice ? { notice: value.notice } : {}),
   }
 }
 
@@ -406,7 +500,8 @@ export function holdOf(card: MmCard): string {
   const sign = signOf(tree)
   if (!tree || !sign) return 'no-sign'
   if (!copyCheck(tree)) return 'drift'
-  if (!isFresh(tree, card.current)) return 'stale'
+  // (0.7.30) a card that could not be drawn again says nothing of the package now, whatever its hash
+  if (!isFresh(tree, card.current) || card.status === 'failed') return 'stale'
   if (!card.own) return 'not-own'
   // (0.7.30) the page holds something this card does not: the thread prints the page, and the go is given from it
   if (card.gap) return 'page'
@@ -429,7 +524,7 @@ export function cardVerdict(card: MmCard, packageId: string): string {
     case 'drift':
       return 'the card does not match the stored drafts'
     case 'stale':
-      return 'the card was drawn from an older version of this package'
+      return card.current ? 'the card was drawn from an older version of this package' : 'OW gave no usable hash for this package'
     case 'not-own':
       return "this is not the client's own thread"
     case 'page':
@@ -439,80 +534,112 @@ export function cardVerdict(card: MmCard, packageId: string): string {
   }
 }
 
-/**
- * (0.7.30) `mm card`'s check against the page as OW prints it now: the card's hash and gap brought up to date in the pane
- * too, so its signature box closes on a package that has moved on, then `cardVerdict`.
- */
-export async function checkCard($: EngineInterface, packageId: string, page: string | null): Promise<string> {
-  const card = await cardOf($)
-  if (card.packageId !== packageId) return cardVerdict(card, packageId)
-  const current = currentOf(packageId, page)
-  const { gap: _was, ...rest } = card
-  const now: MmCard = { ...rest, current, ...gapOf(card.tree, page, current) }
-  if (now.current !== card.current || now.gap !== card.gap) await $.state.set(CARD, now)
-  return cardVerdict(now, packageId)
+/** (0.7.30) Where a press records its signature, how it reads OW's page, and where a record that could not be written is said. */
+export type SignLog = { home: string; note: (line: string) => Promise<void>; readPage: (packageId: string) => Promise<PageRead> }
+
+/** What the file holds now, '' when it is not there yet. ⛔ Anything else throws, so that it is never written over: a read error, a file too large, a link. */
+async function recordsOf($: EngineInterface, path: string): Promise<string> {
+  let stat: { kind: string; size: number; isLink: boolean }
+  try {
+    stat = await $.fs.stat(path)
+  } catch (err) {
+    if (/ENOENT/.test(err instanceof Error ? err.message : String(err))) return ''
+    throw err
+  }
+  if (stat.isLink || stat.kind !== 'file') throw new Error('the record file is not a regular file')
+  if (stat.size > SIGNED_MAX_BYTES) throw new Error('the record file is too large')
+  return $.fs.read(path)
 }
 
-/** (0.7.30) Where a press records its signature, and where a record that could not be written is said. */
-export type SignLog = { home: string; note: (line: string) => Promise<void> }
+/** (0.7.30) One record, with no line break: the exact bytes of the send gate's pinned example (card.test.ts holds it). */
+export async function signatureLine(r: { sessionId: string; packageId: string; sha: string; markdown: string; signer: string; at: number }): Promise<string> {
+  return JSON.stringify({
+    v: 1,
+    session_id: r.sessionId,
+    package_id: r.packageId,
+    package_sha256: r.sha,
+    page_sha256: await sha256Hex(r.markdown),
+    label: r.sha.slice(0, 12),
+    signer: r.signer.trim() || 'Approver',
+    at: new Date(r.at).toISOString(),
+  })
+}
 
 /**
  * (0.7.30) The signature, for the send gate (global-config/hooks/send-gate.js reads this exact shape): one line appended to
  * ~/.claude/mm-hooks/card-signed.jsonl, the newest SIGNED_KEEP kept, mode 0600. `session_id` is `$.session.id()`, the
- * transcript's id: what a PreToolUse hook gets as `session_id`, never the app's `local_` id. ⛔ A failed write is noted and
- * swallowed: the sign flow carries on, and the gate then asks once, which is safe.
+ * transcript's id: what a PreToolUse hook gets as `session_id`, never the app's `local_` id. `page_sha256` is the hash of the
+ * page read for this press, which the gate recomputes at the go. ⛔ False when it could not be written, and the file is left
+ * as it was: no record means nothing is signed, and the box says to try again.
  */
-async function recordSignature($: EngineInterface, card: MmCard, signer: string, log: SignLog): Promise<void> {
+async function recordSignature($: EngineInterface, card: MmCard, signer: string, markdown: string, log: SignLog): Promise<boolean> {
   try {
     const sha = card.tree?.package_sha256
     if (!sha || !SHA.test(sha)) throw new Error('the card has no package hash')
-    const line = JSON.stringify({
-      v: 1,
-      session_id: await $.session.id(),
-      package_id: card.packageId,
-      package_sha256: sha,
-      label: sha.slice(0, 12),
-      signer: signer.trim() || 'Approver',
-      at: new Date(await $.clock.now()).toISOString(),
-    })
     const path = `${log.home}/.claude/mm-hooks/card-signed.jsonl`
-    let had = ''
-    try {
-      had = await $.fs.read(path)
-    } catch {
-      // a first signature
-    }
+    const had = await recordsOf($, path)
+    const line = await signatureLine({ sessionId: await $.session.id(), packageId: card.packageId, sha, markdown, signer, at: await $.clock.now() })
     const lines = `${had}${line}\n`.split('\n').filter(Boolean).slice(-SIGNED_KEEP)
     await $.fs.write(path, `${lines.join('\n')}\n`)
     // `$.fs.write` takes no mode. (No chmod on Windows: the gate reads the file there all the same.)
     await $.process.run(['chmod', '600', path], { timeoutMs: 5_000 }).catch(() => undefined)
+    return true
   } catch (err) {
     await log.note(`card signature for package ${card.packageId} not recorded: ${err instanceof Error ? err.message.slice(0, 160) : 'no reason given'}`).catch(() => {})
+    return false
   }
 }
 
+/** Whether this press is still checking the package, so the box waits. */
+const isChecking = (marks: MmCardMarks, label: string, now: number) => marks.checking?.label === label && now - marks.checking.at < CHECKING_MS
+
 /**
- * A press on Click to sign and send: the signature is recorded (the pane draws it inking in and the envelope), then,
- * when the envelope has flown, exactly `Send package <12>` goes in the prompt box, if the card still holds then. One
- * signature a tag: a second press does nothing.
+ * A press on Click to sign and send. First the package is read and drawn again (`refreshCard`): the signature is for the card as
+ * it stands now. A card that changed is replaced, nothing is recorded and the box says to read it again; a read or a record that
+ * fails records nothing and the box says to try again. Then the signature goes on record (the pane draws it inking in and the
+ * envelope), and when the envelope has flown, exactly `Send package <12>` goes in the prompt box, if the card still holds then.
+ * One signature a tag while it stands: past SIGN_VALID_MS the gate no longer takes it, so a new press signs again.
  */
 export async function pressSign($: EngineInterface, label: string, log: SignLog): Promise<void> {
   const { value: card } = await $.state.get(CARD)
   const marks = await marksOf($)
-  if (!card || !card.tree || marks.signed[label]) return
+  const pressed = await $.clock.now()
+  const was = marks.signed[label]
+  if (!card || !card.tree || (was && pressed - was.at < SIGN_VALID_MS) || isChecking(marks, label, pressed)) return
   if (holdOf(card) || signOf(card.tree)?.label !== label) return
-  const signed: MmCardSigned = { label, signer: signOf(card.tree)?.signer ?? card.tree.signer, at: await $.clock.now() }
-  await $.state.set(CARD_MARKS, { ...marks, signed: { ...marks.signed, [label]: signed } })
+  const { notice: _notice, ...kept } = marks
+  await $.state.set(CARD_MARKS, { ...kept, checking: { label, at: pressed } })
+  const end = async (after: Partial<MmCardMarks>) => {
+    const { checking: _checking, notice: _old, ...m } = await marksOf($)
+    await $.state.set(CARD_MARKS, { ...m, ...after })
+  }
+  const packageId = card.packageId
+  const stop = (kind: 'changed' | 'retry') => end({ notice: { packageId, kind } })
+  let read: PageRead
+  try {
+    read = await log.readPage(packageId)
+  } catch {
+    return stop('retry')
+  }
+  const signer = signOf(card.tree)?.signer ?? card.tree.signer
+  const outcome = await refreshCard($, { packageId, signer, home: log.home, note: log.note }, read)
+  if (outcome === 'no-hash' || outcome === 'failed' || outcome === 'other' || !read.markdown) return stop('retry')
+  const fresh = await cardOf($)
+  if (outcome === 'changed' || holdOf(fresh) || signOf(fresh.tree)?.label !== label) return stop('changed')
+  const at = await $.clock.now()
   // (0.7.30) on record before the words can reach the prompt box
-  await recordSignature($, card, signed.signer, log)
+  if (!(await recordSignature($, fresh, signer, read.markdown, log))) return stop('retry')
+  const signed: MmCardSigned = { label, signer, at }
+  const m = await marksOf($)
+  await end({ signed: { ...m.signed, [label]: signed } })
   await $.clock.after(SIGN_FILL_MS, async () => {
     const { value: now } = await $.state.get(CARD)
-    const m = await marksOf($)
+    const latest = await marksOf($)
     // the package changed, or the pane moved to another package, while the envelope flew: nothing goes in the box
     const holds = !now || now.tree?.label !== label || Boolean(holdOf(now))
     const filled = holds ? 'stale' : await fillWords($, `Send package ${label}`)
-    const was = m.signed[label]
-    if (was) await $.state.set(CARD_MARKS, { ...m, signed: { ...m.signed, [label]: { ...was, filled } } })
+    const mine = latest.signed[label]
+    if (mine) await $.state.set(CARD_MARKS, { ...latest, signed: { ...latest.signed, [label]: { ...mine, filled } } })
   })
 }
 
@@ -743,6 +870,12 @@ export function holdText(hold: string, card: MmCard, label: string): string {
   }
 }
 
+/** What the box says when a press recorded nothing. */
+const NOTICE = {
+  changed: 'The package changed, so nothing was signed. Read it again, then sign.',
+  retry: 'That did not go through, so nothing was signed. Try again, or ask your thread to print the page.',
+} as const
+
 export type CardDraw = {
   card: MmCard
   marks: MmCardMarks
@@ -766,10 +899,13 @@ export function drawCard(els: Els, d: CardDraw): Node {
     return <Text dimColor>Drawing the card…</Text>
   }
   const hold = holdOf(card)
+  const notice = marks.notice?.packageId === card.packageId ? NOTICE[marks.notice.kind] : ''
   let n = 0
   const ctx: Ctx = { dark: false, out: null, parent: '', own: card.own, onAsk: d.onAsk, keyOf: () => `${card.packageId}:${n++}` }
   const sign = (s: { label: string; signer: string }): Node => {
-    const signed = marks.signed[s.label]
+    const stood = marks.signed[s.label]
+    // past SIGN_VALID_MS the send gate no longer takes this signature, so the box asks for a new one and never says Sealed
+    const signed = stood && d.now - stood.at < SIGN_VALID_MS ? stood : undefined
     if (signed) {
       const still = d.now - signed.at > SIGN_ANIMATE_MS
       const said =
@@ -790,9 +926,16 @@ export function drawCard(els: Els, d: CardDraw): Node {
         </Box>
       )
     }
-    if (hold) return <Text color={hold === 'drift' || hold === 'page' ? 'error' : undefined} dimColor={hold !== 'drift' && hold !== 'page'}>{holdText(hold, card, tree.label)}</Text>
+    if (hold) return (
+      <Box key={`mm-card-hold:${s.label}`} flexDirection="column">
+        {notice ? <Text color="warning">{notice}</Text> : null}
+        <Text color={hold === 'drift' || hold === 'page' ? 'error' : undefined} dimColor={hold !== 'drift' && hold !== 'page'}>{holdText(hold, card, tree.label)}</Text>
+      </Box>
+    )
+    if (isChecking(marks, s.label, d.now)) return <Text dimColor>Checking this is still the package…</Text>
     return (
       <Box key={`mm-card-sign:${s.label}`} flexDirection="column" borderStyle="round" borderColor="suggestion" paddingX={1}>
+        {notice ? <Text color="warning">{notice}</Text> : null}
         {Button ? <Button key={`mm-card-sign-btn:${s.label}`} label="✍  Click to sign and send" variant="primary" onPress={() => d.onSign(s.label)} /> : <Text>{`Type in the thread: Send package ${s.label}`}</Text>}
         <Text size="caption" dimColor>{`${s.signer} · your signature is the go for exactly this package, ${s.label}`}</Text>
         <Text size="caption" dimColor>{`Signing puts "Send package ${s.label}" in your prompt box; Enter sends it. Changes go in the chat box as usual.`}</Text>
@@ -803,6 +946,7 @@ export function drawCard(els: Els, d: CardDraw): Node {
     <Box key={`mm-card:${card.packageId}`} flexDirection="column">
       {hold === 'drift' || hold === 'page' ? <Text color="error">This view does not match the stored drafts, so signing is off here. Go by the page printed in the thread.</Text> : null}
       {hold === 'stale' && !signOf(tree) ? <Text dimColor>{holdText('stale', card, tree.label)}</Text> : null}
+      {notice && !signOf(tree) ? <Text color="warning">{notice}</Text> : null}
       {drawNodes(els, tree.nodes, ctx, sign)}
       {Button ? <Button key={`mm-card-page:${card.packageId}`} plain label={`${marks.pageOpen ? 'Hide' : 'Show'} the page as text  ${marks.pageOpen ? '▾' : '▸'}`} onPress={() => d.onPage()} /> : null}
     </Box>

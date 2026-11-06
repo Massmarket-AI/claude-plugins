@@ -396,12 +396,13 @@ describe('0.7.29: a pin the app refuses waits 6 hours and is reported once; a ty
         url.includes('/reply-package') ? { status: 200, ok: true, headers: {}, text: JSON.stringify({ markdown: SMS_PAGE, package_sha256: SMS_TREE.package_sha256 }) } : fetch(url)
       let seconds = 0
       hub.process.run = async (argv: string[]) => {
-        if (argv[0] !== 'sleep') return { exitCode: 1, stdout: '', stderr: '' }
+        if (argv[0] !== 'sleep') return { exitCode: 0, stdout: JSON.stringify(SMS_TREE), stderr: '' }
         seconds++
         if (seconds === 3) await hub.state.set(ref, { ...card, status: 'ready' })
         return { exitCode: 0, stdout: '', stderr: '' }
       }
-      expect(await mm(hub as never, `card ${PKG}`)).toContain(`card ready: Package ${SMS_TREE.label}.`)
+      // the wait over, it goes on to its next question: this fake thread's client part shows nothing
+      expect(await mm(hub as never, `card ${PKG}`)).toBe('card not ready: the side pane is not showing this package. Print the whole page.')
       expect(seconds).toBe(3)
       seconds = 100
       await hub.state.set(ref, card)

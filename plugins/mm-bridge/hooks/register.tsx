@@ -3623,7 +3623,7 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
 }
 
 // (0.7.26) The reply-package card: prepared on arrival, drawn natively above the page (card.tsx).
-import { cardOf, checkCard, clearCard, currentOf, drawCard, marksOf, noteCurrent, prepareCard, pressAsk, pressSign, resetCard, showKept, togglePage } from './card'
+import { cardOf, cardVerdict, clearCard, currentOf, drawCard, isOnScreen, marksOf, noteCurrent, noteDrawn, prepareCard, pressAsk, pressSign, refreshCard, resetCard, showKept, togglePage, type PageRead } from './card'
 import { holderName } from './queue'
 
 /**
@@ -3644,19 +3644,8 @@ async function renderPickup($: EngineInterface, it: QueueItem): Promise<string |
 
 /** A package's pickup page as OW prints it now, else as this computer's renderer does; null when neither can. */
 async function readPickup($: EngineInterface, packageId: string): Promise<string | null> {
-  try {
-    const r = await $.http.fetch(`${EXT}/reply-package?package_id=${packageId}&format=pickup`, {
-      headers: { Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER },
-    })
-    if (r.ok) {
-      const j = JSON.parse(r.text) as { markdown?: string; package_sha256?: unknown }
-      // (0.7.26) the package's hash as it stands: the card is offered for signing only when drawn from it
-      noteCurrent(packageId, j.package_sha256)
-      if (j.markdown) return j.markdown
-    }
-  } catch {
-    // fall through to the local renderer
-  }
+  const { markdown } = await readOwPage($, packageId)
+  if (markdown) return markdown
   const script = `${await home($)}/.claude/skills/client-reply-prep/scripts/render_pickup.py`
   for (const py of [['python3'], ['python'], ['py', '-3']]) {
     try {
@@ -3669,9 +3658,44 @@ async function readPickup($: EngineInterface, packageId: string): Promise<string
   return null
 }
 
-/** (0.7.30) A press on the signature box: `pressSign` with where it records the signature and says a record it could not write. */
+/** (0.7.30) One read of OW's page, its markdown and hash from one answer, and nothing from this computer: never throws. */
+async function readOwPage($: EngineInterface, packageId: string): Promise<PageRead> {
+  try {
+    const r = await $.http.fetch(`${EXT}/reply-package?package_id=${packageId}&format=pickup`, {
+      headers: { Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER },
+    })
+    if (r.ok) {
+      const j = JSON.parse(r.text) as { markdown?: unknown; package_sha256?: unknown }
+      // (0.7.26) the package's hash as it stands: the card is offered for signing only when drawn from it
+      noteCurrent(packageId, j.package_sha256)
+      return {
+        markdown: typeof j.markdown === 'string' && j.markdown ? j.markdown : null,
+        sha: typeof j.package_sha256 === 'string' && /^[0-9a-f]{64}$/.test(j.package_sha256) ? j.package_sha256 : null,
+      }
+    }
+  } catch {
+    // no page from OW
+  }
+  return { markdown: null, sha: null }
+}
+
+/** (0.7.30) The page folded under the card as OW prints it now: a person who opens it reads what the fresh card was checked against. */
+async function foldPage($: EngineInterface, markdown: string | null): Promise<void> {
+  const part = await clientPart($)
+  if (markdown && part.page && part.page !== markdown) await $.state.set(VIEW, { ...part, page: markdown })
+}
+
+/** (0.7.30) A press on the signature box: `pressSign` with where it records the signature, how it reads the page, and where it says a failure. */
 async function signPressed($: EngineInterface, label: string): Promise<void> {
-  await pressSign($, label, { home: await home($), note: line => logAuto($, line) })
+  await pressSign($, label, {
+    home: await home($),
+    note: line => logAuto($, line),
+    readPage: async id => {
+      const read = await readOwPage($, id)
+      await foldPage($, read.markdown)
+      return read
+    },
+  })
 }
 
 /** (0.5.28, internal asks) The most ask pages one draw of a client part reads. */
@@ -3925,6 +3949,8 @@ function notInTime(args: unknown): string {
 const SIGNED_GO = /^Send package [0-9a-f]{12}$/
 /** (0.7.30) How many seconds `mm card` waits for a card still being drawn. */
 const CARD_WAIT_S = 20
+/** (0.7.30) How many seconds `mm card` waits for the pane to draw a card it just set: a pane that is shown draws at once. */
+const CARD_DRAW_WAIT_S = 3
 function cardReady(label: string): string {
   return `card ready: Package ${label}. The whole package is on screen in the side pane and its copy check passed. Do not print the page. Print one line saying it is in the side pane, ending "Package ${label}.", then wait for the person.`
 }
@@ -3951,9 +3977,10 @@ async function aSecond($: EngineInterface): Promise<void> {
 /**
  * (0.7.30) `mm card <package id>`: what a thread asks at pickup, to know whether to print the page (Rob, 2026-11-06: "the copy
  * passes. I already think we should go ahead and implement that for everybody."). It sends nothing, starts nothing and picks
- * up nothing. Ready only for the card of that package, drawn, whose signature box nothing holds back, with OW's page as it
- * stands now fully in it (`pageGap`), in a pane that is placed on a surface. ⛔ Anything else, any error at all, is not ready:
- * the thread then prints the page, as every thread did before this.
+ * up nothing. Ready only when the card of that package has just been drawn again from OW's page as it stands now
+ * (`refreshCard`), nothing holds its signature box back, that page is fully in it (`pageGap`), and it is on the screen: in the
+ * client part of a pane that is placed and shown, and drawn there. ⛔ Anything else, any error at all, is not ready: the thread
+ * then prints the page, as every thread did before this.
  */
 async function cardCommand($: EngineInterface, arg: string): Promise<string> {
   try {
@@ -3964,11 +3991,27 @@ async function cardCommand($: EngineInterface, arg: string): Promise<string> {
       if (card.packageId !== packageId || card.status !== 'rendering') break
       await aSecond($)
     }
-    const why = await checkCard($, packageId, await readPickup($, packageId))
+    const held = await cardOf($)
+    if (held.packageId !== packageId || held.status === 'rendering') return cardNotReady(cardVerdict(held, packageId))
+    const read = await readOwPage($, packageId)
+    await foldPage($, read.markdown)
+    const last = await storeGet<Last | null>($, 'mm.last', null)
+    const signer = held.tree?.signer ?? (last?.member ? holderName(last.member) : 'Approver')
+    const outcome = await refreshCard($, { packageId, signer, home: await home($), note: line => logAuto($, line) }, read)
+    if (outcome === 'no-hash') return cardNotReady(read.sha ? 'the page could not be read to compare' : 'OW gave no usable hash for this package')
+    const card = await cardOf($)
+    const why = cardVerdict(card, packageId)
     if (why) return cardNotReady(why)
+    if (!(await clientPart($)).text) return cardNotReady('the side pane is not showing this package')
     const opened = await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })
     if (!opened.isPlaced) return cardNotReady('the side pane is not open on a surface that can draw it')
-    const label = (await cardOf($)).tree?.label
+    const pane = (await $.ui.panes()).find(p => p.id === PANE_QUEUE)
+    if (!pane?.isPlaced) return cardNotReady('the side pane is not open on a surface that can draw it')
+    if (!pane.isShown) return cardNotReady('the side pane is behind another tab')
+    // the state is set; the words are on the screen once the pane has drawn them
+    for (let s = 0; s < CARD_DRAW_WAIT_S && !isOnScreen(packageId, card.tree); s++) await aSecond($)
+    if (!isOnScreen(packageId, card.tree)) return cardNotReady('the card did not reach the screen')
+    const label = card.tree?.label
     return label ? cardReady(label) : cardNotReady('the card could not be checked')
   } catch {
     return cardNotReady('the card could not be checked')
@@ -9122,6 +9165,7 @@ export const register: Register = on => {
     const cardMarks = await marksOf($)
     const cardNow = await $.clock.now()
     const cardShown = Boolean(client.text && card?.packageId && card.tree)
+    noteDrawn(cardShown ? card : null)
     // (0.7.30) the line that says it cannot be drawn on this computer, over the part as it is
     const cardFailed = Boolean(client.text && card?.packageId && !card.tree && card.status === 'failed')
     // (0.6.0) this thread's Tracking part: what it is counted to, and the time tracked to that project

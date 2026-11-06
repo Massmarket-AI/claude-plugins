@@ -286,7 +286,14 @@ export type MmLineAsk = {
  * (0.7.26, the reply-package card) One run of a card paragraph, as `render_visual.py --tree` writes it: its exact text,
  * the card's classes on it, a link, and the fingerprint of a block that is one run.
  */
-export type MmCardRun = { s: string; c?: string; href?: string; fp?: string }
+export type MmCardRun = {
+  s: string
+  c?: string
+  href?: string
+  fp?: string
+  /** (0.7.30) A mention: the Discord id whose name `s` draws, so the check can tell who it names. */
+  m?: string
+}
 
 /**
  * (0.7.26) One node of the card: a box of nodes (`k`), a paragraph of runs (`r`, with `fp` when it is a fingerprinted
@@ -313,6 +320,8 @@ export type MmCardTree = {
   blocks: number
   signer: string
   can_sign: boolean
+  /** (0.7.30) How many images the words that go out hold: none of them can be drawn, so the card cannot stand in for the page. */
+  images?: number
   rendered_at: string
   nodes: MmCardNode[]
 }
@@ -343,7 +352,14 @@ export type MmCard = {
 export type MmCardSigned = { label: string; signer: string; at: number; filled?: 'filled' | 'draft' | 'none' | 'stale' }
 
 /** (0.7.26) What this thread did with cards: each signature given here by tag, and whether the page as text is open under the card. */
-export type MmCardMarks = { signed: Record<string, MmCardSigned>; pageOpen?: boolean }
+export type MmCardMarks = {
+  signed: Record<string, MmCardSigned>
+  pageOpen?: boolean
+  /** (0.7.30) A press reading the package again: which tag, and since when. */
+  checking?: { label: string; at: number }
+  /** (0.7.30) What the last press found when it recorded nothing: the card changed, or a read or record failed. */
+  notice?: { packageId: string; kind: 'changed' | 'retry' }
+}
 
 declare module 'claude-code' {
   interface PluginState {

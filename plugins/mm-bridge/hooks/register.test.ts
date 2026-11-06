@@ -5,6 +5,7 @@ import type { Engine, FoundElement } from 'claude-code/testing'
 import type { Feed, FeedAsk, FeedQueueTicket, FeedTicket } from './queue'
 import { buildLists, cleanTitle, clockText, isNewerVersion } from './queue'
 import { SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
+import { CARD_PAIRS } from './card-pairs.test-helper'
 import { VERSION } from './register'
 import { REFRESH_FAILED, carryKickoff, freshParagraph, lookupOrder, pinReport, recommend } from './threads'
 import type { PinReport } from './threads'
@@ -375,10 +376,17 @@ function world(on: On, opts: WorldOptions = {}) {
   const ran: string[] = []
   /** (0.7.26) Every reply-package card the bridge drew on this computer: the renderer, apart from the programs above. */
   const renders: string[] = []
-  on('process.run', (_$, e) => {
+  /** (0.7.30) What the renderer draws now. */
+  let treeNow = JSON.stringify(SMS_TREE)
+  on('process.run', async (_$, e) => {
+    // (0.7.30) `mm card`'s free second: short here, and long enough for a mounted pane to draw
+    if (e.argv[0] === 'sleep') {
+      await new Promise(resolve => setTimeout(resolve, 5))
+      return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (e.argv.some(a => String(a).endsWith('/client-reply-prep/scripts/render_visual.py'))) {
       renders.push(JSON.stringify(e))
-      if (opts.renderer === 'tree') return { value: { exitCode: 0, stdout: JSON.stringify(SMS_TREE), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      if (opts.renderer === 'tree') return { value: { exitCode: 0, stdout: treeNow, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
       // a renderer from before --tree: the pane shows the page alone, as before 0.7.26
       return { value: { exitCode: 2, stdout: '', stderr: 'render_visual.py: error: unrecognized arguments: --tree -', isStdoutTruncated: false, isStderrTruncated: false } }
     }
@@ -420,6 +428,9 @@ function world(on: On, opts: WorldOptions = {}) {
     opened.push({ id: e.id, title: e.title })
     return { value: placed ? { isPlaced: true as const } : { isPlaced: false as const, reason: 'nothing can draw a pane here' } }
   })
+  /** (0.7.30) Whether the pane is the one its surface shows, or a tab behind another. */
+  let shownNow = true
+  on('ui.panes', () => ({ value: [{ id: 'mm-queue', title: 'Massmarket', isShown: shownNow, isFocused: false, isPlaced: placed }] }))
   /** (0.6.0) Every status line the bridge set, in order (undefined: cleared). */
   const statuses: Array<string | undefined> = []
   on('ui.status', (_$, e) => {
@@ -471,6 +482,12 @@ function world(on: On, opts: WorldOptions = {}) {
     usageAsked: () => calls.filter(c => c.tool === 'get_usage').map(c => String(c.args.session_id)),
     setPlaced: (can: boolean) => {
       placed = can
+    },
+    setShown: (is: boolean) => {
+      shownNow = is
+    },
+    setTree: (tree: unknown) => {
+      treeNow = JSON.stringify(tree)
     },
     setPickup: (answer: Record<string, unknown>) => {
       pickupNow = answer
@@ -12997,6 +13014,95 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       expect(w.written.filter(f => f.path.endsWith('bridge-notices.log')).map(f => f.text).join('\n')).toContain('could not be drawn: this computer has an older client-reply-prep')
       expect(await tool($, `card ${PKG}`)).toBe(notReady('the card could not be drawn on this computer'))
       await u.unmount()
+    })
+
+    test('finding 9: OW answers with no usable hash, for a newer page: not ready, and the box closes', async ($, on) => {
+      const w = world(on, own)
+      const u = await shown($)
+      for (const hash of [null, undefined, 'not-a-hash']) {
+        expect(await tool($, `card ${PKG}`)).toBe(READY)
+        w.setPickup({ ...PICKUP, markdown: PAGE.replace(LABEL, 'bbbbbbbbbbbb'), package_sha256: hash })
+        expect(await tool($, `card ${PKG}`)).toBe(notReady('OW gave no usable hash for this package'))
+        expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn'))).toBe(false)
+        w.setPickup(PICKUP)
+      }
+      await u.unmount()
+    })
+
+    test('finding 3: a Cc added after plan approval, in no hash: the fresh card is in the pane before `mm card` answers ready', async ($, on) => {
+      const before = CARD_PAIRS["rob's mail, plan not approved"] as { page: string; tree: { package_sha256: string } }
+      const after = CARD_PAIRS["rob's mail, plan approved"] as { page: string; tree: { package_sha256: string } }
+      const pick = (p: { page: string; tree: { package_sha256: string } }) => ({ ok: true, markdown: p.page, package_sha256: p.tree.package_sha256 })
+      const w = world(on, { ...own, pickup: pick(before) })
+      w.setTree(before.tree)
+      const u = await shown($)
+      expect((await lines(u)).join('\n')).toContain('Cc (none)')
+      expect(await tool($, `card ${PKG}`)).toContain('card ready:')
+      // the plan is approved: the same package hash, a new Cc on OW's page
+      w.setPickup(pick(after))
+      w.setTree(after.tree)
+      // the engine draws a shown pane again within a tenth of a second of the write; the kit's drawing does when it is read
+      let answered = ''
+      const asked = tool($, `card ${PKG}`).then(said => {
+        answered = String(said)
+      })
+      while (!answered) {
+        await lines(u)
+        await new Promise(resolve => setTimeout(resolve, 1))
+      }
+      await asked
+      expect(answered).toContain('card ready:')
+      const drawn = (await lines(u)).join('\n')
+      expect(drawn).toContain('Cc support@letaidothehardwork.com')
+      // and the page folded under it is the page it was checked against
+      await u.press({ key: `mm-card-page:${PKG}` })
+      expect((await u.findAll({ type: 'Markdown' })).map(m => m.text)).toContain(after.page)
+      await u.unmount()
+    })
+
+    test('finding 3: a kept card and a page that moved past what this computer draws: not ready, and the fresh card in the pane is the one that says so', async ($, on) => {
+      const before = CARD_PAIRS["rob's mail, plan not approved"] as { page: string; tree: { package_sha256: string } }
+      const after = CARD_PAIRS["rob's mail, plan approved"] as { page: string; tree: { package_sha256: string } }
+      const w = world(on, { ...own, pickup: { ok: true, markdown: before.page, package_sha256: before.tree.package_sha256 } })
+      w.setTree(before.tree)
+      const u = await shown($)
+      w.setPickup({ ok: true, markdown: after.page, package_sha256: after.tree.package_sha256 })
+      expect(await tool($, `card ${PKG}`)).toContain("card not ready: the page's Cc is not the card's")
+      expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn'))).toBe(false)
+      await u.unmount()
+    })
+
+    test('finding 8: two `mm view` calls empty the client part, the card still in state: not ready, with no card on the screen', async ($, on) => {
+      const w = world(on, { ...own, store: { ...own.store, 'mm.links': { [SELF_CLI]: ACME, [SELF]: ACME } } })
+      const u = await shown($)
+      expect(await tool($, `card ${PKG}`)).toBe(READY)
+      w.setFeed(feed({ drafts: [] }))
+      await mm($, 'view')
+      await mm($, 'view')
+      expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn'))).toBe(false)
+      expect(await tool($, `card ${PKG}`)).toBe(notReady('the side pane is not showing this package'))
+      expect(w.fills).toEqual([])
+      await u.unmount()
+    })
+
+    test('finding 8: the pane behind another tab: not ready, and the thread prints the page', async ($, on) => {
+      const w = world(on, own)
+      const u = await shown($)
+      expect(await tool($, `card ${PKG}`)).toBe(READY)
+      w.setShown(false)
+      expect(await tool($, `card ${PKG}`)).toBe(notReady('the side pane is behind another tab'))
+      w.setShown(true)
+      expect(await tool($, `card ${PKG}`)).toBe(READY)
+      await u.unmount()
+    })
+
+    test('finding 8: placed and shown, but the pane has not drawn this card: not ready', async ($, on) => {
+      const w = world(on, own)
+      const u = await shown($)
+      await u.unmount()
+      // nothing draws the pane now: a new card, its check passing, goes into the state and reaches no screen
+      w.setTree(JSON.parse(JSON.stringify(SMS_TREE).replace('"s":"prepared"', '"s":"prepared again"')))
+      expect(await tool($, `card ${PKG}`)).toBe(notReady('the card did not reach the screen'))
     })
 
     test('no pane on this surface: not ready', async ($, on) => {
