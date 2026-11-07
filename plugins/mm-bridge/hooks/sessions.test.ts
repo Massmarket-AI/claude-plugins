@@ -1040,6 +1040,8 @@ describe('L3: a refresh that fails after a press shows in one line, until a sync
         return
       }
       const o = node as { props?: Record<string, unknown>; children?: unknown }
+      // (0.7.34) the Needs you now heading is a button now, and reads as the heading it is
+      if (typeof o.props?.label === 'string' && /^Needs you now/.test(o.props.label)) out.push(o.props.label.replace(/\s+[▾▸]$/, ''))
       walk(o.props?.children, depth + 1)
       walk(o.children, depth + 1)
     }
@@ -1110,7 +1112,7 @@ const human = { kind: 'composer' }
 
 describe('C3 (0.5.4): a client with no thread has ONE chip, in the thread the person works in', () => {
   test('two threads, one chip, in the thread that polls while the person has written in neither; started, it takes the client, and its thread withdraws it on its next pass', async () => {
-    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(51, 'Client Five One', 1)] }
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(51, 'Client Five One', 3)] }
     const w = fakeApp(feed, [{ sessionId: 'local_r5a' }, { sessionId: 'local_r5b' }, { sessionId: 'local_r5n1' }], [], { every: true })
     const [a, b, n1] = ['local_r5a', 'local_r5b', 'local_r5n1'].map(id => w.session(id))
     await mm(a, '')
@@ -1133,7 +1135,7 @@ describe('C3 (0.5.4): a client with no thread has ONE chip, in the thread the pe
   })
 
   test('the person works in another thread for 10 minutes without using it: the chip\'s thread withdraws it, and the thread they work in mints it', async () => {
-    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(52, 'Client Five Two', 1)] }
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(52, 'Client Five Two', 3)] }
     const ids = ['local_r5c', 'local_r5d']
     const w = fakeApp(feed, ids.map(sessionId => ({ sessionId })), [], { every: true })
     const sessions = new Map(ids.map(id => [id, w.session(id)] as const))
@@ -1203,7 +1205,7 @@ describe('C1 and C2 (0.5.4): a client with a thread has ONE chip, in that thread
   })
 
   test('C6: on its first pass, a thread withdraws every chip 0.5.3 minted by itself there, and mints what 0.5.4 would', async () => {
-    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(63, 'Client Six Three', 1)] }
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(63, 'Client Six Three', 3)] }
     const ids = ['local_c6a', 'local_c6b']
     const w = fakeApp(feed, ids.map(sessionId => ({ sessionId })), [], { every: true })
     w.put('mm.links', { [pid(63)]: ids[0] })
@@ -1363,7 +1365,7 @@ describe('0.5.3 claim in place, as 0.5.4 has it: the long thread\'s own fresh-th
   })
 
   test('a client with no thread is never claimed in place, whatever the person writes', async () => {
-    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(72, 'Client Seven Two', 1)] }
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(72, 'Client Seven Two', 3)] }
     const w = fakeApp(feed, [{ sessionId: 'local_r4a' }, { sessionId: 'local_r4b' }], [], { every: true })
     const [a, b] = ['local_r4a', 'local_r4b'].map(id => w.session(id))
     await mm(a, '')
@@ -1383,7 +1385,7 @@ describe('0.5.3 claim in place, as 0.5.4 has it: the long thread\'s own fresh-th
 
 describe('0.5.6: Start moves the chip to the thread it is pressed in (Rob, 10-14: "Start in the thread that I click it on")', () => {
   test('the chip in Y; Start pressed in X: X mints, Y\'s is superseded and Y withdraws it on its pass; one live chip; again in X: already here; a third thread says where it is now', async () => {
-    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(81, 'Client Eight One', 1)] }
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(81, 'Client Eight One', 3)] }
     const [Y, X, Z] = ['local_mvy', 'local_mvx', 'local_mvz']
     const w = fakeApp(feed, [{ sessionId: Y, title: 'Fabrikam Media HighLevel Build' }, { sessionId: X, title: 'Where I am' }, { sessionId: Z, title: 'Elsewhere' }], [], { every: true })
     const [ys, xs, zs] = [Y, X, Z].map(id => w.session(id))

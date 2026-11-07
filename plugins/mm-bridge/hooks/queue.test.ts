@@ -9,7 +9,7 @@ import {
   QUEUE_SHOWN_MAX, internalQueueThread, ownQueueRows, queueMarkdown, queueTotal, queuedOf,
   ETA_ASK_TEXT, INTERNAL_DISCORD, etaAsksOf, etaOnly, lateSentence, matesOf, queueHome, undatedCount, undatedOnly, whoseLate,
   ASSIGN_ASK_TEXT, ASSIGN_BY_BASIS, assignAsksOf, assignMarkdown, assignOnly, committedCount,
-  PM_CHECK_AHEAD_MS, STILL_NEEDS_YOU, checkAheadOf, checkNow, ownActBy, pinTitle, pinsFor, watchMarkdown, watchOf,
+  STILL_NEEDS_YOU, checkNow, ownActBy, pinTitle, pinsFor, watchMarkdown, watchOf,
   LATE_WITH_TEAM, TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine, teamLateSegment, teamLateWho,
   GO_THEIRS, GO_WHAT, clientWaiting, goFirstText, goMarkdown, goMine, goOf, goOnly, goSentence, mayStart, ownPins, stepWord,
   okLateOnly, ownBesides, teamLateOnly,
@@ -849,8 +849,8 @@ describe('B4: a package flagged for the founder lists for him whoever owns the c
     expect(held?.open?.state).toBe('held_by_me')
     // a third teammate sees no row for it
     expect(where({ member: 'someone-else@example.com', role: 'builder', drafts: [flagged()] })).toEqual({ queue: [], teammate: [] })
-    // (0.7.27) a pm sees it under With a teammate once it is due within 24 business hours: it is pinned for its owner then
-    expect(where({ member: 'someone-else@example.com', role: 'pm', drafts: [flagged()] })).toEqual({ queue: [], teammate: [P1] })
+    // (0.7.34) nor a pm: a teammate's part is on Team now, never on his list (0.7.27 to 0.7.33 listed it under With a teammate)
+    expect(where({ member: 'someone-else@example.com', role: 'pm', drafts: [flagged()] })).toEqual({ queue: [], teammate: [] })
   })
 
   test('not flagged, on a client a teammate owns: for him as it was, nothing listed; a hold by the owner is not his either', async () => {
@@ -2810,7 +2810,7 @@ describe('(0.7.15) an `assign_by` commitment asks for an owner by its clock, nev
   })
 })
 
-describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you") a teammate\'s part pins only once the PM should check on them; (0.7.21) never for the founder', () => {
+describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you") a teammate\'s part never pins: (0.7.21) not for the founder; (0.7.34) not for the PM', () => {
   /** Wed 2026-10-28 3 PM in New York. */
   const wed = Date.parse('2026-10-28T19:00:00Z')
   const H = 3_600_000
@@ -2834,11 +2834,7 @@ describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from
     return it
   }
 
-  test('the numbers: (0.7.27) 24 business hours for the PM (0.7.18 to 0.7.26: 5); (0.7.21) none for the founder (0.7.18 to 0.7.20: 2), none for anyone else', async () => {
-    expect(PM_CHECK_AHEAD_MS).toBe(24 * H)
-    expect(checkAheadOf('pm')).toBe(24 * H)
-    expect(checkAheadOf('founder')).toBeNull()
-    expect(checkAheadOf('builder')).toBeNull()
+  test('the words: what a pinned row says of a stored check', async () => {
     expect(STILL_NEEDS_YOU).toBe('still needs you')
   })
 
@@ -2873,16 +2869,18 @@ describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from
     expect(pinTitle(late, wed)).toBe('🟡 Acme Legal · task · no due date')
   })
 
-  test('a reply whose drafts a teammate holds: the PM checks on them (0.7.27) 24 business hours out; (0.7.21) the founder and a teammate never; nothing of the viewer\'s own is lost', async () => {
+  test('a reply whose drafts a teammate holds: (0.7.34) nobody is pinned for it, the PM, the founder or a teammate; nothing of the viewer\'s own is lost', async () => {
     const held = { package_id: PKG, project_id: CLIENT, project_name: 'Acme Legal', status: 'picked_up', picked_up_by: ASIF, picked_up_at: at(-1), covers_through: at(-3), drafts_ready: 1, drafts_unsent: 1, project_owner_email: H9 }
     const msg = (dueH: number, owner: string) => ({ ...mail(CLIENT, 'Acme Legal', -3, owner), reply_due_at: at(dueH) })
+    // (0.7.18 to 0.7.33 pinned the PM 24 business hours out, `🔴 Acme Legal · check on Asif · reply due 7 PM`)
     const pm = (dueH: number): Feed => ({ member: H9, role: 'pm', mail: [msg(dueH, H9)], drafts: [{ ...held, due_at: at(dueH) }] })
-    expect(withTeammate(listed(pm(4)))).toBe(true)
-    expect(pinsFor(listed(pm(30)), wed)).toBe(false)
-    expect(pinsFor(listed(pm(20)), wed)).toBe(true)
-    expect(pinsFor(listed(pm(4)), wed)).toBe(true)
-    expect(pinTitle(listed(pm(4)), wed)).toBe('🔴 Acme Legal · check on Asif · reply due 7 PM')
-    expect(pinTitle(listed(pm(-2)), wed)).toBe('🔴 Acme Legal · check on Asif · reply 2h late')
+    for (const dueH of [30, 20, 4, -2]) {
+      const it = listed(pm(dueH))
+      expect(pinsFor(it, wed)).toBe(false)
+      expect(watchOf(it)).toEqual([])
+      expect(checkNow(it, wed)).toBeNull()
+      expect(pinTitle(it, wed)).not.toContain('check on')
+    }
     // a teammate who owns the client: never pinned for it, late or not (it was never pinned for them before either)
     const mate = (dueH: number): Feed => ({ member: 'builder-a@example.com', role: 'builder', mail: [msg(dueH, 'builder-a@example.com')], drafts: [{ ...held, project_owner_email: 'builder-a@example.com' }] })
     expect(pinsFor(listed(mate(-2)), wed)).toBe(false)
@@ -2907,38 +2905,31 @@ describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from
     expect(pinTitle(listed(both(10)), wed)).toBe(titleFor(listed(both(10)), wed))
   })
 
-  test('the PM and a teammate\'s ticket: listed and pinned only once late, (0.7.27) within 24 business hours, or past its start-by with no sign it started', async () => {
+  test('(0.7.34, Rob 2026-11-07: "I still think that\'s the wrong architecture") the PM and a teammate\'s ticket: never listed, never pinned, late or not, started or not; his own as anyone\'s', async () => {
     const pm = (...tickets: FeedTicket[]): Feed => ({ member: H9, role: 'pm', tickets: { due_soon: tickets } })
-    // 3 days out, its start-by still ahead: nothing, as before
-    expect(buildLists(pm(ticket(1, ASIF, 72, { start_by_at: at(30) })), wed).teammate).toEqual([])
-    // due in 4 hours
-    const soon = listed(pm(ticket(1, ASIF, 4)))
-    expect(withTeammate(soon)).toBe(true)
-    expect(soon).toMatchObject({ theirs: 'Asif', tasks: 0, dueAt: wed + 4 * H })
-    expect(pinsFor(soon, wed)).toBe(true)
-    expect(pinTitle(soon, wed)).toBe('🔴 Acme Legal · check on Asif · task due 7 PM')
-    // start-by missed (OW's start_by_at at 1.5 h a day, as it sends it), the work not started
-    const notStarted = listed(pm(ticket(1, ASIF, 50, { start_by_at: at(-1), status: 'open' })))
-    expect(pinsFor(notStarted, wed)).toBe(true)
-    expect(checkNow(notStarted, wed)).toMatchObject({ notStarted: true, late: false })
-    expect(pinTitle(notStarted, wed)).toBe('🟡 Acme Legal · check on Asif · behind · not started, had to start 2 PM')
-    expect(watchMarkdown(notStarted, wed)).toBe(`### Check on a teammate (1)\n\n- Asif · Build 1 (ticket ${tid(1).slice(0, 8)}) · behind · not started, had to start 2 PM`)
-    expect(clientMarkdown(notStarted, wed)).toContain('### Check on a teammate (1)')
-    // started (OW: in_progress): nothing until it is nearly due
-    expect(buildLists(pm(ticket(1, ASIF, 50, { start_by_at: at(-1), status: 'in_progress' })), wed).teammate).toEqual([])
-    // late
-    expect(pinTitle(listed(pm(ticket(1, ASIF, -3))), wed)).toBe('🔴 Acme Legal · check on Asif · task 3h late')
-    // ⛔ not for the founder (his teammates' client tickets are not his to see), nor a teammate, nor the PM's own ticket
+    for (const t of [ticket(1, ASIF, 72, { start_by_at: at(30) }), ticket(1, ASIF, 4), ticket(1, ASIF, 50, { start_by_at: at(-1), status: 'open' }), ticket(1, ASIF, -3)]) {
+      expect(buildLists(pm(t), wed)).toMatchObject({ queue: [], teammate: [] })
+    }
+    // ⛔ not for the founder (his teammates' client tickets are not his to see), nor a teammate
     expect(buildLists({ member: ROB, role: 'founder', tickets: { due_soon: [ticket(1, ASIF, 4)] } }, wed).teammate).toEqual([])
     expect(buildLists({ member: 'builder-a@example.com', role: 'builder', tickets: { due_soon: [ticket(1, ASIF, 4)] } }, wed).teammate).toEqual([])
     const own = listed(pm(ticket(1, H9, 30)))
     expect(withTeammate(own)).toBe(false)
     expect(own.watch).toBeUndefined()
-    // with a ticket of his own on the client too: his row, pinned for his own when it is due, else to check on Asif
+    // with a ticket of his own on the client too: his row, pinned for his own when it is due, and only then
     const mixed = listed(pm(ticket(1, H9, 72), ticket(2, ASIF, -1)))
     expect(withTeammate(mixed)).toBe(false)
-    expect(pinsFor(mixed, wed)).toBe(true)
-    expect(pinTitle(mixed, wed)).toBe('🔴 Acme Legal · check on Asif · task 1h late')
+    expect(pinsFor(mixed, wed)).toBe(false)
+    const due = listed(pm(ticket(1, H9, 10), ticket(2, ASIF, -1)))
+    expect(pinsFor(due, wed)).toBe(true)
+    expect(pinTitle(due, wed)).toBe(titleFor(due, wed))
+    expect(pinTitle(due, wed)).not.toContain('check on')
+  })
+
+  test('(0.7.34) an item 0.7.33 stored with a teammate\'s part reads as it did until the next sync replaces it: nothing new writes one', async () => {
+    const stored = { ...listed({ member: H9, role: 'pm', tickets: { due_soon: [ticket(1, H9, 72)] } }), watch: [{ by: 'Asif', due: wed + 4 * H, what: 'task', id: tid(1), title: 'Build 1' }], checkAhead: 24 * H } as unknown as QueueItem
+    expect(checkNow(stored, wed)).toMatchObject({ by: 'Asif', late: false })
+    expect(pinTitle(stored, wed)).toBe('🔴 Acme Legal · check on Asif · task due 7 PM')
   })
 
   test('(0.7.21) the founder\'s teammates\' late internal tickets (0.7.4) never pin his thread: Team · late lists them', async () => {
@@ -3132,19 +3123,14 @@ describe('0.7.21 (Rob, 11-05): the founder\'s teammates\' late tickets leave his
     expect(teamLate([none as QueueItem])).toEqual([])
   })
 
-  test('⛔ nobody but the founder: a PM\'s and a teammate\'s feed give no Team · late, and the PM\'s check-ahead pins are as they were', async () => {
+  test('⛔ nobody but the founder: a PM\'s and a teammate\'s feed give no Team · late, and (0.7.34) the PM\'s check-ahead pins are gone', async () => {
     const pm: Feed = { ...robFeed(), member: 'has9@massmarket.ai', role: 'pm' }
     expect(teamLate(all(pm))).toEqual([])
     const mate: Feed = { ...robFeed(), member: who('Asif'), role: 'builder' }
     expect(teamLate(all(mate))).toEqual([])
-    // the PM, a teammate's committed client ticket 3 hours late: listed with a teammate, pinned to check on them, as in 0.7.18
+    // the PM, a teammate's committed client ticket 3 hours late: nothing listed (0.7.18 to 0.7.33: pinned to check on them)
     const late: Feed = { member: 'has9@massmarket.ai', role: 'pm', tickets: { overdue: [{ ticket_id: tid(30), project_id: ACME, project_name: 'Acme Legal', title: 'Build 30', due_at: at(-3), due_source: 'commitment', assignee_email: who('Asif') }] } }
-    const it = buildLists(late, wed).teammate[0] as QueueItem
-    expect(it.checkAhead).toBe(PM_CHECK_AHEAD_MS)
-    expect(pinsFor(it, wed)).toBe(true)
-    expect(pinTitle(it, wed)).toBe('🔴 Acme Legal · check on Asif · task 3h late')
-    expect(lateOnly(it)).toBe(false)
-    expect(teamLate([it])).toEqual([])
+    expect(buildLists(late, wed).teammate).toEqual([])
   })
 
   test('the pane as text: Team · late last on the line of groups, and drawn below the founder\'s own groups', async () => {
@@ -3275,7 +3261,7 @@ describe('(0.7.24, Rob 2026-11-04) follow-up steps nobody approved pin at once f
     expect(buildLists(as('builder-a@example.com', 'builder', waiting()), wed)).toEqual({ queue: [], teammate: [], checking: [] })
   })
 
-  test('a teammate\'s go, for oversight: the PM checks (0.7.27) 24 business hours before the first step; the founder never pins for it (0.7.21); until then With a teammate', async () => {
+  test('a teammate\'s go: the founder never pins for it (0.7.21), and (0.7.34) nor does the PM; With a teammate for the founder', async () => {
     const mate = (role: string, member: string, firstH: number) => listed(as(member, role, waiting({ go_by: ASIF, go_first_at: new Date(wed + firstH * H).toISOString() })))
     const far = mate('founder', ROB, 30)
     expect(goOf(far)).toMatchObject({ mine: false, by: 'Asif' })
@@ -3286,14 +3272,8 @@ describe('(0.7.24, Rob 2026-11-04) follow-up steps nobody approved pin at once f
     // the founder: never pinned for a teammate's part (0.7.21), near or late
     for (const h of [30, 1, -2]) expect(pinsFor(mate('founder', ROB, h), wed)).toBe(false)
     expect(watchOf(far)).toEqual([])
-    // the PM: 30 hours out no, 4 yes, named for who to check on
-    const pmFar = mate('pm', H9, 30)
-    expect(watchOf(pmFar)).toEqual([{ by: 'Asif', due: wed + 30 * H, what: 'follow-ups go' }])
-    expect(pinsFor(pmFar, wed)).toBe(false)
-    const near = mate('pm', H9, 4)
-    expect(pinsFor(near, wed)).toBe(true)
-    expect(pinTitle(near, wed)).toBe('🔴 Dealerosity · check on Asif · follow-ups go due 3:52 PM')
-    expect(pinTitle(mate('pm', H9, -2), wed)).toBe('🔴 Dealerosity · check on Asif · follow-ups go 2h late')
+    // (0.7.34) the PM: nothing listed, 30 hours out, 4 or late (0.7.18 to 0.7.33: pinned from 24 business hours out)
+    for (const h of [30, 4, -2]) expect(buildLists(as(H9, 'pm', waiting({ go_by: ASIF, go_first_at: new Date(wed + h * H).toISOString() })), wed)).toMatchObject({ queue: [], teammate: [] })
     // the note and the kickoff never tell the viewer to approve them
     expect(noteText(far, ROB)).toBe(`Package 3bacdfc2 holds 3 proposed follow-up steps that wait for Asif's go; the first, a text, opens Thu, Nov 5 5:52 PM ET. They are Asif's to approve, not Rob's.`)
     expect(goKickoff(far, 'Dealerosity')).toContain("do not take it and do not approve it: the go is Asif's.")

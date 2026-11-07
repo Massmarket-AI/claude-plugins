@@ -71,6 +71,8 @@ export type MmRow = {
    * row stays, with no Start (Drafts alone), and no thread is started for it.
    */
   dormant?: true
+  /** (0.7.34) On a row of `Needs you now` that should be pinned: whether its thread is, and why not, as the pin report says. */
+  pin?: { pinned: boolean; why?: string }
 }
 
 /**
@@ -108,13 +110,7 @@ export type MmQueue = {
   undated?: MmRow[]
   /** (0.7.5) The viewer's internal queue, drawn under the list as `Your build queue · N`. Absent for a viewer with none. */
   build?: MmBuild
-  /**
-   * (0.7.11) The band at the very top of the pane while any client's thread is in another Claude profile and the client has
-   * no thread of its own here: its words (`You switched Claude profiles. ...`) and how many clients, for its one button,
-   * which puts "Start the missing client threads" in the prompt box. Absent when there are none.
-   */
-  away?: { text: string; count: number }
-  /**
+    /**
    * (0.7.21, for the founder) Team · late: his teammates' late internal tickets, by person, then client, each ticket one
    * line. A closed group `Team · late (n)` at the end of the line of groups under the list, drawn below the others once
    * opened. Never pinned, and never counted in the header: the status line says `· n late with the team`. Absent: none.
@@ -185,12 +181,28 @@ export type MmFolds = {
   undated?: boolean
   /** (0.7.21) `Team · late`. */
   team?: boolean
+  /** (0.7.34) `Needs you now` and `Team now`, this thread's press. Absent: this computer's last one (`mm.panel`). */
+  needs?: boolean
+  teamNow?: boolean
   /** (0.7.5) The Tracking part, closed to its one line until opened; `more`: its further numbers. */
   track?: boolean
   more?: boolean
   /** (0.7.5) The tasks of the time list opened to their threads, by key (`MmTrackLine.toggle`). */
   tasks?: string[]
 }
+
+/** (0.7.34) One row of a person's pins on `Team now`, as the daily photo has it. */
+export type MmTeamItem = { client: string; kind: string; tone: 'red' | 'yellow' | 'green'; dueAt: number | null; pinned: boolean; whyNot: string | null }
+/** (0.7.34) One of a person's threads with a tracked row in the last 30 minutes. A thread with no client said has none, and no task. */
+export type MmTeamThread = { client: string | null; working: boolean; auto: boolean; since: number | null; capped: boolean; lastAt: number; task: string | null }
+/** (0.7.34) A task assigned to a person in the last day. `from`: who this bridge last saw it with. */
+export type MmTeamTask = { ref: string; client: string; title: string | null; at: number; from?: string }
+/** (0.7.34) One person on `Team now`. */
+export type MmTeamPerson = { name: string; me: boolean; reportedAt: number | null; items: MmTeamItem[]; extra: Array<string | null>; seen: boolean; running: MmTeamThread[]; assigned: MmTeamTask[] }
+/** (0.7.34) OW's last read of the team, checked (`teamFrom`). */
+export type MmTeamRead = { at: number; partial: string[]; people: MmTeamPerson[] }
+/** (0.7.34) The pane's `Team now`: OW's last read; `missing` while OW has no such route. */
+export type MmTeamNow = { team?: MmTeamRead; got?: number; missing?: boolean }
 
 /** What the last button press did, shown above the list. */
 export type MmNotice = { text: string; at: number }
@@ -371,6 +383,7 @@ declare module 'claude-code' {
       notice: MmNotice
       band: MmBand
       folds: MmFolds
+      teamNow: MmTeamNow
       people: MmPeople
       track: MmTrack
       sess: MmSession
