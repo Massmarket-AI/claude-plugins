@@ -11,9 +11,9 @@ export type MmMarkdown = string
 export type MmView = {
   text: MmMarkdown
   heading: string
-  /** (0.7.30) With a pickup view: the page alone, which folds under the card (`Show the page as text`). */
+  /** (0.7.33) With a pickup view: the page alone, which folds under the card (`Show the page as text`). */
   page?: MmMarkdown
-  /** (0.7.30) With a pickup view: the hold banner, the open asks and the internal queue, drawn under the card and never folded with the page. */
+  /** (0.7.33) With a pickup view: the hold banner, the open asks and the internal queue, drawn under the card and never folded with the page. */
   extra?: MmMarkdown
 }
 
@@ -291,7 +291,7 @@ export type MmCardRun = {
   c?: string
   href?: string
   fp?: string
-  /** (0.7.30) A mention: the Discord id whose name `s` draws, so the check can tell who it names. */
+  /** (0.7.33) A mention: the Discord id whose name `s` draws, so the check can tell who it names. */
   m?: string
 }
 
@@ -320,7 +320,7 @@ export type MmCardTree = {
   blocks: number
   signer: string
   can_sign: boolean
-  /** (0.7.30) How many images the words that go out hold: none of them can be drawn, so the card cannot stand in for the page. */
+  /** (0.7.33) How many images the words that go out hold: none of them can be drawn, so the card cannot stand in for the page. */
   images?: number
   rendered_at: string
   nodes: MmCardNode[]
@@ -341,7 +341,7 @@ export type MmCard = {
   status: 'ready' | 'rendering' | 'failed' | 'none'
   error?: string
   /**
-   * (0.7.30) Why this card cannot stand in for the page (`pageGap`), when it cannot: its signature box stays closed and
+   * (0.7.33) Why this card cannot stand in for the page (`pageGap`), when it cannot: its signature box stays closed and
    * `mm card` answers not ready. Holds up to 60 characters of the page: never logged.
    */
   gap?: string
@@ -355,9 +355,9 @@ export type MmCardSigned = { label: string; signer: string; at: number; filled?:
 export type MmCardMarks = {
   signed: Record<string, MmCardSigned>
   pageOpen?: boolean
-  /** (0.7.30) A press reading the package again: which tag, and since when. */
+  /** (0.7.33) A press reading the package again: which tag, and since when. */
   checking?: { label: string; at: number }
-  /** (0.7.30) What the last press found when it recorded nothing: the card changed, or a read or record failed. */
+  /** (0.7.33) What the last press found when it recorded nothing: the card changed, or a read or record failed. */
   notice?: { packageId: string; kind: 'changed' | 'retry' }
 }
 

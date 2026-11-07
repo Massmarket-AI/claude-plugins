@@ -283,8 +283,8 @@ describe('0.7.29: a pin the app refuses waits 6 hours and is reported once; a ty
     expect(w.stored('mm.pinwait')).toEqual({})
   })
 
-  // ⛔ (0.7.30) The same for a name: `setName`, in the shape of `setPin`
-  describe('0.7.30: a name the app refuses', () => {
+  // ⛔ (0.7.33) The same for a name: `setName`, in the shape of `setPin`
+  describe('0.7.33: a name the app refuses', () => {
     const titled = () => {
       const w = fakeApp(threeClients(), [{ sessionId: 'local_hub' }, { sessionId: 'local_a', title: 'A work' }, { sessionId: 'local_b', title: 'B work' }, { sessionId: 'local_c', title: 'C work' }])
       w.put('mm.links', { [pid(1)]: 'local_a', [pid(2)]: 'local_b', [pid(3)]: 'local_c' })

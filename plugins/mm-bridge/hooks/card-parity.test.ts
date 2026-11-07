@@ -21,7 +21,7 @@ const pair = (name: string) => {
   return { page: p.page, tree: readTree(JSON.parse(JSON.stringify(p.tree))) as MmCardTree }
 }
 
-describe('0.7.30 the card against the page: real pairs, from the two renderers themselves', () => {
+describe('0.7.33 the card against the page: real pairs, from the two renderers themselves', () => {
   test('a text message package', () => {
     expect(contentPieces(SMS_PAGE).length).toBeGreaterThan(5)
     expect(pageGap(SMS_PAGE, realTree())).toBe('')
@@ -128,7 +128,7 @@ describe('0.7.30 the card against the page: real pairs, from the two renderers t
   })
 })
 
-describe('0.7.30 finding 6: each hole has a gap, and its control line passes', () => {
+describe('0.7.33 finding 6: each hole has a gap, and its control line passes', () => {
   const HOLES: Array<{ name: string; page: string; card: MmCardTree; control: MmCardTree }> = [
     { name: 'an amount-only line', page: fence('$5000'), card: cardWith('Hi Dana'), control: cardWith('$5000') },
     { name: 'a one-word line found in another line', page: fence('No'), card: cardWith('Team post: no action'), control: cardWith('No') },
@@ -161,7 +161,7 @@ describe('0.7.30 finding 6: each hole has a gap, and its control line passes', (
   }
 })
 
-describe('0.7.30 finding 4: any image in a body is not ready', () => {
+describe('0.7.33 finding 4: any image in a body is not ready', () => {
   const IMAGE = 'the package holds an image the side pane cannot draw'
   const card = cardWith('Hi Dana')
   for (const [name, body] of [
@@ -185,7 +185,7 @@ describe('0.7.30 finding 4: any image in a body is not ready', () => {
   })
 })
 
-describe('0.7.30 finding 5: state lines are checked both ways', () => {
+describe('0.7.33 finding 5: state lines are checked both ways', () => {
   const OFF = 'Switched off: none of these steps will send while follow-ups are switched off.'
   test('a card saying none of these steps will send, against a live page: a gap', () => {
     const live = pair('follow-ups live')
@@ -218,7 +218,7 @@ describe('0.7.30 finding 5: state lines are checked both ways', () => {
   })
 })
 
-describe('0.7.30 the normalising and the frame', () => {
+describe('0.7.33 the normalising and the frame', () => {
   test('it collapses whitespace and strips markdown marks, and nothing else', () => {
     expect(squash('  a \n\t b  ')).toBe('a b')
     expect(squash('Jo.Smith@Acme.com -$1,000 5% /a-b')).toBe('Jo.Smith@Acme.com -$1,000 5% /a-b')

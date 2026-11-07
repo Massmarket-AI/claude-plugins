@@ -76,7 +76,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   const failPins = new Set<string>()
   /** (0.7.29) Threads the app refuses to pin, with the words it refuses in. */
   const refusePins = new Map<string, string>()
-  /** (0.7.30) Threads the app refuses a new name for, with the words it refuses in. */
+  /** (0.7.33) Threads the app refuses a new name for, with the words it refuses in. */
   const refuseTitles = new Map<string, string>()
   /**
    * (0.7.28) Threads that are a scheduled task's runs. The app refuses to pin one in its own words and its list does not say

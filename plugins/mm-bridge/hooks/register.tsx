@@ -200,7 +200,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.30'
+export const VERSION = '0.7.33'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -237,7 +237,7 @@ const LEASE_RENEW_MS = 30_000
 const MAX_WRITES = 24
 /** (0.7.28) The most refused pins one sync record keeps. */
 const PIN_REFUSED_MAX = 10
-/** (0.7.29) How long a thread the app refused a pin or an unpin for, (0.7.30) or a new name for, waits before it is asked again (`mm.pinwait`, `mm.namewait`). */
+/** (0.7.29) How long a thread the app refused a pin or an unpin for, (0.7.33) or a new name for, waits before it is asked again (`mm.pinwait`, `mm.namewait`). */
 const PIN_WAIT_MS = 6 * 3_600_000
 const DAY_MS = 24 * 3_600_000
 /** A session's own pair (Claude Code session id → app thread) is kept this long after it last ran. */
@@ -494,7 +494,7 @@ type Mcp = { content?: Array<{ type: string; text?: string }>; isError?: boolean
 type Pin = { projectId: string; client: string; byUs: boolean; internal?: true; again?: true }
 /** (0.7.28) One `set_pinned` the app refused: which thread, whose, which way, and in its own words. */
 type PinRefused = { thread: string; client?: string; pinned: boolean; why: string }
-/** (0.7.30) One `set_session_title` the app refused: which thread, whose, and in its own words. */
+/** (0.7.33) One `set_session_title` the app refused: which thread, whose, and in its own words. */
 type NameRefused = { thread: string; client?: string; why: string }
 /**
  * (0.7.29) A thread the app refused a pin or an unpin for, as anything but a scheduled task's run (`mm.pinwait`): not asked
@@ -521,7 +521,7 @@ type Last = {
   error?: string
   /** (0.7.28) What the app refused this pass when asked to pin or unpin a thread: the pass went on past each one. Absent: nothing. */
   pinRefused?: PinRefused[]
-  /** (0.7.30) What the app refused this pass when asked to name a thread: the pass went on past each one. Absent: nothing. */
+  /** (0.7.33) What the app refused this pass when asked to name a thread: the pass went on past each one. Absent: nothing. */
   nameRefused?: NameRefused[]
   /** (New people) For the founder and a PM: who wrote to us with no project matched, newest first, worded at `at`. Absent: none. */
   people?: MmPerson[]
@@ -1168,7 +1168,7 @@ function feedProjects(feed: Feed): string[] {
   for (const d of feed.drafts ?? []) add(d.project_id)
   // (fix round 1, F5) `start_now` too
   for (const k of [feed.tickets?.overdue, feed.tickets?.due_today, feed.tickets?.due_soon, feed.tickets?.start_now]) for (const t of k ?? []) add(t.project_id)
-  // (0.7.18, A) and the founder's undated client tickets (`tickets.undated`): on 11-03 `/mm link <id>` answered "No client
+  // (0.7.18, A) and the viewer's undated client tickets (`tickets.undated`): on 11-03 `/mm link <id>` answered "No client
   // named ... is in your feed" for Black-Peak and Ground Crew Systems, listed by those alone, because the ids were looked up
   // here while the lists (`buildLists`) and the names (`feedClients`) read `tickets.undated` since 0.7.4
   for (const t of feed.tickets?.undated ?? []) add(t?.project_id)
@@ -2789,9 +2789,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // thread of every ACTIVE client whatever its time, so threads named only `🟡 <client> · task`, whose items were undated
   // tickets, were pinned with no clock. A pin needs a clock again: an undated client is never pinned, active or not, and
   // the pins 0.7.11 put on such threads come off here (they are ours). The internal queue was never pinned that way.
-  // (0.7.27, Rob 2026-11-05, over that: "Shouldn't it be pinned?") An undated ticket with a known last activity inside the
-  // window pins for its owner as `needs a due date`, and a client's own pace row pins as its status says (`ownPins`); an
-  // undated item with nothing to measure it by still never pins.
+  // (0.7.27) A client's own pace row pins as its status says (`ownPins`). ⛔ (0.7.32, Rob 2026-11-06, over 0.7.27's "Shouldn't
+  // it be pinned?": "a ticket with no due date never pins and never asks for a date, for anyone") An undated ticket never
+  // does, and a pin 0.7.27 to 0.7.31 put on one comes off here (it is ours).
   // ⛔ (0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you, not when something has a timer left for a
   // teammate to answer") Only what needs the person pins by R1's 24 business hours (`ownActBy`): a reply whose drafts a
   // teammate holds, a package a teammate decides on and a teammate's ticket pin only once the PM should check on them
@@ -2878,12 +2878,12 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       return false
     }
   }
-  /** (0.7.30) What the app refused this pass when asked to name a thread: on the sync record, and in /mm status. */
+  /** (0.7.33) What the app refused this pass when asked to name a thread: on the sync record, and in /mm status. */
   const nameRefused: NameRefused[] = []
-  /** (0.7.30) The refusals on record. */
+  /** (0.7.33) The refusals on record. */
   const nameWaits = await storeGet<Record<string, PinWait>>($, 'mm.namewait', {})
   /**
-   * ⛔ (0.7.30) One `set_session_title`, for every rename of this pass, in the shape of `setPin`: false when the app refused
+   * ⛔ (0.7.33) One `set_session_title`, for every rename of this pass, in the shape of `setPin`: false when the app refused
    * it, and ONE REFUSAL NEVER STOPS THE PASS (a typed /mm said "did not finish" and the list stood still on it, as for a pin
    * in 0.7.28). Each caller keeps its records, for a later sync to finish. A refusal in the words the app uses for a scheduled
    * task's run lets that run go. Any other waits PIN_WAIT_MS for that thread (`mm.namewait`), and is reported once per thread
@@ -2988,7 +2988,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     }
     const own = titles[sid]
     if (s && own !== undefined && s.title !== own) {
-      // (0.7.30) refused: its records stay, and it is on the list to give back at a later sync
+      // (0.7.33) refused: its records stay, and it is on the list to give back at a later sync
       if (!(await setName(sid, own))) {
         if (live.has(sid) && !waiting.includes(sid)) waiting.push(sid)
         continue
@@ -3016,7 +3016,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     const record = (byUs: boolean): Pin => ({ ...pinOf(it, byUs), ...(back ? { again: true as const } : {}) })
     await recordPin(sid, record(s.pinned ? (pins[sid]?.byUs ?? false) : false))
     const title = pinTitle(it, now, back)
-    // (0.7.30) a name the app refused does not stand in the way of the pin. A run the refusal let go has no pin to get.
+    // (0.7.33) a name the app refused does not stand in the way of the pin. A run the refusal let go has no pin to get.
     if (s.title !== title && !(await rename(s, title)) && !live.has(sid)) continue
     if (!s.pinned) {
       // (0.7.29) waiting on a refusal: its name is right, and its record stays not ours until the app is asked again
@@ -3049,7 +3049,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       s.pinned = false
       writes++
     }
-    // (0.7.30) refused: named at a later sync. A run the refusal let go has no record to get.
+    // (0.7.33) refused: named at a later sync. A run the refusal let go has no record to get.
     if (s.title !== n.title && !(await rename(s, n.title)) && !live.has(sid)) continue
     pins[sid] = pinOf(n.it, false)
   }
@@ -3098,7 +3098,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
         // longer has (review of 79cbc596, F4: the thread a client was moved from kept that client's name).
         const own = titles[sid]
         if (own !== undefined && s.title !== own) {
-          // (0.7.30) refused: its records are kept, as for a sync with no writes left, and the next sync finishes it
+          // (0.7.33) refused: its records are kept, as for a sync with no writes left, and the next sync finishes it
           if (!(await setName(sid, own))) continue
           s.title = own
           writes++
@@ -3107,7 +3107,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       } else {
         // the name in a pin record may be one an older version stored as the feed wrote it
         const title = still ? titleFor(still, now) : clearedTitle(cleanName(pin.client), now)
-        // (0.7.30) refused: its record is kept, and the next sync finishes it
+        // (0.7.33) refused: its record is kept, and the next sync finishes it
         if (s.title !== title && !(await rename(s, title))) continue
       }
     }
@@ -3293,7 +3293,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       for (const sid of Object.keys(fresh)) if (gone.has(sid) || Object.hasOwn(runs, sid) || !(now - Number(fresh[sid]?.until) <= DAY_MS)) delete fresh[sid]
     }).catch(() => {})
   }
-  // (0.7.30) and the same for a name
+  // (0.7.33) and the same for a name
   if (Object.keys(nameWaits).some(sid => gone.has(sid) || Object.hasOwn(runs, sid) || now - Number(nameWaits[sid]?.until) > DAY_MS)) {
     await patchStore<Record<string, PinWait>>($, 'mm.namewait', {}, fresh => {
       for (const sid of Object.keys(fresh)) if (gone.has(sid) || Object.hasOwn(runs, sid) || !(now - Number(fresh[sid]?.until) <= DAY_MS)) delete fresh[sid]
@@ -3438,7 +3438,7 @@ async function showQueue(
   now: number,
   folds: { teammate: Row[]; checking?: Row[]; team?: MmTeam[] },
   syncedAt = now,
-  found: Pick<Last, 'people' | 'routeTo' | 'away' | 'founder'> = {},
+  found: Pick<Last, 'people' | 'routeTo' | 'away' | 'founder' | 'teammate'> = {},
 ): Promise<void> {
   const teammateRows = found.founder === true ? [] : folds.teammate
   const teamRows = found.founder === true ? [] : (folds.team ?? [])
@@ -3453,10 +3453,13 @@ async function showQueue(
   const home = items.find(it => queuedOf(it).length > 0)
   const homeRow = home ? rows.find(r => r.projectId === home.projectId) : undefined
   const build = home && homeRow ? buildOf(home, homeRow) : undefined
-  const undated = rows.filter(r => {
+  // (0.7.32, Rob 2026-11-06: "so it's still one press away") The founder's page has no With a teammate (0.7.27): an undated
+  // ticket of his on a client listed there is under `No due date` too, or it would be on no part of his page.
+  const besideMate = new Set(found.founder === true ? (found.teammate ?? []).filter(it => (it.undatedTasks ?? 0) > 0).map(it => it.projectId) : [])
+  const undated = [...rows.filter(r => {
     const it = byPid.get(r.projectId)
     return it !== undefined && noDateGroup(it)
-  })
+  }), ...folds.teammate.filter(r => besideMate.has(r.projectId))]
   const listed = rows.filter(r => {
     const it = byPid.get(r.projectId)
     return !it || needsYouNow(it) || (it.kind === 'queue' && !build)
@@ -3658,7 +3661,7 @@ async function readPickup($: EngineInterface, packageId: string): Promise<string
   return null
 }
 
-/** (0.7.30) One read of OW's page, its markdown and hash from one answer, and nothing from this computer: never throws. */
+/** (0.7.33) One read of OW's page, its markdown and hash from one answer, and nothing from this computer: never throws. */
 async function readOwPage($: EngineInterface, packageId: string): Promise<PageRead> {
   try {
     const r = await $.http.fetch(`${EXT}/reply-package?package_id=${packageId}&format=pickup`, {
@@ -3679,13 +3682,13 @@ async function readOwPage($: EngineInterface, packageId: string): Promise<PageRe
   return { markdown: null, sha: null }
 }
 
-/** (0.7.30) The page folded under the card as OW prints it now: a person who opens it reads what the fresh card was checked against. */
+/** (0.7.33) The page folded under the card as OW prints it now: a person who opens it reads what the fresh card was checked against. */
 async function foldPage($: EngineInterface, markdown: string | null): Promise<void> {
   const part = await clientPart($)
   if (markdown && part.page && part.page !== markdown) await $.state.set(VIEW, { ...part, page: markdown })
 }
 
-/** (0.7.30) A press on the signature box: `pressSign` with where it records the signature, how it reads the page, and where it says a failure. */
+/** (0.7.33) A press on the signature box: `pressSign` with where it records the signature, how it reads the page, and where it says a failure. */
 async function signPressed($: EngineInterface, label: string): Promise<void> {
   await pressSign($, label, {
     home: await home($),
@@ -3770,7 +3773,7 @@ async function beginClient($: EngineInterface, it: QueueItem, own: boolean, atOn
   const withBanner = (view: string): string => [holdBanner(it), view].filter(Boolean).join('\n\n')
   /** (0.5.28, internal asks) The client's open asks under a pickup view: '' adds nothing, for a client with none. (0.7.3) Then its internal queue, as `clientMarkdown` draws it. */
   const withAsks = (view: string, pages: Record<string, string>, at: number): string => [view, asksMarkdown(it, at, pages), queueMarkdown(it)].filter(Boolean).join('\n\n')
-  /** (0.7.30, G11) A pickup view's parts: under a drawn card the banner, asks and queue stay in sight, and only the page folds. */
+  /** (0.7.33, G11) A pickup view's parts: under a drawn card the banner, asks and queue stay in sight, and only the page folds. */
   const partsOf = (page: string, pages: Record<string, string>, at: number): { page: string; extra: string } => ({
     page,
     extra: [holdBanner(it), asksMarkdown(it, at, pages), queueMarkdown(it)].filter(Boolean).join('\n\n'),
@@ -3940,16 +3943,16 @@ function listSaid(last: Last): string {
 
 /** (0.7.28) What /mm and the mm tool answer for a hook that ran out of its time. */
 const NOT_IN_TIME = 'The bridge did not finish that in time. /mm status says how its last sync went.'
-/** (0.7.30) The answer to a /mm that ran out of its time, by what it asked: `mm card` answers in one of its two forms, always. */
+/** (0.7.33) The answer to a /mm that ran out of its time, by what it asked: `mm card` answers in one of its two forms, always. */
 function notInTime(args: unknown): string {
   return /^\s*card(?:\s|$)/.test(String(args ?? '')) ? cardNotReady('the card could not be checked') : NOT_IN_TIME
 }
 
-/** (0.7.30) The words the signature box puts in the prompt box, as the person sends them. */
+/** (0.7.33) The words the signature box puts in the prompt box, as the person sends them. */
 const SIGNED_GO = /^Send package [0-9a-f]{12}$/
-/** (0.7.30) How many seconds `mm card` waits for a card still being drawn. */
+/** (0.7.33) How many seconds `mm card` waits for a card still being drawn. */
 const CARD_WAIT_S = 20
-/** (0.7.30) How many seconds `mm card` waits for the pane to draw a card it just set: a pane that is shown draws at once. */
+/** (0.7.33) How many seconds `mm card` waits for the pane to draw a card it just set: a pane that is shown draws at once. */
 const CARD_DRAW_WAIT_S = 3
 function cardReady(label: string): string {
   return `card ready: Package ${label}. The whole package is on screen in the side pane and its copy check passed. Do not print the page. Print one line saying it is in the side pane, ending "Package ${label}.", then wait for the person.`
@@ -3975,7 +3978,7 @@ async function aSecond($: EngineInterface): Promise<void> {
 }
 
 /**
- * (0.7.30) `mm card <package id>`: what a thread asks at pickup, to know whether to print the page (Rob, 2026-11-06: "the copy
+ * (0.7.33) `mm card <package id>`: what a thread asks at pickup, to know whether to print the page (Rob, 2026-11-06: "the copy
  * passes. I already think we should go ahead and implement that for everybody."). It sends nothing, starts nothing and picks
  * up nothing. Ready only when the card of that package has just been drawn again from OW's page as it stands now
  * (`refreshCard`), nothing holds its signature box back, that page is fully in it (`pageGap`), and it is on the screen: in the
@@ -4201,7 +4204,7 @@ async function beat($: EngineInterface, extra: Record<string, unknown>): Promise
     const refreshError = await storeGet<unknown>($, 'mm.refreshError', null)
     // (0.7.29) the pins and unpins the app refused and that are still waiting: thread, why, when it is asked again
     const pinRefused = Object.entries(await storeGet<Record<string, PinWait>>($, 'mm.pinwait', {})).slice(0, PIN_REFUSED_MAX).map(([thread, w]) => ({ thread, why: w?.why, until: new Date(Number(w?.until)).toISOString() }))
-    // (0.7.30) and the names
+    // (0.7.33) and the names
     const nameRefused = Object.entries(await storeGet<Record<string, PinWait>>($, 'mm.namewait', {})).slice(0, PIN_REFUSED_MAX).map(([thread, w]) => ({ thread, why: w?.why, until: new Date(Number(w?.until)).toISOString() }))
     await $.fs.write(
       `${await home($)}/.claude/mm-hooks/bridge-state.json`,
@@ -7200,7 +7203,7 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
   const arg = rest.join(' ')
   // (0.5.25) starts nothing: what starts each thread, for the model on the person's own words (`kickoffs`)
   if (verb === 'kickoffs') return kickoffs($, arg)
-  // (0.7.30) sends nothing, starts nothing: whether the card stands in for the page, for a thread at pickup
+  // (0.7.33) sends nothing, starts nothing: whether the card stands in for the page, for a thread at pickup
   if (verb === 'card') return cardCommand($, arg)
   // (0.7.0) the line this thread's work counts toward: the person's or Claude's explicit call (never anything to a client)
   if (verb === 'line') return lineCommand($, arg, false)
@@ -7256,7 +7259,7 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       `last error: ${last?.error ?? 'none'}`,
       // (0.7.28) what the app refused in the last sync's pin pass, which went on past each
       ...(last?.pinRefused?.length ? [`pins the app refused: ${last.pinRefused.map(r => `${r.client || r.thread} (${r.why})`).join('; ')}`] : []),
-      // (0.7.30) and the names
+      // (0.7.33) and the names
       ...(last?.nameRefused?.length ? [`names the app refused: ${last.nameRefused.map(r => `${r.client || r.thread} (${r.why})`).join('; ')}`] : []),
     ].join('\n')
   }
@@ -8958,7 +8961,7 @@ export const register: Register = on => {
       // (0.6.0) the person's prompts, for the band; a SINGLE-SESSION run is known by its first
       await countPrompt($, text, origin).catch(() => {})
       // (0.7.11) the first prompt the person types after a switch of Claude profiles: one line for Claude, once a switch
-      // ⛔ (0.7.30) never on the person's go: the send gate clears a signed card only on exactly `Send package <12>`. The line
+      // ⛔ (0.7.33) never on the person's go: the send gate clears a signed card only on exactly `Send package <12>`. The line
       // waits for their next prompt.
       if (!sentence && !SIGNED_GO.test(text.trim())) sentence = await awayNote($, text, origin).catch(() => undefined)
     } catch {
@@ -9166,7 +9169,7 @@ export const register: Register = on => {
     const cardNow = await $.clock.now()
     const cardShown = Boolean(client.text && card?.packageId && card.tree)
     noteDrawn(cardShown ? card : null)
-    // (0.7.30) the line that says it cannot be drawn on this computer, over the part as it is
+    // (0.7.33) the line that says it cannot be drawn on this computer, over the part as it is
     const cardFailed = Boolean(client.text && card?.packageId && !card.tree && card.status === 'failed')
     // (0.6.0) this thread's Tracking part: what it is counted to, and the time tracked to that project
     const { value: track } = await $.state.get(TRACK)
@@ -9307,7 +9310,7 @@ export const register: Register = on => {
           <Box key="mm-client" flexDirection="column" marginBottom={1}>
             {client.heading ? <Text bold>{client.heading}</Text> : null}
             {cardShown || cardFailed ? drawCard($.ui.resolve(e) as Parameters<typeof drawCard>[0], { card: card, marks: cardMarks, now: cardNow, onSign: label => void signPressed($, label), onAsk: words => void pressAsk($, words), onPage: () => void togglePage($) }) : null}
-            {/* (0.7.30, G11) under a card the banner, the asks and the queue stay in sight: only the page folds */}
+            {/* (0.7.33, G11) under a card the banner, the asks and the queue stay in sight: only the page folds */}
             {cardShown && client.extra ? <Markdown text={client.extra} /> : null}
             {cardShown && cardMarks.pageOpen ? <Markdown text={client.page ?? client.text} /> : null}
             {cardShown ? null : <Markdown text={client.text} />}

@@ -203,19 +203,19 @@ describe('0.7.26 when the pane offers the signature box', () => {
     expect(holdText('page', cardOf(), LABEL)).toBe('This view does not match the stored drafts, so signing is off here. Go by the page printed in the thread.')
   })
 
-  test('(0.7.30) no page need be printed here: the box opens on a fresh card of the thread\'s own client', () => {
+  test('(0.7.33) no page need be printed here: the box opens on a fresh card of the thread\'s own client', () => {
     const drawn = drawCard(ELS, { card: cardOf(), marks: marks(), now: 0, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined })
     expect([...buttons(drawn).keys()]).toContain('✍  Click to sign and send')
     expect(texts(drawn).join(' ')).not.toContain('Signing opens once')
   })
 
-  test('(0.7.30) the page holds a line the card does not: the box stays closed, and the note says to go by the page the thread prints', () => {
+  test('(0.7.33) the page holds a line the card does not: the box stays closed, and the note says to go by the page the thread prints', () => {
     const drawn = drawCard(ELS, { card: cardOf({ gap: 'the page holds a line the card does not (x)' }), marks: marks(), now: 0, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined })
     expect([...buttons(drawn).keys()]).not.toContain('✍  Click to sign and send')
     expect(texts(drawn).join(' ')).toContain('Go by the page printed in the thread.')
   })
 
-  test('(0.7.30) a card that could not be drawn: the pane says one plain line, never the error or a path', () => {
+  test('(0.7.33) a card that could not be drawn: the pane says one plain line, never the error or a path', () => {
     const raw = 'Traceback: /Users/someone/.claude/skills/client-reply-prep/scripts/render_visual.py line 12'
     const drawn = drawCard(ELS, { card: cardOf({ tree: null, status: 'failed', error: raw }), marks: marks(), now: 0, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined })
     expect(texts(drawn)).toEqual([NOT_DRAWN])
@@ -328,7 +328,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     typeof r.signer === 'string' && r.signer.trim() !== '' &&
     typeof r.at === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]00:?00)$/.test(r.at) && !Number.isNaN(Date.parse(r.at))
 
-  test('(0.7.30) a press records the signature for the send gate, parsed as the gate parses it, before the words go in the prompt box', async () => {
+  test('(0.7.33) a press records the signature for the send gate, parsed as the gate parses it, before the words go in the prompt box', async () => {
     const t = thread()
     t.state.set('card', cardOf())
     await pressSign(t.$, LABEL, t.log)
@@ -350,7 +350,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     expect(t.fills).toEqual([`Send package ${SHA.slice(0, 12)}`])
   })
 
-  test('(0.7.30) the file keeps the newest 200 records, and what is already in it', async () => {
+  test('(0.7.33) the file keeps the newest 200 records, and what is already in it', async () => {
     const t = thread()
     t.state.set('card', cardOf())
     const older = Array.from({ length: 205 }, (_, i) => JSON.stringify({ v: 1, n: i }))
@@ -369,19 +369,19 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
   const PINNED_LINE = '{"v":1,"session_id":"11111111-2222-4333-8444-555555555555","package_id":"66666666-7777-4888-8999-aaaaaaaaaaaa","package_sha256":"0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9","page_sha256":"0cc270fe28406aeac526872993f4936e5b8e5040d37575eb5d6d649bf40ee977","label":"0a1b2c3d4e5f","signer":"Example Signer","at":"2026-11-06T16:00:00.000Z"}\n'
   const PINNED_PAGE = "## Example Client · reply package · Package 0a1b2c3d4e5f\n\n### Every question answered?\n| # | They asked | Our reply says | |\n|---|---|---|---|\n| 1 | Is Thursday still on? | \"Yes, Thursday at 2 PM ET\" | ✅ |\n\n### Their message\nEverything since our last reply, Mon Oct 19, 9:12 AM ET: the café plan.\n\n#### Example Person · Mon Oct 19, 9:12 AM ET · gmail\nTo: support@letaidothehardwork.com · Subject: Thursday\n> ```text\n> Is Thursday still on?\n> ```\n\n### Client reply\n\n#### 1. Re: Thursday\n**To:** person@client.example · **Cc:** (none) · **Subject:** Re: Thursday — the café · **From:** support@letaidothehardwork.com · **Channel:** gmail · hash `aaaaaaaaaaaa`\n```text\nHi there,\n\nYes, Thursday at 2 PM ET, at the café.\n\nRob\n```\n\n### Team post\n_No team post in this package._\n\n### Links\n- none\n\n### Findings\n- Nothing to decide.\n\nOne go sends 1 item. Package 0a1b2c3d4e5f.\n"
 
-  test('(0.7.30) the record is, byte for byte, the send gate\'s pinned example, and page_sha256 the exact bytes of the page', async () => {
+  test('(0.7.33) the record is, byte for byte, the send gate\'s pinned example, and page_sha256 the exact bytes of the page', async () => {
     const r = JSON.parse(PINNED_LINE) as { session_id: string; package_id: string; package_sha256: string; signer: string; at: string; page_sha256: string }
     expect(await sha256Hex(PINNED_PAGE)).toBe(r.page_sha256)
     expect(`${await signatureLine({ sessionId: r.session_id, packageId: r.package_id, sha: r.package_sha256, markdown: PINNED_PAGE, signer: r.signer, at: Date.parse(r.at) })}\n`).toBe(PINNED_LINE)
   })
 
-  test('(0.7.30) page_sha256 is over UTF-8 bytes, not characters', async () => {
+  test('(0.7.33) page_sha256 is over UTF-8 bytes, not characters', async () => {
     expect(await sha256Hex('')).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
     expect(await sha256Hex('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
     expect(await sha256Hex('é')).toBe('4a99557e4033c3539de2eb65472017cad5f9557f7a0625a09f1c3f6e2ba69c4c')
   })
 
-  test('(0.7.30) finding 10: a record that cannot be written records nothing, puts no words in the box, and the box says to try again', async () => {
+  test('(0.7.33) finding 10: a record that cannot be written records nothing, puts no words in the box, and the box says to try again', async () => {
     const t = thread()
     t.state.set('card', cardOf())
     ;(t.$ as unknown as { fs: { write: () => Promise<void> } }).fs.write = async () => {
@@ -399,7 +399,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     expect(drawn).toContain('[✍  Click to sign and send]')
   })
 
-  test('(0.7.30) finding 10: a read error leaves the record file as it was, with no new line, and the box says to try again', async () => {
+  test('(0.7.33) finding 10: a read error leaves the record file as it was, with no new line, and the box says to try again', async () => {
     const t = thread()
     t.state.set('card', cardOf())
     const before = '{"v":1,"kept":true}\n'
@@ -415,7 +415,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     expect(t.notes.join('\n')).toContain('EIO')
   })
 
-  test('(0.7.30) finding 10: a stat that fails for any reason but a missing file is no first signature: nothing is written', async () => {
+  test('(0.7.33) finding 10: a stat that fails for any reason but a missing file is no first signature: nothing is written', async () => {
     const t = thread()
     t.state.set('card', cardOf())
     ;(t.$ as unknown as { fs: { stat: () => Promise<never> } }).fs.stat = async () => {
@@ -426,7 +426,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     expect((t.state.get('cardMarks') as MmCardMarks).notice?.kind).toBe('retry')
   })
 
-  test('(0.7.30) finding 10: a file too large to read whole is left alone, and nothing is signed', async () => {
+  test('(0.7.33) finding 10: a file too large to read whole is left alone, and nothing is signed', async () => {
     const t = thread()
     t.state.set('card', cardOf())
     const before = 'x'.repeat(10)
@@ -438,7 +438,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     expect(t.notes.join('\n')).toContain('too large')
   })
 
-  test('(0.7.30) finding 10: a symlink at the record path is refused before any write: its target is never truncated', async () => {
+  test('(0.7.33) finding 10: a symlink at the record path is refused before any write: its target is never truncated', async () => {
     const t = thread()
     t.state.set('card', cardOf())
     ;(t.$ as unknown as { fs: { stat: () => Promise<unknown> } }).fs.stat = async () => ({ kind: 'other', size: 0, mtimeMs: 0, isLink: true })
@@ -448,7 +448,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     expect(t.notes.join('\n')).toContain('not a regular file')
   })
 
-  test('(0.7.30) finding 10: past 2 hours a signature no longer stands: the box says Sign, never Sealed, and a press signs again', async () => {
+  test('(0.7.33) finding 10: past 2 hours a signature no longer stands: the box says Sign, never Sealed, and a press signs again', async () => {
     const t = thread()
     t.state.set('card', cardOf())
     await pressSign(t.$, LABEL, t.log)
@@ -506,7 +506,7 @@ describe('0.7.26 prepared on arrival: the renderer runs once a package version, 
     expect(t.notes).toEqual(['card for package 44444444-4444-4444-8444-444444444444 could not be drawn: this computer has an older client-reply-prep (the skill sync brings the card)'])
   })
 
-  test('(0.7.30) the raw error goes in the log once a reason, and never what it quotes of the package', async () => {
+  test('(0.7.33) the raw error goes in the log once a reason, and never what it quotes of the package', async () => {
     const t = thread()
     ;(t.$ as unknown as { process: { run: () => Promise<unknown> } }).process.run = async () => ({ exitCode: 1, stdout: '', stderr: 'no open package: http 500 {"client_words":"made-up words"}' })
     const f = { packageId: '77777777-7777-4777-8777-777777777777', projectId: SMS_TREE.project_id, client: 'X', own: true, current: SHA, page: SMS_PAGE, signer: 'Owner', home: '/h', note: t.log.note, isNewest: async () => true }
@@ -515,7 +515,7 @@ describe('0.7.26 prepared on arrival: the renderer runs once a package version, 
     expect(t.notes).toEqual(['card for package 77777777-7777-4777-8777-777777777777 could not be drawn: no open package: http 500'])
   })
 
-  test('(0.7.30) the card is checked against the page it was read with: a line it lacks closes its box, and only a card as it stands is checked', async () => {
+  test('(0.7.33) the card is checked against the page it was read with: a line it lacks closes its box, and only a card as it stands is checked', async () => {
     const t = thread()
     const packageId = '88888888-8888-4888-8888-888888888888'
     const f = { packageId, projectId: SMS_TREE.project_id, client: 'X', own: true, current: SHA, page: SMS_PAGE, signer: 'Owner', home: '/h', note: t.log.note, isNewest: async () => true }
@@ -537,7 +537,7 @@ describe('0.7.26 prepared on arrival: the renderer runs once a package version, 
   })
 })
 
-describe('0.7.30 what `mm card` says of a card', () => {
+describe('0.7.33 what `mm card` says of a card', () => {
   test('ready only for that package\'s card, drawn, with nothing holding its box back; each other case in plain words', () => {
     const id = SMS_TREE.package_id
     expect(cardVerdict(cardOf(), id)).toBe('')
@@ -561,7 +561,7 @@ describe('0.7.30 what `mm card` says of a card', () => {
 
 })
 
-describe('0.7.30 the card\'s links: the real source, never the Onboarding Wizard', () => {
+describe('0.7.33 the card\'s links: the real source, never the Onboarding Wizard', () => {
   test('a run with a link to the wizard keeps its words and loses the link, whichever renderer drew it', () => {
     const made = JSON.parse(JSON.stringify(SMS_TREE)) as { nodes: unknown[] }
     made.nodes.unshift({ r: [{ s: 'OW', href: 'https://onboarding-wizard.massmarket.ai/dashboard/projects/x' }, { s: 'Preview', href: 'https://onboarding-wizard-git-x.vercel.app/y' }, { s: 'Doc', href: 'https://x.example/onboarding-wizard' }] })
@@ -594,7 +594,7 @@ describe('0.7.30 the card\'s links: the real source, never the Onboarding Wizard
   })
 })
 
-describe('0.7.30 the card on screen is the current render: read at `mm card` and again at the press', () => {
+describe('0.7.33 the card on screen is the current render: read at `mm card` and again at the press', () => {
   const id = SMS_TREE.package_id
   const RENDERER = { packageId: id, signer: 'Test Signer', home: HOME, note: async () => undefined }
   const pairOf = (name: string) => {

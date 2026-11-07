@@ -1,5 +1,5 @@
 /**
- * (0.7.30) Whether the card carries what the page prints (Rob, 2026-11-06: "the copy passes. I already think we should go
+ * (0.7.33) Whether the card carries what the page prints (Rob, 2026-11-06: "the copy passes. I already think we should go
  * ahead and implement that for everybody."). The card replaces the printed pickup page only where this says so: a thread
  * whose `mm card` answers not ready prints the whole page, and the signature box stays closed. It is the answer to a line
  * only OW prints, and to anything added to the page later.

@@ -36,7 +36,7 @@ const ME = 'builder-a@example.com'
 const SELF = 'local_self'
 const SELF_CLI = 'cccccccc-0000-4000-8000-000000000000'
 const PKG = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
-/** (0.7.30) The line over a client's page on a computer whose renderer draws no card (this test world's, unless it says `renderer: 'tree'`). */
+/** (0.7.33) The line over a client's page on a computer whose renderer draws no card (this test world's, unless it says `renderer: 'tree'`). */
 const CARD_NOT_DRAWN = 'The card could not be drawn on this computer. Your thread prints the whole package instead.'
 
 type Thread = { sessionId: string; title: string; pinned: boolean; isArchived: boolean; lastActivityAt: string; link?: string; cwd?: string }
@@ -376,10 +376,10 @@ function world(on: On, opts: WorldOptions = {}) {
   const ran: string[] = []
   /** (0.7.26) Every reply-package card the bridge drew on this computer: the renderer, apart from the programs above. */
   const renders: string[] = []
-  /** (0.7.30) What the renderer draws now. */
+  /** (0.7.33) What the renderer draws now. */
   let treeNow = JSON.stringify(SMS_TREE)
   on('process.run', async (_$, e) => {
-    // (0.7.30) `mm card`'s free second: short here, and long enough for a mounted pane to draw
+    // (0.7.33) `mm card`'s free second: short here, and long enough for a mounted pane to draw
     if (e.argv[0] === 'sleep') {
       await new Promise(resolve => setTimeout(resolve, 5))
       return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -422,13 +422,13 @@ function world(on: On, opts: WorldOptions = {}) {
     registered.push(String(e.description ?? ''))
     return { value: { tool: `mcp__mm-bridge__${e.name}` } }
   })
-  /** (0.7.30) Whether this surface can place a pane now. */
+  /** (0.7.33) Whether this surface can place a pane now. */
   let placed = true
   on('ui.open', (_$, e) => {
     opened.push({ id: e.id, title: e.title })
     return { value: placed ? { isPlaced: true as const } : { isPlaced: false as const, reason: 'nothing can draw a pane here' } }
   })
-  /** (0.7.30) Whether the pane is the one its surface shows, or a tab behind another. */
+  /** (0.7.33) Whether the pane is the one its surface shows, or a tab behind another. */
   let shownNow = true
   on('ui.panes', () => ({ value: [{ id: 'mm-queue', title: 'Massmarket', isShown: shownNow, isFocused: false, isPlaced: placed }] }))
   /** (0.6.0) Every status line the bridge set, in order (undefined: cleared). */
@@ -10565,7 +10565,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-line/link',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.30', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.33', 'Content-Type': 'application/json' },
       body: { line_key: L_SITE, ticket_id: 'f779a7a0', link_source: 'member' },
     }])
     expect(said).not.toContain('fixture-token')
@@ -10634,7 +10634,7 @@ describe('0.7.0: mm line, propose and bank act on the answer, and never send any
     expect(w.scopePosts[0]).toEqual({
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.30', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.33', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: 'the client asked for a Spanish version on the call', session_id: SELF_CLI },
     })
     expect(lineButtons((await bandLines($)).buttons)).toEqual([])
@@ -10700,7 +10700,7 @@ describe('0.7.1: mm propose sends the estimate and urgent, and says whether to c
     expect(w.scopePosts).toEqual([{
       url: 'https://onboarding-wizard.massmarket.ai/api/ext/scope-proposal',
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.30', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.33', 'Content-Type': 'application/json' },
       body: { project_id: ACME, title: 'Spanish landing page', why: WHY, estimate_hours: 1.5, session_id: SELF_CLI },
     }])
     // the band for this label is answered; no turn, nothing to a client
@@ -12724,7 +12724,7 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
     expect(w.pinPosts).toHaveLength(1)
     const sent = w.pinPosts[0] as (typeof w.pinPosts)[number]
     expect(sent.method).toBe('POST')
-    expect(sent.headers).toEqual({ Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.30', 'Content-Type': 'application/json' })
+    expect(sent.headers).toEqual({ Authorization: 'Bearer fixture-token-not-a-real-one', 'X-MM-Client': 'mm-bridge/0.7.33', 'Content-Type': 'application/json' })
     const body = sent.body
     expect(Object.keys(body).sort()).toEqual(['at', 'extra', 'items'])
     expect(body.at).toBe(new Date(NOW).toISOString())
@@ -12943,7 +12943,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
     })
   }
 
-  describe('0.7.30 `mm card <package id>`: whether the thread prints the page', () => {
+  describe('0.7.33 `mm card <package id>`: whether the thread prints the page', () => {
     const READY = `card ready: Package ${LABEL}. The whole package is on screen in the side pane and its copy check passed. Do not print the page. Print one line saying it is in the side pane, ending "Package ${LABEL}.", then wait for the person.`
     const notReady = (why: string) => `card not ready: ${why}. Print the whole page.`
     const own = { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } }, renderer: 'tree' as const, pickup: PICKUP }
