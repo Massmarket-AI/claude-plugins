@@ -385,9 +385,12 @@ function world(on: On, opts: WorldOptions = {}) {
   const renders: string[] = []
   /** (0.7.33) What the renderer draws now. */
   let treeNow = JSON.stringify(SMS_TREE)
+  /** (0.7.35) How many of those free seconds went by. */
+  let freeSeconds = 0
   on('process.run', async (_$, e) => {
     // (0.7.33) `mm card`'s free second: short here, and long enough for a mounted pane to draw
     if (e.argv[0] === 'sleep') {
+      freeSeconds++
       await new Promise(resolve => setTimeout(resolve, 25))
       return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
@@ -487,6 +490,7 @@ function world(on: On, opts: WorldOptions = {}) {
     argvs: () => ran.map(r => (JSON.parse(r) as { argv: string[] }).argv),
     /** How often this session asked the app for its usage, and for whom. */
     usageAsked: () => calls.filter(c => c.tool === 'get_usage').map(c => String(c.args.session_id)),
+    freeSeconds: () => freeSeconds,
     setPlaced: (can: boolean) => {
       placed = can
     },
@@ -13195,17 +13199,12 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
 
     test('(0.7.35) off screen, it waits no second for a pane that will not draw', async ($, on) => {
       const w = world(on, own)
-      let seconds = 0
-      on('process.run', (_$, e, next) => {
-        if (e.argv[0] === 'sleep') seconds++
-        return next(e)
-      })
       const u = await shown($)
       await u.unmount()
       w.setPlaced(false)
-      seconds = 0
+      const before = w.freeSeconds()
       expect(await tool($, `card ${PKG}`)).toBe(OFF_SCREEN)
-      expect(seconds).toBe(0)
+      expect(w.freeSeconds()).toBe(before)
     })
 
     test('(0.7.35) both forms start with the sentence the send gate parses, for this tag, and the on-screen words have not moved', () => {
@@ -13218,16 +13217,19 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
 
     describe('(0.7.35) a run no surface will ever attach to stays not ready, in the words it always had', () => {
       const NO_SURFACE = notReady('the side pane is not open on a surface that can draw it')
-      /** The card in the state, then the session seen as this: the card itself is no part of the question. */
       test('`claude -p`: not a person\'s session, by what session.start found', async ($, on) => {
         const w = world(on, own)
-        let entry = 'claude-desktop'
-        on('env.get', (_$, e, next) => (e.name === 'CLAUDE_CODE_ENTRYPOINT' ? { value: entry } : next(e)))
+        // the card drawn first, as in a person's session; then the session reads as session.start records a `claude -p`
+        let headless = false
+        on('state.get', { plugin: 'mm-bridge' }, async (_$, e, next) => {
+          const got = (await next(e)) as { value: { value?: unknown } }
+          if (!headless || e.key !== 'sess') return got as never
+          return { value: { ...got.value, value: { prompts: 0, interactive: false } } } as never
+        })
         const u = await shown($)
         await u.unmount()
         w.setPlaced(false)
-        entry = 'sdk-cli'
-        await $.session.start({ cwd: '/work', surface: null, isInteractive: false })
+        headless = true
         expect(await tool($, `card ${PKG}`)).toBe(NO_SURFACE)
       })
 
@@ -13255,14 +13257,11 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       })
 
       test('a person at a terminal REPL is not one of these: the pane waits for a wider window, and the card is ready', async ($, on) => {
-        const w = world(on, own)
-        let entry = 'claude-desktop'
-        on('env.get', (_$, e, next) => (e.name === 'CLAUDE_CODE_ENTRYPOINT' ? { value: entry } : next(e)))
-        const u = await shown($)
+        const w = world(on, { ...own, terminal: true, store: { ...own.store, 'mm.current': { [`cli:${SELF_CLI}`]: { pid: ACME, how: 'primary', at: NOW } } } })
+        await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+        const u = await shown($, 'terminal')
         await u.unmount()
         w.setPlaced(false)
-        entry = 'cli'
-        await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
         expect(await tool($, `card ${PKG}`)).toBe(OFF_SCREEN)
       })
     })
