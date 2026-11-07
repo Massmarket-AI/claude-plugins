@@ -1939,6 +1939,8 @@ export function pinReport(o: {
   links: Readonly<Record<string, string>>
   thread: (sid: string) => AppThread | undefined
   hidden: (sid: string) => boolean
+  /** (0.7.35) A thread of the person's other Claude profile: no thread here, so `no_thread`, never `unseen`. */
+  elsewhere?: (sid: string) => boolean
   stayedOff: ReadonlySet<string>
   capped: ReadonlySet<string>
   /** (0.7.23) The clients (project ids) whose thread the pass named through the checking loop (R8). */
@@ -1957,7 +1959,7 @@ export function pinReport(o: {
     const pinned = s?.pinned === true
     const whyNot: PinWhyNot | null = pinned
       ? null
-      : !sid
+      : !sid || o.elsewhere?.(sid)
         ? 'no_thread'
         : !s
           ? o.hidden(sid) ? 'unseen' : 'unknown'

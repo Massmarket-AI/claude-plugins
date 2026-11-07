@@ -1695,7 +1695,12 @@ function recordReader(
       const own = await ownDir()
       if (own === undefined || files.some(f => f.dir === own)) return undefined
       const said = await read(all, sid)
-      if (!said || said.dir === own) return undefined
+      // ⛔ (0.7.35, measured on Rob's computer 2026-11-07: 73 of 97 pin records were threads of the profile he left on 11-05, so
+      // they spent the sync's files before the links were reached and NextProjectX, due Monday, read neither away nor missing)
+      // The listing has already said it has no record here. A file only adds whether it is archived there, and either way the
+      // client has no thread in this profile.
+      if (!said) return budget.left <= 0 ? 'away' : undefined
+      if (said.dir === own) return undefined
       return said.archived ? 'archived' : 'away'
     },
     own: ownDir,
@@ -3239,6 +3244,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       links,
       thread: sid => (gone.has(sid) ? undefined : live.get(sid)),
       hidden: sid => unseen.has(sid) || away.has(sid),
+      // (0.7.35) a thread of the other profile is no thread here: its row says Start, and "can't see thread" would only confuse it
+      elsewhere: sid => away.has(sid),
       stayedOff,
       capped: outOfWrites,
       checkedOff,
@@ -6076,8 +6083,12 @@ function needsFor(last: Last, w: ChipWorld, now: number): Need[] {
     // it: for a client with no thread, wherever it is; in this thread, always; and (0.5.6: Start moves the chip to the
     // thread it is pressed in) in another thread while it carries what is waiting now. The bridge cannot see a chip the
     // person dismissed, so one for something older never holds back the client's own thread once something new comes.
-    if (w.chips.some(c => c.projectId === it.projectId && !c.auto && !c.superseded && (linked === undefined || c.threadId === w.me || c.signature === signature))) continue
-    if (linked === undefined) {
+    // (0.7.35) A client whose thread is in the other Claude profile and who pins now has no thread here (`last.away`, 0.7.13's rule:
+    // the same clients `kickoffs` starts). Only while its link is still that thread: its new thread here takes the card back at once.
+    const away = stillAway(last, w.links).find(a => a.projectId === it.projectId)
+    const noThreadHere = linked === undefined || away !== undefined
+    if (w.chips.some(c => c.projectId === it.projectId && !c.auto && !c.superseded && (noThreadHere || c.threadId === w.me || c.signature === signature))) continue
+    if (noThreadHere) {
       // C3: a client with no linked thread, when its recommendation is a new thread
       // (0.7.10) never for a client whose own thread is archived: Restore thread is its row's action
       if (rec.state !== 'start' || rec.archived || rec.dormant || w.home === false || noThreadHolder(it.projectId, w, now) !== w.me) continue
@@ -6086,7 +6097,10 @@ function needsFor(last: Last, w: ChipWorld, now: number): Need[] {
       if (awaitingPackage(it, now, CHIP_NO_DRAFTS_MS)) continue
       const target = rec.target && !rec.target.suggested && THREAD_ID.test(rec.target.sid) ? rec.target : undefined
       const replaces = target ? { sid: target.sid, title: w.titles[target.sid] || target.title } : undefined
-      out.push({ it, signature, need: 'start', title: startTitle(it), tldr: startTldr(it, now), prompt: startKickoff(it, replaces, now), kind: 'nothread', why: rec.reason })
+      // (0.7.35) its last thread in the other profile: which one, and the end of its transcript to read first, as `kickoffs` gives it
+      const handover = away ? awayHandoverText(it.projectName, away) : ''
+      const body = startKickoff(it, replaces, now)
+      out.push({ it, signature, need: 'start', title: startTitle(it), tldr: startTldr(it, now), prompt: handover ? `${body}\n\n${handover}` : body, kind: 'nothread', why: rec.reason })
       continue
     }
     // C1: only the client's own thread; C2: every other thread mints nothing for it
