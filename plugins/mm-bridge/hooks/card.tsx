@@ -26,12 +26,17 @@
  * - The box waits for the thread. (0.7.35; on 2026-11-07 a person pressed and sent while the thread's checks were still
  *   running, and those checks then found two real problems. That thread had asked `mm card` 15 seconds into its turn and made
  *   30 more tool calls after it, so the answer alone proves nothing.) A turn that gets `card ready` for this exact version, or
- *   prints its page, leaves it pending (`cardPending`); when that turn ends with an answer it is on record as checked
- *   (`cardChecked`, `turnEnded`). Until then the card is drawn in full with no box, and a button in its place asks the thread
- *   to check. A turn that stops short (interrupted, refused, an error) drops what was pending, and a session that dies keeps
- *   nothing: the box stays closed and the button still works. A new `package_sha256` clears both for the old version
- *   (`noteVersion`) and closes the box; a page that changes under the same hash does not. This wait is no hold (`holdOf`,
- *   `cardVerdict`): it opens on the answer they decide.
+ *   prints its page, leaves it pending (`cardPending`); when that turn ends with an answer and no background sub-agent is still
+ *   at work, it is on record as checked (`cardChecked`, `turnEnded`). Until then the card is drawn in full with no box, and a
+ *   button in its place asks the thread to check. A turn that stops short (interrupted, refused, an error) or leaves a sub-agent
+ *   at work drops what was pending, so the thread asks again, and a session that dies keeps nothing: the box stays closed and the
+ *   button still works. A new `package_sha256` clears both for the old version (`noteVersion`) and closes the box; a page that
+ *   changes under the same hash does not. This wait is no hold (`holdOf`, `cardVerdict`): it opens on the answer they decide.
+ * - The box is closed while the thread works. (0.7.35; a person says "change the second paragraph" and could still press while
+ *   the thread worked on it.) `cardBusy` is true from the start of a turn of the main conversation, and at any end of one it stays
+ *   true only while a background sub-agent of this session is at work, or the list of them cannot be read (`turnEnded`). A check
+ *   on record outlasts this while the hash is the same: the box is back when the thread stops. Busy stuck? `Check this package`
+ *   starts a new turn, and that turn's end clears it.
  * - The card on screen is the current render. (0.7.33) Plan state, the follow-up switch and rolled dates are in no hash, so
  *   `mm card` and a press each read OW's page and render again (`refreshCard`). OW with no usable hash means not ready. A
  *   fresh card that differs replaces the kept one, and a press in that state records nothing: the box says to read it again.
@@ -51,6 +56,8 @@ const CARD = { plugin: 'mm-bridge', key: 'card' } as const
 const CARD_MARKS = { plugin: 'mm-bridge', key: 'cardMarks' } as const
 const CARD_CHECKED = { plugin: 'mm-bridge', key: 'cardChecked' } as const
 const CARD_PENDING = { plugin: 'mm-bridge', key: 'cardPending' } as const
+const CARD_BUSY = { plugin: 'mm-bridge', key: 'cardBusy' } as const
+const CARD_CHECK_DRAFT = { plugin: 'mm-bridge', key: 'cardCheckDraft' } as const
 
 /** The renderer's tree version this module draws. */
 const TREE_V = 1
@@ -547,6 +554,21 @@ async function pendingOf($: EngineInterface): Promise<MmCardChecked> {
   return value && typeof value === 'object' ? value : {}
 }
 
+/** (0.7.35) Whether this thread is working (`CARD_BUSY`): never written means no turn has started here. */
+export async function busyOf($: EngineInterface): Promise<boolean> {
+  return (await $.state.get(CARD_BUSY)).value === true
+}
+
+async function setBusy($: EngineInterface, busy: boolean): Promise<void> {
+  if ((await busyOf($)) !== busy) await $.state.set(CARD_BUSY, busy)
+}
+
+/** (0.7.35) The tag whose Check button found a draft in the prompt box, '' with none. */
+export async function checkDraftOf($: EngineInterface): Promise<string> {
+  const { value } = await $.state.get(CARD_CHECK_DRAFT)
+  return typeof value === 'string' ? value : ''
+}
+
 /** (0.7.35) This thread has finished checking this version of the package. Pending does not count: the turn may still be checking. */
 export const isChecked = (checked: MmCardChecked, label: string): boolean => Object.hasOwn(checked, label)
 
@@ -563,25 +585,59 @@ export async function notePending($: EngineInterface, labels: readonly string[])
 }
 
 /**
- * (0.7.35) The end of a turn of the main conversation. One that ended with an answer has finished: what it left pending is on record
- * as checked, and the box opens. One that stopped short (interrupted, refused, an error) has not, and what it left pending is dropped,
- * so that a later turn opens nothing until it asks again. A pending version a dead session left never gets here, and that session's
- * state is gone with it: the box stays closed there, and `Check this package` starts a turn that can open it.
+ * (0.7.35) How many times a turn of the main conversation has started or ended in this process. A module's and not the state: one dispatch
+ * reads the state at one moment, so a `mm card` still running could never see a turn begin there. It keeps what this said when it started
+ * (`turnMark`), and a call that outlived its turn leaves nothing pending.
  */
-export async function turnEnded($: EngineInterface, finished: boolean): Promise<void> {
-  const tags = Object.keys(await pendingOf($))
-  if (!tags.length) return
-  if (finished) await $.state.set(CARD_CHECKED, withTags(await checkedOf($), tags, await $.clock.now()))
-  await $.state.set(CARD_PENDING, {})
+let turnMarks = 0
+export const turnMark = (): number => turnMarks
+
+/** Where a loop is at work (`AgentStatus`): about to run, running a turn, or held on background work it owns. `idle` waits for a message; the rest have ended. */
+const AT_WORK: ReadonlySet<string> = new Set(['pending', 'running', 'waiting'])
+
+/**
+ * (0.7.35) Whether a background sub-agent of this session is still at work. Measured on 2026-11-07 in a main-loop turn, at its `turn.complete`:
+ * `$.agent.list()` answers, a foreground agent has already left the list, and a background one reads `running`. When that one ends it reads
+ * `completed`, and the engine starts a new main turn, whose end clears the busy. ⛔ A list that cannot be read counts as at work. A teammate
+ * in a terminal pane of its own is left out: it runs no loop here (its id is its address), and the word it last wrote outlives a dead pane,
+ * so no turn's end could ever clear it.
+ */
+async function subAgentAtWork($: EngineInterface): Promise<boolean> {
+  try {
+    return (await $.agent.list()).some(a => AT_WORK.has(a.status) && a.id !== a.teammateId)
+  } catch {
+    return true
+  }
 }
 
 /**
- * (0.7.35) The start of a turn of the main conversation: what is still pending belongs to a turn that is over, and is dropped so that
- * only the same turn's end can make it checked. It comes from a `mm card` still running when its turn was interrupted: that turn's end
- * has been and gone by the time the answer is written.
+ * (0.7.35) The end of a turn of the main conversation, for any reason. Busy stays only while a background sub-agent is at work. One that
+ * ended with an answer, with none at work, has finished: what it left pending is on record as checked, and the box opens. Otherwise what
+ * it left pending is dropped, so that the thread has to ask again: a turn that stopped short (interrupted, refused, an error), or a
+ * sub-agent started after the ask, which may yet find something. A pending version a dead session left never gets here, and that session's
+ * state is gone with it: the box stays closed there, and `Check this package` starts a turn that can open it.
+ */
+export async function turnEnded($: EngineInterface, finished: boolean): Promise<void> {
+  turnMarks++
+  const busy = await subAgentAtWork($)
+  const tags = Object.keys(await pendingOf($))
+  if (tags.length) {
+    if (finished && !busy) await $.state.set(CARD_CHECKED, withTags(await checkedOf($), tags, await $.clock.now()))
+    await $.state.set(CARD_PENDING, {})
+  }
+  await setBusy($, busy)
+}
+
+/**
+ * (0.7.35) The start of a turn of the main conversation: the box closes while the thread works. What is still pending belongs to a turn that
+ * is over, and is dropped so that only the same turn's end can make it checked. The Check button's word about a draft is over too: the
+ * person has sent something.
  */
 export async function turnBegan($: EngineInterface): Promise<void> {
+  turnMarks++
+  await setBusy($, true)
   if (Object.keys(await pendingOf($)).length) await $.state.set(CARD_PENDING, {})
+  if (await checkDraftOf($)) await $.state.set(CARD_CHECK_DRAFT, '')
 }
 
 /** (0.7.35) Nothing stands for this version any more, pending or checked. */
@@ -732,17 +788,20 @@ async function recordSignature($: EngineInterface, card: MmCard, signer: string,
   }
 }
 
-/** (0.7.35) The note a press leaves in the transcript, word for word. */
-export const SIGNED_NOTE = (label: string): string => `[Massmarket bridge, no reply needed] Card signed in the side pane: Package ${label}. Nothing has been sent.`
+/**
+ * (0.7.35) The note a press leaves in the transcript, word for word: the version it signed and the first 12 of the record's `page_sha256`.
+ * ⛔ send-gate.js `CARD_PRESS_NOTE` in the control tower parses these words: change both together.
+ */
+export const SIGNED_NOTE = (label: string, page12: string): string => `[Massmarket bridge, no reply needed] Card signed in the side pane: Package ${label}, page ${page12}. Nothing has been sent.`
 
 /**
  * (0.7.35) The press's mark in the transcript, for the send gate: a row a thread's own words cannot make, stored `isMeta` under the
  * bridge's name as `origin`, which starts no turn. ⛔ False when it could not be appended (the engine refused it, or a plugin above
  * answered `{ deny }`): no note means no words in the prompt box, as for a record that could not be written.
  */
-async function appendSigned($: EngineInterface, card: MmCard, label: string, log: SignLog): Promise<boolean> {
+async function appendSigned($: EngineInterface, card: MmCard, label: string, page12: string, log: SignLog): Promise<boolean> {
   try {
-    const stored = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: SIGNED_NOTE(label) }] } })
+    const stored = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: SIGNED_NOTE(label, page12) }] } })
     if (stored.deny !== undefined) throw new Error(stored.deny)
     return true
   } catch (err) {
@@ -772,14 +831,14 @@ const isChecking = (marks: MmCardMarks, label: string, now: number) => marks.che
  * `Send package <12>` goes in the prompt box, if the card still holds then. A note that cannot be appended stops there, as a record
  * that cannot be written does: the record stands in its file, with no note and no words.
  * One signature a tag while it stands (`standing`): once the gate would no longer take it, a new press signs again.
- * (0.7.35) A press for a version this thread has not finished checking records nothing, while its turn is still running too: the box
- * is not drawn then, so this is the second line of defence for a press that was already under way.
+ * (0.7.35) A press while this thread is working, or for a version it has not finished checking, records nothing, while its turn is still
+ * running too: the box is not drawn then, so this is the second line of defence for a press that was already under way.
  */
 export async function pressSign($: EngineInterface, label: string, log: SignLog): Promise<void> {
   const { value: card } = await $.state.get(CARD)
   const marks = await marksOf($)
   const pressed = await $.clock.now()
-  if (!isChecked(await checkedOf($), label)) return
+  if ((await busyOf($)) || !isChecked(await checkedOf($), label)) return
   if (!card || !card.tree || standing(marks, label, card, pressed) || isChecking(marks, label, pressed)) return
   if (holdOf(card) || signOf(card.tree)?.label !== label) return
   const { notice: _notice, ...kept } = marks
@@ -802,11 +861,11 @@ export async function pressSign($: EngineInterface, label: string, log: SignLog)
   const fresh = await cardOf($)
   if (outcome === 'changed' || holdOf(fresh) || signOf(fresh.tree)?.label !== label) return stop('changed')
   const at = await $.clock.now()
+  const pageSha = await sha256Hex(read.markdown)
   // (0.7.33) on record before the words can reach the prompt box
   if (!(await recordSignature($, fresh, signer, read.markdown, log))) return stop('retry')
-  // (0.7.35) then the note: record, note, words, always in that order
-  if (!(await appendSigned($, fresh, label, log))) return stop('retry')
-  const pageSha = await sha256Hex(read.markdown)
+  // (0.7.35) then the note, right after it: the send gate matches it to the record's page, session and time. Record, note, words, always
+  if (!(await appendSigned($, fresh, label, pageSha.slice(0, 12), log))) return stop('retry')
   const signed: MmCardSigned = { label, signer, at, pageSha }
   const m = await marksOf($)
   await end({ signed: { ...m.signed, [label]: signed } })
@@ -824,6 +883,12 @@ export async function pressSign($: EngineInterface, label: string, log: SignLog)
 /** A press on one of the card's own buttons (Read the whole transcript, Fix these first): its words in the prompt box. */
 export async function pressAsk($: EngineInterface, words: string): Promise<void> {
   await fillWords($, words)
+}
+
+/** (0.7.35) A press on Check this package: its words in the prompt box, or, when the box holds other text, the pane says so (`CHECK_DRAFT`). */
+export async function pressCheck($: EngineInterface, label: string): Promise<void> {
+  const said = (await fillWords($, `Check package ${label}`)) === 'draft' ? label : ''
+  if ((await checkDraftOf($)) !== said) await $.state.set(CARD_CHECK_DRAFT, said)
 }
 
 // ---------------------------------------------------------------- drawing
@@ -1056,8 +1121,13 @@ const NOTICE = {
   retry: 'That did not go through, so nothing was signed. Try again, or ask your thread to print the page.',
 } as const
 
-/** (0.7.35) What the pane says in place of the box until this thread has finished checking this version, and the button that asks it to. */
+/**
+ * (0.7.35) What the pane says in place of the box: while this thread is working, once it has stopped without checking this version, and
+ * when the prompt box holds other text; and the button that asks it to check.
+ */
 export const THREAD_CHECKING = 'This thread is still checking this package. The signature box opens when it finishes.'
+export const THREAD_NOT_CHECKED = 'This thread has not checked this version of the package yet.'
+export const CHECK_DRAFT = (label: string): string => `Your prompt box holds a draft, so type: Check package ${label}`
 export const CHECK_BUTTON = 'Check this package'
 
 export type CardDraw = {
@@ -1065,8 +1135,13 @@ export type CardDraw = {
   marks: MmCardMarks
   /** (0.7.35) The versions this thread has finished checking (`checkedOf`). */
   checked: MmCardChecked
+  /** (0.7.35) This thread is working (`busyOf`). */
+  busy: boolean
+  /** (0.7.35) The tag whose Check button found a draft in the prompt box (`checkDraftOf`). */
+  checkDraft: string
   now: number
   onSign: (label: string) => void
+  onCheck: (label: string) => void
   onAsk: (words: string) => void
   onPage: () => void
 }
@@ -1117,12 +1192,13 @@ export function drawCard(els: Els, d: CardDraw): Node {
         <Text color={hold === 'drift' || hold === 'page' ? 'error' : undefined} dimColor={hold !== 'drift' && hold !== 'page'}>{holdText(hold, card, tree.label)}</Text>
       </Box>
     )
-    // (0.7.35) the thread is still checking this version: the card stands in full, and the box waits
-    if (!isChecked(d.checked, s.label)) return (
+    // (0.7.35) the thread is working, or has not checked this version: the card stands in full, and the box waits
+    if (d.busy || !isChecked(d.checked, s.label)) return (
       <Box key={`mm-card-wait:${s.label}`} flexDirection="column">
         {notice ? <Text color="warning">{notice}</Text> : null}
-        <Text dimColor>{THREAD_CHECKING}</Text>
-        {Button ? <Button key={`mm-card-check:${s.label}`} label={CHECK_BUTTON} onPress={() => d.onAsk(`Check package ${s.label}`)} /> : <Text dimColor>{CHECK_BUTTON}</Text>}
+        <Text dimColor>{d.busy ? THREAD_CHECKING : THREAD_NOT_CHECKED}</Text>
+        {d.checkDraft === s.label ? <Text>{CHECK_DRAFT(s.label)}</Text> : null}
+        {Button ? <Button key={`mm-card-check:${s.label}`} label={CHECK_BUTTON} onPress={() => d.onCheck(s.label)} /> : <Text dimColor>{CHECK_BUTTON}</Text>}
       </Box>
     )
     if (isChecking(marks, s.label, d.now)) return <Text dimColor>Checking this is still the package…</Text>

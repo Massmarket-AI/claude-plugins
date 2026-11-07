@@ -3641,7 +3641,7 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
 // (0.7.26) The reply-package card: prepared on arrival, drawn natively above the page (card.tsx).
 import { teamFrom, teamHeadingNow, teamLines, teamText, withMoves } from './team'
 import type { TeamNow, TeamSeen } from './team'
-import { cardHooks, cardOf, cardVerdict, checkedOf, clearCard, currentOf, drawCard, isOnScreen, marksOf, noteDrawn, notePending, noteVersion, onWindows, prepareCard, pressAsk, pressSign, refreshCard, resetCard, showKept, togglePage, turnBegan, turnEnded, type PageRead } from './card'
+import { busyOf, cardHooks, cardOf, cardVerdict, checkDraftOf, checkedOf, clearCard, currentOf, drawCard, isOnScreen, marksOf, noteDrawn, notePending, noteVersion, onWindows, prepareCard, pressAsk, pressCheck, pressSign, refreshCard, resetCard, showKept, togglePage, turnBegan, turnEnded, turnMark, type PageRead } from './card'
 import { holderName } from './queue'
 
 /**
@@ -4020,10 +4020,12 @@ async function aSecond($: EngineInterface): Promise<void> {
  * (0.7.35) A ready answer to this thread's own tool call (`ownCall`) leaves that version pending (`notePending`), and the end of the
  * turn it came in opens the signature box (`turnEnded`): threads have asked this at the start of their checks. A sub-agent's call does
  * not count, as its thread is still at work and the send gate reads the main chain alone. Nor does a typed /mm card: it runs no turn
- * (measured 2026-11-07), so there is no turn to end, and the gate does not count it either.
+ * (measured 2026-11-07), so there is no turn to end, and the gate does not count it either. Nor does a call that outlived its turn
+ * (`turnMark`): it says nothing of the turn under way when it answers.
  */
 async function cardCommand($: EngineInterface, arg: string, ownCall: boolean): Promise<string> {
   try {
+    const turn = turnMark()
     const packageId = arg.trim().toLowerCase()
     if (!isUuid(packageId)) return CARD_WHOLE_ID
     // ⛔ Every `$.state.get` of one dispatch reads one moment, so waiting here on the state would never see a draw end: `refreshCard`
@@ -4048,7 +4050,7 @@ async function cardCommand($: EngineInterface, arg: string, ownCall: boolean): P
     const shown = Boolean(pane?.isPlaced && pane.isShown)
     // the state is set; the words are on the screen once the pane has drawn them. A pane that is not shown draws nothing to wait for.
     for (let s = 0; shown && s < CARD_DRAW_WAIT_S && !isOnScreen(packageId, card.tree); s++) await aSecond($)
-    if (ownCall) await notePending($, [label])
+    if (ownCall && turnMark() === turn) await notePending($, [label])
     return shown && isOnScreen(packageId, card.tree) ? cardReady(label) : cardReadyOffScreen(label)
   } catch {
     return cardNotReady('the card could not be checked')
@@ -9070,7 +9072,7 @@ export const register: Register = on => {
     const done = await next(e)
     // the main conversation's turns only: a subagent's turn says nothing of this thread's work
     if ((e as { agentId?: unknown }).agentId) return done
-    // (0.7.35) what this turn got `card ready` for, or printed the page of, is checked now that it has ended: the signature box opens
+    // (0.7.35) the thread has stopped, unless a background sub-agent is at work: what this turn got `card ready` for, or printed the page of, is checked now, and the signature box opens
     await turnEnded($, e.reason === 'answer').catch(() => {})
     void (async () => {
       await terminalTime($)
@@ -9134,7 +9136,7 @@ export const register: Register = on => {
   // R10: a chip the app did not answer outside a turn is tried again at the start of this thread's next turn
   on('turn.start', async ($, e, next) => {
     try {
-      // (0.7.35) only the end of the same turn makes what it left pending checked (`turnBegan`)
+      // (0.7.35) the thread is working: no signature box until this turn ends (`turnBegan`)
       if (!(e as { agentId?: unknown }).agentId) await turnBegan($)
       const id = await instanceId($)
       const paused = mintPause.get(id)
@@ -9334,6 +9336,8 @@ export const register: Register = on => {
     const card = await cardOf($)
     const cardMarks = await marksOf($)
     const cardChecked = await checkedOf($)
+    const cardBusy = await busyOf($)
+    const cardCheckDraft = await checkDraftOf($)
     const cardNow = await $.clock.now()
     const cardShown = Boolean(client.text && card?.packageId && card.tree)
     // (0.7.33) the line that says it cannot be drawn on this computer, over the part as it is
@@ -9490,7 +9494,7 @@ export const register: Register = on => {
         {client.text ? (
           <Box key="mm-client" flexDirection="column" marginBottom={1}>
             {client.heading ? <Text bold>{client.heading}</Text> : null}
-            {cardShown || cardFailed ? drawCard($.ui.resolve(e) as Parameters<typeof drawCard>[0], { card: card, marks: cardMarks, checked: cardChecked, now: cardNow, onSign: label => void signPressed($, label), onAsk: words => void pressAsk($, words), onPage: () => void togglePage($) }) : null}
+            {cardShown || cardFailed ? drawCard($.ui.resolve(e) as Parameters<typeof drawCard>[0], { card: card, marks: cardMarks, checked: cardChecked, busy: cardBusy, checkDraft: cardCheckDraft, now: cardNow, onSign: label => void signPressed($, label), onCheck: label => void pressCheck($, label), onAsk: words => void pressAsk($, words), onPage: () => void togglePage($) }) : null}
             {/* (0.7.33, G11) under a card the banner, the asks and the queue stay in sight: only the page folds */}
             {cardShown && client.extra ? <Markdown text={client.extra} /> : null}
             {cardShown && cardMarks.pageOpen ? <Markdown text={client.page ?? client.text} /> : null}

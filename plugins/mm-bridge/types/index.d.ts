@@ -401,6 +401,10 @@ declare module 'claude-code' {
       cardMarks: MmCardMarks
       cardChecked: MmCardChecked
       cardPending: MmCardChecked
+      /** (0.7.35) This thread is working: a turn of the main conversation is running, or a background sub-agent outlived the last one. No box then. */
+      cardBusy: boolean
+      /** (0.7.35) The tag whose Check button found a draft in the prompt box, '' with none: the pane says so. */
+      cardCheckDraft: string
     }
   }
 }

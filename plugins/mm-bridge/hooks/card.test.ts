@@ -2,8 +2,8 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import type { MmCard, MmCardMarks, MmCardTree } from '../types'
 import {
-  CHECK_BUTTON, NOT_DRAWN, NO_CARD, NO_OWNER_CHECK, SIGNED_NOTE, SIGN_FILL_MS, SIGN_VALID_MS, THREAD_CHECKING, cardVerdict, checkedOf, copyCheck, currentOf, drawCard, fnv1a, holdOf, holdText, isChecked, isFresh, noteCurrent, notePending, noteVersion, prepareCard, pressAsk, pressSign, readTree,
-  printedTags, refreshCard, sha256Hex, signOf, signatureLine, signatureSvg, standing, turnBegan, turnEnded, type CardDraw,
+  CHECK_BUTTON, CHECK_DRAFT, NOT_DRAWN, NO_CARD, NO_OWNER_CHECK, SIGNED_NOTE, SIGN_FILL_MS, SIGN_VALID_MS, THREAD_CHECKING, THREAD_NOT_CHECKED, busyOf, cardVerdict, checkDraftOf, checkedOf, copyCheck, currentOf, drawCard, fnv1a, holdOf, holdText, isChecked, isFresh, noteCurrent, notePending, noteVersion, prepareCard, pressAsk, pressCheck, pressSign, readTree,
+  printedTags, refreshCard, sha256Hex, signOf, signatureLine, signatureSvg, standing, turnBegan, turnEnded, turnMark, type CardDraw,
 } from './card'
 import { drawnText, pageGap } from './card-parity'
 import { CARD_PAIRS } from './card-pairs.test-helper'
@@ -63,7 +63,7 @@ function buttons(node: unknown, out = new Map<string, () => void>()): Map<string
 const ELS = { Box: 'Box', Text: 'Text', Button: 'Button', Link: 'Link', Svg: 'Svg' } as never
 
 /** (0.7.35) A drawing with this thread's check of the card on record: the wait for it has tests of its own, at the end of this file. */
-const drawChecked = (d: Omit<CardDraw, 'checked'>) => drawCard(ELS, { checked: { [d.card.tree?.label ?? '']: 0 }, ...d })
+const drawChecked = (d: Omit<CardDraw, 'checked' | 'busy' | 'checkDraft' | 'onCheck'>) => drawCard(ELS, { checked: { [d.card.tree?.label ?? '']: 0 }, busy: false, checkDraft: '', onCheck: () => undefined, ...d })
 /** (0.7.35) Every package these tests draw: a thread starts with its check on record, and a test of the wait takes it away. */
 const ALL_CHECKED = Object.fromEntries([LABEL, ...Object.values(CARD_PAIRS).map(p => (p.tree as { label: string }).label)].map(label => [label, 0]))
 
@@ -80,7 +80,7 @@ function thread(box = '') {
   const appends: unknown[] = []
   const order: string[] = []
   /** What the page read gives a press, what the renderer draws on this computer, and how an append goes. */
-  const now = { page: { markdown: SMS_PAGE as string | null, sha: SHA as string | null }, render: JSON.stringify(SMS_TREE), session: TRANSCRIPT, os: undefined as string | undefined, append: 'stores' as 'stores' | 'throws' | 'denied' }
+  const now = { page: { markdown: SMS_PAGE as string | null, sha: SHA as string | null }, render: JSON.stringify(SMS_TREE), session: TRANSCRIPT, os: undefined as string | undefined, append: 'stores' as 'stores' | 'throws' | 'denied', agents: [] as Array<{ id: string; status: string; teammateId?: string }> | 'throws' }
   const $ = {
     session: {
       id: async () => now.session,
@@ -93,6 +93,12 @@ function thread(box = '') {
       },
     },
     env: { get: async (name: string) => ({ HOME, OS: now.os })[name] },
+    agent: {
+      list: async () => {
+        if (now.agents === 'throws') throw new Error('the list could not be read')
+        return now.agents
+      },
+    },
     fs: {
       read: async (path: string) => {
         const text = files.get(path)
@@ -951,8 +957,12 @@ describe('0.7.26 in the bridge: the pane draws the card above the page as the cl
 })
 
 describe('0.7.35 the box waits for the thread: it opens once this thread has finished checking this exact version', () => {
-  const draw = (card: MmCard, checked: Record<string, number>, onAsk: (words: string) => void = () => undefined, marks: MmCardMarks = { signed: {} }) =>
-    drawCard(ELS, { card, marks, checked, now: 1_000_000, onSign: () => undefined, onAsk, onPage: () => undefined })
+  const draw = (card: MmCard, checked: Record<string, number>, over: Partial<CardDraw> = {}) =>
+    drawCard(ELS, { card, marks: { signed: {} }, checked, busy: false, checkDraft: '', now: 1_000_000, onSign: () => undefined, onCheck: () => undefined, onAsk: () => undefined, onPage: () => undefined, ...over })
+  const SIGN = '✍  Click to sign and send'
+  /** The card as this thread's pane draws it now. */
+  const drawn = async (t: ReturnType<typeof thread>, over: Partial<CardDraw> = {}) =>
+    draw(t.state.get('card') as MmCard, await checkedOf(t.$), { busy: await busyOf(t.$), checkDraft: await checkDraftOf(t.$), ...over })
   /** A thread with nothing checked yet. */
   const unchecked = (box = '') => {
     const t = thread(box)
@@ -967,42 +977,81 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
     await turnEnded($, true)
   }
 
-  test('unchecked: the card is drawn in full, no box, and in its place the exact words and the button', () => {
-    const drawn = draw(cardOf(), {})
-    const all = texts(drawn).join('\n')
-    expect(all).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
-    expect(all).toContain('Hi Dana, yes, the new booking link is live now: example.com/book. Saturday 9 to 1 shows on it. Book a test slot and tell us if anything looks off.')
+  test('the pane says what is true: not checked and stopped, or working; the card is drawn in full with the same button, and no box', () => {
     expect(THREAD_CHECKING).toBe('This thread is still checking this package. The signature box opens when it finishes.')
+    expect(THREAD_NOT_CHECKED).toBe('This thread has not checked this version of the package yet.')
     expect(CHECK_BUTTON).toBe('Check this package')
-    expect(all).toContain(THREAD_CHECKING)
-    expect([...buttons(drawn).keys()]).toContain('Check this package')
-    expect([...buttons(drawn).keys()]).not.toContain('✍  Click to sign and send')
-    expect(all).not.toContain('your signature is the go')
+    for (const [busy, says, not] of [[false, THREAD_NOT_CHECKED, THREAD_CHECKING], [true, THREAD_CHECKING, THREAD_NOT_CHECKED]] as const) {
+      const card = draw(cardOf(), {}, { busy })
+      const all = texts(card).join('\n')
+      expect(all).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
+      expect(all).toContain('Hi Dana, yes, the new booking link is live now: example.com/book. Saturday 9 to 1 shows on it. Book a test slot and tell us if anything looks off.')
+      expect(all).toContain(says)
+      expect(all).not.toContain(not)
+      expect([...buttons(card).keys()]).toContain('Check this package')
+      expect([...buttons(card).keys()]).not.toContain(SIGN)
+      expect(all).not.toContain('your signature is the go')
+    }
   })
 
-  test('checked: the box, and neither the words nor the button', () => {
-    const drawn = draw(cardOf(), { [LABEL]: 0 })
-    expect([...buttons(drawn).keys()]).toContain('✍  Click to sign and send')
-    expect([...buttons(drawn).keys()]).not.toContain('Check this package')
-    expect(texts(drawn).join('\n')).not.toContain(THREAD_CHECKING)
+  test('checked and stopped: the box, and neither line nor the button. Checked and working: the working line, the button and no box', () => {
+    const open = draw(cardOf(), { [LABEL]: 0 })
+    expect([...buttons(open).keys()]).toContain(SIGN)
+    expect([...buttons(open).keys()]).not.toContain('Check this package')
+    expect(texts(open).join('\n')).not.toContain(THREAD_CHECKING)
+    expect(texts(open).join('\n')).not.toContain(THREAD_NOT_CHECKED)
+    const working = draw(cardOf(), { [LABEL]: 0 }, { busy: true })
+    expect([...buttons(working).keys()]).toEqual(expect.arrayContaining(['Check this package']))
+    expect([...buttons(working).keys()]).not.toContain(SIGN)
+    expect(texts(working).join('\n')).toContain(THREAD_CHECKING)
   })
 
-  test('the button asks for exactly the words, by the path the card\'s other buttons take, and a draft is never written over', async () => {
+  test('the button asks for exactly the words, and with any text in the prompt box it writes nothing and says so, as the sign path does', async () => {
     const asked: string[] = []
-    buttons(draw(cardOf(), {}, words => asked.push(words))).get('Check this package')?.()
-    expect(asked).toEqual([`Check package ${LABEL}`])
+    buttons(draw(cardOf(), {}, { onCheck: label => asked.push(label) })).get('Check this package')?.()
+    expect(asked).toEqual([LABEL])
     const t = unchecked()
-    await pressAsk(t.$, asked[0] as string)
+    await pressCheck(t.$, LABEL)
     expect(t.fills).toEqual([`Check package ${LABEL}`])
-    const drafting = unchecked('a note I was writing')
-    await pressAsk(drafting.$, asked[0] as string)
-    expect(drafting.fills).toEqual([])
+    expect(await checkDraftOf(t.$)).toBe('')
+    expect(texts(await drawn(t)).join('\n')).not.toContain('holds a draft')
+    expect(CHECK_DRAFT(LABEL)).toBe(`Your prompt box holds a draft, so type: Check package ${LABEL}`)
+    for (const busy of [false, true]) {
+      const drafting = unchecked('a note I was writing')
+      if (busy) await turnBegan(drafting.$)
+      await pressCheck(drafting.$, LABEL)
+      expect(drafting.fills).toEqual([])
+      expect(texts(await drawn(drafting)).join('\n')).toContain(`Your prompt box holds a draft, so type: Check package ${LABEL}`)
+      expect([...buttons(await drawn(drafting)).keys()]).toContain('Check this package')
+    }
+  })
+
+  test('the draft line goes when the person sends something, and when a press finds the box clear; it is only for that version', async () => {
+    const sent = unchecked('a note I was writing')
+    await pressCheck(sent.$, LABEL)
+    await turnBegan(sent.$)
+    expect(await checkDraftOf(sent.$)).toBe('')
+    const cleared = unchecked('a note I was writing')
+    await pressCheck(cleared.$, LABEL)
+    expect(await checkDraftOf(cleared.$)).toBe(LABEL)
+    // on another version the line is not drawn
+    expect(texts(draw(nextCard(), {}, { checkDraft: await checkDraftOf(cleared.$) })).join('\n')).not.toContain('holds a draft')
+    // the person clears the box and presses again: the words go in, and the line goes
+    ;(cleared.$ as unknown as { prompt: { read: () => Promise<{ text: string; cursor: number }> } }).prompt.read = async () => ({ text: '', cursor: 0 })
+    await pressCheck(cleared.$, LABEL)
+    expect(cleared.fills).toEqual([`Check package ${LABEL}`])
+    expect(await checkDraftOf(cleared.$)).toBe('')
+    // the words already in the box are no draft: nothing is written, and nothing is said
+    const same = unchecked(`Check package ${LABEL}`)
+    await pressCheck(same.$, LABEL)
+    expect(same.fills).toEqual([])
+    expect(await checkDraftOf(same.$)).toBe('')
   })
 
   test('a surface with no Button: the words and the label stand as text, as the card\'s other buttons do', () => {
     const noButton = { Box: 'Box', Text: 'Text' } as never
-    const drawn = drawCard(noButton, { card: cardOf(), marks: { signed: {} }, checked: {}, now: 0, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined })
-    const all = texts(drawn).join('\n')
+    const card = drawCard(noButton, { card: cardOf(), marks: { signed: {} }, checked: {}, busy: true, checkDraft: '', now: 0, onSign: () => undefined, onCheck: () => undefined, onAsk: () => undefined, onPage: () => undefined })
+    const all = texts(card).join('\n')
     expect(all).toContain(THREAD_CHECKING)
     expect(all).toContain(CHECK_BUTTON)
     expect(all).not.toContain('Type in the thread')
@@ -1010,9 +1059,12 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
 
   test('the holds speak first: a card that is held says why, and asks for no check', () => {
     for (const card of [cardOf({ own: false }), cardOf({ current: OTHER }), cardOf({ gap: 'the page holds a line the card does not (x)' })]) {
-      const drawn = draw(card, {})
-      expect(texts(drawn).join('\n')).not.toContain(THREAD_CHECKING)
-      expect([...buttons(drawn).keys()]).not.toContain('Check this package')
+      for (const busy of [false, true]) {
+        const held = draw(card, {}, { busy })
+        expect(texts(held).join('\n')).not.toContain(THREAD_CHECKING)
+        expect(texts(held).join('\n')).not.toContain(THREAD_NOT_CHECKED)
+        expect([...buttons(held).keys()]).not.toContain('Check this package')
+      }
     }
   })
 
@@ -1024,6 +1076,7 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
     expect(t.fills).toEqual([])
     expect((t.state.get('cardMarks') as MmCardMarks | undefined)?.signed ?? {}).toEqual({})
     // ready at t1, more tool calls, a press at t2 while the turn runs: refused the same way
+    await turnBegan(t.$)
     await notePending(t.$, [LABEL])
     expect(buttons(draw(t.state.get('card') as MmCard, await checkedOf(t.$))).has('✍  Click to sign and send')).toBe(false)
     await pressSign(t.$, LABEL, t.log)
@@ -1125,9 +1178,9 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
     await notePending(dying.$, [LABEL])
     // its state goes with it: what a new process of the thread starts from
     const t = unchecked()
-    const drawn = draw(t.state.get('card') as MmCard, await checkedOf(t.$), words => void pressAsk(t.$, words))
-    expect(buttons(drawn).has('✍  Click to sign and send')).toBe(false)
-    buttons(drawn).get('Check this package')?.()
+    const fresh = await drawn(t, { onCheck: label => void pressCheck(t.$, label) })
+    expect(buttons(fresh).has('✍  Click to sign and send')).toBe(false)
+    buttons(fresh).get('Check this package')?.()
     await new Promise(r => setTimeout(r, 0))
     expect(t.fills).toEqual([`Check package ${LABEL}`])
     await checkedNow(t.$, LABEL)
@@ -1157,7 +1210,8 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
   })
 
   describe('the note a press leaves in the transcript', () => {
-    const NOTE = `[Massmarket bridge, no reply needed] Card signed in the side pane: Package ${LABEL}. Nothing has been sent.`
+    /** The first 12 of the record's `page_sha256`, off the file the send gate reads. */
+    const recordPage = (t: ReturnType<typeof thread>) => (JSON.parse((t.files.get(SIGNED_FILE) ?? '').trim().split('\n').at(-1) as string) as { page_sha256: string }).page_sha256.slice(0, 12)
     /** A thread with this card and its check on record. */
     const ready = async () => {
       const t = unchecked()
@@ -1165,11 +1219,13 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
       return t
     }
 
-    test('its words, as a user row of one text block, written once, and always record, note, then words', async () => {
-      expect(SIGNED_NOTE(LABEL)).toBe(NOTE)
+    test('its words with the page the record signed, as a user row of one text block, written once, and always record, note, then words', async () => {
+      expect(SIGNED_NOTE('3f1c9a7e5b2d', 'abcdefabcdef')).toBe('[Massmarket bridge, no reply needed] Card signed in the side pane: Package 3f1c9a7e5b2d, page abcdefabcdef. Nothing has been sent.')
       const t = await ready()
       await pressSign(t.$, LABEL, t.log)
-      expect(t.appends).toEqual([{ message: { type: 'user', content: [{ type: 'text', text: NOTE }] } }])
+      const page12 = recordPage(t)
+      expect(page12).toBe((await sha256Hex(SMS_PAGE)).slice(0, 12))
+      expect(t.appends).toEqual([{ message: { type: 'user', content: [{ type: 'text', text: `[Massmarket bridge, no reply needed] Card signed in the side pane: Package ${LABEL}, page ${page12}. Nothing has been sent.` }] } }])
       expect(t.order).toEqual(['record', 'note'])
       await t.advance(SIGN_FILL_MS)
       expect(t.order).toEqual(['record', 'note', 'words'])
@@ -1194,8 +1250,8 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
         expect(marks.notice?.kind).toBe('retry')
         expect(t.notes.join('\n')).toContain('not appended')
         expect(t.notes.join('\n')).not.toContain('Nothing has been sent')
-        const drawn = texts(draw(t.state.get('card') as MmCard, await checkedOf(t.$), () => undefined, marks)).join(' ')
-        expect(drawn).toContain('That did not go through, so nothing was signed. Try again, or ask your thread to print the page.')
+        const said = texts(draw(t.state.get('card') as MmCard, await checkedOf(t.$), { marks })).join(' ')
+        expect(said).toContain('That did not go through, so nothing was signed. Try again, or ask your thread to print the page.')
         // it goes through on the next press: a record and a note of its own, then the words
         t.now.append = 'stores'
         await pressSign(t.$, LABEL, t.log)
@@ -1229,6 +1285,158 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
     })
   })
 
+  describe('the box is closed while the thread works', () => {
+    const working = (status: string, more: { teammateId?: string; id?: string } = {}) => ({ id: 'agent_1', status, ...more })
+
+    test('"change the second paragraph": an open box closes when the turn starts, a press is refused, and the check stands when the turn ends with the same hash', async () => {
+      const t = unchecked()
+      await checkedNow(t.$, LABEL)
+      expect(await busyOf(t.$)).toBe(false)
+      expect([...buttons(await drawn(t)).keys()]).toContain(SIGN)
+      // the person sends a change
+      await turnBegan(t.$)
+      expect(await busyOf(t.$)).toBe(true)
+      const closed = await drawn(t)
+      expect([...buttons(closed).keys()]).not.toContain(SIGN)
+      expect(texts(closed).join('\n')).toContain(THREAD_CHECKING)
+      await pressSign(t.$, LABEL, t.log)
+      await t.advance(SIGN_FILL_MS)
+      expect(t.files.size).toBe(0)
+      expect(t.appends).toEqual([])
+      expect(t.fills).toEqual([])
+      expect((t.state.get('cardMarks') as MmCardMarks | undefined)?.signed ?? {}).toEqual({})
+      // a same-hash re-check in the turn does not open it either
+      await notePending(t.$, [LABEL])
+      expect([...buttons(await drawn(t)).keys()]).not.toContain(SIGN)
+      await turnEnded(t.$, true)
+      expect(await busyOf(t.$)).toBe(false)
+      expect(isChecked(await checkedOf(t.$), LABEL)).toBe(true)
+      expect([...buttons(await drawn(t)).keys()]).toContain(SIGN)
+    })
+
+    test('a turn that adds no check leaves one on record for the same hash', async () => {
+      const t = unchecked()
+      await checkedNow(t.$, LABEL)
+      await turnBegan(t.$)
+      await turnEnded(t.$, true)
+      expect(isChecked(await checkedOf(t.$), LABEL)).toBe(true)
+      expect([...buttons(await drawn(t)).keys()]).toContain(SIGN)
+    })
+
+    test('any end of a turn clears busy with no sub-agent at work, whatever its reason', async () => {
+      const t = unchecked()
+      await turnBegan(t.$)
+      await turnEnded(t.$, false)
+      expect(await busyOf(t.$)).toBe(false)
+      expect(texts(await drawn(t)).join('\n')).toContain(THREAD_NOT_CHECKED)
+    })
+
+    test('a background sub-agent still at work at the end of the turn: busy stays, the pending ready is dropped, and the thread has to ask again', async () => {
+      const t = unchecked()
+      await turnBegan(t.$)
+      await notePending(t.$, [LABEL])
+      t.now.agents = [working('running')]
+      await turnEnded(t.$, true)
+      expect(await busyOf(t.$)).toBe(true)
+      expect(await checkedOf(t.$)).toEqual({})
+      const held = await drawn(t)
+      expect([...buttons(held).keys()]).not.toContain(SIGN)
+      expect(texts(held).join('\n')).toContain(THREAD_CHECKING)
+      // it ends, the engine starts a turn, and that turn's end clears busy: nothing pending came through
+      t.now.agents = [working('completed')]
+      await turnBegan(t.$)
+      await turnEnded(t.$, true)
+      expect(await busyOf(t.$)).toBe(false)
+      expect(await checkedOf(t.$)).toEqual({})
+      expect(texts(await drawn(t)).join('\n')).toContain(THREAD_NOT_CHECKED)
+      // the thread asks again, and that turn's end opens the box
+      await turnBegan(t.$)
+      await notePending(t.$, [LABEL])
+      await turnEnded(t.$, true)
+      expect([...buttons(await drawn(t)).keys()]).toContain(SIGN)
+    })
+
+    test('a check on record stands while a later turn leaves a sub-agent at work; the box waits for it', async () => {
+      const t = unchecked()
+      await checkedNow(t.$, LABEL)
+      await turnBegan(t.$)
+      t.now.agents = [working('running')]
+      await turnEnded(t.$, true)
+      expect(await busyOf(t.$)).toBe(true)
+      expect(isChecked(await checkedOf(t.$), LABEL)).toBe(true)
+      expect([...buttons(await drawn(t)).keys()]).not.toContain(SIGN)
+      await pressSign(t.$, LABEL, t.log)
+      expect(t.files.size).toBe(0)
+      t.now.agents = []
+      await turnBegan(t.$)
+      await turnEnded(t.$, true)
+      expect([...buttons(await drawn(t)).keys()]).toContain(SIGN)
+    })
+
+    for (const status of ['pending', 'running', 'waiting']) {
+      test(`a sub-agent ${status} counts as at work`, async () => {
+        const t = unchecked()
+        t.now.agents = [working('completed', { id: 'agent_0' }), working(status)]
+        await turnBegan(t.$)
+        await turnEnded(t.$, true)
+        expect(await busyOf(t.$)).toBe(true)
+      })
+    }
+
+    for (const status of ['idle', 'completed', 'failed', 'killed']) {
+      test(`a sub-agent ${status} does not`, async () => {
+        const t = unchecked()
+        t.now.agents = [working(status)]
+        await turnBegan(t.$)
+        await turnEnded(t.$, true)
+        expect(await busyOf(t.$)).toBe(false)
+      })
+    }
+
+    test('a teammate in a terminal pane of its own does not: the word it last wrote outlives a dead pane. One in this session does', async () => {
+      const t = unchecked()
+      t.now.agents = [working('running', { id: 'sam@team', teammateId: 'sam@team' })]
+      await turnBegan(t.$)
+      await turnEnded(t.$, true)
+      expect(await busyOf(t.$)).toBe(false)
+      t.now.agents = [working('running', { id: 'agent_2', teammateId: 'sam@team' })]
+      await turnBegan(t.$)
+      await turnEnded(t.$, true)
+      expect(await busyOf(t.$)).toBe(true)
+    })
+
+    test('a list that cannot be read stays busy and drops what was pending; the Check button starts a new turn, and that turn\'s end clears it', async () => {
+      const t = unchecked()
+      await turnBegan(t.$)
+      await notePending(t.$, [LABEL])
+      t.now.agents = 'throws'
+      await turnEnded(t.$, true)
+      expect(await busyOf(t.$)).toBe(true)
+      expect(await checkedOf(t.$)).toEqual({})
+      const stuck = await drawn(t, { onCheck: label => void pressCheck(t.$, label) })
+      expect([...buttons(stuck).keys()]).not.toContain(SIGN)
+      buttons(stuck).get('Check this package')?.()
+      await new Promise(r => setTimeout(r, 0))
+      expect(t.fills).toEqual([`Check package ${LABEL}`])
+      // the person presses Enter
+      t.now.agents = []
+      await turnBegan(t.$)
+      await notePending(t.$, [LABEL])
+      await turnEnded(t.$, true)
+      expect(await busyOf(t.$)).toBe(false)
+      expect([...buttons(await drawn(t)).keys()]).toContain(SIGN)
+    })
+
+    test('the turn mark moves at every start and end of a turn, so a call can tell it outlived its turn', async () => {
+      const t = unchecked()
+      const at = turnMark()
+      await turnBegan(t.$)
+      expect(turnMark()).toBe(at + 1)
+      await turnEnded(t.$, true)
+      expect(turnMark()).toBe(at + 2)
+    })
+  })
+
   test('a thread keeps the newest 30 versions, an odd value reads as none, and only a tag goes on record', async () => {
     const t = unchecked()
     const tags = Array.from({ length: 35 }, (_, i) => i.toString(16).padStart(12, '0'))
@@ -1256,8 +1464,8 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
     expect(t.fills).toEqual([])
     expect((t.state.get('cardMarks') as MmCardMarks).notice?.kind).toBe('changed')
     // and the box is closed on the new version, saying why
-    const drawn = texts(draw(t.state.get('card') as MmCard, await checkedOf(t.$), () => undefined, t.state.get('cardMarks') as MmCardMarks)).join('\n')
-    expect(drawn).toContain(THREAD_CHECKING)
-    expect(drawn).toContain('The package changed, so nothing was signed. Read it again, then sign.')
+    const said = texts(draw(t.state.get('card') as MmCard, await checkedOf(t.$), { marks: t.state.get('cardMarks') as MmCardMarks })).join('\n')
+    expect(said).toContain(THREAD_NOT_CHECKED)
+    expect(said).toContain('The package changed, so nothing was signed. Read it again, then sign.')
   })
 })
