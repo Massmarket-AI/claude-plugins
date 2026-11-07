@@ -2,10 +2,10 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import type { MmCard, MmCardMarks, MmCardTree } from '../types'
 import {
-  NOT_DRAWN, NO_CARD, SIGN_FILL_MS, SIGN_VALID_MS, cardVerdict, copyCheck, currentOf, drawCard, fnv1a, holdOf, holdText, isFresh, noteCurrent, prepareCard, pressSign, readTree,
-  refreshCard, sha256Hex, signOf, signatureLine, signatureSvg,
+  NOT_DRAWN, NO_CARD, NO_OWNER_CHECK, SIGN_FILL_MS, SIGN_VALID_MS, cardVerdict, copyCheck, currentOf, drawCard, fnv1a, holdOf, holdText, isFresh, noteCurrent, prepareCard, pressSign, readTree,
+  refreshCard, sha256Hex, signOf, signatureLine, signatureSvg, standing,
 } from './card'
-import { drawnText } from './card-parity'
+import { drawnText, pageGap } from './card-parity'
 import { CARD_PAIRS } from './card-pairs.test-helper'
 import { SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
 import { ME, fakeApp, mm, pid, press } from './fake-app.test-helper'
@@ -72,9 +72,10 @@ function thread(box = '') {
   const ran: string[][] = []
   const notes: string[] = []
   /** What the page read gives a press, and what the renderer draws on this computer. */
-  const now = { page: { markdown: SMS_PAGE as string | null, sha: SHA as string | null }, render: JSON.stringify(SMS_TREE), session: TRANSCRIPT }
+  const now = { page: { markdown: SMS_PAGE as string | null, sha: SHA as string | null }, render: JSON.stringify(SMS_TREE), session: TRANSCRIPT, os: undefined as string | undefined }
   const $ = {
     session: { id: async () => now.session },
+    env: { get: async (name: string) => ({ HOME, OS: now.os })[name] },
     fs: {
       read: async (path: string) => {
         const text = files.get(path)
@@ -285,7 +286,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     expect(t.fills).toEqual([])
     const m = t.state.get('cardMarks') as { signed: Record<string, { filled?: string }> }
     expect(m.signed[LABEL]?.filled).toBe('draft')
-    const drawn = drawCard(ELS, { card: cardOf(), marks: m as never, now: 1_000_000 + 10_000, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined })
+    const drawn = drawCard(ELS, { card: t.state.get('card') as MmCard, marks: m as never, now: 1_000_000 + 10_000, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined })
     expect(texts(drawn).join(' ')).toContain(`Sealed. Your prompt box holds a draft, so type: Send package ${LABEL}`)
   })
 
@@ -469,6 +470,101 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     expect(t.fills.length).toBe(2)
   })
 
+  describe('(0.7.33) a signature is for the page it read, not only the hash', () => {
+    const before = CARD_PAIRS["rob's mail, plan not approved"] as { page: string; tree: { package_id: string; package_sha256: string; label: string } }
+    const after = CARD_PAIRS["rob's mail, plan approved"] as { page: string; tree: { package_id: string; package_sha256: string; label: string } }
+    const sha = before.tree.package_sha256
+    const label = before.tree.label
+    const drawn = (t: ReturnType<typeof thread>) =>
+      texts(drawCard(ELS, { card: t.state.get('card') as MmCard, marks: t.state.get('cardMarks') as MmCardMarks, now: 1_000_000, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined })).join('\n')
+    const lines = (t: ReturnType<typeof thread>) => (t.files.get(SIGNED_FILE) ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>)
+    /** A thread that has pressed and been filled, on the page before plan approval. */
+    const signed = async () => {
+      const t = thread()
+      t.now.page = { markdown: before.page, sha }
+      t.now.render = JSON.stringify(before.tree)
+      t.state.set('card', cardOf({ packageId: before.tree.package_id, tree: readTree(JSON.parse(JSON.stringify(before.tree))) as MmCardTree, current: sha }))
+      await pressSign(t.$, label, t.log)
+      await t.advance(SIGN_FILL_MS)
+      t.setTime(1_000_000)
+      return t
+    }
+
+    test('the two pages are the real pair: the hash the same, the words of the Cc not', () => {
+      expect(after.tree.package_sha256).toBe(sha)
+      expect(after.page).not.toBe(before.page)
+      expect(pageGap(after.page, readTree(JSON.parse(JSON.stringify(before.tree))) as MmCardTree)).toContain('Cc')
+    })
+
+    test('press, plan approval adds a Cc with the hash the same, a refresh: unsigned, the box back, and a press writes a record the gate takes', async () => {
+      const t = await signed()
+      expect(t.fills).toEqual([`Send package ${label}`])
+      expect(drawn(t)).toContain('Sealed')
+      expect(lines(t).length).toBe(1)
+      expect(lines(t)[0]?.page_sha256).toBe(await sha256Hex(before.page))
+
+      // plan approval: OW's page and this computer's render both say the new Cc, and the package's hash has not moved
+      t.now.page = { markdown: after.page, sha }
+      t.now.render = JSON.stringify(after.tree)
+      expect(await refreshCard(t.$, { packageId: before.tree.package_id, signer: 'Test Signer', home: HOME, note: async () => undefined }, t.now.page)).toBe('changed')
+      const card = t.state.get('card') as MmCard
+      expect(card.pageSha).toBe(await sha256Hex(after.page))
+      expect(holdOf(card)).toBe('')
+      const now = drawn(t)
+      expect(now).not.toContain('Sealed')
+      expect(now).not.toContain('Signed by')
+      expect(now).not.toContain('Press Enter')
+      expect(now).toContain('[✍  Click to sign and send]')
+
+      // the press is no longer swallowed, and its record is for the page the gate will read
+      await pressSign(t.$, label, t.log)
+      expect(lines(t).length).toBe(2)
+      const fresh = lines(t)[1] as Record<string, unknown>
+      expect(gateTakes(fresh, TRANSCRIPT, sha)).toBe(true)
+      expect(fresh.page_sha256).toBe(await sha256Hex(after.page))
+      expect(fresh.package_sha256).toBe(sha)
+      expect(fresh.label).toBe(label)
+      await t.advance(SIGN_FILL_MS)
+      expect(t.fills).toEqual([`Send package ${label}`, `Send package ${label}`])
+      expect(drawn(t)).toContain('Sealed')
+    })
+
+    test('the same page read again keeps the signature, and a second press writes nothing', async () => {
+      const t = await signed()
+      expect(await refreshCard(t.$, { packageId: before.tree.package_id, signer: 'Test Signer', home: HOME, note: async () => undefined }, t.now.page)).toBe('same')
+      expect(drawn(t)).toContain('Sealed')
+      await pressSign(t.$, label, t.log)
+      expect(lines(t).length).toBe(1)
+    })
+
+    test('a page that changes while the envelope flies: nothing goes in the prompt box', async () => {
+      const t = thread()
+      t.now.page = { markdown: before.page, sha }
+      t.now.render = JSON.stringify(before.tree)
+      t.state.set('card', cardOf({ packageId: before.tree.package_id, tree: readTree(JSON.parse(JSON.stringify(before.tree))) as MmCardTree, current: sha }))
+      await pressSign(t.$, label, t.log)
+      t.now.page = { markdown: after.page, sha }
+      t.now.render = JSON.stringify(after.tree)
+      await refreshCard(t.$, { packageId: before.tree.package_id, signer: 'Test Signer', home: HOME, note: async () => undefined }, t.now.page)
+      await t.advance(SIGN_FILL_MS)
+      expect(t.fills).toEqual([])
+      expect(drawn(t)).toContain('[✍  Click to sign and send]')
+    })
+
+    test('a mark an older version left, with no page on it, does not stand', () => {
+      const marks: MmCardMarks = { signed: { [label]: { label, signer: 'Test Signer', at: 1_000_000 } } }
+      expect(standing(marks, label, { pageSha: 'a'.repeat(64) }, 1_000_001)).toBeUndefined()
+      expect(standing(marks, label, {}, 1_000_001)).toBeUndefined()
+    })
+
+    test('OW with no usable hash takes the page away, and the signature does not stand', async () => {
+      const t = await signed()
+      expect(await refreshCard(t.$, { packageId: before.tree.package_id, signer: 'Test Signer', home: HOME, note: async () => undefined }, { markdown: null, sha: null })).toBe('no-hash')
+      expect((t.state.get('card') as MmCard).pageSha).toBeUndefined()
+      expect(drawn(t)).not.toContain('Sealed')
+    })
+  })
+
   test('the signature SVG carries the name escaped, and no script', () => {
     const svg = signatureSvg('Dana <script>alert(1)</script> & Co', false)
     expect(svg).toContain('Dana &lt;script&gt;alert(1)&lt;/script&gt; &amp; Co')
@@ -534,6 +630,35 @@ describe('0.7.26 prepared on arrival: the renderer runs once a package version, 
     await prepareCard(t.$, { packageId: '55555555-5555-4555-8555-555555555555', projectId: SMS_TREE.project_id, client: 'X', own: true, current: SHA, page: SMS_PAGE, signer: 'Owner', home: '/h', note: async () => undefined, isNewest: async () => false })
     expect(t.state.get('card')).toBeUndefined()
     expect(NO_CARD.packageId).toBe('')
+  })
+})
+
+describe('0.7.33 a computer whose signature records the send gate cannot check', () => {
+  const read = { markdown: SMS_PAGE, sha: SHA }
+  const refresh = (t: ReturnType<typeof thread>) => refreshCard(t.$, { packageId: SMS_TREE.package_id, signer: 'Test Signer', home: HOME, note: async () => undefined }, read)
+
+  test('on Windows: not ready in the gate\'s words, no box, and a press records nothing', async () => {
+    const t = thread()
+    t.now.os = 'Windows_NT'
+    t.state.set('card', cardOf())
+    expect(await refresh(t)).toBe('same')
+    const card = t.state.get('card') as MmCard
+    expect(card.gap).toBe(NO_OWNER_CHECK)
+    expect(holdOf(card)).toBe('no-owner-check')
+    expect(cardVerdict(card, SMS_TREE.package_id)).toBe("signatures can't be checked on this computer")
+    const drawn = texts(drawCard(ELS, { card, marks: { signed: {} }, now: 0, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined })).join('\n')
+    expect(drawn).not.toContain('Click to sign and send')
+    expect(drawn).toContain("Signatures can't be checked on this computer")
+    await pressSign(t.$, LABEL, t.log)
+    expect(t.files.has(SIGNED_FILE)).toBe(false)
+    expect(t.fills).toEqual([])
+  })
+
+  test('on a Mac or Linux: nothing changes', async () => {
+    const t = thread()
+    t.state.set('card', cardOf())
+    await refresh(t)
+    expect(cardVerdict(t.state.get('card') as MmCard, SMS_TREE.package_id)).toBe('')
   })
 })
 
@@ -792,6 +917,8 @@ describe('0.7.26 in the bridge: the pane draws the card above the page as the cl
       url.includes('/reply-package') ? { status: 200, ok: true, headers: {}, text: JSON.stringify({ markdown: SMS_PAGE, package_sha256: SHA }) } : fetch(url)
     await mm(hub, '')
     expect(await press(hub, `drafts:${pid(1)}`)).toBe(true)
+    // the draw goes on after the press answers, past a real digest of the page
+    for (let i = 0; i < 200 && (w.view('local_hub', 'card') as MmCard | undefined)?.status !== 'ready'; i++) await new Promise(r => setTimeout(r, 2))
     expect(ran.filter(a => a.some(x => x.endsWith('render_visual.py'))).length).toBe(1)
     const card = w.view('local_hub', 'card') as MmCard
     expect(card.status).toBe('ready')

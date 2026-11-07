@@ -27,7 +27,7 @@ describe('0.7.33 the card against the page: real pairs, from the two renderers t
     expect(pageGap(SMS_PAGE, realTree())).toBe('')
   })
 
-  for (const name of ['everything', 'source links', "rob's mail, plan not approved", "rob's mail, plan approved", 'html email', 'no reply', 'closed no reply', 'later messages', 'ticket check unreadable', 'follow-ups live', 'follow-ups switched off']) {
+  for (const name of ['everything', 'source links', "rob's mail, plan not approved", "rob's mail, plan approved", 'html email', 'no reply', 'closed no reply', 'later messages', 'ticket check unreadable', 'follow-ups live', 'follow-ups switched off', 'tickets from the call', 'tickets from the call, all decided', 'tickets from the call, unread', 'tickets from the call, ticket check off', 'ticket gap under enforce, a teammate', "ticket gap under enforce, rob's machine"]) {
     test(`${name}: the page and the card agree`, () => {
       const { page, tree } = pair(name)
       expect(contentPieces(page).length).toBeGreaterThan(5)
@@ -161,8 +161,123 @@ describe('0.7.33 finding 6: each hole has a gap, and its control line passes', (
   }
 })
 
+describe('0.7.33 tickets from the call', () => {
+  const HEAD = 'Tickets from the call: give each a due date or drop it'
+
+  test('a package that has them is ready, and they are a section of its own', () => {
+    const { page, tree } = pair('tickets from the call')
+    expect(page).toContain(`### ${HEAD}`)
+    expect(page).toContain('ZZ_call_ticket_one')
+    expect(pageGap(page, tree)).toBe('')
+  })
+
+  test('a ticket the card lacks, or another owner on it, is a gap', () => {
+    const { page, tree } = pair('tickets from the call')
+    expect(pageGap(page, JSON.parse(JSON.stringify(tree).replace('ZZ_call_ticket_one', 'ZZ_call_ticket_oth')) as MmCardTree)).toContain('the page holds a line the card does not')
+    expect(pageGap(page.replace('ZZ_call_ticket_one', 'ZZ_call_ticket_oth'), tree)).toContain('the page holds a line the card does not')
+    expect(pageGap(page.replace('owner zz_owner@example.com', 'owner zz_someone@example.com'), tree)).toContain('the page holds a line the card does not')
+  })
+
+  test('the section gone from the card is a gap, and so is any other new section', () => {
+    const { page, tree } = pair('tickets from the call')
+    const without = { ...tree, nodes: tree.nodes.filter(n => !JSON.stringify(n).includes(HEAD)) }
+    expect(pageGap(page, without)).toBe(`the page holds a section the card does not (${HEAD})`)
+    expect(pageGap(`${page}\n### Something new\nZZ_new\n`, tree)).toContain('Something new')
+  })
+
+  test('the page saying they could not be read stands on the card too', () => {
+    const { page, tree } = pair('tickets from the call, unread')
+    expect(page).toContain('The tickets from the call could not be read.')
+    expect(pageGap(page, tree)).toBe('')
+    expect(pageGap(page, JSON.parse(JSON.stringify(tree).replace('could not be read.', 'were read.')) as MmCardTree)).toContain('the page holds a line the card does not')
+  })
+})
+
+describe('0.7.33 added by the team: never sent, so the name is not compared, its time and words are', () => {
+  /** OW's page prints the roster's name where this computer's renderer prints the address. */
+  const onOwPage = (page: string) => page.replace(/^(#### )[^\n·]*@[^\n·]*( · )/gm, '$1Roster Name$2')
+
+  test('the marker package has additions, and the page and card agree', () => {
+    const { page, tree } = pair('everything')
+    expect(page).toContain('### Added by the team')
+    expect(pageGap(page, tree)).toBe('')
+  })
+
+  test("the roster's name on OW's page against the address on the card: no gap", () => {
+    const { page, tree } = pair('everything')
+    expect(onOwPage(page)).not.toBe(page)
+    expect(pageGap(onOwPage(page), tree)).toBe('')
+  })
+
+  const section = (page: string) => page.slice(page.indexOf('### Added by the team'), page.indexOf('\n### ', page.indexOf('### Added by the team') + 1))
+
+  test('a changed word in what they added is a gap, on the page or on the card', () => {
+    const { page, tree } = pair('everything')
+    const added = section(page)
+    const word = /[>`\n]\s*(ZZ_\w+)/.exec(added.slice(added.indexOf('```')))?.[1] as string
+    expect(word).toBeTruthy()
+    expect(pageGap(page.replace(added, added.replace(word, 'ZZ_changed')), tree)).toContain('the page holds a line the card does not')
+    expect(pageGap(onOwPage(page).replace(section(onOwPage(page)), section(onOwPage(page)).replace(word, 'ZZ_changed')), tree)).toContain('the page holds a line the card does not')
+  })
+
+  test('another time on the by-line is a gap', () => {
+    const { page, tree } = pair('everything')
+    const added = section(page)
+    const changed = added.replace(/^(#### .* · )(.*)$/m, '$1Fri Jan 1, 9:00 AM ET')
+    expect(changed).not.toBe(added)
+    expect(pageGap(page.replace(added, changed), tree)).toBe(MISSING('Fri Jan 1, 9:00 AM ET'))
+  })
+
+  test('an addition the card lacks, or one more on the card, is a gap', () => {
+    const { page, tree } = pair('everything')
+    const added = section(page)
+    const more = `${added}\n#### Roster Name · Fri Jan 1, 9:00 AM ET\n> \`\`\`\n> ZZ_one_more\n> \`\`\`\n`
+    expect(pageGap(page.replace(added, more), tree)).toContain('the page holds a line the card does not')
+    const only = added.slice(0, added.indexOf('#### '))
+    expect(pageGap(page.replace(added, only), tree)).toContain('additions by the team')
+  })
+
+  test('words only one addition holds do not stand for another: each is held against its own', () => {
+    const { page, tree } = pair('everything')
+    const bodies = findQuotes(tree)
+    expect(bodies.length).toBeGreaterThan(0)
+    expect(pageGap(page, tree)).toBe('')
+    const noted = JSON.parse(JSON.stringify(tree)) as MmCardTree
+    for (const n of findQuotes(noted)) n.r = [{ s: 'ZZ_something_else' }]
+    expect(pageGap(page, noted)).toContain('the page holds a line the card does not')
+  })
+})
+
+/** The nodes of a card that hold what the team added. */
+function findQuotes(tree: MmCardTree): MmCardNode[] {
+  const out: MmCardNode[] = []
+  const walk = (list: readonly MmCardNode[]) => {
+    for (const n of list) {
+      if (/\brp-quote\b/.test(n.c ?? '')) out.push(n)
+      else if (n.k) walk(n.k)
+    }
+  }
+  walk(tree.nodes)
+  return out
+}
+
+describe('0.7.33 findings', () => {
+  const page = (line: string) => `### Findings\n- ${line}\n`
+  const card = (what: string, rec: string) =>
+    cardOf(sec('Findings', { c: 'rp-find', k: [para(what, 'rp-find-what'), { c: 'rp-rec', r: [{ s: 'Recommend', c: 'rp-k' }, { s: ' ' }, { s: rec, c: 'rp-v' }] }] }))
+
+  test('a recommendation that opens with the word itself: cut where the renderer cuts it', () => {
+    expect(pageGap(page('Rob: decide this Recommend: Recommend: go with it'), card('Rob: decide this', 'Recommend: go with it'))).toBe('')
+  })
+
+  test('another word in what it is, or in what we recommend, is a gap', () => {
+    expect(pageGap(page('Rob: decide that Recommend: go with it'), card('Rob: decide this', 'go with it'))).toBe(MISSING('Rob: decide that'))
+    expect(pageGap(page('Rob: decide this Recommend: stop'), card('Rob: decide this', 'go with it'))).toBe(MISSING('Recommend: stop'))
+  })
+})
+
 describe('0.7.33 finding 4: any image in a body is not ready', () => {
-  const IMAGE = 'the package holds an image the side pane cannot draw'
+  const IMAGE = 'the package holds an image or other media the side pane cannot draw'
   const card = cardWith('Hi Dana')
   for (const [name, body] of [
     ['an <img> with no alt', 'Hi Dana\n<img src="https://cdn.example/pricing-table.png">'],
@@ -180,6 +295,36 @@ describe('0.7.33 finding 4: any image in a body is not ready', () => {
     expect(pageGap('**Inline image** `[image: a.png]`: a.png', card)).toBe(IMAGE)
     expect(pageGap('Hi Dana', { ...card, images: 1 })).toBe(IMAGE)
   })
+  for (const [name, body] of [
+    ['a table background', '<table background="https://cdn.example/b.png"><tr><td>Hi</td></tr></table>'],
+    ['css background-image', '<div style="background-image:url(https://cdn.example/b.png)">Hi</div>'],
+    ['css url( alone', '<div style="background:url(https://cdn.example/b.png)">Hi</div>'],
+    ['an entity hiding the url(', '<div style="background:u&#114;l(https://cdn.example/b.png)">Hi</div>'],
+    ['a picture and its source', '<picture><source srcset="https://cdn.example/b.png"></picture>'],
+    ['an svg image', '<svg><image href="https://cdn.example/b.png"/></svg>'],
+    ['a video', '<video controls src="https://cdn.example/b.mp4"></video>'],
+    ['an audio', '<audio controls src="https://cdn.example/b.mp3"></audio>'],
+    ['an iframe', '<iframe src="https://cdn.example/b"></iframe>'],
+    ['an object', '<object data="https://cdn.example/b.pdf"></object>'],
+    ['an embed', '<embed type="application/pdf">'],
+    ['a quote mark before src', '<x alt="p"src="https://cdn.example/b.png">'],
+  ] as const) {
+    test(`${name} in a body that goes out is not ready`, () => {
+      const page = `## X · reply package · Package \`${realTree().label}\`\n\n### Client reply\n#### 1. Reply\n${fence(body)}\n`
+      expect(holdsImage(page, realTree())).toBe(true)
+      expect(pageGap(page, realTree())).toBe('the package holds an image or other media the side pane cannot draw')
+    })
+  }
+
+  test('the renderer\'s flag for any of them holds the box without the page', () => {
+    expect(pageGap(SMS_PAGE, { ...realTree(), images: 1 })).toBe('the package holds an image or other media the side pane cannot draw')
+  })
+
+  test('a link with ?src= in it, and words about a video or a background, are no media', () => {
+    for (const body of ['Book here: https://x.example/b?src=mail&utm_source=a', '<a href="https://x.example/b?src=mail">book</a>', 'We looked at the background of the video call.'])
+      expect(holdsImage(`### Client reply\n${fence(body)}\n`, realTree())).toBe(false)
+  })
+
   test('words about an image, and a link, are no image', () => {
     expect(holdsImage(fence('the image is attached [here](https://x.example/a.png)'), card)).toBe(false)
   })

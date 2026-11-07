@@ -41,9 +41,14 @@ export const STATE_LINES: readonly RegExp[] = [
 ]
 
 const SHORT_WORDS = 3
-const IMAGE_REASON = 'the package holds an image the side pane cannot draw'
-/** An image in a body: an <img>, with or without alt, or a markdown image. */
-const IMAGE = /<img\b|!\[[^\]\n]*\]\([^)\n]*\)/i
+const IMAGE_REASON = 'the package holds an image or other media the side pane cannot draw'
+/**
+ * What a body can hold that the card cannot show, and nothing here tries to draw it: a media element, an attribute that loads a
+ * file (never a link's `?src=`), CSS that does, or a markdown image. The same pattern as IMAGE_RE in client-reply-prep's
+ * render_visual.py, which counts them in the tree's `images`.
+ */
+const IMAGE =
+  /<(?:img|picture|source|svg|image|video|audio|iframe|frame|object|embed|applet)\b[^>]*|(?<![?&\w-])(?:src|srcset|background|poster)\s*=|background-image|\burl\s*\(|!\[[^\]\n]*\]\([^)\n]*\)/i
 const INLINE_IMAGE_LINE = /^(?:> ?)*\*\*Inline image\*\*/m
 /** A leaf whose words are a body or a quote: never a state line, and never marked up. */
 const BODY_CLASS = /\brp-(?:body|bub|turn-text|qa|whatsnew)\b/
@@ -55,6 +60,7 @@ const SECTIONS: Record<string, string> = {
   'Their message': 'Their message',
   'Client reply': 'Our reply to the client',
   'Suggestion: no reply needed': 'Our reply to the client',
+  'Tickets from the call: give each a due date or drop it': 'Tickets from the call: give each a due date or drop it',
   'Team post': 'Team post',
   'Added by the team': 'Added by the team',
   'Follow-ups (sent only if they have not replied)': 'Follow-ups, sent only if they have not replied',
@@ -657,13 +663,40 @@ function findingsGap(section: PageSection, node: MmCardNode | undefined): string
   for (const [n, line] of lines.entries()) {
     const leaves = finds[n] as Leaf[]
     const text = unmark(line.text)
-    const at = text.lastIndexOf(' Recommend: ')
+    // the first one, where the renderer cuts it: a recommendation may open with the word itself
+    const at = text.indexOf(' Recommend: ')
     const what = at < 0 ? text : text.slice(0, at)
     if (squash(firstOf(leaves, /\brp-find-what\b/)?.text ?? '') !== what) return lineOf(what)
     if (at >= 0 && firstOf(leaves, /\brp-rec\b/)?.text !== `Recommend ${text.slice(at + 12)}`) return lineOf(text.slice(at + 1))
   }
   const rest = section.blocks.filter(b => !(b.kind === 'line' && /^- /.test(b.text.trim())))
   return plainGap(hayOf(leavesOf(node.k ?? [])), rest)
+}
+
+/**
+ * "Added by the team" is never sent. Each addition, one to one in order: its time and its words, whole. Never its name: OW's page
+ * prints the roster's name, and the card, which cannot read the roster, the address (render_pickup.py contributor_name).
+ */
+function contributionsGap(section: PageSection, node: MmCardNode | undefined): string {
+  if (!node) return section.blocks.some(b => b.kind !== 'blank') ? 'the page holds a section the card does not (Added by the team)' : ''
+  const bys = findAll(node.k ?? [], 'rp-noteby').map(leafOf)
+  const words = findAll(node.k ?? [], 'rp-quote').map(leafOf)
+  const timeOf = (line: string) => line.slice(line.lastIndexOf(' · ') + 3)
+  const hay = hayOf(leavesOf(node.k ?? []))
+  let n = -1
+  for (const b of section.blocks) {
+    if (b.kind === 'line' && /^#### /.test(b.text)) {
+      n += 1
+      const time = timeOf(unmark(b.text))
+      if (timeOf(bys[n]?.text ?? '') !== time) return lineOf(time)
+    } else if (b.kind === 'fence') {
+      if (squash(words[n]?.text ?? '') !== squash(b.text)) return lineOf(squash(b.text))
+    } else if (b.kind === 'line') {
+      const gap = lineGap(hay, b.text)
+      if (gap) return gap
+    }
+  }
+  return n + 1 === bys.length ? '' : `the page holds ${n + 1} additions by the team, the card ${bys.length}`
 }
 
 /** A state line on one side and not the other. */
@@ -681,10 +714,10 @@ function stateGap(page: readonly Block[], card: Card): string {
   return ''
 }
 
-/** Whether a body holds an image: an <img> with or without alt, a markdown image, the page's inline image line, or the renderer's flag. */
+/** Whether a body holds an image or other media (IMAGE), as written or with its entities read, the page's inline image line, or the renderer's flag. */
 export function holdsImage(page: string, tree: MmCardTree): boolean {
   if ((tree.images ?? 0) > 0 || INLINE_IMAGE_LINE.test(page)) return true
-  if (blocksOf(page).some(b => b.kind === 'fence' && IMAGE.test(b.text))) return true
+  if (blocksOf(page).some(b => b.kind === 'fence' && (IMAGE.test(b.text) || IMAGE.test(decoded(b.text))))) return true
   return /(?:^| )Inline image \[image: /.test(drawnText(tree.nodes))
 }
 
@@ -717,6 +750,7 @@ export function pageGap(page: string | null, tree: MmCardTree): string {
     else if (section.head === 'Their message') gap = theirGap(section, node)
     else if (section.head === 'Client reply' || section.head === 'Suggestion: no reply needed' || section.head === 'Team post' || section.head === 'Other items')
       gap = draftsGap(section, card, used)
+    else if (section.head === 'Added by the team') gap = contributionsGap(section, node)
     else if (section.head === 'Links') gap = linksGap(section, node)
     else if (section.head === 'Findings') gap = findingsGap(section, node)
     else if (section.head.startsWith('Follow-ups') || section.head === 'Proposed follow-ups') gap = followupsGap(section, node)

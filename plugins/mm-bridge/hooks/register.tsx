@@ -3626,7 +3626,7 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
 }
 
 // (0.7.26) The reply-package card: prepared on arrival, drawn natively above the page (card.tsx).
-import { cardOf, cardVerdict, clearCard, currentOf, drawCard, isOnScreen, marksOf, noteCurrent, noteDrawn, prepareCard, pressAsk, pressSign, refreshCard, resetCard, showKept, togglePage, type PageRead } from './card'
+import { cardOf, cardVerdict, clearCard, currentOf, drawCard, isOnScreen, marksOf, noteCurrent, noteDrawn, onWindows, prepareCard, pressAsk, pressSign, refreshCard, resetCard, showKept, togglePage, type PageRead } from './card'
 import { holderName } from './queue'
 
 /**
@@ -3950,8 +3950,6 @@ function notInTime(args: unknown): string {
 
 /** (0.7.33) The words the signature box puts in the prompt box, as the person sends them. */
 const SIGNED_GO = /^Send package [0-9a-f]{12}$/
-/** (0.7.33) How many seconds `mm card` waits for a card still being drawn. */
-const CARD_WAIT_S = 20
 /** (0.7.33) How many seconds `mm card` waits for the pane to draw a card it just set: a pane that is shown draws at once. */
 const CARD_DRAW_WAIT_S = 3
 function cardReady(label: string): string {
@@ -3989,13 +3987,10 @@ async function cardCommand($: EngineInterface, arg: string): Promise<string> {
   try {
     const packageId = arg.trim().toLowerCase()
     if (!isUuid(packageId)) return cardNotReady('that is not a package id')
-    for (let s = 0; s < CARD_WAIT_S; s++) {
-      const card = await cardOf($)
-      if (card.packageId !== packageId || card.status !== 'rendering') break
-      await aSecond($)
-    }
+    // ⛔ Every `$.state.get` of one dispatch reads one moment, so waiting here on the state would never see a draw end: `refreshCard`
+    // waits for a render under way (a module's promise, not the state), then draws the card itself.
     const held = await cardOf($)
-    if (held.packageId !== packageId || held.status === 'rendering') return cardNotReady(cardVerdict(held, packageId))
+    if (held.packageId !== packageId) return cardNotReady(cardVerdict(held, packageId))
     const read = await readOwPage($, packageId)
     await foldPage($, read.markdown)
     const last = await storeGet<Last | null>($, 'mm.last', null)
@@ -8540,9 +8535,6 @@ async function lineContext($: EngineInterface, needLines: boolean): Promise<{ pi
   return { pid: cur.pid, client, p, task: cur.task }
 }
 
-/** (0.7.0) Whether this computer runs Windows: the hook's command is given in PowerShell's form too. */
-const onWindows = async ($: EngineInterface): Promise<boolean> => platformOf({ OS: await $.env.get('OS'), HOME: await $.env.get('HOME') }) === 'windows'
-
 /** (0.7.0) OW's own words in an answer that refused (`message`, else `error`), one line. */
 function owSaid(text: string): string {
   try {
@@ -9153,6 +9145,8 @@ export const register: Register = on => {
   // link and three buttons. A surface with no Select (the mobile app) has no picker, so it offers no Route. A HighLevel
   // Directory lead's row has two, anywhere: Mark handled and Not client mail (OW refuses route and bootstrap for it).
   on('ui.render', { component: 'Pane', requestId: PANE_QUEUE }, async ($, e) => {
+    // (0.7.33) nothing counts as drawn until this draw has been made (`noteDrawn` under the tree): `mm card` asks
+    noteDrawn(null)
     const { Box, Button, Link, Markdown, Text } = $.ui.resolve(e)
     // (New people) a picker only where the surface draws one: the mobile app's table has no Select
     const Select = PICKER_SURFACES.has(String(e.surface)) ? ($.ui.resolve(e) as Partial<Pick<Elements['desktop'], 'Select'>>).Select : undefined
@@ -9168,7 +9162,6 @@ export const register: Register = on => {
     const cardMarks = await marksOf($)
     const cardNow = await $.clock.now()
     const cardShown = Boolean(client.text && card?.packageId && card.tree)
-    noteDrawn(cardShown ? card : null)
     // (0.7.33) the line that says it cannot be drawn on this computer, over the part as it is
     const cardFailed = Boolean(client.text && card?.packageId && !card.tree && card.status === 'failed')
     // (0.6.0) this thread's Tracking part: what it is counted to, and the time tracked to that project
@@ -9297,7 +9290,7 @@ export const register: Register = on => {
     const updated = hasList && queue ? queue.note : tracking?.at ? `Updated ${localClock(tracking.at)}` : ''
     // (0.7.11) At the very top, above everything: the clients whose thread is in another Claude profile, and ONE button
     // that puts the words that start them in the prompt box (Start missing threads' own press).
-    return (
+    const drawn = (
       <Box flexDirection="column">
         {hasList && queue?.away?.text ? (
           <Box key="mm-away" flexDirection="column" marginBottom={1}>
@@ -9391,5 +9384,9 @@ export const register: Register = on => {
         ) : null}
       </Box>
     )
+    // (0.7.33) the tree is built: only now does this card count as drawn. ⛔ What the engine does with a tree it refuses after this
+    // return (`ui.render`: "An invalid tree, or a throw while drawn, draws the engine's") this hook cannot see.
+    noteDrawn(cardShown ? card : null)
+    return drawn
   })
 }

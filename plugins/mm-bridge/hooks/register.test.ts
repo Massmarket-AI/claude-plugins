@@ -381,7 +381,7 @@ function world(on: On, opts: WorldOptions = {}) {
   on('process.run', async (_$, e) => {
     // (0.7.33) `mm card`'s free second: short here, and long enough for a mounted pane to draw
     if (e.argv[0] === 'sleep') {
-      await new Promise(resolve => setTimeout(resolve, 5))
+      await new Promise(resolve => setTimeout(resolve, 25))
       return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (e.argv.some(a => String(a).endsWith('/client-reply-prep/scripts/render_visual.py'))) {
@@ -12929,8 +12929,10 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       const signBtn = (await buttons(u)).find(([k]) => k === `mm-card-sign-btn:${LABEL}`)
       expect(signBtn?.[1], surface).toBe('✍  Click to sign and send')
       await u.press({ key: `mm-card-sign-btn:${LABEL}` })
-      // on record for the send gate, by the transcript's id, before anything is in the prompt box
-      const record = JSON.parse(w.written.findLast(f => f.path.endsWith('/.claude/mm-hooks/card-signed.jsonl'))?.text ?? '{}') as Record<string, unknown>
+      // on record for the send gate, by the transcript's id, before anything is in the prompt box (the press goes on past a real digest of the page)
+      const recorded = () => w.written.findLast(f => f.path.endsWith('/.claude/mm-hooks/card-signed.jsonl'))
+      for (let i = 0; i < 200 && !recorded(); i++) await new Promise(r => setTimeout(r, 2))
+      const record = JSON.parse(recorded()?.text ?? '{}') as Record<string, unknown>
       expect(record, surface).toMatchObject({ v: 1, session_id: SELF_CLI, package_id: PKG, package_sha256: SMS_TREE.package_sha256, label: LABEL })
       // the name and the envelope first; the words only once it has flown, and never sent
       expect(w.fills, surface).toEqual([])
@@ -13103,6 +13105,48 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       // nothing draws the pane now: a new card, its check passing, goes into the state and reaches no screen
       w.setTree(JSON.parse(JSON.stringify(SMS_TREE).replace('"s":"prepared"', '"s":"prepared again"')))
       expect(await tool($, `card ${PKG}`)).toBe(notReady('the card did not reach the screen'))
+    })
+
+    test('asked while the pane is still drawing the card: ready, and never "still being drawn"', async ($, on) => {
+      const w = world(on, own)
+      await mm($, '')
+      const u = await mount($, 'desktop')
+      await u.press({ key: `drafts:${ACME}` })
+      // a pass drawing the client part again as the thread asks: the state reads `rendering` for the whole of this dispatch
+      const passing = mm($, '')
+      expect(await tool($, `card ${PKG}`)).toBe(READY)
+      await passing
+      expect(w.fills).toEqual([])
+      await u.unmount()
+    })
+
+    test('a computer whose signature records the send gate cannot check: not ready, in its words, and no box to press', async ($, on) => {
+      world(on, { ...own, env: { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', OS: 'Windows_NT', HOME: 'C:\\Users\\someone' } })
+      const u = await shown($)
+      expect(await tool($, `card ${PKG}`)).toBe(notReady("signatures can't be checked on this computer"))
+      const drawn = (await lines(u)).join('\n')
+      expect(drawn).not.toContain('Click to sign and send')
+      expect(drawn).toContain("Signatures can't be checked on this computer")
+      await u.unmount()
+    })
+
+    test('the draw report comes after the draw: a draw that throws leaves nothing on record as drawn, and `mm card` is not ready', async ($, on) => {
+      world(on, own)
+      // a signature the drawing cannot write: the hook throws where it builds the card, with the card itself the same
+      let poison = false
+      let pageSha: unknown
+      on('state.get', { plugin: 'mm-bridge' }, async (_$, e, next) => {
+        const got = (await next(e)) as { value: { value?: { pageSha?: unknown } } }
+        if (e.key === 'card' && got.value.value?.pageSha) pageSha = got.value.value.pageSha
+        if (!poison || e.key !== 'cardMarks') return got as never
+        return { value: { ...got.value, value: { signed: { [LABEL]: { label: LABEL, signer: 12345, at: NOW, pageSha } } } } } as never
+      })
+      const u = await shown($)
+      expect(await tool($, `card ${PKG}`)).toBe(READY)
+      poison = true
+      await lines(u).catch(() => undefined)
+      expect(await tool($, `card ${PKG}`)).toBe(notReady('the card did not reach the screen'))
+      await u.unmount().catch(() => undefined)
     })
 
     test('no pane on this surface: not ready', async ($, on) => {

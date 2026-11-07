@@ -345,11 +345,13 @@ export type MmCard = {
    * `mm card` answers not ready. Holds up to 60 characters of the page: never logged.
    */
   gap?: string
+  /** (0.7.33) The hash of the page this card was last held against: what a signature is for (`standing`). None when no page was read. */
+  pageSha?: string
   at: number
 }
 
-/** (0.7.26) A signature given in this thread's pane: the tag signed, by whom, when, and what became of the words. */
-export type MmCardSigned = { label: string; signer: string; at: number; filled?: 'filled' | 'draft' | 'none' | 'stale' }
+/** (0.7.26) A signature given in this thread's pane: the tag signed, by whom, when, (0.7.33) the hash of the page it read, and what became of the words. */
+export type MmCardSigned = { label: string; signer: string; at: number; pageSha?: string; filled?: 'filled' | 'draft' | 'none' | 'stale' }
 
 /** (0.7.26) What this thread did with cards: each signature given here by tag, and whether the page as text is open under the card. */
 export type MmCardMarks = {

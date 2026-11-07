@@ -380,34 +380,29 @@ describe('0.7.29: a pin the app refuses waits 6 hours and is reported once; a ty
       expect(w.stored('mm.namewait') ?? {}).toEqual({})
     })
 
-    test('`mm card` waits for a card still being drawn, at no cost to the hook\'s clock, then answers; a card that never comes is not ready at 20 seconds', async () => {
+    test('`mm card` on a card still being drawn never waits on the state, which one dispatch reads at one moment: it draws the card itself, then answers', async () => {
       const PKG = SMS_TREE.package_id
       const w = fakeApp(threeClients(), [{ sessionId: 'local_hub' }])
       const hub = w.session('local_hub') as unknown as {
         process: { run: (argv: string[]) => Promise<unknown> }
         http: { fetch: (url: string) => Promise<unknown> }
-        state: { set: (ref: unknown, value: unknown) => Promise<unknown> }
+        state: { set: (ref: unknown, value: unknown) => Promise<unknown>; get: (ref: unknown) => Promise<{ value: { status: string } }> }
       }
-      const card = { packageId: PKG, projectId: pid(1), client: 'Client One', own: true, current: SMS_TREE.package_sha256, tree: readTree(JSON.parse(JSON.stringify(SMS_TREE))), status: 'rendering', at: 0 }
+      await mm(hub as never, '')
       const ref = { plugin: 'mm-bridge', key: 'card' }
-      await hub.state.set(ref, card)
+      await hub.state.set(ref, { packageId: PKG, projectId: pid(1), client: 'Acme', own: true, current: SMS_TREE.package_sha256, tree: null, status: 'rendering', at: 0 })
       const fetch = hub.http.fetch
       hub.http.fetch = async (url: string) =>
         url.includes('/reply-package') ? { status: 200, ok: true, headers: {}, text: JSON.stringify({ markdown: SMS_PAGE, package_sha256: SMS_TREE.package_sha256 }) } : fetch(url)
       let seconds = 0
       hub.process.run = async (argv: string[]) => {
-        if (argv[0] !== 'sleep') return { exitCode: 0, stdout: JSON.stringify(SMS_TREE), stderr: '' }
-        seconds++
-        if (seconds === 3) await hub.state.set(ref, { ...card, status: 'ready' })
-        return { exitCode: 0, stdout: '', stderr: '' }
+        if (argv[0] === 'sleep') seconds++
+        return { exitCode: 0, stdout: JSON.stringify(SMS_TREE), stderr: '' }
       }
-      // the wait over, it goes on to its next question: this fake thread's client part shows nothing
+      // this fake thread's client part shows nothing, so that is its next question; no second went by waiting
       expect(await mm(hub as never, `card ${PKG}`)).toBe('card not ready: the side pane is not showing this package. Print the whole page.')
-      expect(seconds).toBe(3)
-      seconds = 100
-      await hub.state.set(ref, card)
-      expect(await mm(hub as never, `card ${PKG}`)).toBe('card not ready: the card is still being drawn. Print the whole page.')
-      expect(seconds).toBe(120)
+      expect(seconds).toBe(0)
+      expect((await hub.state.get(ref)).value.status).toBe('ready')
     })
   })
 
