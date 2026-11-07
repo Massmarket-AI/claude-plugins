@@ -8355,9 +8355,9 @@ describe('0.5.23 (the 14 refused starts of 10-19 and 10-20): a link lasts until 
     expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_p2' })
     expect(w.stored['mm.pins']).toEqual({ local_p2: ourPin(ACME, 'Acme Roofing') })
     expect(w.stored['mm.titles']).toEqual({ local_p2: 'Roof quote' })
-    // ⛔ by itself: no start, no card, no chip, no message
+    // ⛔ by itself: no start, no chip, no message. (0.7.35, Rob 11-07: "still should have started a chip for them") Its one card, which starts nothing.
     expect(starts(w)).toEqual([])
-    expect(proposals(w)).toEqual([])
+    expect(proposals(w).length).toBe(1)
     expect(w.minted()).toEqual([])
     expect(sends(w)).toEqual([])
     expect(w.stored['mm.autostarts']).toBeUndefined()
@@ -8434,8 +8434,8 @@ describe('0.5.23 (the 14 refused starts of 10-19 and 10-20): a link lasts until 
     await mm($, '')
     expect(w.stored['mm.links']).toEqual(links)
     expect(recordReads(w).length).toBeLessThanOrEqual(40)
-    // the ones whose records were not opened this sync were asked for by id, at most 10 (LOOKUPS_PER_SYNC), and kept
-    expect(w.calls.filter(c => c.tool === 'get_session' && c.args.session_id !== 'self').length).toBeLessThanOrEqual(10)
+    // (0.7.35) the ones whose records were not opened this sync: the listing says they are not here, and the app is not asked
+    expect(w.calls.filter(c => c.tool === 'get_session' && c.args.session_id !== 'self')).toEqual([])
   })
 
   test('Start missing threads, pressed in this profile: the client whose thread is in the other profile is one of them, as when its link was dropped; (0.5.25) the words go in the prompt box, kickoffs gives its start, and the link stays until the new thread opens', async ($, on) => {
@@ -8565,7 +8565,8 @@ describe('0.5.23 (the 14 refused starts of 10-19 and 10-20): a link lasts until 
     await ui.unmount()
     await after(w, 30)
     expect(starts(w)).toEqual([])
-    expect(proposals(w)).toEqual([])
+    // (0.7.35) its one card, which starts nothing
+    expect(proposals(w).length).toBe(1)
     expect(sends(w)).toEqual([])
   })
 
@@ -13455,5 +13456,71 @@ describe('0.7.34: Team now, Needs you now that folds, the pin marks and the no-t
       expect((await lines(ui)).some(l => l.includes('Cedar Dental · task'))).toBe(true)
       await ui.unmount()
     })
+  })
+})
+
+describe('0.7.35 (measured 11-07: 73 of 97 pin records were threads of the profile Rob left on 11-05, and NextProjectX, due Monday, read neither away nor missing)', () => {
+  const recOf = (w: { stored: Record<string, unknown> }, pid: string) => (w.stored['mm.last'] as { recs: Record<string, Record<string, unknown>> }).recs[pid]
+  /** Forty-five pin records of threads in profile A: they spend the sync's record files before Cedar's link is reached. */
+  const farPins = Object.fromEntries(Array.from({ length: 45 }, (_, n) => [`local_p${n}`, ourPin(`${String(n).padStart(8, '0')}-0000-4000-8000-0000000007a1`, `Client ${n}`)]))
+  const farFiles = Object.assign({}, ...Array.from({ length: 45 }, (_, n) => profileRec(PROFILE_A, `local_p${n}`))) as Record<string, { text: string; mtimeMs: number }>
+  /** Cedar, due now, linked to its thread in profile A; this thread in profile B. */
+  const inB = (on: On, f: Feed, store: Record<string, unknown> = {}, files: Record<string, { text: string; mtimeMs: number }> = {}) =>
+    world(on, {
+      tools: 'start',
+      feed: f,
+      threads: [thread('local_other', 'Unrelated notes', 100)],
+      files: { ...profileRec(PROFILE_B, SELF), ...profileRec(PROFILE_A, 'local_far'), ...files },
+      store: { 'mm.profile': { dir: PROFILE_B, since: NOW - DAYS, from: PROFILE_A }, 'mm.switchPins': { since: NOW - DAYS, at: NOW - DAYS }, 'mm.links': { [CEDAR]: 'local_far' }, 'mm.titles': { local_far: 'Cedar build' }, ...store },
+    })
+
+  test('the sync\'s record files spent on other threads: the client still reads as away, is counted as missing, keeps its link, and the app is not asked about it', async ($, on) => {
+    const w = inB(on, cedarAlone(), { 'mm.pins': farPins }, farFiles)
+    await mm($, '')
+    expect(recOf(w, CEDAR)).toMatchObject({ state: 'start', away: true })
+    expect((w.stored['mm.last'] as { rowPins: Record<string, unknown> }).rowPins[CEDAR]).toEqual({ pinned: false, why: 'no_thread' })
+    expect(w.calls.filter(c => c.tool === 'get_session' && c.args.session_id === 'local_far')).toEqual([])
+    expect((w.stored['mm.links'] as Record<string, string>)[CEDAR]).toBe('local_far')
+    expect((await kickoffsOf($)).map(k => k.arguments.prompt)).toEqual([expect.stringContaining(`[mm-link ${CEDAR}]`)])
+    const ui = await pane($)
+    expect(await lines(ui)).toContain('1 thread not started')
+    expect((await buttons(ui)).filter(b => b[0] === 'mm-start-all').map(b => b[1])).toEqual(['Start missing threads'])
+    await ui.unmount()
+  })
+
+  test('a client that pins, its thread in the other profile: its card, carrying which thread that was, no folder, and never a start', async ($, on) => {
+    const w = inB(on, cedarAlone())
+    await tickOnce($, w)
+    await w.clock.advance(60_000)
+    const cards = sessionCalls(w)
+    expect(cards.length).toBe(1)
+    expect(cards[0]?.args).toMatchObject({ initiation: 'own_initiative', context: 'fresh', title: expect.stringContaining('Cedar Dental') })
+    expect(String(cards[0]?.args.prompt)).toStartWith(`[mm-link ${CEDAR}]`)
+    expect(String(cards[0]?.args.prompt)).toContain('This client\'s last thread is in another Claude profile: thread local_far ("Cedar build")')
+    expect(cards[0]?.args.cwd).toBeUndefined()
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(sessionCalls(w).length).toBe(1)
+  })
+
+  test('a client that does not pin, its thread in the other profile: its row keeps its Start and no card comes, ready package or not (0.7.13)', async ($, on) => {
+    const far = feed({ mail: [], tickets: {}, drafts: [{ package_id: PKG, project_id: CEDAR, project_name: 'Cedar Dental', status: 'prepared', covers_through: ago(3), due_at: new Date(NOW + 60 * HOUR).toISOString(), drafts_ready: 2, project_owner_email: ME }] })
+    const w = inB(on, far)
+    await tickOnce($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(recOf(w, CEDAR)).toMatchObject({ state: 'start', away: true })
+    expect(sessionCalls(w)).toEqual([])
+  })
+
+  test('the card is withdrawn once the client has its own thread here', async ($, on) => {
+    const w = inB(on, cedarAlone())
+    await tickOnce($, w)
+    await w.clock.advance(60_000)
+    expect(sessionCalls(w).length).toBe(1)
+    const [chip] = w.stored['mm.chips'] as Array<{ taskId: string }>
+    w.threads.set('local_here', thread('local_here', 'Cedar, new', 1))
+    w.stored['mm.links'] = { [CEDAR]: 'local_here' }
+    for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
+    expect(w.calls.filter(c => c.tool === 'dismiss_task').map(c => c.args.task_id)).toEqual([chip?.taskId])
+    expect(sessionCalls(w).length).toBe(1)
   })
 })
