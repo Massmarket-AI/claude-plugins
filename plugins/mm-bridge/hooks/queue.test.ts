@@ -449,7 +449,7 @@ describe('a reply package someone picked up', () => {
     expect(note).toContain('already picked up by')
     expect(note).not.toContain('no reply drafts are prepared yet')
     expect(note).toBe(
-      `Reply package aaaaaaaa is already picked up by Builder A, the person in this session, with 1 draft not sent yet; the five-part pickup view is in the side pane. 1 client message arrived after that draft was written: read the package again and revise the open draft, never write a second email. The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${HELD}.`,
+      `Reply package ${HELD} is already picked up by Builder A, the person in this session, with 1 draft not sent yet; the five-part pickup view is in the side pane. 1 client message arrived after that draft was written: read the package again and revise the open draft, never write a second email. The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${HELD}.`,
     )
     expect(holdBanner(it).startsWith('> **You picked this up**')).toBe(true)
     expect(holdBanner(it)).toBe('> **You picked this up** (Mon 4:30 PM). 1 draft not sent yet. 1 client message arrived after it was written.')
@@ -463,7 +463,7 @@ describe('a reply package someone picked up', () => {
     expect(titleFor(it, T)).toBe('🟡 17h left · Acme Roofing · your draft · flagged')
     expect(holdBanner(it)).toBe('> **You picked this up** (Mon 4:30 PM). 3 drafts not sent yet.')
     expect(noteText(it, ME)).toBe(
-      `Reply package aaaaaaaa is already picked up by Builder A, the person in this session, with 3 drafts not sent yet, flagged for approval; the five-part pickup view is in the side pane. The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${HELD}.`,
+      `Reply package ${HELD} is already picked up by Builder A, the person in this session, with 3 drafts not sent yet, flagged for approval; the five-part pickup view is in the side pane. The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${HELD}.`,
     )
     // two messages after two or more drafts
     const two = only(feed({ drafts: [pkg({ drafts_unsent: 2 })], mail: [newer(), mailAt(P1, ACME_NAME, '2026-10-12 11:30')] }))

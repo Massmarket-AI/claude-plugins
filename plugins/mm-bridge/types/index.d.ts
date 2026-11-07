@@ -376,9 +376,10 @@ export type MmCardMarks = {
 }
 
 /**
- * (0.7.35) The versions of a package this thread has finished checking, by tag (the hash's first 12), and when: `mm card` answered
- * ready for it here, or this thread printed its page. A key of its own and not a field of `MmCardMarks`: one dispatch reads the state
- * at one moment and `mm card` runs for seconds, so a shared key would write a press's marks back over what they became.
+ * (0.7.35) Versions of a package by tag (the hash's first 12), and when. `cardPending`: this thread's turn got `card ready` for it, or
+ * printed its page, and has not ended. `cardChecked`: such a turn ended, so this thread has finished checking it. Keys of their own and
+ * not fields of `MmCardMarks`: one dispatch reads the state at one moment and `mm card` runs for seconds, so a shared key would write a
+ * press's marks back over what they became.
  */
 export type MmCardChecked = Record<string, number>
 
@@ -399,6 +400,7 @@ declare module 'claude-code' {
       card: MmCard
       cardMarks: MmCardMarks
       cardChecked: MmCardChecked
+      cardPending: MmCardChecked
     }
   }
 }

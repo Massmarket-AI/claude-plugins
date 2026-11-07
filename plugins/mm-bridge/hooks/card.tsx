@@ -24,17 +24,22 @@
  *   or drawn until it is opened, so ready no longer needs the card on the screen: the card waits in the pane, and the thread's
  *   line says the person can ask there for the page. A run no surface will ever attach to is still not ready.
  * - The box waits for the thread. (0.7.35; on 2026-11-07 a person pressed and sent while the thread's checks were still
- *   running, and those checks then found two real problems.) Until this thread has finished checking this exact version
- *   (`cardChecked`: `mm card` answered ready for it here, or this thread printed its page) the card is drawn in full with no
- *   box, and a button in its place asks the thread to check. A new `package_sha256` closes the box again; a page that changes
- *   under the same hash does not. This wait is no hold (`holdOf`, `cardVerdict`): it opens on the answer they decide.
+ *   running, and those checks then found two real problems. That thread had asked `mm card` 15 seconds into its turn and made
+ *   30 more tool calls after it, so the answer alone proves nothing.) A turn that gets `card ready` for this exact version, or
+ *   prints its page, leaves it pending (`cardPending`); when that turn ends with an answer it is on record as checked
+ *   (`cardChecked`, `turnEnded`). Until then the card is drawn in full with no box, and a button in its place asks the thread
+ *   to check. A turn that stops short (interrupted, refused, an error) drops what was pending, and a session that dies keeps
+ *   nothing: the box stays closed and the button still works. A new `package_sha256` clears both for the old version
+ *   (`noteVersion`) and closes the box; a page that changes under the same hash does not. This wait is no hold (`holdOf`,
+ *   `cardVerdict`): it opens on the answer they decide.
  * - The card on screen is the current render. (0.7.33) Plan state, the follow-up switch and rolled dates are in no hash, so
  *   `mm card` and a press each read OW's page and render again (`refreshCard`). OW with no usable hash means not ready. A
  *   fresh card that differs replaces the kept one, and a press in that state records nothing: the box says to read it again.
  * - Signing never sends. The box writes the signer's name in, records the signature for the send gate
- *   (~/.claude/mm-hooks/card-signed.jsonl, with the hash of the page it was checked against), folds the letter into an
- *   envelope, and puts exactly `Send package <12>` in the person's prompt box, as the Start buttons fill it. The person sends
- *   it with Enter; the thread then runs the go of §9.5. A draft of theirs in the box is never written over.
+ *   (~/.claude/mm-hooks/card-signed.jsonl, with the hash of the page it was checked against), leaves a note in the transcript
+ *   (`SIGNED_NOTE`, a row a thread's own words cannot make), folds the letter into an envelope, and puts exactly `Send package <12>` in the
+ *   person's prompt box, as the Start buttons fill it. The person sends it with Enter; the thread then runs the go of §9.5. A
+ *   draft of theirs in the box is never written over.
  */
 import type { BoxProps, ButtonProps, ElementConstructor, EngineInterface, LinkProps, Register, RenderNode, SvgProps, TextProps } from 'claude-code'
 
@@ -45,6 +50,7 @@ import { platformOf } from './threads'
 const CARD = { plugin: 'mm-bridge', key: 'card' } as const
 const CARD_MARKS = { plugin: 'mm-bridge', key: 'cardMarks' } as const
 const CARD_CHECKED = { plugin: 'mm-bridge', key: 'cardChecked' } as const
+const CARD_PENDING = { plugin: 'mm-bridge', key: 'cardPending' } as const
 
 /** The renderer's tree version this module draws. */
 const TREE_V = 1
@@ -83,6 +89,8 @@ const cards = new Map<string, MmCardTree>()
 const running = new Map<string, Promise<MmCardTree | string>>()
 /** The package's hash as the last pickup read gave it, by package id. */
 const currents = new Map<string, string>()
+/** (0.7.35) The last usable hash OW gave of each package: `noteCurrent` forgets one on an answer with none, and this tells a new one from the last. */
+const lastHashes = new Map<string, string>()
 /** The page a kept card with a gap was last drawn again for, by package id: one new render for each new page, not one a draw. */
 const redrawnFor = new Map<string, string>()
 /** (0.7.33) The card the pane last put on the screen, by what it holds. Nothing while the client part shows none. */
@@ -257,6 +265,18 @@ export function signOf(tree: MmCardTree | null): { label: string; signer: string
 export function noteCurrent(packageId: string, sha: unknown): void {
   if (typeof sha === 'string' && SHA.test(sha)) currents.set(packageId, sha)
   else currents.delete(packageId)
+}
+
+/**
+ * (0.7.35) `noteCurrent` for a read of OW, which can also bring a new hash: that clears what stands for the version before it, so a
+ * package that comes back to an earlier version waits for the thread again. A failed write costs nothing a new tag does not already close.
+ */
+export async function noteVersion($: EngineInterface, packageId: string, sha: unknown): Promise<void> {
+  noteCurrent(packageId, sha)
+  if (typeof sha !== 'string' || !SHA.test(sha)) return
+  const was = lastHashes.get(packageId)
+  lastHashes.set(packageId, sha)
+  if (was && was !== sha) await forgetVersion($, was.slice(0, 12)).catch(() => {})
 }
 
 /** The package's hash as last read: OW's full hash, else the 12 of a page drawn locally, else null. */
@@ -521,16 +541,55 @@ export async function checkedOf($: EngineInterface): Promise<MmCardChecked> {
   return value && typeof value === 'object' ? value : {}
 }
 
-/** (0.7.35) This thread has finished checking this version of the package. */
+/** (0.7.35) The versions the turn under way got `card ready` for, or printed the page of (`MmCardChecked`). */
+async function pendingOf($: EngineInterface): Promise<MmCardChecked> {
+  const { value } = await $.state.get(CARD_PENDING)
+  return value && typeof value === 'object' ? value : {}
+}
+
+/** (0.7.35) This thread has finished checking this version of the package. Pending does not count: the turn may still be checking. */
 export const isChecked = (checked: MmCardChecked, label: string): boolean => Object.hasOwn(checked, label)
 
-/** (0.7.35) These versions are on record as checked by this thread: the box opens for them. The newest CHECKED_MAX are kept. */
-export async function noteChecked($: EngineInterface, labels: readonly string[]): Promise<void> {
+/** These tags, newest last, on top of what stands: the newest CHECKED_MAX are kept. */
+function withTags(had: MmCardChecked, tags: readonly string[], at: number): MmCardChecked {
+  const kept = Object.entries(had).filter(([label]) => !tags.includes(label))
+  return Object.fromEntries([...kept, ...tags.map(label => [label, at] as const)].slice(-CHECKED_MAX))
+}
+
+/** (0.7.35) The turn under way got `card ready` for these versions, or printed their pages: they are checked once it ends (`turnEnded`). */
+export async function notePending($: EngineInterface, labels: readonly string[]): Promise<void> {
   const tags = labels.filter(label => LABEL.test(label))
+  if (tags.length) await $.state.set(CARD_PENDING, withTags(await pendingOf($), tags, await $.clock.now()))
+}
+
+/**
+ * (0.7.35) The end of a turn of the main conversation. One that ended with an answer has finished: what it left pending is on record
+ * as checked, and the box opens. One that stopped short (interrupted, refused, an error) has not, and what it left pending is dropped,
+ * so that a later turn opens nothing until it asks again. A pending version a dead session left never gets here, and that session's
+ * state is gone with it: the box stays closed there, and `Check this package` starts a turn that can open it.
+ */
+export async function turnEnded($: EngineInterface, finished: boolean): Promise<void> {
+  const tags = Object.keys(await pendingOf($))
   if (!tags.length) return
-  const at = await $.clock.now()
-  const had = Object.entries(await checkedOf($)).filter(([label]) => !tags.includes(label))
-  await $.state.set(CARD_CHECKED, Object.fromEntries([...had, ...tags.map(label => [label, at] as const)].slice(-CHECKED_MAX)))
+  if (finished) await $.state.set(CARD_CHECKED, withTags(await checkedOf($), tags, await $.clock.now()))
+  await $.state.set(CARD_PENDING, {})
+}
+
+/**
+ * (0.7.35) The start of a turn of the main conversation: what is still pending belongs to a turn that is over, and is dropped so that
+ * only the same turn's end can make it checked. It comes from a `mm card` still running when its turn was interrupted: that turn's end
+ * has been and gone by the time the answer is written.
+ */
+export async function turnBegan($: EngineInterface): Promise<void> {
+  if (Object.keys(await pendingOf($)).length) await $.state.set(CARD_PENDING, {})
+}
+
+/** (0.7.35) Nothing stands for this version any more, pending or checked. */
+async function forgetVersion($: EngineInterface, label: string): Promise<void> {
+  const checked = await checkedOf($)
+  if (isChecked(checked, label)) await $.state.set(CARD_CHECKED, Object.fromEntries(Object.entries(checked).filter(([tag]) => tag !== label)))
+  const pending = await pendingOf($)
+  if (isChecked(pending, label)) await $.state.set(CARD_PENDING, Object.fromEntries(Object.entries(pending).filter(([tag]) => tag !== label)))
 }
 
 /** The tags of every pickup page closing line in a response of this thread. */
@@ -538,13 +597,17 @@ export function printedTags(text: string): string[] {
   return [...text.matchAll(CLOSING)].map(m => m[1] as string)
 }
 
-/** (0.7.35) Every response block of this thread is read for a pickup page's closing line: a printed page is a finished check. Reads only; the row is stored as it came. */
+/**
+ * (0.7.35) Every response block of this thread is read for a pickup page's closing line: a printed page leaves that version pending, and
+ * the end of the turn makes it checked. Measured on 2026-11-07 in a main-loop turn: a turn's last block reaches `session.append` before
+ * `turn.complete` fires, so a page printed last counts at the end of that same turn. Reads only; the row is stored as it came.
+ */
 export function cardHooks(on: Parameters<Register>[0]): void {
   on('session.append', { door: 'response' }, async ($, e, next) => {
     try {
       if (!e.agentId && e.message.type === 'assistant') {
         const text = (e.message.content ?? []).map(b => (b && (b as { type?: string }).type === 'text' ? String((b as { text?: unknown }).text ?? '') : '')).join('\n')
-        if (text.includes('Package `')) await noteChecked($, printedTags(text))
+        if (text.includes('Package `')) await notePending($, printedTags(text))
       }
     } catch {
       // the row is stored as it came
@@ -669,6 +732,25 @@ async function recordSignature($: EngineInterface, card: MmCard, signer: string,
   }
 }
 
+/** (0.7.35) The note a press leaves in the transcript, word for word. */
+export const SIGNED_NOTE = (label: string): string => `[Massmarket bridge, no reply needed] Card signed in the side pane: Package ${label}. Nothing has been sent.`
+
+/**
+ * (0.7.35) The press's mark in the transcript, for the send gate: a row a thread's own words cannot make, stored `isMeta` under the
+ * bridge's name as `origin`, which starts no turn. ⛔ False when it could not be appended (the engine refused it, or a plugin above
+ * answered `{ deny }`): no note means no words in the prompt box, as for a record that could not be written.
+ */
+async function appendSigned($: EngineInterface, card: MmCard, label: string, log: SignLog): Promise<boolean> {
+  try {
+    const stored = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: SIGNED_NOTE(label) }] } })
+    if (stored.deny !== undefined) throw new Error(stored.deny)
+    return true
+  } catch (err) {
+    await log.note(`card signature note for package ${card.packageId} not appended: ${err instanceof Error ? err.message.slice(0, 160) : 'no reason given'}`).catch(() => {})
+    return false
+  }
+}
+
 /**
  * (0.7.33) The signature that stands for this tag: under SIGN_VALID_MS old, and for the page as it reads now. Past either the gate no
  * longer takes it, so the card reads unsigned and a press writes a new record: plan approval adds a Cc, and rolled dates or the
@@ -685,11 +767,13 @@ const isChecking = (marks: MmCardMarks, label: string, now: number) => marks.che
 /**
  * A press on Click to sign and send. First the package is read and drawn again (`refreshCard`): the signature is for the card as
  * it stands now. A card that changed is replaced, nothing is recorded and the box says to read it again; a read or a record that
- * fails records nothing and the box says to try again. Then the signature goes on record (the pane draws it inking in and the
- * envelope), and when the envelope has flown, exactly `Send package <12>` goes in the prompt box, if the card still holds then.
+ * fails records nothing and the box says to try again. Then the signature goes on record and (0.7.35) its note in the transcript
+ * (`appendSigned`), always in that order (the pane draws it inking in and the envelope), and when the envelope has flown, exactly
+ * `Send package <12>` goes in the prompt box, if the card still holds then. A note that cannot be appended stops there, as a record
+ * that cannot be written does: the record stands in its file, with no note and no words.
  * One signature a tag while it stands (`standing`): once the gate would no longer take it, a new press signs again.
- * (0.7.35) A press for a version this thread has not finished checking records nothing: the box is not drawn then, so this is the
- * second line of defence for a press that was already under way.
+ * (0.7.35) A press for a version this thread has not finished checking records nothing, while its turn is still running too: the box
+ * is not drawn then, so this is the second line of defence for a press that was already under way.
  */
 export async function pressSign($: EngineInterface, label: string, log: SignLog): Promise<void> {
   const { value: card } = await $.state.get(CARD)
@@ -720,6 +804,8 @@ export async function pressSign($: EngineInterface, label: string, log: SignLog)
   const at = await $.clock.now()
   // (0.7.33) on record before the words can reach the prompt box
   if (!(await recordSignature($, fresh, signer, read.markdown, log))) return stop('retry')
+  // (0.7.35) then the note: record, note, words, always in that order
+  if (!(await appendSigned($, fresh, label, log))) return stop('retry')
   const pageSha = await sha256Hex(read.markdown)
   const signed: MmCardSigned = { label, signer, at, pageSha }
   const m = await marksOf($)

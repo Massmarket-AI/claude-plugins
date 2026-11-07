@@ -2,8 +2,8 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import type { MmCard, MmCardMarks, MmCardTree } from '../types'
 import {
-  CHECK_BUTTON, NOT_DRAWN, NO_CARD, NO_OWNER_CHECK, SIGN_FILL_MS, SIGN_VALID_MS, THREAD_CHECKING, cardVerdict, checkedOf, copyCheck, currentOf, drawCard, fnv1a, holdOf, holdText, isChecked, isFresh, noteChecked, noteCurrent, prepareCard, pressAsk, pressSign, readTree,
-  printedTags, refreshCard, sha256Hex, signOf, signatureLine, signatureSvg, standing, type CardDraw,
+  CHECK_BUTTON, NOT_DRAWN, NO_CARD, NO_OWNER_CHECK, SIGNED_NOTE, SIGN_FILL_MS, SIGN_VALID_MS, THREAD_CHECKING, cardVerdict, checkedOf, copyCheck, currentOf, drawCard, fnv1a, holdOf, holdText, isChecked, isFresh, noteCurrent, notePending, noteVersion, prepareCard, pressAsk, pressSign, readTree,
+  printedTags, refreshCard, sha256Hex, signOf, signatureLine, signatureSvg, standing, turnBegan, turnEnded, type CardDraw,
 } from './card'
 import { drawnText, pageGap } from './card-parity'
 import { CARD_PAIRS } from './card-pairs.test-helper'
@@ -76,10 +76,22 @@ function thread(box = '') {
   const files = new Map<string, string>()
   const ran: string[][] = []
   const notes: string[] = []
-  /** What the page read gives a press, and what the renderer draws on this computer. */
-  const now = { page: { markdown: SMS_PAGE as string | null, sha: SHA as string | null }, render: JSON.stringify(SMS_TREE), session: TRANSCRIPT, os: undefined as string | undefined }
+  /** (0.7.35) What a press appended to the transcript, and the order of the record, the note and the words. */
+  const appends: unknown[] = []
+  const order: string[] = []
+  /** What the page read gives a press, what the renderer draws on this computer, and how an append goes. */
+  const now = { page: { markdown: SMS_PAGE as string | null, sha: SHA as string | null }, render: JSON.stringify(SMS_TREE), session: TRANSCRIPT, os: undefined as string | undefined, append: 'stores' as 'stores' | 'throws' | 'denied' }
   const $ = {
-    session: { id: async () => now.session },
+    session: {
+      id: async () => now.session,
+      append: async (args: unknown) => {
+        if (now.append === 'throws') throw new Error('a run no plugin may shape')
+        if (now.append === 'denied') return { deny: 'a plugin above refused it' }
+        appends.push(args)
+        order.push('note')
+        return { message: {}, uuid: 'row-1' }
+      },
+    },
     env: { get: async (name: string) => ({ HOME, OS: now.os })[name] },
     fs: {
       read: async (path: string) => {
@@ -87,7 +99,10 @@ function thread(box = '') {
         if (text === undefined) throw new Error('ENOENT')
         return text
       },
-      write: async (path: string, text: string) => void files.set(path, text),
+      write: async (path: string, text: string) => {
+        files.set(path, text)
+        if (path === SIGNED_FILE) order.push('record')
+      },
       stat: async (path: string) => {
         const text = files.get(path)
         if (text === undefined) throw new Error(`ENOENT: no such file or directory, stat '${path}'`)
@@ -109,6 +124,7 @@ function thread(box = '') {
       read: async () => ({ text: box, cursor: 0 }),
       fill: async (input: { text: string }) => {
         fills.push(input.text)
+        order.push('words')
         return { isFilled: true, text: input.text, cursor: input.text.length }
       },
     },
@@ -126,6 +142,8 @@ function thread(box = '') {
     files,
     ran,
     notes,
+    appends,
+    order,
     now,
     setTime: (at: number) => {
       time = at
@@ -943,6 +961,11 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
     return t
   }
   const nextCard = () => cardOf({ current: NEXT_SHA, tree: readTree(JSON.parse(NEXT_TREE)) as MmCardTree })
+  /** A turn that got `card ready` for this version, or printed its page, and ended with an answer. */
+  const checkedNow = async ($: never, label: string) => {
+    await notePending($, [label])
+    await turnEnded($, true)
+  }
 
   test('unchecked: the card is drawn in full, no box, and in its place the exact words and the button', () => {
     const drawn = draw(cardOf(), {})
@@ -1000,8 +1023,18 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
     await t.advance(SIGN_FILL_MS)
     expect(t.fills).toEqual([])
     expect((t.state.get('cardMarks') as MmCardMarks | undefined)?.signed ?? {}).toEqual({})
-    // the thread finishes: the same press now signs, and the words go in
-    await noteChecked(t.$, [LABEL])
+    // ready at t1, more tool calls, a press at t2 while the turn runs: refused the same way
+    await notePending(t.$, [LABEL])
+    expect(buttons(draw(t.state.get('card') as MmCard, await checkedOf(t.$))).has('✍  Click to sign and send')).toBe(false)
+    await pressSign(t.$, LABEL, t.log)
+    expect(t.files.size).toBe(0)
+    expect(t.appends).toEqual([])
+    await t.advance(SIGN_FILL_MS)
+    expect(t.fills).toEqual([])
+    expect((t.state.get('cardMarks') as MmCardMarks | undefined)?.signed ?? {}).toEqual({})
+    // the turn ends: the same press now signs, and the words go in
+    await turnEnded(t.$, true)
+    expect(buttons(draw(t.state.get('card') as MmCard, await checkedOf(t.$))).has('✍  Click to sign and send')).toBe(true)
     await pressSign(t.$, LABEL, t.log)
     expect((t.files.get(SIGNED_FILE) ?? '').split('\n').filter(Boolean).length).toBe(1)
     await t.advance(SIGN_FILL_MS)
@@ -1010,7 +1043,7 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
 
   test('a new hash closes the box until the thread answers for that version; a press on it records nothing', async () => {
     const t = unchecked()
-    await noteChecked(t.$, [LABEL])
+    await checkedNow(t.$, LABEL)
     expect([...buttons(draw(t.state.get('card') as MmCard, await checkedOf(t.$))).keys()]).toContain('✍  Click to sign and send')
     t.state.set('card', nextCard())
     expect(holdOf(t.state.get('card') as MmCard)).toBe('')
@@ -1019,7 +1052,7 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
     expect([...buttons(closed).keys()]).not.toContain('✍  Click to sign and send')
     await pressSign(t.$, NEXT, t.log)
     expect(t.files.size).toBe(0)
-    await noteChecked(t.$, [NEXT])
+    await checkedNow(t.$, NEXT)
     expect([...buttons(draw(t.state.get('card') as MmCard, await checkedOf(t.$))).keys()]).toContain('✍  Click to sign and send')
   })
 
@@ -1029,7 +1062,7 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
     expect(after.tree.package_sha256).toBe(before.tree.package_sha256)
     const t = unchecked()
     t.state.set('card', cardOf({ packageId: before.tree.package_id, current: before.tree.package_sha256, tree: readTree(JSON.parse(JSON.stringify(before.tree))) as MmCardTree }))
-    await noteChecked(t.$, [before.tree.label])
+    await checkedNow(t.$, before.tree.label)
     t.now.page = { markdown: after.page, sha: after.tree.package_sha256 }
     t.now.render = JSON.stringify(after.tree)
     expect(await refreshCard(t.$, { packageId: before.tree.package_id, signer: 'Test Signer', home: HOME, note: async () => undefined }, t.now.page)).toBe('changed')
@@ -1055,16 +1088,158 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
     expect(cardVerdict(card, SMS_TREE.package_id)).toBe('')
   })
 
+  test('the end of a turn: one that answered makes what it left pending checked, and one that stopped short drops it', async () => {
+    const t = unchecked()
+    await notePending(t.$, [LABEL])
+    expect(await checkedOf(t.$)).toEqual({})
+    await turnEnded(t.$, false)
+    expect(await checkedOf(t.$)).toEqual({})
+    // nothing pending is left for a later turn to open
+    await turnEnded(t.$, true)
+    expect(await checkedOf(t.$)).toEqual({})
+    await notePending(t.$, [LABEL])
+    await turnEnded(t.$, true)
+    expect(isChecked(await checkedOf(t.$), LABEL)).toBe(true)
+    // once: the next turn's end has nothing new to do
+    const had = await checkedOf(t.$)
+    t.setTime(2_000_000)
+    await turnEnded(t.$, true)
+    expect(await checkedOf(t.$)).toEqual(had)
+  })
+
+  test('only the same turn: a ready that lands after its interrupted turn ended is gone when the next turn starts', async () => {
+    const t = unchecked()
+    await turnEnded(t.$, false)
+    await notePending(t.$, [LABEL])
+    await turnBegan(t.$)
+    await turnEnded(t.$, true)
+    expect(await checkedOf(t.$)).toEqual({})
+    // what the earlier turns finished stands
+    await checkedNow(t.$, LABEL)
+    await turnBegan(t.$)
+    expect(isChecked(await checkedOf(t.$), LABEL)).toBe(true)
+  })
+
+  test('a session that dies before its turn ends keeps nothing: the box is closed, the button works, and the next finished turn opens it', async () => {
+    const dying = unchecked()
+    await notePending(dying.$, [LABEL])
+    // its state goes with it: what a new process of the thread starts from
+    const t = unchecked()
+    const drawn = draw(t.state.get('card') as MmCard, await checkedOf(t.$), words => void pressAsk(t.$, words))
+    expect(buttons(drawn).has('✍  Click to sign and send')).toBe(false)
+    buttons(drawn).get('Check this package')?.()
+    await new Promise(r => setTimeout(r, 0))
+    expect(t.fills).toEqual([`Check package ${LABEL}`])
+    await checkedNow(t.$, LABEL)
+    expect(buttons(draw(t.state.get('card') as MmCard, await checkedOf(t.$))).has('✍  Click to sign and send')).toBe(true)
+  })
+
+  test('a new hash from OW clears both for the old version; the same hash, and a read with none, clear nothing', async () => {
+    const id = '12121212-1212-4212-8212-121212121212'
+    const t = unchecked()
+    await noteVersion(t.$, id, SHA)
+    await checkedNow(t.$, LABEL)
+    await notePending(t.$, [LABEL])
+    await noteVersion(t.$, id, SHA)
+    expect(isChecked(await checkedOf(t.$), LABEL)).toBe(true)
+    await noteVersion(t.$, id, null)
+    expect(isChecked(await checkedOf(t.$), LABEL)).toBe(true)
+    expect(currentOf(id, null)).toBeNull()
+    await noteVersion(t.$, id, NEXT_SHA)
+    expect(currentOf(id, null)).toBe(NEXT_SHA)
+    expect(await checkedOf(t.$)).toEqual({})
+    // and nothing pending comes back at the end of the turn
+    await turnEnded(t.$, true)
+    expect(await checkedOf(t.$)).toEqual({})
+    // back to the first version: it waits for the thread again
+    await noteVersion(t.$, id, SHA)
+    expect(isChecked(await checkedOf(t.$), LABEL)).toBe(false)
+  })
+
+  describe('the note a press leaves in the transcript', () => {
+    const NOTE = `[Massmarket bridge, no reply needed] Card signed in the side pane: Package ${LABEL}. Nothing has been sent.`
+    /** A thread with this card and its check on record. */
+    const ready = async () => {
+      const t = unchecked()
+      await checkedNow(t.$, LABEL)
+      return t
+    }
+
+    test('its words, as a user row of one text block, written once, and always record, note, then words', async () => {
+      expect(SIGNED_NOTE(LABEL)).toBe(NOTE)
+      const t = await ready()
+      await pressSign(t.$, LABEL, t.log)
+      expect(t.appends).toEqual([{ message: { type: 'user', content: [{ type: 'text', text: NOTE }] } }])
+      expect(t.order).toEqual(['record', 'note'])
+      await t.advance(SIGN_FILL_MS)
+      expect(t.order).toEqual(['record', 'note', 'words'])
+      // a second press while the signature stands writes neither
+      await pressSign(t.$, LABEL, t.log)
+      await t.advance(SIGN_FILL_MS)
+      expect(t.appends.length).toBe(1)
+      expect(t.order).toEqual(['record', 'note', 'words'])
+    })
+
+    for (const how of ['throws', 'denied'] as const) {
+      test(`an append that ${how === 'throws' ? 'the engine refuses' : 'a plugin above answers with a deny'}: no words in the box, the box says to try again, and the record stands with no note`, async () => {
+        const t = await ready()
+        t.now.append = how
+        await pressSign(t.$, LABEL, t.log)
+        await t.advance(SIGN_FILL_MS)
+        expect(t.order).toEqual(['record'])
+        expect(t.fills).toEqual([])
+        expect(t.appends).toEqual([])
+        const marks = t.state.get('cardMarks') as MmCardMarks
+        expect(marks.signed).toEqual({})
+        expect(marks.notice?.kind).toBe('retry')
+        expect(t.notes.join('\n')).toContain('not appended')
+        expect(t.notes.join('\n')).not.toContain('Nothing has been sent')
+        const drawn = texts(draw(t.state.get('card') as MmCard, await checkedOf(t.$), () => undefined, marks)).join(' ')
+        expect(drawn).toContain('That did not go through, so nothing was signed. Try again, or ask your thread to print the page.')
+        // it goes through on the next press: a record and a note of its own, then the words
+        t.now.append = 'stores'
+        await pressSign(t.$, LABEL, t.log)
+        await t.advance(SIGN_FILL_MS)
+        expect(t.order).toEqual(['record', 'record', 'note', 'words'])
+        expect(t.appends.length).toBe(1)
+      })
+    }
+
+    test('a record that cannot be written leaves no note either', async () => {
+      const t = await ready()
+      ;(t.$ as unknown as { fs: { write: () => Promise<void> } }).fs.write = async () => {
+        throw new Error('EACCES: no write here')
+      }
+      await pressSign(t.$, LABEL, t.log)
+      await t.advance(SIGN_FILL_MS)
+      expect(t.appends).toEqual([])
+      expect(t.fills).toEqual([])
+    })
+
+    test('nothing reaches the transcript when the press is refused for want of a check, or for a card that moved', async () => {
+      const first = unchecked()
+      await notePending(first.$, [LABEL])
+      await pressSign(first.$, LABEL, first.log)
+      expect(first.appends).toEqual([])
+      const moved = await ready()
+      moved.now.page = { markdown: NEXT_PAGE, sha: NEXT_SHA }
+      moved.now.render = NEXT_TREE
+      await pressSign(moved.$, LABEL, moved.log)
+      expect(moved.appends).toEqual([])
+    })
+  })
+
   test('a thread keeps the newest 30 versions, an odd value reads as none, and only a tag goes on record', async () => {
     const t = unchecked()
     const tags = Array.from({ length: 35 }, (_, i) => i.toString(16).padStart(12, '0'))
-    for (const tag of tags) await noteChecked(t.$, [tag])
+    for (const tag of tags) await checkedNow(t.$, tag)
     const kept = await checkedOf(t.$)
     expect(Object.keys(kept).length).toBe(30)
     expect(isChecked(kept, tags[4] as string)).toBe(false)
     expect(isChecked(kept, tags[5] as string)).toBe(true)
     expect(isChecked(kept, 'constructor')).toBe(false)
-    await noteChecked(t.$, ['not a tag', ''])
+    await notePending(t.$, ['not a tag', ''])
+    await turnEnded(t.$, true)
     expect(Object.keys(await checkedOf(t.$)).length).toBe(30)
     t.state.set('cardChecked', 'something older')
     expect(await checkedOf(t.$)).toEqual({})
@@ -1072,7 +1247,7 @@ describe('0.7.35 the box waits for the thread: it opens once this thread has fin
 
   test('a press after the check still reads the package again: a card whose hash moved records nothing, and the words stay out', async () => {
     const t = unchecked()
-    await noteChecked(t.$, [LABEL])
+    await checkedNow(t.$, LABEL)
     t.now.page = { markdown: NEXT_PAGE, sha: NEXT_SHA }
     t.now.render = NEXT_TREE
     await pressSign(t.$, LABEL, t.log)
