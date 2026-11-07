@@ -73,9 +73,14 @@ for (const p of PLUGINS) {
   // Changed = uncommitted edits (the hook copy above), OR commits to the plugin since its version was last
   // set. A change merged through a pull request is committed, so the working tree alone would never see it
   // and it would reach nobody.
-  const versionCommit = git('log', '-1', '--format=%H', '--', `${dir}/.claude-plugin/plugin.json`).trim()
-  const committedSince = versionCommit ? git('diff', '--name-only', versionCommit, 'HEAD', '--', dir).trim() !== '' : true
-  const changed = git('status', '--porcelain', '--', dir).trim() !== '' || committedSince
+  // --first-parent: "last set" is the commit on main that brought the version in. A pull request's later commits
+  // landed in that same merge, so they shipped under that version. Without it, 1087d18 (round 2 of mm-bridge
+  // 0.7.33) read as unreleased, and every hook-only release bumped the bridge too.
+  // A change to test files alone reaches nobody, so it is not a release.
+  const versionCommit = git('log', '-1', '--first-parent', '--format=%H', '--', `${dir}/.claude-plugin/plugin.json`).trim()
+  const shipped = [dir, ':(exclude,glob)**/*.test.*']
+  const committedSince = versionCommit ? git('diff', '--name-only', versionCommit, 'HEAD', '--', ...shipped).trim() !== '' : true
+  const changed = git('status', '--porcelain', '--', ...shipped).trim() !== '' || committedSince
   if (!changed) continue
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   let headVersion = null
