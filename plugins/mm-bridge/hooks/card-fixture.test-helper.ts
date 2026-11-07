@@ -1,3 +1,5 @@
+import { fnv1a } from './card'
+
 /**
  * (0.7.26) A card as client-reply-prep's render_visual.py --tree draws it, for the synthetic text-message package
  * (skills/client-reply-prep/scripts/tests/fixtures/visual/sms-package.json, signer "Test Signer"). Made-up client, made-up
@@ -421,3 +423,15 @@ export const SMS_TREE = {
 }
 
 export const SMS_PAGE = "## Example Dental (Dana Example) · reply package · Package `3f1c9a7e5b2d`\n\n### Every question answered?\n| # | They asked | Our reply says | |\n|---|---|---|---|\n| 1 | Is the new booking link live yet? | \"the new booking link is live now\" | ✅ |\n| 2 | Do Saturday slots show? | \"Saturday 9 to 1 shows on it\" | ✅ |\n\n### Their message\nEverything since our last reply, Wed Nov 4, 9:00 AM ET: Text to Dana: booking link going live tomorrow.\n\n#### Dana Example · Thu Nov 5, 10:02 AM ET · sms\nTheir words, as the package stored them; the whole document is doc `dddddddd`:\n> ```text\n> Hi! Is the new booking link live yet? Do Saturday slots show?\n> ```\n\n### Client reply\n_No client email in this package._\n\n### Team post\n_No team post in this package._\n\n### Other items\n\n#### 1. Text to Dana: link is live, Saturday shows\n**Kind:** Text message · **channel:** sms · **to_name:** Dana Example · **contact_id:** hlcontact123 · **to_phone:** +15555550142 · hash `9a8b7c6d5e4f`\n```text\nHi Dana, yes, the new booking link is live now: example.com/book. Saturday 9 to 1 shows on it. Book a test slot and tell us if anything looks off.\n```\n\n### Findings\n_Nothing for Rob to decide._\n\nOne go sends 1 item. Package `3f1c9a7e5b2d`.\n"
+
+/**
+ * (0.7.35) The same package at its next version, to tell a new hash from the old: its hash and tag moved through every word that names
+ * them, with the go line's fingerprint worked out again, since that line names the tag. It reads, and passes its copy check, as the first does.
+ */
+export const NEXT_LABEL = 'abcabcabcabc'
+export const NEXT_SHA = SMS_TREE.package_sha256.replace(SMS_TREE.label, NEXT_LABEL)
+export const NEXT_PAGE = SMS_PAGE.replaceAll(SMS_TREE.label, NEXT_LABEL)
+const GO_LINE = `One go sends 1 item. Package ${SMS_TREE.label}.`
+export const NEXT_TREE = JSON.stringify(SMS_TREE)
+  .replace(`"fp":"${fnv1a(GO_LINE)}"`, `"fp":"${fnv1a(GO_LINE.replace(SMS_TREE.label, NEXT_LABEL))}"`)
+  .replaceAll(SMS_TREE.label, NEXT_LABEL)

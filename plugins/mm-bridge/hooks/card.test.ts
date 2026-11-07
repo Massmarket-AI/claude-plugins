@@ -7,7 +7,7 @@ import {
 } from './card'
 import { drawnText, pageGap } from './card-parity'
 import { CARD_PAIRS } from './card-pairs.test-helper'
-import { SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
+import { NEXT_LABEL as NEXT, NEXT_PAGE, NEXT_SHA, NEXT_TREE, SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
 import { ME, fakeApp, mm, pid, press } from './fake-app.test-helper'
 import type { Feed } from './queue'
 
@@ -62,9 +62,9 @@ function buttons(node: unknown, out = new Map<string, () => void>()): Map<string
 
 const ELS = { Box: 'Box', Text: 'Text', Button: 'Button', Link: 'Link', Svg: 'Svg' } as never
 
-/** (0.7.34) A drawing with this thread's check of the card on record: the wait for it has tests of its own, at the end of this file. */
+/** (0.7.35) A drawing with this thread's check of the card on record: the wait for it has tests of its own, at the end of this file. */
 const drawChecked = (d: Omit<CardDraw, 'checked'>) => drawCard(ELS, { checked: { [d.card.tree?.label ?? '']: 0 }, ...d })
-/** (0.7.34) Every package these tests draw: a thread starts with its check on record, and a test of the wait takes it away. */
+/** (0.7.35) Every package these tests draw: a thread starts with its check on record, and a test of the wait takes it away. */
 const ALL_CHECKED = Object.fromEntries([LABEL, ...Object.values(CARD_PAIRS).map(p => (p.tree as { label: string }).label)].map(label => [label, 0]))
 
 /** A thread's `$` for the card alone: its state, a clock whose timers run when told, and a prompt box. */
@@ -932,7 +932,7 @@ describe('0.7.26 in the bridge: the pane draws the card above the page as the cl
   })
 })
 
-describe('0.7.34 the box waits for the thread: it opens once this thread has finished checking this exact version', () => {
+describe('0.7.35 the box waits for the thread: it opens once this thread has finished checking this exact version', () => {
   const draw = (card: MmCard, checked: Record<string, number>, onAsk: (words: string) => void = () => undefined, marks: MmCardMarks = { signed: {} }) =>
     drawCard(ELS, { card, marks, checked, now: 1_000_000, onSign: () => undefined, onAsk, onPage: () => undefined })
   /** A thread with nothing checked yet. */
@@ -942,11 +942,6 @@ describe('0.7.34 the box waits for the thread: it opens once this thread has fin
     t.state.set('card', cardOf())
     return t
   }
-  /** The same package at its next version: a new hash, and the tag through every word that names it. */
-  const NEXT = 'abcabcabcabc'
-  const NEXT_TREE = JSON.stringify(SMS_TREE).replaceAll(LABEL, NEXT)
-  const NEXT_PAGE = SMS_PAGE.replaceAll(LABEL, NEXT)
-  const NEXT_SHA = SHA.replace(LABEL, NEXT)
   const nextCard = () => cardOf({ current: NEXT_SHA, tree: readTree(JSON.parse(NEXT_TREE)) as MmCardTree })
 
   test('unchecked: the card is drawn in full, no box, and in its place the exact words and the button', () => {

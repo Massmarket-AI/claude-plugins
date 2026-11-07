@@ -20,10 +20,10 @@
  *   without the box and says why.
  * - It replaces the page. (0.7.33, Rob, 2026-11-06: "the copy passes. I already think we should go ahead and implement that
  *   for everybody.") A thread asks `mm card <package id>` at pickup (`cardVerdict`): ready, it prints one line and waits;
- *   not ready, it prints the whole page. (0.7.34) Most pickups run with the thread in the background, where nothing is placed
+ *   not ready, it prints the whole page. (0.7.35) Most pickups run with the thread in the background, where nothing is placed
  *   or drawn until it is opened, so ready no longer needs the card on the screen: the card waits in the pane, and the thread's
  *   line says the person can ask there for the page. A run no surface will ever attach to is still not ready.
- * - The box waits for the thread. (0.7.34; on 2026-11-07 a person pressed and sent while the thread's checks were still
+ * - The box waits for the thread. (0.7.35; on 2026-11-07 a person pressed and sent while the thread's checks were still
  *   running, and those checks then found two real problems.) Until this thread has finished checking this exact version
  *   (`cardChecked`: `mm card` answered ready for it here, or this thread printed its page) the card is drawn in full with no
  *   box, and a button in its place asks the thread to check. A new `package_sha256` closes the box again; a page that changes
@@ -63,7 +63,7 @@ const SIGNED_KEEP = 200
 const SIGNED_MAX_BYTES = 4 * 1024 * 1024
 /** How long a signature stands: the send gate asks for a new one past this, so the box then offers one. */
 export const SIGN_VALID_MS = 2 * 60 * 60 * 1000
-/** (0.7.34) How many checked versions a thread remembers: the newest. */
+/** (0.7.35) How many checked versions a thread remembers: the newest. */
 const CHECKED_MAX = 30
 /** A press still checking the package after this has died: the box opens again. */
 const CHECKING_MS = 120_000
@@ -515,16 +515,16 @@ export async function togglePage($: EngineInterface): Promise<void> {
   await $.state.set(CARD_MARKS, { ...marks, pageOpen: !marks.pageOpen })
 }
 
-/** (0.7.34) The versions this thread has finished checking (`MmCardChecked`). A restart loses them, which only closes the box. */
+/** (0.7.35) The versions this thread has finished checking (`MmCardChecked`). A restart loses them, which only closes the box. */
 export async function checkedOf($: EngineInterface): Promise<MmCardChecked> {
   const { value } = await $.state.get(CARD_CHECKED)
   return value && typeof value === 'object' ? value : {}
 }
 
-/** (0.7.34) This thread has finished checking this version of the package. */
+/** (0.7.35) This thread has finished checking this version of the package. */
 export const isChecked = (checked: MmCardChecked, label: string): boolean => Object.hasOwn(checked, label)
 
-/** (0.7.34) These versions are on record as checked by this thread: the box opens for them. The newest CHECKED_MAX are kept. */
+/** (0.7.35) These versions are on record as checked by this thread: the box opens for them. The newest CHECKED_MAX are kept. */
 export async function noteChecked($: EngineInterface, labels: readonly string[]): Promise<void> {
   const tags = labels.filter(label => LABEL.test(label))
   if (!tags.length) return
@@ -538,7 +538,7 @@ export function printedTags(text: string): string[] {
   return [...text.matchAll(CLOSING)].map(m => m[1] as string)
 }
 
-/** (0.7.34) Every response block of this thread is read for a pickup page's closing line: a printed page is a finished check. Reads only; the row is stored as it came. */
+/** (0.7.35) Every response block of this thread is read for a pickup page's closing line: a printed page is a finished check. Reads only; the row is stored as it came. */
 export function cardHooks(on: Parameters<Register>[0]): void {
   on('session.append', { door: 'response' }, async ($, e, next) => {
     try {
@@ -567,7 +567,7 @@ export async function fillWords($: EngineInterface, words: string): Promise<'fil
 }
 
 /**
- * What of the card itself holds its signature box back, or '' when nothing does. ⛔ (0.7.34) The wait for the thread's check (`isChecked`)
+ * What of the card itself holds its signature box back, or '' when nothing does. ⛔ (0.7.35) The wait for the thread's check (`isChecked`)
  * is not in here: `mm card` answers from this, and its ready is what ends that wait, so it could never answer ready.
  */
 export function holdOf(card: MmCard): string {
@@ -688,7 +688,7 @@ const isChecking = (marks: MmCardMarks, label: string, now: number) => marks.che
  * fails records nothing and the box says to try again. Then the signature goes on record (the pane draws it inking in and the
  * envelope), and when the envelope has flown, exactly `Send package <12>` goes in the prompt box, if the card still holds then.
  * One signature a tag while it stands (`standing`): once the gate would no longer take it, a new press signs again.
- * (0.7.34) A press for a version this thread has not finished checking records nothing: the box is not drawn then, so this is the
+ * (0.7.35) A press for a version this thread has not finished checking records nothing: the box is not drawn then, so this is the
  * second line of defence for a press that was already under way.
  */
 export async function pressSign($: EngineInterface, label: string, log: SignLog): Promise<void> {
@@ -970,14 +970,14 @@ const NOTICE = {
   retry: 'That did not go through, so nothing was signed. Try again, or ask your thread to print the page.',
 } as const
 
-/** (0.7.34) What the pane says in place of the box until this thread has finished checking this version, and the button that asks it to. */
+/** (0.7.35) What the pane says in place of the box until this thread has finished checking this version, and the button that asks it to. */
 export const THREAD_CHECKING = 'This thread is still checking this package. The signature box opens when it finishes.'
 export const CHECK_BUTTON = 'Check this package'
 
 export type CardDraw = {
   card: MmCard
   marks: MmCardMarks
-  /** (0.7.34) The versions this thread has finished checking (`checkedOf`). */
+  /** (0.7.35) The versions this thread has finished checking (`checkedOf`). */
   checked: MmCardChecked
   now: number
   onSign: (label: string) => void
@@ -1031,7 +1031,7 @@ export function drawCard(els: Els, d: CardDraw): Node {
         <Text color={hold === 'drift' || hold === 'page' ? 'error' : undefined} dimColor={hold !== 'drift' && hold !== 'page'}>{holdText(hold, card, tree.label)}</Text>
       </Box>
     )
-    // (0.7.34) the thread is still checking this version: the card stands in full, and the box waits
+    // (0.7.35) the thread is still checking this version: the card stands in full, and the box waits
     if (!isChecked(d.checked, s.label)) return (
       <Box key={`mm-card-wait:${s.label}`} flexDirection="column">
         {notice ? <Text color="warning">{notice}</Text> : null}

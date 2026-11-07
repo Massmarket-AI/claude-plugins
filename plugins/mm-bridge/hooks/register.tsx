@@ -3955,18 +3955,18 @@ const CARD_DRAW_WAIT_S = 3
 function cardReady(label: string): string {
   return `card ready: Package ${label}. The whole package is on screen in the side pane and its copy check passed. Do not print the page. Print one line saying it is in the side pane, ending "Package ${label}.", then wait for the person.`
 }
-/** (0.7.34) Ready with the pane not on a screen: most pickups run with the thread in the background. Its first sentence is the one the send gate parses, as `cardReady`'s is. */
+/** (0.7.35) Ready with the pane not on a screen: most pickups run with the thread in the background. Its first sentence is the one the send gate parses, as `cardReady`'s is. */
 function cardReadyOffScreen(label: string): string {
   return `card ready: Package ${label}. The whole package is checked and waiting in the side pane, which draws it when this thread is open on a screen. Do not print the page. Print one line saying it is in the side pane and that they can ask here for the page if they can't see the pane, ending "Package ${label}.", then wait for the person.`
 }
 function cardNotReady(reason: string): string {
   return `card not ready: ${reason}. Print the whole page.`
 }
-/** (0.7.34) A tag is not an id, and there is nothing yet to print: the thread asks again with the whole id. */
+/** (0.7.35) A tag is not an id, and there is nothing yet to print: the thread asks again with the whole id. */
 const CARD_WHOLE_ID = 'card not ready: give the whole package id, not the 8-character tag, and ask again.'
 
 /**
- * (0.7.34) A session no surface will ever attach to, so that a person can never see the pane in it. Not from the engine's surface
+ * (0.7.35) A session no surface will ever attach to, so that a person can never see the pane in it. Not from the engine's surface
  * calls: measured in a `claude -p` on 2026-11-07, `$.ui.open` answers `no-surface: no surface is attached` and `$.session.surfaces()`
  * is empty, and the engine says the same of any session until a page attaches, as a desktop thread in the background is. So from
  * what `autoPane` goes by: a person's session (`tracks`), not MM_UNATTENDED=1, and no `SINGLE-SESSION` first prompt.
@@ -3997,12 +3997,12 @@ async function aSecond($: EngineInterface): Promise<void> {
  * up nothing. Ready only when the card of that package has just been drawn again from OW's page as it stands now
  * (`refreshCard`), nothing holds its signature box back, that page is fully in it (`pageGap`), and it is in this thread's client
  * part. ⛔ Anything else, any error at all, is not ready: the thread then prints the page, as every thread did before this.
- * (0.7.34) Ready no longer needs the screen. On 2026-11-07 threads asked 7 times and none answered ready, 4 of them because the
+ * (0.7.35) Ready no longer needs the screen. On 2026-11-07 threads asked 7 times and none answered ready, 4 of them because the
  * pane is not placed while a thread runs in the background; in one the person had the pane on screen minutes later and pressed
  * the box. It answers by where the pane stands: on screen (placed, shown and this card drawn there) it says so, and otherwise the
  * card is waiting for the thread to be opened (`cardReadyOffScreen`). The pane is still opened, so that it is there then. Only a
  * session nobody will ever watch (`nobodyWatches`) stays not ready for want of a surface.
- * (0.7.34) A ready answer is this thread's finished check of that version (`noteChecked`): it opens the signature box. A sub-agent's
+ * (0.7.35) A ready answer is this thread's finished check of that version (`noteChecked`): it opens the signature box. A sub-agent's
  * is not: its thread is still at work, and the send gate reads the main chain alone.
  */
 async function cardCommand($: EngineInterface, arg: string, subagent: boolean): Promise<string> {
@@ -8877,7 +8877,7 @@ async function currentLine($: EngineInterface): Promise<string> {
 }
 
 export const register: Register = on => {
-  // (0.7.34) a pickup page this thread prints is its finished check of that version: the signature box opens
+  // (0.7.35) a pickup page this thread prints is its finished check of that version: the signature box opens
   cardHooks(on)
 
   on('session.start', async ($, e, next) => {
