@@ -375,29 +375,36 @@ describe('F4: chip records when a dozen threads tick at once', () => {
 })
 
 // (0.5.7, Rob 10-14 ~13:35 ET) Where the app has start_session, a client with no thread got its thread started by
-// itself. (0.5.24) It got its Start card instead. (0.5.25, Rob 10-22: "it's kind of confusing having a button and chips
-// appear that don't work") Now nothing at all by itself: a dozen threads that tick at once, none knowing which thread
-// polls, start no thread and put up no card; the client's row waits for the person's Start.
-describe('0.5.7: a dozen threads that tick at once never start one client\'s thread twice; (0.5.25) nor start it or put up its card at all', () => {
+// itself. (0.5.24) It got its Start card instead. (0.5.25 to 0.7.33) Nothing at all by itself. (0.7.34, Rob 2026-11-07: "still
+// should have started a chip for them") Its card again, and still never a thread started: a dozen threads that tick at
+// once, none knowing which thread polls, may each put one up, and come down to one a client on the next ticks.
+describe('0.5.7: a dozen threads that tick at once never start one client\'s thread; (0.7.34) each client ends with one card', () => {
   const tickAll = async (w: ReturnType<typeof world>, threads: unknown[]) => {
     await Promise.all(threads.map(t => hooks['session.start']?.(t, { cwd: '/work', surface: 'desktop', isInteractive: false }, next)))
     await w.advance(4_000)
     await w.advance(3_100)
   }
   for (const seed of [1, 7, 42, 99, 2026, 1013, 5, 11]) {
-    test(`twelve threads, no poller they know of: no thread is started and no card is put up (seed ${seed})`, async () => {
+    test(`twelve threads, no poller they know of: no thread is started, and each client ends with one card (seed ${seed})`, async () => {
       const ids = Array.from({ length: N }, (_, i) => `local_as_${seed}_${i + 1}`)
       const w = world({ seed, extra: ids, startOnly: true })
       await before(w)
       // the lease is held by a session none of them knows: nobody is the poller to them
       w.put('mm.lease', { owner: 'cli-nobody', until: NOW + HOUR, version: VERSION })
       const threads = ids.map((id, i) => w.session(`cli-as-${seed}-${i + 1}`, id))
-      for (let i = 0; i < 2; i++) {
+      for (let i = 0; i < 3; i++) {
         await tickAll(w, threads)
         await w.advance(60_000)
       }
       expect(w.startedNow).toEqual([])
-      expect(w.cards).toEqual([])
+      const live = ((w.stored('mm.chips') ?? []) as Array<{ taskId: string; threadId: string; projectId: string; superseded?: boolean }>).filter(r => ids.includes(r.threadId) && !r.superseded)
+      expect(live.length).toBeGreaterThan(0)
+      expect(new Set(live.map(r => r.projectId)).size).toBe(live.length)
+      // and the tick after puts up nothing
+      const cards = w.cards.length
+      await tickAll(w, threads)
+      await w.advance(60_000)
+      expect(w.cards.length).toBe(cards)
     })
   }
 })

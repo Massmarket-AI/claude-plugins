@@ -1166,6 +1166,31 @@ export function startAllSummary(started: readonly string[], failed: ReadonlyArra
  */
 export const START_ALL_WORDS = 'Start the missing client threads'
 
+/**
+ * (0.7.34, Rob 2026-11-07: "those clients ... had never been pinned before, and rightfully so ... But I guess, yeah, still should
+ * have started a chip for them. Once they had reply packages ready") Whether the viewer has a reply package of this client's
+ * ready to work: drafts ready for them, or waiting on their OK, and no teammate deciding it.
+ */
+export const packageReady = (it: Pick<QueueItem, 'kind' | 'packageId' | 'theirs'>): boolean => (it.kind === 'ready' || it.kind === 'ok') && Boolean(it.packageId) && !it.theirs
+
+/** (0.7.34) Whether a client's mail still waits for its package, up to `wait` after the newest message: no chip for its new thread yet. */
+export const awaitingPackage = (it: Pick<QueueItem, 'messages' | 'packageId' | 'newest'>, now: number, wait: number): boolean =>
+  it.messages > 0 && !it.packageId && now - (Number(it.newest?.mail) || 0) < wait
+
+/** (0.7.34) Beside `Needs you now`: how many client threads are not started. */
+export const notStartedText = (n: number): string => `${n} thread${n === 1 ? '' : 's'} not started`
+/** (0.7.34) The one button beside it. */
+export const START_MISSING = 'Start missing threads'
+
+/** (0.7.34) A row's pin, as the pin report has it: whether its thread is pinned, and why not. The photo's words, for the viewer's own row. */
+export type RowPin = { pinned: boolean; why?: string }
+const OWN_WHY: Readonly<Record<string, string>> = { no_thread: 'not pinned: no thread', unseen: "not pinned: can't see thread", person_unpinned: 'not pinned: you unpinned it', write_cap: 'not pinned yet' }
+export const rowPinWords = (pin: RowPin): string => (pin.pinned ? 'pinned' : (pin.why && Object.hasOwn(OWN_WHY, pin.why) ? (OWN_WHY[pin.why] as string) : 'not pinned'))
+/** (0.7.34) The report's rows by client, for the pane's marks. */
+export const rowPinsOf = (report: Pick<PinReport, 'items'>): Record<string, RowPin> =>
+  Object.fromEntries(report.items.map(i => [i.project_id, i.pinned ? { pinned: true } : { pinned: false, ...(i.why_not ? { why: i.why_not } : {}) }]))
+
+
 /** (0.5.25) What a row's Start, and /mm start <client>, puts there. */
 export const startWords = (client: string): string => `Start ${client}'s thread`
 
