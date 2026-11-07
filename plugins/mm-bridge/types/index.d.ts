@@ -8,7 +8,14 @@ export type MmMarkdown = string
  * is the client of the thread the pane is in, and empty for another client's (shown from its row's Drafts
  * button). An empty `text` draws no client part.
  */
-export type MmView = { text: MmMarkdown; heading: string }
+export type MmView = {
+  text: MmMarkdown
+  heading: string
+  /** (0.7.33) With a pickup view: the page alone, which folds under the card (`Show the page as text`). */
+  page?: MmMarkdown
+  /** (0.7.33) With a pickup view: the hold banner, the open asks and the internal queue, drawn under the card and never folded with the page. */
+  extra?: MmMarkdown
+}
 
 /** One client on the Needs-you pane: what is due, what is waiting, and the one thing to do about its thread. */
 export type MmRow = {
@@ -279,7 +286,14 @@ export type MmLineAsk = {
  * (0.7.26, the reply-package card) One run of a card paragraph, as `render_visual.py --tree` writes it: its exact text,
  * the card's classes on it, a link, and the fingerprint of a block that is one run.
  */
-export type MmCardRun = { s: string; c?: string; href?: string; fp?: string }
+export type MmCardRun = {
+  s: string
+  c?: string
+  href?: string
+  fp?: string
+  /** (0.7.33) A mention: the Discord id whose name `s` draws, so the check can tell who it names. */
+  m?: string
+}
 
 /**
  * (0.7.26) One node of the card: a box of nodes (`k`), a paragraph of runs (`r`, with `fp` when it is a fingerprinted
@@ -306,6 +320,8 @@ export type MmCardTree = {
   blocks: number
   signer: string
   can_sign: boolean
+  /** (0.7.33) How many images the words that go out hold: none of them can be drawn, so the card cannot stand in for the page. */
+  images?: number
   rendered_at: string
   nodes: MmCardNode[]
 }
@@ -324,17 +340,28 @@ export type MmCard = {
   tree: MmCardTree | null
   status: 'ready' | 'rendering' | 'failed' | 'none'
   error?: string
+  /**
+   * (0.7.33) Why this card cannot stand in for the page (`pageGap`), when it cannot: its signature box stays closed and
+   * `mm card` answers not ready. Holds up to 60 characters of the page: never logged.
+   */
+  gap?: string
+  /** (0.7.33) The hash of the page this card was last held against: what a signature is for (`standing`). None when no page was read. */
+  pageSha?: string
   at: number
 }
 
-/** (0.7.26) A signature given in this thread's pane: the tag signed, by whom, when, and what became of the words. */
-export type MmCardSigned = { label: string; signer: string; at: number; filled?: 'filled' | 'draft' | 'none' | 'stale' }
+/** (0.7.26) A signature given in this thread's pane: the tag signed, by whom, when, (0.7.33) the hash of the page it read, and what became of the words. */
+export type MmCardSigned = { label: string; signer: string; at: number; pageSha?: string; filled?: 'filled' | 'draft' | 'none' | 'stale' }
 
-/**
- * (0.7.26) What this thread did with cards: the tags of the pickup pages it printed (newest last), each signature given
- * here by tag, and whether the page as text is open under the card.
- */
-export type MmCardMarks = { printed: string[]; signed: Record<string, MmCardSigned>; pageOpen?: boolean }
+/** (0.7.26) What this thread did with cards: each signature given here by tag, and whether the page as text is open under the card. */
+export type MmCardMarks = {
+  signed: Record<string, MmCardSigned>
+  pageOpen?: boolean
+  /** (0.7.33) A press reading the package again: which tag, and since when. */
+  checking?: { label: string; at: number }
+  /** (0.7.33) What the last press found when it recorded nothing: the card changed, or a read or record failed. */
+  notice?: { packageId: string; kind: 'changed' | 'retry' }
+}
 
 declare module 'claude-code' {
   interface PluginState {

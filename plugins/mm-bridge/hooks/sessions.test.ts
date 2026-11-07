@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
+import { readTree } from './card'
+import { SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
 import { ME, NOW, ago, bandButtons, fakeApp, hooks, mm, next, paneButtons, pid, press, tool } from './fake-app.test-helper'
 import type { FakeThread } from './fake-app.test-helper'
 import type { Feed } from './queue'
@@ -279,6 +281,129 @@ describe('0.7.29: a pin the app refuses waits 6 hours and is reported once; a ty
     await w.advance(6 * 60_000)
     await mm(hub, '')
     expect(w.stored('mm.pinwait')).toEqual({})
+  })
+
+  // ⛔ (0.7.33) The same for a name: `setName`, in the shape of `setPin`
+  describe('0.7.33: a name the app refuses', () => {
+    const titled = () => {
+      const w = fakeApp(threeClients(), [{ sessionId: 'local_hub' }, { sessionId: 'local_a', title: 'A work' }, { sessionId: 'local_b', title: 'B work' }, { sessionId: 'local_c', title: 'C work' }])
+      w.put('mm.links', { [pid(1)]: 'local_a', [pid(2)]: 'local_b', [pid(3)]: 'local_c' })
+      w.refuseTitles.set('local_a', 'The app will not rename this one.')
+      return w
+    }
+    const nameCalls = (w: ReturnType<typeof fakeApp>, sid: string) => w.calls.filter(c => c.tool === 'set_session_title' && c.args.session_id === sid).length
+    const nameNotices = (w: ReturnType<typeof fakeApp>, sid: string) => w.written.filter(f => f.path.endsWith('bridge-notices.log') && f.text.includes(`thread ${sid}: the app refused to rename it`))
+
+    test('every other thread is named and pinned, this one is still pinned, a typed /mm answers and the sync advances', async () => {
+      const w = titled()
+      const hub = w.session('local_hub')
+      expect(await mm(hub, '')).toContain('3 clients need you; 3 threads pinned.')
+      expect(w.app.get('local_a')).toMatchObject({ title: 'A work', pinned: true })
+      for (const [sid, name] of [['local_b', 'Client Two'], ['local_c', 'Client Three']] as const) {
+        expect(w.app.get(sid)?.pinned).toBe(true)
+        expect(w.app.get(sid)?.title).toContain(name)
+      }
+      expect((w.stored('mm.last') as { error?: string }).error).toBeUndefined()
+      const first = lastAt(w)
+      await w.advance(6 * 60_000)
+      await mm(hub, '')
+      expect(lastAt(w)).toBeGreaterThan(first)
+    })
+
+    test('asked again no sooner than 6 hours; reported once per thread and reason; in /mm status and the heartbeat while it waits', async () => {
+      const w = titled()
+      const hub = w.session('local_hub')
+      await mm(hub, '')
+      expect(nameCalls(w, 'local_a')).toBe(1)
+      expect(nameNotices(w, 'local_a').length).toBe(1)
+      await w.advance(6 * 60_000)
+      await mm(hub, '')
+      expect(nameCalls(w, 'local_a')).toBe(1)
+      expect(await mm(hub, 'status')).toContain('names the app refused: Client One (')
+      w.feedAnswers(503)
+      await w.advance(6 * 60_000)
+      await mm(hub, '')
+      const state = JSON.parse(w.written.filter(f => f.path.endsWith('bridge-state.json')).at(-1)?.text ?? '{}') as { nameRefused?: Array<{ thread: string; why: string; until: string }> }
+      expect(state.nameRefused?.map(r => r.thread)).toEqual(['local_a'])
+      expect(state.nameRefused?.[0]?.why).toContain('The app will not rename this one.')
+      w.feedAnswers(200)
+      await w.advance(SIX_HOURS)
+      await mm(hub, '')
+      expect(nameCalls(w, 'local_a')).toBe(2)
+      expect(nameNotices(w, 'local_a').length).toBe(1)
+      // a new reason is a new report
+      w.refuseTitles.set('local_a', 'Busy now.')
+      await w.advance(SIX_HOURS + 60_000)
+      await mm(hub, '')
+      expect(nameCalls(w, 'local_a')).toBe(3)
+      expect(nameNotices(w, 'local_a').length).toBe(2)
+      // the app takes it: named, and the wait goes
+      w.refuseTitles.clear()
+      await w.advance(SIX_HOURS + 60_000)
+      await mm(hub, '')
+      expect(w.app.get('local_a')?.title).toContain('Client One')
+      expect(w.stored('mm.namewait')).toEqual({})
+      expect(await mm(hub, 'status')).not.toContain('names the app refused')
+    })
+
+    test('a thread that gives its own name back, refused: its records stay and a later sync finishes it', async () => {
+      const w = fakeApp({ member: ME, role: 'founder', tickets: {}, threads: [], mail: [mail(2, 'Client Two')] }, [{ sessionId: 'local_hub' }, { sessionId: 'local_a', title: 'A work' }, { sessionId: 'local_b', title: 'B work' }])
+      w.put('mm.links', { [pid(2)]: 'local_b' })
+      w.put('mm.titles', { local_a: 'A work' })
+      w.put('mm.pins', { local_a: { client: 'Client One', projectId: pid(1), byUs: false } })
+      w.put('mm.released', ['local_a'])
+      const a = w.app.get('local_a')
+      if (a) a.title = 'Client One · due'
+      w.refuseTitles.set('local_a', 'No.')
+      const hub = w.session('local_hub')
+      await mm(hub, '')
+      expect((w.stored('mm.last') as { error?: string }).error).toBeUndefined()
+      expect((w.stored('mm.titles') as Record<string, string>).local_a).toBe('A work')
+      expect(w.stored('mm.released')).toEqual(['local_a'])
+      expect(w.app.get('local_b')?.title).toContain('Client Two')
+      w.refuseTitles.clear()
+      await w.advance(SIX_HOURS + 60_000)
+      await mm(hub, '')
+      expect(w.app.get('local_a')?.title).toBe('A work')
+      expect(w.stored('mm.released')).toEqual([])
+      expect((w.stored('mm.titles') as Record<string, string>).local_a).toBeUndefined()
+    })
+
+    test('a refusal in the words for a scheduled task\'s run lets the run go', async () => {
+      const w = titled()
+      w.refuseTitles.set('local_a', 'Session "local_a" is a scheduled task run. These runs show under their task.')
+      const hub = w.session('local_hub')
+      await mm(hub, '')
+      expect(w.stored('mm.links')).not.toHaveProperty(pid(1))
+      expect(w.app.get('local_a')?.pinned).toBeFalsy()
+      expect((w.stored('mm.last') as { error?: string }).error).toBeUndefined()
+      expect(w.stored('mm.namewait') ?? {}).toEqual({})
+    })
+
+    test('`mm card` on a card still being drawn never waits on the state, which one dispatch reads at one moment: it draws the card itself, then answers', async () => {
+      const PKG = SMS_TREE.package_id
+      const w = fakeApp(threeClients(), [{ sessionId: 'local_hub' }])
+      const hub = w.session('local_hub') as unknown as {
+        process: { run: (argv: string[]) => Promise<unknown> }
+        http: { fetch: (url: string) => Promise<unknown> }
+        state: { set: (ref: unknown, value: unknown) => Promise<unknown>; get: (ref: unknown) => Promise<{ value: { status: string } }> }
+      }
+      await mm(hub as never, '')
+      const ref = { plugin: 'mm-bridge', key: 'card' }
+      await hub.state.set(ref, { packageId: PKG, projectId: pid(1), client: 'Acme', own: true, current: SMS_TREE.package_sha256, tree: null, status: 'rendering', at: 0 })
+      const fetch = hub.http.fetch
+      hub.http.fetch = async (url: string) =>
+        url.includes('/reply-package') ? { status: 200, ok: true, headers: {}, text: JSON.stringify({ markdown: SMS_PAGE, package_sha256: SMS_TREE.package_sha256 }) } : fetch(url)
+      let seconds = 0
+      hub.process.run = async (argv: string[]) => {
+        if (argv[0] === 'sleep') seconds++
+        return { exitCode: 0, stdout: JSON.stringify(SMS_TREE), stderr: '' }
+      }
+      // this fake thread's client part shows nothing, so that is its next question; no second went by waiting
+      expect(await mm(hub as never, `card ${PKG}`)).toBe('card not ready: the side pane is not showing this package. Print the whole page.')
+      expect(seconds).toBe(0)
+      expect((await hub.state.get(ref)).value.status).toBe('ready')
+    })
   })
 
   test('a typed /mm answers why a pass failed, with the list as last loaded', async () => {
