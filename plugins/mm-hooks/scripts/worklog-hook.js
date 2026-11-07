@@ -169,7 +169,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.12.1";
+const HOOK_VERSION = "0.12.2";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -8361,6 +8361,14 @@ async function runSkillSync(root, deadlineAt, result, failures) {
  * no request, no write, no adoption — and records the skip in skills-sync.json.
  * Both forms the control tower's install makes count: the skill's folder as a
  * link, and a real folder whose SKILL.md is a link.
+ *
+ * ⛔ Only an entry with a skill's name counts (0.12.2). The sync and the setup
+ * report ignore every other name, so a stray link such as `_old` or `my copy`
+ * is not a skill. Before this, one such link turned the whole machine into a
+ * "control-tower machine": nothing was ever installed, and OW told the member
+ * to run an installer from a checkout they did not have. Measured 2026-11-06 on
+ * a Windows machine: 3 skills, 0 links counted, source control_tower, all 396
+ * registry skills missing.
  */
 const CONTROL_TOWER_SKILLS_MARK = "/massmarket-ops-control-tower/skills/";
 /** The scan looks at no more than this many entries of `~/.claude/skills`. */
@@ -8385,6 +8393,7 @@ function skillsComeFromControlTower(root) {
     return false;
   }
   for (let i = 0; i < names.length && i < CONTROL_TOWER_SCAN_MAX_ENTRIES; i++) {
+    if (!SKILL_KEY_RE.test(names[i])) continue;
     const entry = path.join(root, names[i]);
     if (linksIntoControlTower(entry)) return true;
     if (pathKind(entry) === "dir" && linksIntoControlTower(path.join(entry, "SKILL.md"))) return true;
