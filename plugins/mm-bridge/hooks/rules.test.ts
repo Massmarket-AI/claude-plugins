@@ -106,15 +106,12 @@ describe("Rob's pin and clock rules, one test each (0.7.25)", () => {
     expect(titleFor(one(f2), NOW)).toContain('Asif decides')
   })
 
-  test('P6 (11-05, over 11-04\'s 5 hours: "everything that\'s yellow or red should show up pinned for H9 as well if it\'s yellow or red for any of the team members"): the PM is pinned whenever the teammate is, 24 business hours ahead of their due time, named who to check on', () => {
+  test('P6 (0.7.34, Rob 2026-11-07, over his rule of 11-05: "I know we just made it so only H9 sees every single task pinned, but I still think that\'s the wrong architecture"): the PM is pinned for his own work, never a teammate\'s', () => {
     const pm = (dueIn: number) => feed({ member: 'h9@example.com', role: 'pm', tickets: { due_soon: [ticket(1, NOW + dueIn * H, { assignee_email: ASIF })] } })
-    const near = one(pm(4))
-    expect(pinsFor(near, NOW)).toBe(true)
-    expect(pinTitle(near, NOW)).toBe(`🔴 ${ACME} · check on Asif · task due 7 PM`)
-    const tomorrow = one(pm(20))
-    expect(pinsFor(tomorrow, NOW)).toBe(true)
-    expect(pinTitle(tomorrow, NOW)).toBe(`🟡 ${ACME} · check on Asif · task due Thu 11 AM`)
-    expect(all(pm(30)).some(it => pinsFor(it, NOW))).toBe(false)
+    for (const dueIn of [-3, 4, 20, 30]) expect(all(pm(dueIn))).toEqual([])
+    const own = one(feed({ member: 'h9@example.com', role: 'pm', tickets: { due_soon: [ticket(1, NOW + 4 * H, { assignee_email: 'h9@example.com' })] } }))
+    expect(pinsFor(own, NOW)).toBe(true)
+    expect(pinTitle(own, NOW)).not.toContain('check on')
   })
 
   test('P7 (11-03: "whoever sent the ETA should have been showing up in their Claude after that, pinned"; "he has a 24-hour timer to assign it to a teammate"): an ETA owed and an owner to give each pin, by their own clocks', () => {
@@ -301,7 +298,7 @@ describe("Rob's pin and clock rules, one test each (0.7.25)", () => {
       feed({ tickets: { due_soon: [ticket(1, null)] } }),
       feed({ tickets: { due_soon: [ticket(1, NOW + 50 * H)] } }),
       feed({ tickets: { start_now: [{ ...ticket(1, Date.parse('2026-11-09T15:00:00-05:00')), start_by_at: iso(NOW - 2 * H) }] } }),
-      feed({ member: 'h9@example.com', role: 'pm', tickets: { due_soon: [ticket(1, NOW + 4 * H, { assignee_email: ASIF })] } }),
+      feed({ member: 'h9@example.com', role: 'pm', tickets: { due_soon: [ticket(1, NOW + 4 * H, { assignee_email: 'h9@example.com' })] } }),
       feed({ member: ROB, role: 'founder', drafts: [pkg(1, { status: 'picked_up', picked_up_by: ASIF, project_owner_email: ASIF, flagged_for_rob: true })] }),
     ]
     fixtures.push(feed({ drafts: [pkg(1, { covers_through: iso(NOW - 3 * H), last_outbound_at: iso(NOW - 10 * 60_000) })] }))
@@ -313,7 +310,7 @@ describe("Rob's pin and clock rules, one test each (0.7.25)", () => {
     expect(pinReason(one(fixtures[2] as Feed), NOW)).toBe('No pin needed: nothing of yours here has a due date.')
     expect(pinReason(one(fixtures[3] as Feed), NOW)).toBe('No pin needed: the next thing of yours is due Fri 5 PM, more than 24 business hours away.')
     expect(pinReason(one(fixtures[4] as Feed), NOW)).toBe('Pinned for you: your task "Build the intake form" is due Mon 3 PM, and to land on time its work had to start 1 PM.')
-    expect(pinReason(one(fixtures[5] as Feed), NOW)).toBe('Pinned to check on Asif: their task is due 7 PM (4h left).')
+    expect(pinReason(one(fixtures[5] as Feed), NOW)).toStartWith('Pinned for you')
     expect(pinReason(one(fixtures[6] as Feed), NOW)).toBe(`No pin needed: Asif has ${ACME}'s reply drafts, so nothing here needs you.`)
     // the person's own pin, and a pin put back over their unpin, are said too
     expect(threadWhy(one(fixtures[2] as Feed), ACME, NOW, { person: true })).toBe('No pin needed: nothing of yours here has a due date. You pinned it yourself, so it stays until you unpin it.')
@@ -379,41 +376,16 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
   /** The founder's own undated client ticket, as `tickets.undated` lists it. */
   const undatedRow = (over: Partial<FeedTicket> = {}): FeedTicket => ticket(1, null, { assignee_email: ROB, ...over })
 
-  test('S2 (11-05: "everything that\'s yellow or red should show up pinned for H9 as well if it\'s yellow or red for any of the team members"): a client pins for H9 when it is pinned for a teammate: late, within 24 business hours, or start-by passed', () => {
+  test('S2 (0.7.34, Rob 2026-11-07, over his rule of 11-05): nothing of a teammate\'s lists or pins for H9: a ticket, a missed start-by, a reply, a package, a pace row', () => {
     const tk = (dueIn: number, over: Partial<FeedTicket> = {}) => h9({ tickets: { due_soon: [ticket(1, NOW + dueIn * H, { assignee_email: ASIF, ...over })] } })
-    // 20 business hours out pinned, where 0.7.18's 5 did not; 30 out is not on his list at all
-    expect(pinsFor(one(tk(20)), NOW)).toBe(true)
-    expect(pinTitle(one(tk(20)), NOW)).toBe(`🟡 ${ACME} · check on Asif · task due Thu 11 AM`)
-    expect(all(tk(30))).toEqual([])
-    // due today and late are red
-    expect(pinTitle(one(tk(4)), NOW)).toBe(`🔴 ${ACME} · check on Asif · task due 7 PM`)
-    expect(pinTitle(one(tk(-3)), NOW)).toBe(`🔴 ${ACME} · check on Asif · task 3h late`)
-    // start-by passed with the work not started: a kind of behind, whatever the due date
-    const notStarted = h9({ tickets: { start_now: [ticket(1, NOV_9, { assignee_email: ASIF, start_by_at: iso(NOW - 26 * H) })] } })
-    expect(pinTitle(one(notStarted), NOW)).toBe(`🟡 ${ACME} · check on Asif · behind · not started, had to start Tue 1 PM`)
-    // the work started: nothing to check on while its time is left
-    expect(all(h9({ tickets: { start_now: [ticket(1, NOV_9, { assignee_email: ASIF, start_by_at: iso(NOW - 26 * H), status: 'in_progress' })] } }))).toEqual([])
-    // a teammate's reply and reply package, due within the same 24 business hours
-    const reply = h9({ mail: [mail(1, NOW - 4 * H, { project_owner_email: ASIF, reply_due_at: iso(NOW + 20 * H) })] })
-    expect(pinTitle(one(reply), NOW)).toBe(`🟡 ${ACME} · check on Asif · reply due Thu 11 AM`)
-    expect(all(h9({ mail: [mail(1, NOW - 4 * H, { project_owner_email: ASIF, reply_due_at: iso(NOW + 30 * H) })] }))).toEqual([])
-    const prepared = h9({ drafts: [pkg(1, { project_owner_email: ASIF, due_at: iso(NOW + 20 * H) })] })
-    expect(pinsFor(one(prepared), NOW)).toBe(true)
-    const heldDrafts = h9({ drafts: [pkg(1, { status: 'picked_up', picked_up_by: ASIF, project_owner_email: 'antu@example.com', due_at: iso(NOW - H) })] })
-    expect(pinTitle(one(heldDrafts), NOW)).toBe(`🔴 ${ACME} · check on Asif · reply 1h late`)
-    // his pace rows reading behind, overbooked or late pin H9 too
-    for (const [state, words] of [
-      ['behind', '🟡 Acme Legal · check on Asif · behind · needs 2.4 h/day, paid 1.5 · due Mon Nov 30'],
-      ['overbooked', '🔴 Acme Legal · check on Asif · overbooked · needs 2.4 h/day, paid 1.5 · due Mon Nov 30'],
-      ['late', '🔴 Acme Legal · check on Asif · late · 3 h past Mon Nov 30'],
-    ] as const) {
-      const it = one(h9({ pace: [paceRow(state, { holder_email: ASIF })] }))
-      expect(pinsFor(it, NOW), state).toBe(true)
-      expect(pinTitle(it, NOW), state).toBe(words)
-    }
-    // a worse part of the client names it, whichever is sooner
-    const both = one(h9({ tickets: { due_soon: [ticket(1, NOW + 20 * H, { assignee_email: ASIF })] }, pace: [paceRow('overbooked', { holder_email: 'antu@example.com' })] }))
-    expect(pinTitle(both, NOW)).toContain('check on Antu · overbooked')
+    for (const dueIn of [-3, 4, 20, 30]) expect(all(tk(dueIn))).toEqual([])
+    expect(all(h9({ tickets: { start_now: [ticket(1, NOV_9, { assignee_email: ASIF, start_by_at: iso(NOW - 26 * H) })] } }))).toEqual([])
+    expect(all(h9({ mail: [mail(1, NOW - 4 * H, { project_owner_email: ASIF, reply_due_at: iso(NOW + 20 * H) })] }))).toEqual([])
+    expect(all(h9({ drafts: [pkg(1, { project_owner_email: ASIF, due_at: iso(NOW + 20 * H) })] }))).toEqual([])
+    expect(all(h9({ drafts: [pkg(1, { status: 'picked_up', picked_up_by: ASIF, project_owner_email: 'antu@example.com', due_at: iso(NOW - H) })] }))).toEqual([])
+    for (const state of ['behind', 'overbooked', 'late'] as const) expect(all(h9({ pace: [paceRow(state, { holder_email: ASIF })] })), state).toEqual([])
+    // his own pace row, as anyone's
+    expect(pinsFor(one(h9({ pace: [paceRow('behind', { holder_email: H9 })] })), NOW)).toBe(true)
   })
 
   test('S2b (approved 11-05: "never for undated items"; "H9 is NOT pinned for teammates\' green"): it never pins H9 for an undated item, an ETA ask, a teammate\'s on-track row, a row nobody holds or the founder\'s work', () => {
@@ -430,19 +402,10 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
     expect(all(feed({ tickets: { overdue: [ticket(1, NOW - H, { assignee_email: ASIF })] }, pace: [paceRow('behind', { holder_email: ASIF })] }))).toEqual([])
   })
 
-  test('S2c (11-05: "He can also have constant clarity about whether something\'s showing up for a teammate or not"): H9\'s row says `pinned for <teammate>` or `not pinned for <teammate>` from `member_pins`, and neither when the key or the report is absent', () => {
-    const row = (over: Partial<Feed>) => rowLine(one(h9({ tickets: { due_soon: [ticket(1, NOW + 4 * H, { assignee_email: ASIF })] }, ...over })), NOW)
-    expect(row({ member_pins: [asifReport([{ project_id: P(1), pinned: true, kind: 'task' }])] })).toBe(`🔴 ${ACME} · task due 7 PM · pinned for Asif`)
-    expect(row({ member_pins: [asifReport([{ project_id: P(1), pinned: false, kind: 'task' }])] })).toBe(`🔴 ${ACME} · task due 7 PM · not pinned for Asif`)
-    // a report that does not list the client: not pinned for him
-    expect(row({ member_pins: [asifReport([{ project_id: P(2), pinned: true, kind: 'task' }])] })).toBe(`🔴 ${ACME} · task due 7 PM · not pinned for Asif`)
-    expect(row({ member_pins: [asifReport([])] })).toBe(`🔴 ${ACME} · task due 7 PM · not pinned for Asif`)
-    // no report from him, or no key: neither, and the row still says whose it is
-    expect(row({ member_pins: [{ member_email: 'antu@example.com', reported_at: iso(NOW), items: [] }] })).toBe(`🔴 ${ACME} · task due 7 PM · with Asif`)
-    expect(row({})).toBe(`🔴 ${ACME} · task due 7 PM · with Asif`)
-    // a pace row, in its own words
-    const behind = one(h9({ pace: [paceRow('behind', { holder_email: ASIF })], member_pins: [asifReport([{ project_id: P(1), pinned: true, kind: 'behind' }])] }))
-    expect(rowLine(behind, NOW)).toBe(`🟡 ${ACME} · behind · needs 2.4 h/day, paid 1.5 · due Mon Nov 30 · pinned for Asif`)
+  test('S2c (0.7.34, Rob 2026-11-07, for his words of 11-05: "He can also have constant clarity about whether something\'s showing up for a teammate or not"): that clarity is Team now\'s; `member_pins` on the feed adds nothing to H9\'s list', () => {
+    const f = { tickets: { due_soon: [ticket(1, NOW + 4 * H, { assignee_email: ASIF })] } }
+    expect(all(h9({ ...f, member_pins: [asifReport([{ project_id: P(1), pinned: true, kind: 'task' }])] }))).toEqual([])
+    expect(all(h9(f))).toEqual([])
   })
 
   test('S3 (11-05, approved "Yes, use them": "behind · needs 2.4 h/day, paid 1.5 · due Mon Nov 30"): a pace row\'s name and row, in the approved words', () => {
@@ -610,10 +573,6 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
     expect(report(feed({ tickets: { start_now: [ticket(1, NOV_9, { start_by_at: iso(NOW - 26 * H) })] } }))).toMatchObject({ kind: 'behind', tone: 'yellow', due_at: iso(NOV_9) })
     // today's hours done is not one that should be pinned
     expect(report(feed({ pace: [onTrack({ hours_logged_today: 1.5 })] }))).toBeUndefined()
-    // H9's own report: a teammate's status by its name, an ordinary ticket as before
-    expect(report(h9({ pace: [paceRow('overbooked', { holder_email: ASIF })] }))).toMatchObject({ kind: 'overbooked', tone: 'red' })
-    expect(report(h9({ tickets: { start_now: [ticket(1, NOV_9, { assignee_email: ASIF, start_by_at: iso(NOW - 26 * H) })] } }))).toMatchObject({ kind: 'behind', tone: 'yellow' })
-    expect(report(h9({ tickets: { due_soon: [ticket(1, NOW + 20 * H, { assignee_email: ASIF })] } }))).toMatchObject({ kind: 'task', tone: 'yellow' })
     // what names nothing new reports as before
     expect(report(feed({ mail: [mail(1, NOW - H)] }))).toMatchObject({ kind: 'reply', tone: 'yellow' })
     expect(report(feed({ tickets: { overdue: [ticket(1, NOW - 2 * H)] } }))).toMatchObject({ kind: 'task', tone: 'red' })
@@ -631,12 +590,10 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
     expect(why(feed({ pace: [paceRow('overbooked')] }))).toBe("Pinned for you: overbooked, this needs 2.4 h a day and 1.5 is paid, it is due Mon Nov 30, and you don't have the hours across your clients.")
     expect(why(feed({ pace: [paceRow('late')] }))).toBe('Pinned for you: late, 3 h of quoted work are past Mon Nov 30.')
     expect(why(founder({ tickets: { undated: [undatedRow()] } }))).toBe('No pin needed: nothing of yours here has a due date.')
-    expect(why(h9({ pace: [paceRow('behind', { holder_email: ASIF })] }))).toBe('Pinned to check on Asif: behind, this needs 2.4 h a day and 1.5 is paid, and it is due Mon Nov 30.')
-    expect(why(h9({ pace: [paceRow('overbooked', { holder_email: ASIF })] }))).toBe("Pinned to check on Asif: overbooked, this needs 2.4 h a day and 1.5 is paid, it is due Mon Nov 30, and they don't have the hours across their clients.")
     expect(why(feed({ tickets: { start_now: [ticket(1, NOV_9, { start_by_at: iso(NOW - 26 * H) })] } }))).toBe('Pinned for you: your task "Build the intake form" is due Mon 3 PM, and to land on time its work had to start Tue 1 PM.')
     // `Pinned` exactly when the thread pins, whichever status names it
     const fixtures: Array<[Feed, number]> = [
-      ...(['behind', 'overbooked', 'late'] as const).flatMap(s => [[feed({ pace: [paceRow(s)] }), NOW], [h9({ pace: [paceRow(s, { holder_email: ASIF })] }), NOW]] as Array<[Feed, number]>),
+      ...(['behind', 'overbooked', 'late'] as const).flatMap(s => [[feed({ pace: [paceRow(s)] }), NOW]] as Array<[Feed, number]>),
       [feed({ pace: [onTrack()] }), NOW], [feed({ pace: [onTrack()] }), SAT], [feed({ pace: [onTrack({ hours_logged_today: 9 })] }), NOW],
       [feed({ pace: [onTrack({ hours_logged_today: 9 })], tickets: { due_soon: [ticket(1, NOW + 4 * H)] } }), NOW],
       [feed({ pace: [onTrack({ hours_logged_today: 9 })], mail: [mail(1, NOW - H)] }), NOW],
@@ -856,11 +813,10 @@ describe('0.7.32: a ticket with no due date never pins and never asks for a date
     })
   }
 
-  test('what pins beside them is never hidden under the closed toggle: a teammate to check on, a go with no date, a pace row', () => {
+  test('what pins beside them is never hidden under the closed toggle: a go with no date, a pace row; (0.7.34) a teammate\'s late ticket no longer pins the PM', () => {
     const pm = one(as(H9, 'pm', { tickets: { overdue: [ticket(1, NOW - 3 * H, { ticket_id: P(105), assignee_email: ASIF })], undated: [noDate(H9)] } }))
-    expect(pinsFor(pm, NOW)).toBe(true)
-    expect(pinTitle(pm, NOW)).toBe(`🔴 ${ACME} · check on Asif · task 3h late`)
-    expect(noDateGroup(pm)).toBe(false)
+    expect(pinsFor(pm, NOW)).toBe(false)
+    expect(noDateGroup(pm)).toBe(true)
     const go = one(as(ME, 'builder', { tickets: { undated: [noDate(ME)] }, projects: [{ project_id: P(1), name: `${ACME} — Jeff`, followups: { go_steps: 2, go_package_id: P(50), go_first_at: null, go_first_kind: 'client_sms', go_by: ME } }] }))
     expect(pinsFor(go, NOW)).toBe(true)
     expect(noDateGroup(go)).toBe(false)
