@@ -13447,6 +13447,22 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
         await u.unmount()
       })
 
+      test('(review round 2) a sub-agent list this engine can never read: `mm card` answers not ready, so the thread prints the page', async ($, on) => {
+        const w = world(on, own)
+        const u = await shown($)
+        w.setAgents('throws')
+        await startTurn($)
+        expect(await tool($, `card ${PKG}`)).toBe("card not ready: this bridge cannot see whether the thread's background work has finished. Print the whole page.")
+        await endTurn($)
+        expect(await hasBox(u)).toBe(false)
+        w.setAgents([])
+        await startTurn($, 't2')
+        expect(await tool($, `card ${PKG}`)).toBe(READY)
+        await endTurn($, { turnId: 't2' })
+        expect(await hasBox(u)).toBe(true)
+        await u.unmount()
+      })
+
       test('the thread prints the page: its closing line opens the box at the end of that turn, whether or not `mm card` was asked', async ($, on) => {
         const w = world(on, own)
         const u = await shown($)

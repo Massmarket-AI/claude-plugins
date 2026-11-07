@@ -3648,7 +3648,7 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
 // (0.7.26) The reply-package card: prepared on arrival, drawn natively above the page (card.tsx).
 import { teamFrom, teamHeadingNow, teamLines, teamText, withMoves } from './team'
 import type { TeamNow, TeamSeen } from './team'
-import { busyOf, cardHooks, cardOf, cardVerdict, checkMissOf, checkedOf, clearCard, currentOf, drawCard, isOnScreen, marksOf, noteDrawn, notePending, noteVersion, onWindows, prepareCard, pressAsk, pressCheck, pressSign, refreshCard, resetCard, showKept, togglePage, turnBegan, turnEnded, turnMark, type PageRead } from './card'
+import { agentListReadable, busyOf, cardHooks, cardOf, cardVerdict, checkMissOf, checkedOf, clearCard, currentOf, drawCard, isOnScreen, marksOf, noteDrawn, notePending, noteVersion, onWindows, prepareCard, pressAsk, pressCheck, pressSign, refreshCard, resetCard, showKept, togglePage, turnBegan, turnEnded, turnMark, type PageRead } from './card'
 import { holderName } from './queue'
 
 /**
@@ -4050,6 +4050,8 @@ async function cardCommand($: EngineInterface, arg: string, ownCall: boolean): P
     if (why) return cardNotReady(why)
     if (!(await clientPart($)).text) return cardNotReady('the side pane is not showing this package')
     if (await nobodyWatches($)) return cardNotReady('the side pane is not open on a surface that can draw it')
+    // (0.7.36) the box opens only once this thread's background work is seen to have ended: an engine that cannot say so would keep it shut
+    if (!(await agentListReadable($))) return cardNotReady("this bridge cannot see whether the thread's background work has finished")
     const label = card.tree?.label
     if (!label) return cardNotReady('the card could not be checked')
     const opened = await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })

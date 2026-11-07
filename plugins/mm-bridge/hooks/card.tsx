@@ -613,6 +613,20 @@ async function subAgentAtWork($: EngineInterface): Promise<boolean> {
 }
 
 /**
+ * (0.7.36) Whether this engine can say what the sub-agents are doing at all. Review round 2 (2026-11-07): where `$.agent.list()` is
+ * missing or always fails, every turn's end counts as busy, so the box would never open while `mm card` kept answering ready, and the
+ * thread would never print the page. `mm card` answers not ready there instead, and the thread prints it.
+ */
+export async function agentListReadable($: EngineInterface): Promise<boolean> {
+  try {
+    await $.agent.list()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * (0.7.36) The end of a turn of the main conversation, for any reason. Busy stays only while a background sub-agent is at work. One that
  * ended with an answer, with none at work, has finished: what it left pending is on record as checked, and the box opens. Otherwise what
  * it left pending is dropped, so that the thread has to ask again: a turn that stopped short (interrupted, refused, an error), or a
