@@ -40,6 +40,11 @@
  * installer's note and pins before hashing, so a current copy matches main
  * (gateBytesAsOnMain).
  *
+ * A teammate's skill edit (0.12.3, 2026-11-07): the sync copies a local edit out
+ * before it overwrites it (KEPT SKILL EDITS), and the setup report names each
+ * folder's marker sha and the copies it kept, so OW can tell a copy that is
+ * behind from one that was edited, or both.
+ *
  * Turn origin (0.11.5, 2026-10-12): every worklog POST also says who started the
  * work it belongs to, `person` or `auto`, read from the stamp Claude Code writes
  * on the turn's opening entry in the session's transcript. A turn the system
@@ -169,7 +174,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.12.2";
+const HOOK_VERSION = "0.12.3";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -7784,9 +7789,10 @@ function undeclaredReminderFor(payload, state, turnOrigin, env, platform) {
 //
 // ⛔ WHAT IT MAY WRITE: `~/.claude/skills/<key>/` for a key the registry lists
 // (and the `~/.claude/skills` container itself when a machine has none), plus
-// its timestamp file under `~/.claude/mm-hooks/state/`. Nothing else, anywhere.
-// That is the #342 invariant, widened deliberately and only for this — see
-// tests/unit/worklog-hook-state-home.unit.test.ts.
+// its timestamp file under `~/.claude/mm-hooks/state/` and the copies it keeps
+// of a local edit under `~/.claude/mm-hooks/state/skill-edits/` (0.12.3). Nothing
+// else, anywhere. That is the #342 invariant, widened deliberately and only for
+// this — see tests/unit/worklog-hook-state-home.unit.test.ts.
 //
 // ⛔ THE WRITE RULES, shared with the installer (§5.3): every file is written to
 // a temp file and renamed into place; nothing is ever written through a symlink,
@@ -7978,7 +7984,10 @@ function readSkillMarker(dir) {
     const files = Array.isArray(parsed.files)
       ? parsed.files.filter((f) => typeof f === "string")
       : [];
-    return { sha: parsed.sha, files };
+    const marker = { sha: parsed.sha, files };
+    // Our own write in progress (0.12.3): see the updating marker in writeRegistrySkill.
+    if (typeof parsed.updating_to === "string" && parsed.updating_to) marker.updating_to = parsed.updating_to;
+    return marker;
   } catch {
     return null;
   }
@@ -8023,6 +8032,232 @@ function realDirsAlong(dir, parts) {
     if (pathKind(cur) !== "dir") return false;
   }
   return true;
+}
+
+// ── KEPT SKILL EDITS (0.12.3) ──────────────────────────────────────────────
+// Rob's yes, 2026-11-07. The sync replaces a stale copy whole, so a teammate's
+// edit to a skill was gone the moment main changed that skill. Now the copy goes
+// out first: `state/skill-edits/<key>/<YYYYMMDDTHHMMSSZ>-<first 8 of local sha>/`,
+// the skill's files plus a `.mm-kept-edit.json` {v, key, at, reason, base, local,
+// incoming}, which gains `seen_at` once the member has seen it (--skill-edit-seen).
+//   ⛔ Under mm-hooks, never under ~/.claude/skills: Claude Code must never load
+//   a kept copy as a skill.
+//   ⛔ Every regular file the walk reaches is copied, whatever its size. Only
+//   `.git`, `node_modules`, links and dotfiles stay out, because the sync never
+//   touches those, and only a copy over SKILL_EDIT_COPY_MAX_BYTES in all fails.
+//   ⛔ A copy that cannot be made means no overwrite: writeRegistrySkill answers
+//   "error", which is transient, and the sync asks again on a later run.
+//   ⛔ Built in `<target>.tmp` and renamed, so a partial copy never looks finished.
+//   ⛔ The record is a dotfile, so it can never collide with a skill's own file:
+//   the walk skips dotfiles.
+// Reasons: "edited" (the marker already names the incoming version), "both_moved"
+// (the marker names neither the folder nor the incoming version), "no_record"
+// (a folder adopted with no marker, so what it was based on is unknown).
+const SKILL_EDITS_DIR = "skill-edits";
+const SKILL_EDIT_RECORD = ".mm-kept-edit.json";
+/** One kept copy, every file together. Past this it is not made, so nothing is overwritten. */
+const SKILL_EDIT_COPY_MAX_BYTES = 50 * 1024 * 1024;
+const SKILL_EDIT_REASONS = ["edited", "both_moved", "no_record"];
+const SKILL_EDIT_STAMP_RE = /^\d{8}T\d{6}Z-[0-9a-f]{8}$/;
+const SKILL_EDIT_RECORD_MAX_BYTES = 1024 * 1024;
+/** The newest this many copies stay, per skill. */
+const SKILL_EDITS_KEEP_PER_KEY = 5;
+/** The setup report names at most this many copies, the newest, none older than this. */
+const SKILL_EDITS_REPORT_MAX = 50;
+const SKILL_EDITS_REPORT_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** `<home>/.claude/mm-hooks/state/skill-edits`, or null without a usable home. */
+function skillEditsRoot() {
+  const state = stateRootDir();
+  return state ? path.join(state, SKILL_EDITS_DIR) : null;
+}
+
+/** A finished copy's record, or null for anything that is not one. Never throws. */
+function readSkillEditRecord(copyDir) {
+  try {
+    if (pathKind(copyDir) !== "dir") return null;
+    const record = JSON.parse(readTextBounded(path.join(copyDir, SKILL_EDIT_RECORD), SKILL_EDIT_RECORD_MAX_BYTES));
+    return record && typeof record === "object" && !Array.isArray(record) ? record : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Copy a skill folder by skillFolderShas's walk rules: no `.git`, no
+ * `node_modules`, no link (never followed), no dotfile, no deeper than 12 levels.
+ * Every regular file it reaches, in bytes, not text, so a kept file matches the
+ * edit exactly. Throws when the files together pass SKILL_EDIT_COPY_MAX_BYTES,
+ * and on any failure: the caller's try decides.
+ */
+function copySkillFolderForKeep(from, to, depth, copied) {
+  if (depth > 12) return;
+  const entries = fs.readdirSync(from, { withFileTypes: true });
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    const abs = path.join(from, e.name);
+    if (e.name === ".git" || e.name === "node_modules") continue;
+    const st = fs.lstatSync(abs);
+    if (st.isSymbolicLink()) continue;
+    if (e.name.startsWith(".")) continue;
+    if (st.isDirectory()) {
+      const sub = path.join(to, e.name);
+      fs.mkdirSync(sub);
+      copySkillFolderForKeep(abs, sub, depth + 1, copied);
+      continue;
+    }
+    if (!st.isFile()) continue;
+    copied.bytes += st.size;
+    if (copied.bytes > SKILL_EDIT_COPY_MAX_BYTES) throw new Error("kept copy over its cap");
+    fs.writeFileSync(path.join(to, e.name), fs.readFileSync(abs), { flag: "wx" });
+  }
+}
+
+/** The newest SKILL_EDITS_KEEP_PER_KEY copies stay, and `keep` always. Best-effort. */
+function pruneKeptSkillEdits(keyDir, keep) {
+  try {
+    const copies = fs
+      .readdirSync(keyDir)
+      .filter((name) => SKILL_EDIT_STAMP_RE.test(name) && pathKind(path.join(keyDir, name)) === "dir")
+      .map((name) => {
+        const record = readSkillEditRecord(path.join(keyDir, name));
+        const at = record ? Date.parse(String(record.at || "")) : NaN;
+        return { name, at: Number.isFinite(at) ? at : 0 };
+      })
+      .sort((a, b) => b.at - a.at || (a.name < b.name ? 1 : a.name > b.name ? -1 : 0));
+    const stay = new Set([keep]);
+    for (let i = 0; i < copies.length && stay.size < SKILL_EDITS_KEEP_PER_KEY; i++) stay.add(copies[i].name);
+    copies.forEach((c) => {
+      if (stay.has(c.name)) return;
+      try {
+        fs.rmSync(path.join(keyDir, c.name), { recursive: true, force: true });
+      } catch {
+        /* this copy only */
+      }
+    });
+  } catch {
+    /* the copy just made stands */
+  }
+}
+
+/** Remove half-built copies a crash left, older than 10 minutes. Best-effort. */
+function removeStaleKeepTemps(keyDir) {
+  try {
+    const cutoff = Date.now() - SKILL_SYNC_TEMP_STALE_MS;
+    fs.readdirSync(keyDir).forEach((name) => {
+      if (!/\.tmp$/.test(name) || !SKILL_EDIT_STAMP_RE.test(name.slice(0, -4))) return;
+      const p = path.join(keyDir, name);
+      try {
+        const st = fs.lstatSync(p);
+        if (st.isDirectory() && st.mtimeMs < cutoff) fs.rmSync(p, { recursive: true, force: true });
+      } catch {
+        /* this one only */
+      }
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Keep a copy of the folder `dir` before the sync overwrites it. True when a copy
+ * holding `localShas` exists afterwards, whether made now or earlier; false means
+ * do not overwrite. Never throws.
+ */
+function keepSkillEdit(dir, key, localShas, base, incomingSha, reason, nowIso) {
+  let tmp = null;
+  try {
+    const root = skillEditsRoot();
+    const local = localShas && (localShas.sha || localShas.md_sha);
+    if (!root || !local) return false;
+    const stamp = `${String(nowIso).replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z")}-${String(local).slice(0, 8)}`;
+    if (!SKILL_EDIT_STAMP_RE.test(stamp)) return false;
+    // A real folder all the way down: a link here would carry the copy elsewhere.
+    fs.mkdirSync(root, { recursive: true });
+    if (pathKind(root) !== "dir") return false;
+    const keyDir = path.join(root, key);
+    if (pathKind(keyDir) === "missing") fs.mkdirSync(keyDir);
+    if (pathKind(keyDir) !== "dir") return false;
+    const names = fs.readdirSync(keyDir);
+    for (let i = 0; i < names.length; i++) {
+      if (!SKILL_EDIT_STAMP_RE.test(names[i])) continue;
+      const record = readSkillEditRecord(path.join(keyDir, names[i]));
+      if (record && record.local === local) return true;
+    }
+    removeStaleKeepTemps(keyDir);
+    const target = path.join(keyDir, stamp);
+    tmp = `${target}.tmp`;
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.mkdirSync(tmp);
+    copySkillFolderForKeep(dir, tmp, 0, { bytes: 0 });
+    fs.writeFileSync(
+      path.join(tmp, SKILL_EDIT_RECORD),
+      `${JSON.stringify({ v: 1, key, at: nowIso, reason, base, local, incoming: incomingSha }, null, 2)}\n`,
+      { encoding: "utf8", flag: "wx" },
+    );
+    fs.renameSync(tmp, target);
+    tmp = null;
+    pruneKeptSkillEdits(keyDir, stamp);
+    return true;
+  } catch (err) {
+    debugLog(`skill edit not kept (${key}): ${err && err.code}`);
+    if (tmp) {
+      try {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      } catch {
+        /* a stale .tmp never looks finished */
+      }
+    }
+    return false;
+  }
+}
+
+/**
+ * The copies the setup report names: the newest SKILL_EDITS_REPORT_MAX under 14
+ * days old that the member has not marked as seen (--skill-edit-seen), read within
+ * `deadlineAt`. ⛔ Only these six fields ever leave the machine: never a path or a
+ * file's content. Never throws.
+ */
+function keptSkillEditsForReport(deadlineAt) {
+  const found = [];
+  try {
+    const root = skillEditsRoot();
+    if (!root || pathKind(root) !== "dir") return [];
+    const nowMs = Date.now();
+    const shaOrNull = (v) => (typeof v === "string" && /^[A-Za-z0-9._-]{1,200}$/.test(v) ? v : null);
+    const keys = fs.readdirSync(root);
+    for (let i = 0; i < keys.length && !deadlinePassed(deadlineAt); i++) {
+      const key = keys[i];
+      if (!SKILL_KEY_RE.test(key)) continue;
+      const keyDir = path.join(root, key);
+      if (pathKind(keyDir) !== "dir") continue;
+      const stamps = fs.readdirSync(keyDir);
+      for (let j = 0; j < stamps.length && !deadlinePassed(deadlineAt); j++) {
+        if (!SKILL_EDIT_STAMP_RE.test(stamps[j])) continue;
+        const record = readSkillEditRecord(path.join(keyDir, stamps[j]));
+        if (!record || record.key !== key || record.seen_at || SKILL_EDIT_REASONS.indexOf(record.reason) === -1) continue;
+        const at = Date.parse(String(record.at || ""));
+        if (!Number.isFinite(at) || nowMs - at >= SKILL_EDITS_REPORT_MAX_AGE_MS) continue;
+        found.push({
+          at,
+          entry: {
+            key,
+            stamp: stamps[j],
+            reason: record.reason,
+            base: shaOrNull(record.base),
+            local: shaOrNull(record.local),
+            incoming: shaOrNull(record.incoming),
+          },
+        });
+      }
+    }
+  } catch (err) {
+    debugLog(`kept skill edits not read: ${err && err.code}`);
+  }
+  return found
+    .sort((a, b) => b.at - a.at)
+    .slice(0, SKILL_EDITS_REPORT_MAX)
+    .map((f) => f.entry);
 }
 
 /**
@@ -8094,16 +8329,43 @@ function writeRegistrySkill(root, key, sha, files, nowIso) {
   if (markerKind === "symlink") return "linked";
   if (markerKind !== "missing" && markerKind !== "file") return "conflict";
 
+  // ⛔ A local edit is copied out before anything here is overwritten (0.12.3,
+  // KEPT SKILL EDITS). A copy that is simply behind, an interrupted install (a
+  // provisional marker), our own unfinished update (`updating_to`) and a copy
+  // already matching the incoming version have nothing to keep. A copy that cannot
+  // be made stops the write: "error" is transient, so the sync asks again later.
+  if (info.kind === "adoptable" || (info.kind === "ours" && !info.marker.updating_to)) {
+    const local = skillFolderShas(dir);
+    if (local && local.sha !== sha && local.md_sha !== sha) {
+      const base = info.kind === "ours" ? info.marker.sha : null;
+      let reason = null;
+      if (info.kind === "adoptable") reason = "no_record";
+      else if (base !== "" && local.sha !== base && local.md_sha !== base) {
+        reason = base === sha ? "edited" : "both_moved";
+      }
+      if (reason && !keepSkillEdit(dir, key, local, base, sha, reason, nowIso)) return "error";
+    }
+  }
+
   // A new or adopted folder is claimed first with a provisional marker (no sha),
   // so a run cut short leaves a folder the next run still recognises as ours
   // and finishes, instead of one it can no longer tell from a stranger's.
-  const markerFor = (markerSha, markerFiles) =>
+  //
+  // ⛔ An update says so first (0.12.3): the old sha and files plus `updating_to`.
+  // A run cut off mid-write leaves a folder that matches neither sha, which would
+  // otherwise read as a teammate's edit: the next run would keep it as one and OW
+  // would call it both_moved. The final marker below clears it.
+  const markerFor = (markerSha, markerFiles, updatingTo) =>
     `${JSON.stringify(
-      { sha: markerSha, synced_at: nowIso, source: SKILL_MARKER_SOURCE, files: markerFiles },
+      Object.assign(
+        { sha: markerSha, synced_at: nowIso, source: SKILL_MARKER_SOURCE, files: markerFiles },
+        updatingTo ? { updating_to: updatingTo } : {},
+      ),
       null,
       2,
     )}\n`;
-  if (info.kind !== "ours" && !writeFileAtomic(markerPath, markerFor("", []), dir)) return "error";
+  const claim = info.kind === "ours" ? markerFor(info.marker.sha, info.marker.files, sha) : markerFor("", []);
+  if (!writeFileAtomic(markerPath, claim, dir)) return "error";
 
   for (let i = 0; i < entries.length; i++) {
     let cur = dir;
@@ -8288,7 +8550,9 @@ async function runSkillSync(root, deadlineAt, result, failures) {
     // asked for at once.
     if (failures[key] && failures[key].sha !== sha) delete failures[key];
     const info = inspectSkillFolder(root, key);
-    if (info.kind === "ours" && info.marker.sha === sha) {
+    // ⛔ Not while `updating_to` is set: a cut-off update left this folder half
+    // written, so a registry that went back to the marker's sha must rewrite it.
+    if (info.kind === "ours" && info.marker.sha === sha && !info.marker.updating_to) {
       result.current += 1;
       delete failures[key];
     } else if (info.kind === "missing" || info.kind === "ours" || info.kind === "adoptable") {
@@ -8474,14 +8738,18 @@ async function syncRegistrySkills(budgetMs) {
 // version), the hook reads this machine's setup and POSTs it to
 // /api/ext/setup-report: every skill folder's content sha (the registry's own
 // formula, computeContentSha in the control tower's skill-registry-sync.mjs),
-// the global rules file, the gates and how they are registered, the plugin
-// versions, the Claude Code version and CLAUDE_CODE_AUTO_COMPACT_WINDOW. OW
-// compares it with the canonical setup, stores it (member_setup_reports,
-// migration 344), turns what differs into a task for the member, and answers
-// with what the hook may repair itself and the check's mode.
+// the sha each of ours was last synced to (its marker), the copies of a local
+// edit the sync kept, the global rules file, the gates and how they are
+// registered, the plugin versions, the Claude Code version and
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW. OW compares it with the canonical setup,
+// stores it (member_setup_reports, migration 344), turns what differs into a
+// task for the member, and answers with what the hook may repair itself and the
+// check's mode.
 //   ⛔ What is sent: names, versions, shas, true/false. Never a file's content,
 //   a path under the home folder, a host name or a user name. machine_id is
-//   the first 12 hex of sha256(host name + home folder), computed here.
+//   the first 12 hex of sha256(host name + home folder), computed here. A kept
+//   copy is sent as its skill name, its folder name (a time and 8 hex of the
+//   sha), its reason and three shas (keptSkillEditsForReport).
 //   ⛔ The repair: a skill the registry says is stale or missing is synced NOW,
 //   by a detached child of this hook (event MMSkillRepair on its stdin, so it
 //   passes the same consent gate as every event) that runs the Stop-time
@@ -8650,11 +8918,17 @@ function skillFolderShas(dir) {
   }
 }
 
-/** Every skill folder under `~/.claude/skills`: `{key: [sha, md_sha]}`, plus where they come from. */
+/**
+ * Every skill folder under `~/.claude/skills`: `{key: [sha, md_sha, kind]}`, with
+ * ours also carrying the sha its marker names; where they come from; and the
+ * copies of a local edit the sync kept.
+ */
 function localSkillShas(deadlineAt) {
-  const out = { source: null, shas: {}, count: 0, linked: 0, marked: 0, truncated: false };
+  const out = { source: null, shas: {}, count: 0, linked: 0, marked: 0, truncated: false, kept_edits: [] };
   const claude = homeClaudeDir();
   if (!claude) return out;
+  // First: the walk below can spend the whole deadline.
+  out.kept_edits = keptSkillEditsForReport(deadlineAt);
   const root = path.join(claude, "skills");
   // Where this machine's skills come from, by the sync's own test: a control-
   // tower machine is never registry-synced, so OW offers it no repair.
@@ -8694,9 +8968,15 @@ function localSkillShas(deadlineAt) {
     if (!s) continue;
     // [folder sha, SKILL.md sha, the sync's word for the folder]: "o" ours
     // (marker), "a" adoptable, "l" linked, "f" foreign. The sync replaces only
-    // o and a, so OW asks for a repair of only those.
-    const kind = inspectSkillFolder(root, key).kind;
-    out.shas[key] = [s.sha, s.md_sha, kind === "ours" ? "o" : kind === "adoptable" ? "a" : kind === "linked" ? "l" : "f"];
+    // o and a, so OW asks for a repair of only those. Ours adds the marker's sha,
+    // so OW can tell behind from edited: "" for a provisional marker or our own
+    // unfinished update, which OW reads as behind.
+    const info = inspectSkillFolder(root, key);
+    const kind = info.kind;
+    out.shas[key] =
+      kind === "ours"
+        ? [s.sha, s.md_sha, "o", info.marker.updating_to ? "" : info.marker.sha]
+        : [s.sha, s.md_sha, kind === "adoptable" ? "a" : kind === "linked" ? "l" : "f"];
     out.count += 1;
   }
   return out;
@@ -10194,6 +10474,61 @@ function consentCli(argv) {
   return 2;
 }
 
+/**
+ * `node worklog-hook.js --skill-edit-seen <key> <stamp>` (0.12.3): the member has
+ * seen a kept copy (KEPT SKILL EDITS), so the setup report stops naming it and its
+ * card does not come back. Its files stay.
+ *
+ * Sets `seen_at` in that copy's record and touches nothing else: no network, no
+ * debug log (debugLog writes into the state folder), no consent check (it records
+ * nothing about a folder), so writeFileAtomic is not used here. The refusal never
+ * echoes what it was given, so it stays one line. Exit 0 marked; 1 no such copy, or
+ * the write failed; 2 anything but one skill name and one copy name.
+ */
+function skillEditSeenCli(argv) {
+  const emit = (line) => process.stdout.write(`${line}\n`);
+  const key = String(argv[1] == null ? "" : argv[1]);
+  const stamp = String(argv[2] == null ? "" : argv[2]);
+  if (
+    argv[0] !== "--skill-edit-seen" ||
+    argv.length !== 3 ||
+    !SKILL_KEY_RE.test(key) ||
+    !SKILL_EDIT_STAMP_RE.test(stamp)
+  ) {
+    emit("usage: node worklog-hook.js --skill-edit-seen <skill name> <kept copy folder name>");
+    return 2;
+  }
+  const root = skillEditsRoot();
+  const keyDir = root ? path.join(root, key) : null;
+  const copyDir = keyDir ? path.join(keyDir, stamp) : null;
+  const record =
+    root && pathKind(root) === "dir" && pathKind(keyDir) === "dir" ? readSkillEditRecord(copyDir) : null;
+  if (!record || record.key !== key) {
+    emit(`No kept copy ${key} ${stamp} on this computer.`);
+    return 1;
+  }
+  const file = path.join(copyDir, SKILL_EDIT_RECORD);
+  const tmp = `${file}.${process.pid}-${require("crypto").randomBytes(6).toString("hex")}.tmp`;
+  try {
+    fs.writeFileSync(
+      tmp,
+      `${JSON.stringify(Object.assign({}, record, { seen_at: new Date().toISOString() }), null, 2)}\n`,
+      { encoding: "utf8", flag: "wx" },
+    );
+    fs.renameSync(tmp, file);
+  } catch {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* it was never created */
+    }
+    emit(`Could not mark the kept copy ${key} ${stamp} as seen.`);
+    return 1;
+  }
+  emit(`Marked as seen: ${key} ${stamp}. The setup report stops naming it; its files stay.`);
+  return 0;
+}
+
 /** VERBATIM — SPEC v2 §2.2: what `--task` prints for an empty or whitespace label. */
 const TASK_NOT_NOTED_LINE =
   'Task not noted: give a few words, for example --task "Phase 1 nurture sequence copy".';
@@ -10251,6 +10586,18 @@ async function main() {
     // `.catch` on main() and exit 0, as if the command had worked.
     try {
       process.exitCode = consentCli(argv);
+    } catch {
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  // ⛔ `--skill-edit-seen` (0.12.3): the same, a management command with its own
+  // exit codes, and it never reads stdin. Any spelling of the flag lands here, so
+  // `--skill-edit-seen=x` is refused rather than read as a Claude Code event.
+  if (argv.length > 0 && String(argv[0]).indexOf("--skill-edit-seen") === 0) {
+    try {
+      process.exitCode = skillEditSeenCli(argv);
     } catch {
       process.exitCode = 1;
     }
