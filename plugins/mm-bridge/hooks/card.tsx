@@ -57,7 +57,7 @@ const CARD_MARKS = { plugin: 'mm-bridge', key: 'cardMarks' } as const
 const CARD_CHECKED = { plugin: 'mm-bridge', key: 'cardChecked' } as const
 const CARD_PENDING = { plugin: 'mm-bridge', key: 'cardPending' } as const
 const CARD_BUSY = { plugin: 'mm-bridge', key: 'cardBusy' } as const
-const CARD_CHECK_DRAFT = { plugin: 'mm-bridge', key: 'cardCheckDraft' } as const
+const CARD_CHECK_MISS = { plugin: 'mm-bridge', key: 'cardCheckMiss' } as const
 
 /** The renderer's tree version this module draws. */
 const TREE_V = 1
@@ -554,6 +554,8 @@ async function pendingOf($: EngineInterface): Promise<MmCardChecked> {
   return value && typeof value === 'object' ? value : {}
 }
 
+type CardCheckMiss = { label: string; filled: 'draft' | 'none' }
+
 /** (0.7.35) Whether this thread is working (`CARD_BUSY`): never written means no turn has started here. */
 export async function busyOf($: EngineInterface): Promise<boolean> {
   return (await $.state.get(CARD_BUSY)).value === true
@@ -563,10 +565,10 @@ async function setBusy($: EngineInterface, busy: boolean): Promise<void> {
   if ((await busyOf($)) !== busy) await $.state.set(CARD_BUSY, busy)
 }
 
-/** (0.7.35) The tag whose Check button found a draft in the prompt box, '' with none. */
-export async function checkDraftOf($: EngineInterface): Promise<string> {
-  const { value } = await $.state.get(CARD_CHECK_DRAFT)
-  return typeof value === 'string' ? value : ''
+/** (0.7.35) The tag whose Check button could not put its words in the prompt box, and why; null with none. */
+export async function checkMissOf($: EngineInterface): Promise<CardCheckMiss | null> {
+  const { value } = await $.state.get(CARD_CHECK_MISS)
+  return value && typeof value === 'object' ? value : null
 }
 
 /** (0.7.35) This thread has finished checking this version of the package. Pending does not count: the turn may still be checking. */
@@ -630,14 +632,14 @@ export async function turnEnded($: EngineInterface, finished: boolean): Promise<
 
 /**
  * (0.7.35) The start of a turn of the main conversation: the box closes while the thread works. What is still pending belongs to a turn that
- * is over, and is dropped so that only the same turn's end can make it checked. The Check button's word about a draft is over too: the
- * person has sent something.
+ * is over, and is dropped so that only the same turn's end can make it checked. What the Check button said about the prompt box is over
+ * too: the person has sent something.
  */
 export async function turnBegan($: EngineInterface): Promise<void> {
   turnMarks++
   await setBusy($, true)
   if (Object.keys(await pendingOf($)).length) await $.state.set(CARD_PENDING, {})
-  if (await checkDraftOf($)) await $.state.set(CARD_CHECK_DRAFT, '')
+  if (await checkMissOf($)) await $.state.set(CARD_CHECK_MISS, null)
 }
 
 /** (0.7.35) Nothing stands for this version any more, pending or checked. */
@@ -885,10 +887,15 @@ export async function pressAsk($: EngineInterface, words: string): Promise<void>
   await fillWords($, words)
 }
 
-/** (0.7.35) A press on Check this package: its words in the prompt box, or, when the box holds other text, the pane says so (`CHECK_DRAFT`). */
+/**
+ * (0.7.35) A press on Check this package: its words in the prompt box. It never fails silently: when the box holds other text
+ * (`CHECK_DRAFT`), or cannot be read or filled (`CHECK_TYPE`), the pane says what to type.
+ */
 export async function pressCheck($: EngineInterface, label: string): Promise<void> {
-  const said = (await fillWords($, `Check package ${label}`)) === 'draft' ? label : ''
-  if ((await checkDraftOf($)) !== said) await $.state.set(CARD_CHECK_DRAFT, said)
+  const filled = await fillWords($, `Check package ${label}`)
+  const miss = filled === 'filled' ? null : { label, filled }
+  const had = await checkMissOf($)
+  if (had?.label !== miss?.label || had?.filled !== miss?.filled) await $.state.set(CARD_CHECK_MISS, miss)
 }
 
 // ---------------------------------------------------------------- drawing
@@ -1122,12 +1129,13 @@ const NOTICE = {
 } as const
 
 /**
- * (0.7.35) What the pane says in place of the box: while this thread is working, once it has stopped without checking this version, and
- * when the prompt box holds other text; and the button that asks it to check.
+ * (0.7.35) What the pane says in place of the box: while this thread is working, once it has stopped without checking this version, when
+ * the prompt box holds other text, and when it cannot be read or filled; and the button that asks it to check.
  */
 export const THREAD_CHECKING = 'This thread is still checking this package. The signature box opens when it finishes.'
 export const THREAD_NOT_CHECKED = 'This thread has not checked this version of the package yet.'
 export const CHECK_DRAFT = (label: string): string => `Your prompt box holds a draft, so type: Check package ${label}`
+export const CHECK_TYPE = (label: string): string => `Type this in the thread: Check package ${label}`
 export const CHECK_BUTTON = 'Check this package'
 
 export type CardDraw = {
@@ -1137,8 +1145,8 @@ export type CardDraw = {
   checked: MmCardChecked
   /** (0.7.35) This thread is working (`busyOf`). */
   busy: boolean
-  /** (0.7.35) The tag whose Check button found a draft in the prompt box (`checkDraftOf`). */
-  checkDraft: string
+  /** (0.7.35) The tag whose Check button could not put its words in the prompt box, and why (`checkMissOf`). */
+  checkMiss: CardCheckMiss | null
   now: number
   onSign: (label: string) => void
   onCheck: (label: string) => void
@@ -1197,7 +1205,7 @@ export function drawCard(els: Els, d: CardDraw): Node {
       <Box key={`mm-card-wait:${s.label}`} flexDirection="column">
         {notice ? <Text color="warning">{notice}</Text> : null}
         <Text dimColor>{d.busy ? THREAD_CHECKING : THREAD_NOT_CHECKED}</Text>
-        {d.checkDraft === s.label ? <Text>{CHECK_DRAFT(s.label)}</Text> : null}
+        {d.checkMiss?.label === s.label ? <Text>{d.checkMiss.filled === 'draft' ? CHECK_DRAFT(s.label) : CHECK_TYPE(s.label)}</Text> : null}
         {Button ? <Button key={`mm-card-check:${s.label}`} label={CHECK_BUTTON} onPress={() => d.onCheck(s.label)} /> : <Text dimColor>{CHECK_BUTTON}</Text>}
       </Box>
     )

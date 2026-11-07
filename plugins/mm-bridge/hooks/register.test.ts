@@ -13370,6 +13370,21 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
         await u.unmount()
       })
 
+      test('a prompt box that cannot be filled: the pane says what to type, with the button still there, and the line goes when a turn starts', async ($, on) => {
+        const w = world(on, { ...own, box: null })
+        const u = await shown($)
+        await u.press({ key: `mm-card-check:${LABEL}` })
+        const said = `Type this in the thread: Check package ${LABEL}`
+        for (let i = 0; i < 200 && !(await lines(u)).join('\n').includes(said); i++) await new Promise(r => setTimeout(r, 2))
+        expect((await lines(u)).join('\n')).toContain(said)
+        expect((await lines(u)).join('\n')).not.toContain('holds a draft')
+        expect(w.fills).toEqual([])
+        expect((await buttons(u)).find(([k]) => k === `mm-card-check:${LABEL}`)?.[1]).toBe('Check this package')
+        await startTurn($)
+        expect((await lines(u)).join('\n')).not.toContain(said)
+        await u.unmount()
+      })
+
       test('"change the second paragraph": an open box closes when the turn starts and comes back when it ends, with the hash the same', async ($, on) => {
         const w = world(on, own)
         const u = await shown($)

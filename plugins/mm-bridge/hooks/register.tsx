@@ -3641,7 +3641,7 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
 // (0.7.26) The reply-package card: prepared on arrival, drawn natively above the page (card.tsx).
 import { teamFrom, teamHeadingNow, teamLines, teamText, withMoves } from './team'
 import type { TeamNow, TeamSeen } from './team'
-import { busyOf, cardHooks, cardOf, cardVerdict, checkDraftOf, checkedOf, clearCard, currentOf, drawCard, isOnScreen, marksOf, noteDrawn, notePending, noteVersion, onWindows, prepareCard, pressAsk, pressCheck, pressSign, refreshCard, resetCard, showKept, togglePage, turnBegan, turnEnded, turnMark, type PageRead } from './card'
+import { busyOf, cardHooks, cardOf, cardVerdict, checkMissOf, checkedOf, clearCard, currentOf, drawCard, isOnScreen, marksOf, noteDrawn, notePending, noteVersion, onWindows, prepareCard, pressAsk, pressCheck, pressSign, refreshCard, resetCard, showKept, togglePage, turnBegan, turnEnded, turnMark, type PageRead } from './card'
 import { holderName } from './queue'
 
 /**
@@ -9337,7 +9337,7 @@ export const register: Register = on => {
     const cardMarks = await marksOf($)
     const cardChecked = await checkedOf($)
     const cardBusy = await busyOf($)
-    const cardCheckDraft = await checkDraftOf($)
+    const cardCheckMiss = await checkMissOf($)
     const cardNow = await $.clock.now()
     const cardShown = Boolean(client.text && card?.packageId && card.tree)
     // (0.7.33) the line that says it cannot be drawn on this computer, over the part as it is
@@ -9494,7 +9494,7 @@ export const register: Register = on => {
         {client.text ? (
           <Box key="mm-client" flexDirection="column" marginBottom={1}>
             {client.heading ? <Text bold>{client.heading}</Text> : null}
-            {cardShown || cardFailed ? drawCard($.ui.resolve(e) as Parameters<typeof drawCard>[0], { card: card, marks: cardMarks, checked: cardChecked, busy: cardBusy, checkDraft: cardCheckDraft, now: cardNow, onSign: label => void signPressed($, label), onCheck: label => void pressCheck($, label), onAsk: words => void pressAsk($, words), onPage: () => void togglePage($) }) : null}
+            {cardShown || cardFailed ? drawCard($.ui.resolve(e) as Parameters<typeof drawCard>[0], { card: card, marks: cardMarks, checked: cardChecked, busy: cardBusy, checkMiss: cardCheckMiss, now: cardNow, onSign: label => void signPressed($, label), onCheck: label => void pressCheck($, label), onAsk: words => void pressAsk($, words), onPage: () => void togglePage($) }) : null}
             {/* (0.7.33, G11) under a card the banner, the asks and the queue stay in sight: only the page folds */}
             {cardShown && client.extra ? <Markdown text={client.extra} /> : null}
             {cardShown && cardMarks.pageOpen ? <Markdown text={client.page ?? client.text} /> : null}
