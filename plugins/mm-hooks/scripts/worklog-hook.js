@@ -8365,9 +8365,9 @@ async function runSkillSync(root, deadlineAt, result, failures) {
  * ⛔ Only an entry with a skill's name counts (0.12.2). The sync and the setup
  * report ignore every other name, so a stray link such as `_old` or `my copy`
  * is not a skill. Before this, one such link turned the whole machine into a
- * "control-tower machine": nothing was ever installed, and OW told the member
- * to run an installer from a checkout they did not have. Measured 2026-11-06 on
- * a Windows machine: 3 skills, 0 links counted, source control_tower, all 396
+ * "control-tower machine": nothing was ever installed, and OW's only advice was
+ * to run the installer from a control-tower checkout. Measured 2026-11-06 on a
+ * Windows machine: 3 skills, 0 links counted, source control_tower, all 396
  * registry skills missing.
  */
 const CONTROL_TOWER_SKILLS_MARK = "/massmarket-ops-control-tower/skills/";
