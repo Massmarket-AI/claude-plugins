@@ -588,8 +588,8 @@ describe('a reply package someone picked up', () => {
     const it = only(feed({ drafts: [pkg({ status: 'prepared', picked_up_by: null, picked_up_at: null })] }))
     expect(it).toMatchObject({ kind: 'ready', packageId: HELD, open: null })
     expect(draftsLine(it)).toBe('_Reply drafts are prepared for this client, but the pickup view could not be loaded here. Ask Claude: "Show me the reply drafts for Acme Roofing"._')
-    expect(noteText(it, ME)).toBe(`Reply package aaaaaaaa is prepared; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`)
-    expect(noteText({ ...it, flagged: true }, ME)).toBe(`Reply package aaaaaaaa is prepared and flagged for approval; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`)
+    expect(noteText(it, ME)).toBe(`Reply package ${HELD} is prepared; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`)
+    expect(noteText({ ...it, flagged: true }, ME)).toBe(`Reply package ${HELD} is prepared and flagged for approval; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`)
     expect(titleFor(it, T)).toBe('🟡 17h left · Acme Roofing · reply ready')
     expect(holdBanner(it)).toBe('')
   })
@@ -610,7 +610,7 @@ describe('a reply package someone picked up', () => {
       '🟡 17h left · Acme Roofing · reply ready', '🟡 17h left · Acme Roofing · reply · 2 new', '🔴 1h left · Acme Roofing · task',
     ])
     expect([ready, reply, task].map(it => noteText(it, ME))).toEqual([
-      `Reply package aaaaaaaa is prepared; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`,
+      `Reply package ${HELD} is prepared; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`,
       '2 client messages waiting on our reply and 0 committed tasks due; no reply drafts are prepared yet.',
       // (0.7.4) a task alone is not a reply to prepare (Rob, 2026-10-27: "It doesn't necessarily create the need for a new reply")
       '0 client messages waiting on our reply and 1 committed task due; no client message is waiting, so there is no reply to prepare.',

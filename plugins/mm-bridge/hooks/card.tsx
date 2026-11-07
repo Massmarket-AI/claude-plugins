@@ -20,7 +20,14 @@
  *   without the box and says why.
  * - It replaces the page. (0.7.33, Rob, 2026-11-06: "the copy passes. I already think we should go ahead and implement that
  *   for everybody.") A thread asks `mm card <package id>` at pickup (`cardVerdict`): ready, it prints one line and waits;
- *   not ready, it prints the whole page, so a computer where the card cannot be drawn blocks nobody.
+ *   not ready, it prints the whole page. (0.7.34) Most pickups run with the thread in the background, where nothing is placed
+ *   or drawn until it is opened, so ready no longer needs the card on the screen: the card waits in the pane, and the thread's
+ *   line says the person can ask there for the page. A run no surface will ever attach to is still not ready.
+ * - The box waits for the thread. (0.7.34; on 2026-11-07 a person pressed and sent while the thread's checks were still
+ *   running, and those checks then found two real problems.) Until this thread has finished checking this exact version
+ *   (`cardChecked`: `mm card` answered ready for it here, or this thread printed its page) the card is drawn in full with no
+ *   box, and a button in its place asks the thread to check. A new `package_sha256` closes the box again; a page that changes
+ *   under the same hash does not. This wait is no hold (`holdOf`, `cardVerdict`): it opens on the answer they decide.
  * - The card on screen is the current render. (0.7.33) Plan state, the follow-up switch and rolled dates are in no hash, so
  *   `mm card` and a press each read OW's page and render again (`refreshCard`). OW with no usable hash means not ready. A
  *   fresh card that differs replaces the kept one, and a press in that state records nothing: the box says to read it again.
@@ -29,14 +36,15 @@
  *   envelope, and puts exactly `Send package <12>` in the person's prompt box, as the Start buttons fill it. The person sends
  *   it with Enter; the thread then runs the go of §9.5. A draft of theirs in the box is never written over.
  */
-import type { BoxProps, ButtonProps, ElementConstructor, EngineInterface, LinkProps, RenderNode, SvgProps, TextProps } from 'claude-code'
+import type { BoxProps, ButtonProps, ElementConstructor, EngineInterface, LinkProps, Register, RenderNode, SvgProps, TextProps } from 'claude-code'
 
-import type { MmCard, MmCardMarks, MmCardNode, MmCardRun, MmCardSigned, MmCardTree } from '../types'
+import type { MmCard, MmCardChecked, MmCardMarks, MmCardNode, MmCardRun, MmCardSigned, MmCardTree } from '../types'
 import { isOwUrl, pageGap } from './card-parity'
 import { platformOf } from './threads'
 
 const CARD = { plugin: 'mm-bridge', key: 'card' } as const
 const CARD_MARKS = { plugin: 'mm-bridge', key: 'cardMarks' } as const
+const CARD_CHECKED = { plugin: 'mm-bridge', key: 'cardChecked' } as const
 
 /** The renderer's tree version this module draws. */
 const TREE_V = 1
@@ -55,6 +63,8 @@ const SIGNED_KEEP = 200
 const SIGNED_MAX_BYTES = 4 * 1024 * 1024
 /** How long a signature stands: the send gate asks for a new one past this, so the box then offers one. */
 export const SIGN_VALID_MS = 2 * 60 * 60 * 1000
+/** (0.7.34) How many checked versions a thread remembers: the newest. */
+const CHECKED_MAX = 30
 /** A press still checking the package after this has died: the box opens again. */
 const CHECKING_MS = 120_000
 /** How long the signature and the envelope take before the words go in the prompt box (the widget's 3.05 s). */
@@ -64,6 +74,8 @@ const SIGN_ANIMATE_MS = 4_000
 
 const SHA = /^[0-9a-f]{64}$/
 const LABEL = /^[0-9a-f]{12}$/
+/** The page's closing line: `One go … Package `<12>`.` (client-reply-prep §9.3). */
+const CLOSING = /One go [^\n]*?Package `([0-9a-f]{12})`\./g
 
 /** The card drawn for each package this session, by package id: the newest version read. */
 const cards = new Map<string, MmCardTree>()
@@ -503,6 +515,44 @@ export async function togglePage($: EngineInterface): Promise<void> {
   await $.state.set(CARD_MARKS, { ...marks, pageOpen: !marks.pageOpen })
 }
 
+/** (0.7.34) The versions this thread has finished checking (`MmCardChecked`). A restart loses them, which only closes the box. */
+export async function checkedOf($: EngineInterface): Promise<MmCardChecked> {
+  const { value } = await $.state.get(CARD_CHECKED)
+  return value && typeof value === 'object' ? value : {}
+}
+
+/** (0.7.34) This thread has finished checking this version of the package. */
+export const isChecked = (checked: MmCardChecked, label: string): boolean => Object.hasOwn(checked, label)
+
+/** (0.7.34) These versions are on record as checked by this thread: the box opens for them. The newest CHECKED_MAX are kept. */
+export async function noteChecked($: EngineInterface, labels: readonly string[]): Promise<void> {
+  const tags = labels.filter(label => LABEL.test(label))
+  if (!tags.length) return
+  const at = await $.clock.now()
+  const had = Object.entries(await checkedOf($)).filter(([label]) => !tags.includes(label))
+  await $.state.set(CARD_CHECKED, Object.fromEntries([...had, ...tags.map(label => [label, at] as const)].slice(-CHECKED_MAX)))
+}
+
+/** The tags of every pickup page closing line in a response of this thread. */
+export function printedTags(text: string): string[] {
+  return [...text.matchAll(CLOSING)].map(m => m[1] as string)
+}
+
+/** (0.7.34) Every response block of this thread is read for a pickup page's closing line: a printed page is a finished check. Reads only; the row is stored as it came. */
+export function cardHooks(on: Parameters<Register>[0]): void {
+  on('session.append', { door: 'response' }, async ($, e, next) => {
+    try {
+      if (!e.agentId && e.message.type === 'assistant') {
+        const text = (e.message.content ?? []).map(b => (b && (b as { type?: string }).type === 'text' ? String((b as { text?: unknown }).text ?? '') : '')).join('\n')
+        if (text.includes('Package `')) await noteChecked($, printedTags(text))
+      }
+    } catch {
+      // the row is stored as it came
+    }
+    return next(e)
+  })
+}
+
 /** Words put in the prompt box, as a Start press puts them (`fillStart`): a draft of the person's is never written over. */
 export async function fillWords($: EngineInterface, words: string): Promise<'filled' | 'draft' | 'none'> {
   try {
@@ -516,7 +566,10 @@ export async function fillWords($: EngineInterface, words: string): Promise<'fil
   }
 }
 
-/** Why the pane offers no signature for this card now, or '' when it offers one. */
+/**
+ * What of the card itself holds its signature box back, or '' when nothing does. ⛔ (0.7.34) The wait for the thread's check (`isChecked`)
+ * is not in here: `mm card` answers from this, and its ready is what ends that wait, so it could never answer ready.
+ */
 export function holdOf(card: MmCard): string {
   const tree = card.tree
   const sign = signOf(tree)
@@ -635,11 +688,14 @@ const isChecking = (marks: MmCardMarks, label: string, now: number) => marks.che
  * fails records nothing and the box says to try again. Then the signature goes on record (the pane draws it inking in and the
  * envelope), and when the envelope has flown, exactly `Send package <12>` goes in the prompt box, if the card still holds then.
  * One signature a tag while it stands (`standing`): once the gate would no longer take it, a new press signs again.
+ * (0.7.34) A press for a version this thread has not finished checking records nothing: the box is not drawn then, so this is the
+ * second line of defence for a press that was already under way.
  */
 export async function pressSign($: EngineInterface, label: string, log: SignLog): Promise<void> {
   const { value: card } = await $.state.get(CARD)
   const marks = await marksOf($)
   const pressed = await $.clock.now()
+  if (!isChecked(await checkedOf($), label)) return
   if (!card || !card.tree || standing(marks, label, card, pressed) || isChecking(marks, label, pressed)) return
   if (holdOf(card) || signOf(card.tree)?.label !== label) return
   const { notice: _notice, ...kept } = marks
@@ -914,9 +970,15 @@ const NOTICE = {
   retry: 'That did not go through, so nothing was signed. Try again, or ask your thread to print the page.',
 } as const
 
+/** (0.7.34) What the pane says in place of the box until this thread has finished checking this version, and the button that asks it to. */
+export const THREAD_CHECKING = 'This thread is still checking this package. The signature box opens when it finishes.'
+export const CHECK_BUTTON = 'Check this package'
+
 export type CardDraw = {
   card: MmCard
   marks: MmCardMarks
+  /** (0.7.34) The versions this thread has finished checking (`checkedOf`). */
+  checked: MmCardChecked
   now: number
   onSign: (label: string) => void
   onAsk: (words: string) => void
@@ -967,6 +1029,14 @@ export function drawCard(els: Els, d: CardDraw): Node {
       <Box key={`mm-card-hold:${s.label}`} flexDirection="column">
         {notice ? <Text color="warning">{notice}</Text> : null}
         <Text color={hold === 'drift' || hold === 'page' ? 'error' : undefined} dimColor={hold !== 'drift' && hold !== 'page'}>{holdText(hold, card, tree.label)}</Text>
+      </Box>
+    )
+    // (0.7.34) the thread is still checking this version: the card stands in full, and the box waits
+    if (!isChecked(d.checked, s.label)) return (
+      <Box key={`mm-card-wait:${s.label}`} flexDirection="column">
+        {notice ? <Text color="warning">{notice}</Text> : null}
+        <Text dimColor>{THREAD_CHECKING}</Text>
+        {Button ? <Button key={`mm-card-check:${s.label}`} label={CHECK_BUTTON} onPress={() => d.onAsk(`Check package ${s.label}`)} /> : <Text dimColor>{CHECK_BUTTON}</Text>}
       </Box>
     )
     if (isChecking(marks, s.label, d.now)) return <Text dimColor>Checking this is still the package…</Text>

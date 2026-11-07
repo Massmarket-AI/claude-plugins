@@ -200,7 +200,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.33'
+export const VERSION = '0.7.35'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -3626,7 +3626,7 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
 }
 
 // (0.7.26) The reply-package card: prepared on arrival, drawn natively above the page (card.tsx).
-import { cardOf, cardVerdict, clearCard, currentOf, drawCard, isOnScreen, marksOf, noteCurrent, noteDrawn, onWindows, prepareCard, pressAsk, pressSign, refreshCard, resetCard, showKept, togglePage, type PageRead } from './card'
+import { cardHooks, cardOf, cardVerdict, checkedOf, clearCard, currentOf, drawCard, isOnScreen, marksOf, noteChecked, noteCurrent, noteDrawn, onWindows, prepareCard, pressAsk, pressSign, refreshCard, resetCard, showKept, togglePage, type PageRead } from './card'
 import { holderName } from './queue'
 
 /**
@@ -3955,8 +3955,24 @@ const CARD_DRAW_WAIT_S = 3
 function cardReady(label: string): string {
   return `card ready: Package ${label}. The whole package is on screen in the side pane and its copy check passed. Do not print the page. Print one line saying it is in the side pane, ending "Package ${label}.", then wait for the person.`
 }
+/** (0.7.34) Ready with the pane not on a screen: most pickups run with the thread in the background. Its first sentence is the one the send gate parses, as `cardReady`'s is. */
+function cardReadyOffScreen(label: string): string {
+  return `card ready: Package ${label}. The whole package is checked and waiting in the side pane, which draws it when this thread is open on a screen. Do not print the page. Print one line saying it is in the side pane and that they can ask here for the page if they can't see the pane, ending "Package ${label}.", then wait for the person.`
+}
 function cardNotReady(reason: string): string {
   return `card not ready: ${reason}. Print the whole page.`
+}
+/** (0.7.34) A tag is not an id, and there is nothing yet to print: the thread asks again with the whole id. */
+const CARD_WHOLE_ID = 'card not ready: give the whole package id, not the 8-character tag, and ask again.'
+
+/**
+ * (0.7.34) A session no surface will ever attach to, so that a person can never see the pane in it. Not from the engine's surface
+ * calls: measured in a `claude -p` on 2026-11-07, `$.ui.open` answers `no-surface: no surface is attached` and `$.session.surfaces()`
+ * is empty, and the engine says the same of any session until a page attaches, as a desktop thread in the background is. So from
+ * what `autoPane` goes by: a person's session (`tracks`), not MM_UNATTENDED=1, and no `SINGLE-SESSION` first prompt.
+ */
+async function nobodyWatches($: EngineInterface): Promise<boolean> {
+  return !(await tracks($)) || Boolean((await sessOf($)).single) || (await $.env.get('MM_UNATTENDED')) === '1'
 }
 
 /**
@@ -3979,14 +3995,20 @@ async function aSecond($: EngineInterface): Promise<void> {
  * (0.7.33) `mm card <package id>`: what a thread asks at pickup, to know whether to print the page (Rob, 2026-11-06: "the copy
  * passes. I already think we should go ahead and implement that for everybody."). It sends nothing, starts nothing and picks
  * up nothing. Ready only when the card of that package has just been drawn again from OW's page as it stands now
- * (`refreshCard`), nothing holds its signature box back, that page is fully in it (`pageGap`), and it is on the screen: in the
- * client part of a pane that is placed and shown, and drawn there. ⛔ Anything else, any error at all, is not ready: the thread
- * then prints the page, as every thread did before this.
+ * (`refreshCard`), nothing holds its signature box back, that page is fully in it (`pageGap`), and it is in this thread's client
+ * part. ⛔ Anything else, any error at all, is not ready: the thread then prints the page, as every thread did before this.
+ * (0.7.34) Ready no longer needs the screen. On 2026-11-07 threads asked 7 times and none answered ready, 4 of them because the
+ * pane is not placed while a thread runs in the background; in one the person had the pane on screen minutes later and pressed
+ * the box. It answers by where the pane stands: on screen (placed, shown and this card drawn there) it says so, and otherwise the
+ * card is waiting for the thread to be opened (`cardReadyOffScreen`). The pane is still opened, so that it is there then. Only a
+ * session nobody will ever watch (`nobodyWatches`) stays not ready for want of a surface.
+ * (0.7.34) A ready answer is this thread's finished check of that version (`noteChecked`): it opens the signature box. A sub-agent's
+ * is not: its thread is still at work, and the send gate reads the main chain alone.
  */
-async function cardCommand($: EngineInterface, arg: string): Promise<string> {
+async function cardCommand($: EngineInterface, arg: string, subagent: boolean): Promise<string> {
   try {
     const packageId = arg.trim().toLowerCase()
-    if (!isUuid(packageId)) return cardNotReady('that is not a package id')
+    if (!isUuid(packageId)) return CARD_WHOLE_ID
     // ⛔ Every `$.state.get` of one dispatch reads one moment, so waiting here on the state would never see a draw end: `refreshCard`
     // waits for a render under way (a module's promise, not the state), then draws the card itself.
     const held = await cardOf($)
@@ -4001,16 +4023,16 @@ async function cardCommand($: EngineInterface, arg: string): Promise<string> {
     const why = cardVerdict(card, packageId)
     if (why) return cardNotReady(why)
     if (!(await clientPart($)).text) return cardNotReady('the side pane is not showing this package')
-    const opened = await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })
-    if (!opened.isPlaced) return cardNotReady('the side pane is not open on a surface that can draw it')
-    const pane = (await $.ui.panes()).find(p => p.id === PANE_QUEUE)
-    if (!pane?.isPlaced) return cardNotReady('the side pane is not open on a surface that can draw it')
-    if (!pane.isShown) return cardNotReady('the side pane is behind another tab')
-    // the state is set; the words are on the screen once the pane has drawn them
-    for (let s = 0; s < CARD_DRAW_WAIT_S && !isOnScreen(packageId, card.tree); s++) await aSecond($)
-    if (!isOnScreen(packageId, card.tree)) return cardNotReady('the card did not reach the screen')
+    if (await nobodyWatches($)) return cardNotReady('the side pane is not open on a surface that can draw it')
     const label = card.tree?.label
-    return label ? cardReady(label) : cardNotReady('the card could not be checked')
+    if (!label) return cardNotReady('the card could not be checked')
+    const opened = await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })
+    const pane = opened.isPlaced ? (await $.ui.panes()).find(p => p.id === PANE_QUEUE) : undefined
+    const shown = Boolean(pane?.isPlaced && pane.isShown)
+    // the state is set; the words are on the screen once the pane has drawn them. A pane that is not shown draws nothing to wait for.
+    for (let s = 0; shown && s < CARD_DRAW_WAIT_S && !isOnScreen(packageId, card.tree); s++) await aSecond($)
+    if (!subagent) await noteChecked($, [label])
+    return shown && isOnScreen(packageId, card.tree) ? cardReady(label) : cardReadyOffScreen(label)
   } catch {
     return cardNotReady('the card could not be checked')
   }
@@ -7193,13 +7215,13 @@ async function openDrafts($: EngineInterface): Promise<void> {
  * from another session, a schedule, a channel or a plugin) they are refused here, first, before anything
  * is fetched, called, stored or stamped.
  */
-async function runCommand($: EngineInterface, args: string, by: By, press = false): Promise<string> {
+async function runCommand($: EngineInterface, args: string, by: By, press = false, subagent = false): Promise<string> {
   const [verb = 'queue', ...rest] = args.trim().split(/\s+/).filter(Boolean)
   const arg = rest.join(' ')
   // (0.5.25) starts nothing: what starts each thread, for the model on the person's own words (`kickoffs`)
   if (verb === 'kickoffs') return kickoffs($, arg)
   // (0.7.33) sends nothing, starts nothing: whether the card stands in for the page, for a thread at pickup
-  if (verb === 'card') return cardCommand($, arg)
+  if (verb === 'card') return cardCommand($, arg, subagent)
   // (0.7.0) the line this thread's work counts toward: the person's or Claude's explicit call (never anything to a client)
   if (verb === 'line') return lineCommand($, arg, false)
   if (verb === 'bank') return lineCommand($, arg, true)
@@ -8855,6 +8877,9 @@ async function currentLine($: EngineInterface): Promise<string> {
 }
 
 export const register: Register = on => {
+  // (0.7.34) a pickup page this thread prints is its finished check of that version: the signature box opens
+  cardHooks(on)
+
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     // Runs in a person's session only: the terminal REPL (isInteractive) or the desktop app's Code tab, which
@@ -9005,7 +9030,7 @@ export const register: Register = on => {
     const args = String((e as Record<string, unknown>).args ?? '')
     let result: string
     try {
-      result = await runCommand($, args, 'other')
+      result = await runCommand($, args, 'other', false, Boolean((e as { agentId?: unknown }).agentId))
     } catch (err) {
       result = await didNotFinish($, args, err)
     }
@@ -9160,6 +9185,7 @@ export const register: Register = on => {
     // (0.7.26) the reply-package card, above the page it draws (the page folds under it once the card is drawn)
     const card = await cardOf($)
     const cardMarks = await marksOf($)
+    const cardChecked = await checkedOf($)
     const cardNow = await $.clock.now()
     const cardShown = Boolean(client.text && card?.packageId && card.tree)
     // (0.7.33) the line that says it cannot be drawn on this computer, over the part as it is
@@ -9302,7 +9328,7 @@ export const register: Register = on => {
         {client.text ? (
           <Box key="mm-client" flexDirection="column" marginBottom={1}>
             {client.heading ? <Text bold>{client.heading}</Text> : null}
-            {cardShown || cardFailed ? drawCard($.ui.resolve(e) as Parameters<typeof drawCard>[0], { card: card, marks: cardMarks, now: cardNow, onSign: label => void signPressed($, label), onAsk: words => void pressAsk($, words), onPage: () => void togglePage($) }) : null}
+            {cardShown || cardFailed ? drawCard($.ui.resolve(e) as Parameters<typeof drawCard>[0], { card: card, marks: cardMarks, checked: cardChecked, now: cardNow, onSign: label => void signPressed($, label), onAsk: words => void pressAsk($, words), onPage: () => void togglePage($) }) : null}
             {/* (0.7.33, G11) under a card the banner, the asks and the queue stay in sight: only the page folds */}
             {cardShown && client.extra ? <Markdown text={client.extra} /> : null}
             {cardShown && cardMarks.pageOpen ? <Markdown text={client.page ?? client.text} /> : null}

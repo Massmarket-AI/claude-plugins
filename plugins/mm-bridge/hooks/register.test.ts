@@ -3712,7 +3712,7 @@ describe('F10: a reply package someone picked up stays in the panel, with who ho
     expect(w.fetched.filter(u => u.includes('/closeout')).length).toBe(1)
     expect(w.appended.length).toBe(1)
     expect(w.appended[0]).toContain(
-      `[Massmarket bridge, no reply needed] Acme Roofing Pat: ${ACME_TITLE}. Reply package aaaaaaaa is prepared; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${PKG}. This thread updates itself at about 11:10 AM. Nothing has been sent.`,
+      `[Massmarket bridge, no reply needed] Acme Roofing Pat: ${ACME_TITLE}. Reply package ${PKG} is prepared; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${PKG}. This thread updates itself at about 11:10 AM. Nothing has been sent.`,
     )
     expect(await viewText($, 'Acme Roofing')).toBe('## Acme Roofing\n\n1. What the client sent')
     // the note the last version left is recorded under the same key this version works out: no repeat, before or after a sync
@@ -12921,11 +12921,14 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
   })
 
   for (const surface of SURFACES) {
-    test(`in the client's own thread (${surface}): the box is open with no page printed, and a signature is recorded and puts exactly the go in the prompt box`, async ($, on) => {
+    test(`in the client's own thread (${surface}): the box opens on \`mm card\`'s ready with no page printed, and a signature is recorded and puts exactly the go in the prompt box`, async ($, on) => {
       const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } }, renderer: 'tree', pickup: PICKUP })
       await mm($, '')
       const u = await mount($, surface)
       await u.press({ key: `drafts:${ACME}` })
+      // (0.7.34) until the thread answers for this version the card stands without the box
+      expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn')), surface).toBe(false)
+      expect(await tool($, `card ${PKG}`), surface).toContain(`card ready: Package ${LABEL}.`)
       const signBtn = (await buttons(u)).find(([k]) => k === `mm-card-sign-btn:${LABEL}`)
       expect(signBtn?.[1], surface).toBe('✍  Click to sign and send')
       await u.press({ key: `mm-card-sign-btn:${LABEL}` })
@@ -12947,6 +12950,9 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
 
   describe('0.7.33 `mm card <package id>`: whether the thread prints the page', () => {
     const READY = `card ready: Package ${LABEL}. The whole package is on screen in the side pane and its copy check passed. Do not print the page. Print one line saying it is in the side pane, ending "Package ${LABEL}.", then wait for the person.`
+    /** (0.7.34) Ready with the pane not on a screen. */
+    const OFF_SCREEN = `card ready: Package ${LABEL}. The whole package is checked and waiting in the side pane, which draws it when this thread is open on a screen. Do not print the page. Print one line saying it is in the side pane and that they can ask here for the page if they can't see the pane, ending "Package ${LABEL}.", then wait for the person.`
+    const WHOLE_ID = 'card not ready: give the whole package id, not the 8-character tag, and ask again.'
     const notReady = (why: string) => `card not ready: ${why}. Print the whole page.`
     const own = { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } }, renderer: 'tree' as const, pickup: PICKUP }
     /** This thread's client in the pane, drawn. */
@@ -12973,8 +12979,8 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
 
     test('not ready, each in plain words: no id, another package, another client\'s part', async ($, on) => {
       const w = world(on, { ...own, feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.threads': PAIRS } })
-      expect(await tool($, 'card')).toBe(notReady('that is not a package id'))
-      expect(await tool($, 'card not-a-uuid')).toBe(notReady('that is not a package id'))
+      expect(await tool($, 'card')).toBe(WHOLE_ID)
+      expect(await tool($, 'card not-a-uuid')).toBe(WHOLE_ID)
       expect(await tool($, `card ${PKG}`)).toBe(notReady('the side pane is not showing this package'))
       const u = await shown($)
       expect(await tool($, 'card 99999999-9999-4999-8999-999999999999')).toBe(notReady('the side pane is not showing this package'))
@@ -13087,24 +13093,24 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await u.unmount()
     })
 
-    test('finding 8: the pane behind another tab: not ready, and the thread prints the page', async ($, on) => {
+    test('(0.7.34) the pane behind another tab: ready, and it says the card is waiting rather than on screen', async ($, on) => {
       const w = world(on, own)
       const u = await shown($)
       expect(await tool($, `card ${PKG}`)).toBe(READY)
       w.setShown(false)
-      expect(await tool($, `card ${PKG}`)).toBe(notReady('the side pane is behind another tab'))
+      expect(await tool($, `card ${PKG}`)).toBe(OFF_SCREEN)
       w.setShown(true)
       expect(await tool($, `card ${PKG}`)).toBe(READY)
       await u.unmount()
     })
 
-    test('finding 8: placed and shown, but the pane has not drawn this card: not ready', async ($, on) => {
+    test('(0.7.34) placed and shown, but the pane has not drawn this card: ready, and it says the card is waiting rather than on screen', async ($, on) => {
       const w = world(on, own)
       const u = await shown($)
       await u.unmount()
       // nothing draws the pane now: a new card, its check passing, goes into the state and reaches no screen
       w.setTree(JSON.parse(JSON.stringify(SMS_TREE).replace('"s":"prepared"', '"s":"prepared again"')))
-      expect(await tool($, `card ${PKG}`)).toBe(notReady('the card did not reach the screen'))
+      expect(await tool($, `card ${PKG}`)).toBe(OFF_SCREEN)
     })
 
     test('asked while the pane is still drawing the card: ready, and never "still being drawn"', async ($, on) => {
@@ -13130,7 +13136,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await u.unmount()
     })
 
-    test('the draw report comes after the draw: a draw that throws leaves nothing on record as drawn, and `mm card` is not ready', async ($, on) => {
+    test('the draw report comes after the draw: a draw that throws leaves nothing on record as drawn, so `mm card` never says it is on screen', async ($, on) => {
       world(on, own)
       // a signature the drawing cannot write: the hook throws where it builds the card, with the card itself the same
       let poison = false
@@ -13145,15 +13151,246 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       expect(await tool($, `card ${PKG}`)).toBe(READY)
       poison = true
       await lines(u).catch(() => undefined)
-      expect(await tool($, `card ${PKG}`)).toBe(notReady('the card did not reach the screen'))
+      expect(await tool($, `card ${PKG}`)).toBe(OFF_SCREEN)
       await u.unmount().catch(() => undefined)
     })
 
-    test('no pane on this surface: not ready', async ($, on) => {
+    test('(0.7.34) the pane not placed, as in a thread running in the background: ready, it says the card is waiting, and the pane is still opened', async ($, on) => {
       const w = world(on, own)
-      const u = await shown($)
+      await mm($, '')
+      const u = await mount($, 'desktop')
+      await u.press({ key: `drafts:${ACME}` })
+      await u.unmount()
       w.setPlaced(false)
-      expect(await tool($, `card ${PKG}`)).toBe(notReady('the side pane is not open on a surface that can draw it'))
+      const opened = w.opened.length
+      expect(await tool($, `card ${PKG}`)).toBe(OFF_SCREEN)
+      expect(w.opened.length).toBe(opened + 1)
+      expect(w.fills).toEqual([])
+      expect(w.prompts).toEqual([])
+      expect(sends(w)).toEqual([])
+    })
+
+    test('(0.7.34) off screen, it waits no second for a pane that will not draw', async ($, on) => {
+      const w = world(on, own)
+      let seconds = 0
+      on('process.run', (_$, e, next) => {
+        if (e.argv[0] === 'sleep') seconds++
+        return next(e)
+      })
+      const u = await shown($)
+      await u.unmount()
+      w.setPlaced(false)
+      seconds = 0
+      expect(await tool($, `card ${PKG}`)).toBe(OFF_SCREEN)
+      expect(seconds).toBe(0)
+    })
+
+    test('(0.7.34) both forms start with the sentence the send gate parses, for this tag, and the on-screen words have not moved', () => {
+      // global-config/hooks/send-gate.js, CARD_READY: its first capture is held against the go's 12
+      const CARD_READY = /^card ready: Package ([0-9a-f]{12})\./
+      for (const said of [READY, OFF_SCREEN]) expect(CARD_READY.exec(said)?.[1]).toBe(LABEL)
+      expect(READY).toBe(`card ready: Package ${LABEL}. The whole package is on screen in the side pane and its copy check passed. Do not print the page. Print one line saying it is in the side pane, ending "Package ${LABEL}.", then wait for the person.`)
+      expect(OFF_SCREEN.endsWith(`ending "Package ${LABEL}.", then wait for the person.`)).toBe(true)
+    })
+
+    describe('(0.7.34) a run no surface will ever attach to stays not ready, in the words it always had', () => {
+      const NO_SURFACE = notReady('the side pane is not open on a surface that can draw it')
+      /** The card in the state, then the session seen as this: the card itself is no part of the question. */
+      test('`claude -p`: not a person\'s session, by what session.start found', async ($, on) => {
+        const w = world(on, own)
+        let entry = 'claude-desktop'
+        on('env.get', (_$, e, next) => (e.name === 'CLAUDE_CODE_ENTRYPOINT' ? { value: entry } : next(e)))
+        const u = await shown($)
+        await u.unmount()
+        w.setPlaced(false)
+        entry = 'sdk-cli'
+        await $.session.start({ cwd: '/work', surface: null, isInteractive: false })
+        expect(await tool($, `card ${PKG}`)).toBe(NO_SURFACE)
+      })
+
+      test('MM_UNATTENDED=1', async ($, on) => {
+        world(on, { ...own, env: { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', HOME: '/home/someone', MM_UNATTENDED: '1' } })
+        const u = await shown($)
+        expect(await tool($, `card ${PKG}`)).toBe(NO_SURFACE)
+        await u.unmount()
+      })
+
+      test('a first prompt that begins SINGLE-SESSION', async ($, on) => {
+        world(on, own)
+        await $.prompt.submit({ text: 'SINGLE-SESSION reconcile one client', wait: false, origin: { kind: 'sdk' } })
+        const u = await shown($)
+        expect(await tool($, `card ${PKG}`)).toBe(NO_SURFACE)
+        await u.unmount()
+      })
+
+      test('nothing of it opens the box', async ($, on) => {
+        world(on, { ...own, env: { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', HOME: '/home/someone', MM_UNATTENDED: '1' } })
+        const u = await shown($)
+        await tool($, `card ${PKG}`)
+        expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn'))).toBe(false)
+        await u.unmount()
+      })
+
+      test('a person at a terminal REPL is not one of these: the pane waits for a wider window, and the card is ready', async ($, on) => {
+        const w = world(on, own)
+        let entry = 'claude-desktop'
+        on('env.get', (_$, e, next) => (e.name === 'CLAUDE_CODE_ENTRYPOINT' ? { value: entry } : next(e)))
+        const u = await shown($)
+        await u.unmount()
+        w.setPlaced(false)
+        entry = 'cli'
+        await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+        expect(await tool($, `card ${PKG}`)).toBe(OFF_SCREEN)
+      })
+    })
+
+    describe('(0.7.34) the box waits for this thread: `mm card` answering ready, or the page printed', () => {
+      const CHECK_WORDS = `Check package ${LABEL}`
+      const WAITING = 'This thread is still checking this package. The signature box opens when it finishes.'
+      const hasBox = async (u: Drawing) => (await buttons(u)).some(([k]) => k === `mm-card-sign-btn:${LABEL}`)
+      /** The thread prints the package's page, as a client thread's answer does: a response row of the main loop. */
+      const prints = ($: Engine, text: string, agentId?: string) =>
+        $.session.append({ message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text }] }, door: 'response', origin: { kind: 'model', model: 'claude-opus-5-5' }, uuid: `row-${text.length}`, ...(agentId ? { agentId } : {}) } as never)
+      /** The same package at its next version: a new hash, and the tag through every word that names it. */
+      const NEXT = 'abcabcabcabc'
+      const pair = CARD_PAIRS["rob's mail, plan not approved"] as { page: string; tree: { package_sha256: string; label: string } }
+      const approved = CARD_PAIRS["rob's mail, plan approved"] as { page: string; tree: { package_sha256: string; label: string } }
+      const pick = (p: { page: string; tree: { package_sha256: string } }) => ({ ok: true, markdown: p.page, package_sha256: p.tree.package_sha256 })
+
+      for (const surface of SURFACES) {
+        test(`the card stands in full with the words and the button in place of the box, and \`mm card\` opens it (${surface})`, async ($, on) => {
+          world(on, own)
+          const u = await shown($, surface)
+          const text = (await lines(u)).join('\n')
+          expect(text, surface).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
+          expect(text, surface).toContain(WAITING)
+          expect(await hasBox(u), surface).toBe(false)
+          expect((await buttons(u)).find(([k]) => k === `mm-card-check:${LABEL}`)?.[1], surface).toBe('Check this package')
+          expect(await tool($, `card ${PKG}`), surface).toBe(READY)
+          expect(await hasBox(u), surface).toBe(true)
+          expect((await lines(u)).join('\n'), surface).not.toContain(WAITING)
+          expect((await buttons(u)).some(([k]) => k === `mm-card-check:${LABEL}`), surface).toBe(false)
+          await u.unmount()
+        })
+      }
+
+      test('the button puts exactly the words in the prompt box, and sends nothing', async ($, on) => {
+        const w = world(on, own)
+        const u = await shown($)
+        await u.press({ key: `mm-card-check:${LABEL}` })
+        expect(w.fills).toEqual([CHECK_WORDS])
+        expect(w.prompts).toEqual([])
+        expect(sends(w)).toEqual([])
+        expect(await hasBox(u)).toBe(false)
+        await u.unmount()
+      })
+
+      test('a draft of the person\'s is never written over', async ($, on) => {
+        const w = world(on, { ...own, box: 'a note I was writing' })
+        const u = await shown($)
+        await u.press({ key: `mm-card-check:${LABEL}` })
+        expect(w.fills).toEqual([])
+        await u.unmount()
+      })
+
+      test('the thread prints the page: its closing line opens the box, whether or not `mm card` was asked', async ($, on) => {
+        const w = world(on, own)
+        const u = await shown($)
+        expect(await hasBox(u)).toBe(false)
+        await prints($, `Above the page, my read.\n\n${PAGE}`)
+        expect(await hasBox(u)).toBe(true)
+        expect(w.fills).toEqual([])
+        await u.unmount()
+      })
+
+      test('a tag named in passing, a sub-agent\'s page, and another package\'s page do not', async ($, on) => {
+        world(on, own)
+        const u = await shown($)
+        await prints($, `The old tag was Package \`${LABEL}\`.`)
+        expect(await hasBox(u)).toBe(false)
+        await prints($, PAGE, 'agent_1')
+        expect(await hasBox(u)).toBe(false)
+        await prints($, 'One go sends 1 item. Package `0123456789ab`.')
+        expect(await hasBox(u)).toBe(false)
+        await u.unmount()
+      })
+
+      test('a sub-agent\'s `mm card` gets the same answer and opens nothing: its thread is still at work, and the gate reads the main chain alone', async ($, on) => {
+        world(on, own)
+        const u = await shown($)
+        const said = String(((await $.tool.call({ tool: 'mcp__mm-bridge__mm', args: `card ${PKG}`, agentId: 'agent_1' } as never)) as { result?: unknown }).result ?? '')
+        expect(said).toBe(READY)
+        expect(await hasBox(u)).toBe(false)
+        await u.unmount()
+      })
+
+      test('an answer that is not ready opens nothing: another package, a tag, a page with a line the card lacks', async ($, on) => {
+        const w = world(on, own)
+        const u = await shown($)
+        expect(await tool($, 'card 99999999-9999-4999-8999-999999999999')).toBe(notReady('the side pane is not showing this package'))
+        expect(await tool($, 'card 3f1c9a7e')).toBe(WHOLE_ID)
+        expect(await hasBox(u)).toBe(false)
+        w.setPickup({ ...PICKUP, markdown: `${PAGE}\n\nA line only OW prints about the package.` })
+        expect(await tool($, `card ${PKG}`)).toContain('card not ready: the page holds a line')
+        expect(await hasBox(u)).toBe(false)
+        await u.unmount()
+      })
+
+      test('answered off screen, the box is open when the person arrives', async ($, on) => {
+        const w = world(on, own)
+        const first = await shown($)
+        await first.unmount()
+        w.setPlaced(false)
+        expect(await tool($, `card ${PKG}`)).toBe(OFF_SCREEN)
+        w.setPlaced(true)
+        const u = await mount($, 'desktop')
+        expect(await hasBox(u)).toBe(true)
+        await u.unmount()
+      })
+
+      test('a new package_sha256 closes the box until the thread answers for it', async ($, on) => {
+        const w = world(on, own)
+        const u = await shown($)
+        expect(await tool($, `card ${PKG}`)).toBe(READY)
+        expect(await hasBox(u)).toBe(true)
+        // a revision: a new hash on OW's page, and the renderer draws it
+        w.setPickup({ markdown: PAGE.replaceAll(LABEL, NEXT), package_sha256: SMS_TREE.package_sha256.replace(LABEL, NEXT) })
+        w.setTree(JSON.parse(JSON.stringify(SMS_TREE).replaceAll(LABEL, NEXT)))
+        await u.press({ key: `drafts:${ACME}` })
+        for (let i = 0; i < 200 && !(await lines(u)).join('\n').includes(WAITING); i++) await new Promise(r => setTimeout(r, 2))
+        expect((await lines(u)).join('\n')).toContain(WAITING)
+        expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn'))).toBe(false)
+        expect((await buttons(u)).find(([k]) => k === `mm-card-check:${NEXT}`)?.[1]).toBe('Check this package')
+        expect(await tool($, `card ${PKG}`)).toContain(`card ready: Package ${NEXT}.`)
+        expect((await buttons(u)).some(([k]) => k === `mm-card-sign-btn:${NEXT}`)).toBe(true)
+        await u.unmount()
+      })
+
+      test('a page that changes with the hash the same keeps the box open', async ($, on) => {
+        const w = world(on, { ...own, pickup: pick(pair) })
+        w.setTree(pair.tree)
+        const u = await shown($)
+        expect(await tool($, `card ${PKG}`)).toContain('card ready:')
+        const box = async () => (await buttons(u)).some(([k]) => k === `mm-card-sign-btn:${pair.tree.label}`)
+        expect(await box()).toBe(true)
+        expect(approved.tree.package_sha256).toBe(pair.tree.package_sha256)
+        w.setPickup(pick(approved))
+        w.setTree(approved.tree)
+        await u.press({ key: `drafts:${ACME}` })
+        for (let i = 0; i < 200 && !(await lines(u)).join('\n').includes('Cc support@letaidothehardwork.com'); i++) await new Promise(r => setTimeout(r, 2))
+        expect((await lines(u)).join('\n')).toContain('Cc support@letaidothehardwork.com')
+        expect(await box()).toBe(true)
+        expect((await lines(u)).join('\n')).not.toContain(WAITING)
+        await u.unmount()
+      })
+    })
+
+    test('(0.7.34) a tag answers with what to do, and does not tell the thread to print the page', async ($, on) => {
+      world(on, own)
+      const u = await shown($)
+      expect(await tool($, 'card 3f1c9a7e')).toBe(WHOLE_ID)
+      expect(await mm($, 'card 3f1c9a7e')).toBe(WHOLE_ID)
+      expect(WHOLE_ID).not.toContain('Print the whole page')
       await u.unmount()
     })
 
