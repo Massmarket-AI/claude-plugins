@@ -62,9 +62,9 @@ function buttons(node: unknown, out = new Map<string, () => void>()): Map<string
 
 const ELS = { Box: 'Box', Text: 'Text', Button: 'Button', Link: 'Link', Svg: 'Svg' } as never
 
-/** (0.7.35) A drawing with this thread's check of the card on record: the wait for it has tests of its own, at the end of this file. */
+/** (0.7.36) A drawing with this thread's check of the card on record: the wait for it has tests of its own, at the end of this file. */
 const drawChecked = (d: Omit<CardDraw, 'checked' | 'busy' | 'checkMiss' | 'onCheck'>) => drawCard(ELS, { checked: { [d.card.tree?.label ?? '']: 0 }, busy: false, checkMiss: null, onCheck: () => undefined, ...d })
-/** (0.7.35) Every package these tests draw: a thread starts with its check on record, and a test of the wait takes it away. */
+/** (0.7.36) Every package these tests draw: a thread starts with its check on record, and a test of the wait takes it away. */
 const ALL_CHECKED = Object.fromEntries([LABEL, ...Object.values(CARD_PAIRS).map(p => (p.tree as { label: string }).label)].map(label => [label, 0]))
 
 /** A thread's `$` for the card alone: its state, a clock whose timers run when told, and a prompt box. */
@@ -76,7 +76,7 @@ function thread(box = '') {
   const files = new Map<string, string>()
   const ran: string[][] = []
   const notes: string[] = []
-  /** (0.7.35) What a press appended to the transcript, and the order of the record, the note and the words. */
+  /** (0.7.36) What a press appended to the transcript, and the order of the record, the note and the words. */
   const appends: unknown[] = []
   const order: string[] = []
   /** What the page read gives a press, what the renderer draws on this computer, and how an append goes. */
@@ -956,7 +956,7 @@ describe('0.7.26 in the bridge: the pane draws the card above the page as the cl
   })
 })
 
-describe('0.7.35 the box waits for the thread: it opens once this thread has finished checking this exact version', () => {
+describe('0.7.36 the box waits for the thread: it opens once this thread has finished checking this exact version', () => {
   const draw = (card: MmCard, checked: Record<string, number>, over: Partial<CardDraw> = {}) =>
     drawCard(ELS, { card, marks: { signed: {} }, checked, busy: false, checkMiss: null, now: 1_000_000, onSign: () => undefined, onCheck: () => undefined, onAsk: () => undefined, onPage: () => undefined, ...over })
   const SIGN = '✍  Click to sign and send'

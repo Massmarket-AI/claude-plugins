@@ -188,7 +188,7 @@ function world(on: On, opts: WorldOptions = {}) {
   let theFeed = opts.feed ?? feed()
   /** (0.7.26) What the reply-package pickup read answers. */
   let pickupNow = opts.pickup
-  /** (0.7.35) A pickup read that waits, so that a test can move on while a call is in flight. */
+  /** (0.7.36) A pickup read that waits, so that a test can move on while a call is in flight. */
   let pickupGate: { gate: Promise<void>; arrived: () => void } | null = null
   let chipsMinted = 0
   let sessionsStarted = 0
@@ -393,7 +393,7 @@ function world(on: On, opts: WorldOptions = {}) {
   const renders: string[] = []
   /** (0.7.33) What the renderer draws now. */
   let treeNow = JSON.stringify(SMS_TREE)
-  /** (0.7.35) How many of those free seconds went by. */
+  /** (0.7.36) How many of those free seconds went by. */
   let freeSeconds = 0
   on('process.run', async (_$, e) => {
     // (0.7.33) `mm card`'s free second: short here, and long enough for a mounted pane to draw
@@ -433,7 +433,7 @@ function world(on: On, opts: WorldOptions = {}) {
   on('session.attach', (_$, e) => ({ clientId: e.clientId }))
   on('turn.complete', () => ({ text: '' }))
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
-  /** (0.7.35) The session's sub-agents, as `$.agent.list()` answers them, or a list that cannot be read. */
+  /** (0.7.36) The session's sub-agents, as `$.agent.list()` answers them, or a list that cannot be read. */
   let agentsNow: Array<{ id: string; status: string }> | 'throws' = []
   on('agent.list', () => {
     if (agentsNow === 'throws') throw new Error('the list could not be read')
@@ -518,11 +518,11 @@ function world(on: On, opts: WorldOptions = {}) {
     setPickup: (answer: Record<string, unknown>) => {
       pickupNow = answer
     },
-    /** (0.7.35) The sub-agents `$.agent.list()` answers from now on. */
+    /** (0.7.36) The sub-agents `$.agent.list()` answers from now on. */
     setAgents: (list: typeof agentsNow) => {
       agentsNow = list
     },
-    /** (0.7.35) The next pickup read waits until this returns' `release` is called, and `reached` says it has got there. */
+    /** (0.7.36) The next pickup read waits until this returns' `release` is called, and `reached` says it has got there. */
     holdPickup: () => {
       let release = () => {}
       const gate = new Promise<void>(r => (release = r))
@@ -12942,10 +12942,10 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
   const PICKUP = { markdown: PAGE, package_sha256: SMS_TREE.package_sha256 }
   const SURFACES = ['desktop', 'terminal'] as const
   const mount = ($: Engine, surface: (typeof SURFACES)[number]) => $.ui.mount({ plugin: 'mm-bridge', surface, component: 'Pane', requestId: 'mm-queue', props: PANE })
-  /** (0.7.35) The press's note in the transcript, word for word, with the first 12 of the record's `page_sha256`. */
+  /** (0.7.36) The press's note in the transcript, word for word, with the first 12 of the record's `page_sha256`. */
   const SIGNED = (page12: string) => `[Massmarket bridge, no reply needed] Card signed in the side pane: Package ${LABEL}, page ${page12}. Nothing has been sent.`
   const SIGNED_START = `Card signed in the side pane: Package ${LABEL}, page `
-  /** (0.7.35) The turn under way ends, as the engine raises it: for the main conversation, unless a subagent's is named. */
+  /** (0.7.36) The turn under way ends, as the engine raises it: for the main conversation, unless a subagent's is named. */
   const endTurn = ($: Engine, over: Record<string, unknown> = {}) => $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer', ...over } as never)
   test('Drafts on another client\'s row: the card is drawn from the renderer on both surfaces, to read, with no signature box and the page a press away', async ($, on) => {
     const w = world(on, { feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.threads': PAIRS }, renderer: 'tree', pickup: PICKUP })
@@ -12986,7 +12986,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await mm($, '')
       const u = await mount($, surface)
       await u.press({ key: `drafts:${ACME}` })
-      // (0.7.35) until the thread answers for this version the card stands without the box
+      // (0.7.36) until the thread answers for this version the card stands without the box
       expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn')), surface).toBe(false)
       expect(await tool($, `card ${PKG}`), surface).toContain(`card ready: Package ${LABEL}.`)
       expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn')), surface).toBe(false)
@@ -13002,7 +13002,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       // the name and the envelope first; the words only once it has flown, and never sent
       expect(w.fills, surface).toEqual([])
       if (surface === 'desktop') expect(await u.find({ type: 'Svg' }), surface).toBeDefined()
-      // (0.7.35) and its mark in the transcript, once, before the words
+      // (0.7.36) and its mark in the transcript, once, before the words
       for (let i = 0; i < 200 && !w.appended.some(t => t.includes(SIGNED_START)); i++) await new Promise(r => setTimeout(r, 2))
       const signedNote = SIGNED(String(record.page_sha256).slice(0, 12))
       expect(w.appended.filter(t => t.includes(SIGNED_START)).map(t => JSON.parse(t)), surface).toEqual([{ type: 'user', role: 'user', isMeta: true, content: [{ type: 'text', text: signedNote }] }])
@@ -13017,7 +13017,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
 
   describe('0.7.33 `mm card <package id>`: whether the thread prints the page', () => {
     const READY = `card ready: Package ${LABEL}. The whole package is on screen in the side pane and its copy check passed. Do not print the page. Print one line saying it is in the side pane, ending "Package ${LABEL}.", then wait for the person.`
-    /** (0.7.35) Ready with the pane not on a screen. */
+    /** (0.7.36) Ready with the pane not on a screen. */
     const OFF_SCREEN = `card ready: Package ${LABEL}. The whole package is checked and waiting in the side pane, which draws it when this thread is open on a screen. Do not print the page. Print one line saying it is in the side pane and that they can ask here for the page if they can't see the pane, ending "Package ${LABEL}.", then wait for the person.`
     const WHOLE_ID = 'card not ready: give the whole package id, not the 8-character tag, and ask again.'
     const notReady = (why: string) => `card not ready: ${why}. Print the whole page.`
@@ -13160,7 +13160,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await u.unmount()
     })
 
-    test('(0.7.35) the pane behind another tab: ready, and it says the card is waiting rather than on screen', async ($, on) => {
+    test('(0.7.36) the pane behind another tab: ready, and it says the card is waiting rather than on screen', async ($, on) => {
       const w = world(on, own)
       const u = await shown($)
       expect(await tool($, `card ${PKG}`)).toBe(READY)
@@ -13171,7 +13171,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await u.unmount()
     })
 
-    test('(0.7.35) placed and shown, but the pane has not drawn this card: ready, and it says the card is waiting rather than on screen', async ($, on) => {
+    test('(0.7.36) placed and shown, but the pane has not drawn this card: ready, and it says the card is waiting rather than on screen', async ($, on) => {
       const w = world(on, own)
       const u = await shown($)
       await u.unmount()
@@ -13222,7 +13222,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await u.unmount().catch(() => undefined)
     })
 
-    test('(0.7.35) the pane not placed, as in a thread running in the background: ready, it says the card is waiting, and the pane is still opened', async ($, on) => {
+    test('(0.7.36) the pane not placed, as in a thread running in the background: ready, it says the card is waiting, and the pane is still opened', async ($, on) => {
       const w = world(on, own)
       await mm($, '')
       const u = await mount($, 'desktop')
@@ -13237,7 +13237,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       expect(sends(w)).toEqual([])
     })
 
-    test('(0.7.35) off screen, it waits no second for a pane that will not draw', async ($, on) => {
+    test('(0.7.36) off screen, it waits no second for a pane that will not draw', async ($, on) => {
       const w = world(on, own)
       const u = await shown($)
       await u.unmount()
@@ -13247,7 +13247,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       expect(w.freeSeconds()).toBe(before)
     })
 
-    test('(0.7.35) both forms start with the sentence the send gate parses, for this tag, and the on-screen words have not moved', () => {
+    test('(0.7.36) both forms start with the sentence the send gate parses, for this tag, and the on-screen words have not moved', () => {
       // global-config/hooks/send-gate.js, CARD_READY: its first capture is held against the go's 12
       const CARD_READY = /^card ready: Package ([0-9a-f]{12})\./
       for (const said of [READY, OFF_SCREEN]) expect(CARD_READY.exec(said)?.[1]).toBe(LABEL)
@@ -13255,7 +13255,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       expect(OFF_SCREEN.endsWith(`ending "Package ${LABEL}.", then wait for the person.`)).toBe(true)
     })
 
-    describe('(0.7.35) a run no surface will ever attach to stays not ready, in the words it always had', () => {
+    describe('(0.7.36) a run no surface will ever attach to stays not ready, in the words it always had', () => {
       const NO_SURFACE = notReady('the side pane is not open on a surface that can draw it')
       test('`claude -p`: not a person\'s session, by what session.start found', async ($, on) => {
         const w = world(on, own)
@@ -13307,7 +13307,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       })
     })
 
-    describe('(0.7.35) the box waits for this thread: the end of the turn that got `card ready`, or printed the page', () => {
+    describe('(0.7.36) the box waits for this thread: the end of the turn that got `card ready`, or printed the page', () => {
       const CHECK_WORDS = `Check package ${LABEL}`
       const WAITING = 'This thread is still checking this package. The signature box opens when it finishes.'
       const NOT_CHECKED = 'This thread has not checked this version of the package yet.'
@@ -13667,7 +13667,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       })
     })
 
-    test('(0.7.35) a tag answers with what to do, and does not tell the thread to print the page', async ($, on) => {
+    test('(0.7.36) a tag answers with what to do, and does not tell the thread to print the page', async ($, on) => {
       world(on, own)
       const u = await shown($)
       expect(await tool($, 'card 3f1c9a7e')).toBe(WHOLE_ID)

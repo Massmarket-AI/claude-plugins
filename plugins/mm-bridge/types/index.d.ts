@@ -376,7 +376,7 @@ export type MmCardMarks = {
 }
 
 /**
- * (0.7.35) Versions of a package by tag (the hash's first 12), and when. `cardPending`: this thread's turn got `card ready` for it, or
+ * (0.7.36) Versions of a package by tag (the hash's first 12), and when. `cardPending`: this thread's turn got `card ready` for it, or
  * printed its page, and has not ended. `cardChecked`: such a turn ended, so this thread has finished checking it. Keys of their own and
  * not fields of `MmCardMarks`: one dispatch reads the state at one moment and `mm card` runs for seconds, so a shared key would write a
  * press's marks back over what they became.
@@ -401,9 +401,9 @@ declare module 'claude-code' {
       cardMarks: MmCardMarks
       cardChecked: MmCardChecked
       cardPending: MmCardChecked
-      /** (0.7.35) This thread is working: a turn of the main conversation is running, or a background sub-agent outlived the last one. No box then. */
+      /** (0.7.36) This thread is working: a turn of the main conversation is running, or a background sub-agent outlived the last one. No box then. */
       cardBusy: boolean
-      /** (0.7.35) The tag whose Check button could not put its words in the prompt box, and why: the pane says what to type. Null with none. */
+      /** (0.7.36) The tag whose Check button could not put its words in the prompt box, and why: the pane says what to type. Null with none. */
       cardCheckMiss: { label: string; filled: 'draft' | 'none' } | null
     }
   }
