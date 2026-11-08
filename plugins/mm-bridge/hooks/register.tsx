@@ -204,7 +204,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.37'
+export const VERSION = '0.7.38'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -215,7 +215,7 @@ const BAND = { plugin: 'mm-bridge', key: 'band' } as const
 const FOLDS = { plugin: 'mm-bridge', key: 'folds' } as const
 /** (0.7.34) The pane's Team now, from the store (`drawTeam`). */
 const TEAMNOW = { plugin: 'mm-bridge', key: 'teamNow' } as const
-/** (0.7.37) The ready reply packages this thread's pane listed last (`revealNewPackages`). */
+/** (0.7.38) The ready reply packages this thread's pane listed last (`revealNewPackages`). */
 const SEEN_PACKAGES = { plugin: 'mm-bridge', key: 'seenPackages' } as const
 /** (New people) This thread's own presses on `New people`: the open picker, presses in flight, what OW refused. */
 const PEOPLE = { plugin: 'mm-bridge', key: 'people' } as const
@@ -3443,7 +3443,7 @@ async function storeLast($: EngineInterface, feed: Feed, last: Last): Promise<vo
 }
 
 /**
- * (0.7.37, Rob 2026-11-07: "if one arrives, the side panel should scroll up to the top to see it automatically") The viewer's
+ * (0.7.38, Rob 2026-11-07: "if one arrives, the side panel should scroll up to the top to see it automatically") The viewer's
  * ready reply packages this thread's pane lists now (`readyPackages`), kept per thread: one it did not list before
  * (`packageArrived`) scrolls the pane to its top, where the client part and Needs you now are. A pane that is not drawn, or a
  * surface that does not scroll it, says why (`deny`) or throws, and nothing else happens. (The test kit has no window to move:
@@ -9510,7 +9510,7 @@ export const register: Register = on => {
       )
     }
     const updated = hasList && queue ? queue.note : tracking?.at ? `Updated ${localClock(tracking.at)}` : ''
-    // (0.7.37, Rob 2026-11-07: "Any Reply package should appear above the team member tracking") Top to bottom: this thread's
+    // (0.7.38, Rob 2026-11-07: "Any Reply package should appear above the team member tracking") Top to bottom: this thread's
     // client part (its reply package), Needs you now and its rows, then Team now, then the rest.
     const drawn = (
       <Box flexDirection="column">
@@ -9539,7 +9539,7 @@ export const register: Register = on => {
         {hasList && queue?.warning ? <Text>{queue.warning}</Text> : null}
         {hasList && queue && needsOpen ? rowGroups(queue.rows).flatMap(group => group.rows.map(({ row, n, mark }) => drawRow(row, `${mark}${n}.`))) : null}
         {/* (0.7.34, Rob 2026-11-07: "a dropdown that reveals something that looks just like what we added to the bottom of the daily team photo")
-            (0.7.37, Rob 2026-11-07: "Any Reply package should appear above the team member tracking") under the client part and the list */}
+            (0.7.38, Rob 2026-11-07: "Any Reply package should appear above the team member tracking") under the client part and the list */}
         <Box key="mm-teamnow" flexDirection="column" marginTop={1}>
           <Button key="mm-teamnow-toggle" plain label={`${teamHeadingNow(teamNow?.team)}  ${teamOpen ? '▾' : '▸'}`} onPress={() => void togglePanel($, 'teamNow', teamOpen)} />
           {teamOpen && teamNow?.missing ? <Text dimColor>{TEAM_MISSING}</Text> : null}

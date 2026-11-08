@@ -869,7 +869,7 @@ describe('R3: the buttons on each row', () => {
       ])
       // one action a row: no second action button beside it
       expect(await buttons(ui)).toEqual([
-        // (0.7.34) the two parts that fold; (0.7.37) Team now under the list, so a reply package is above it
+        // (0.7.34) the two parts that fold; (0.7.38) Team now under the list, so a reply package is above it
         ['mm-needs-toggle', 'Needs you now (3)  ▾'],
         [`start:${CEDAR}`, 'Start thread'], [`drafts:${CEDAR}`, 'Drafts'],
         [`update:${ACME}`, 'Update thread'], [`drafts:${ACME}`, 'Drafts'],
@@ -14037,7 +14037,7 @@ describe('0.7.35 (measured 11-07: 73 of 97 pin records were threads of the profi
   })
 })
 
-describe('0.7.37 (Rob 2026-11-07: "Any Reply package should appear above the team member tracking. And if one arrives, the side panel should scroll up to the top to see it automatically")', () => {
+describe('0.7.38 (Rob 2026-11-07: "Any Reply package should appear above the team member tracking. And if one arrives, the side panel should scroll up to the top to see it automatically")', () => {
   const keysOf = async (ui: Parameters<typeof buttons>[0]) => (await buttons(ui)).map(b => b[0])
 
   test('in a client\'s thread: its reply package first, then Needs you now and its rows, then Team now', async ($, on) => {

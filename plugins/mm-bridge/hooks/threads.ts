@@ -1173,12 +1173,12 @@ export const START_ALL_WORDS = 'Start the missing client threads'
  */
 export const packageReady = (it: Pick<QueueItem, 'kind' | 'packageId' | 'theirs'>): boolean => (it.kind === 'ready' || it.kind === 'ok') && Boolean(it.packageId) && !it.theirs
 
-/** (0.7.37) The viewer's ready reply packages (`packageReady`) in a list, once each and sorted: what a thread's pane keeps between lists. */
+/** (0.7.38) The viewer's ready reply packages (`packageReady`) in a list, once each and sorted: what a thread's pane keeps between lists. */
 export const readyPackages = (items: readonly Pick<QueueItem, 'kind' | 'packageId' | 'theirs'>[]): string[] =>
   [...new Set(items.filter(packageReady).map(it => String(it.packageId)))].sort()
 
 /**
- * (0.7.37, Rob 2026-11-07: "if one arrives, the side panel should scroll up to the top to see it automatically") Whether a list
+ * (0.7.38, Rob 2026-11-07: "if one arrives, the side panel should scroll up to the top to see it automatically") Whether a list
  * brings a ready package the thread's last list did not have. Never on a thread's first list (`had` null): a thread that starts,
  * or the bridge reloading, does not jump.
  */
