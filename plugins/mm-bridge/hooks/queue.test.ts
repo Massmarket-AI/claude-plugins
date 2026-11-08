@@ -9,7 +9,7 @@ import {
   QUEUE_SHOWN_MAX, internalQueueThread, ownQueueRows, queueMarkdown, queueTotal, queuedOf,
   ETA_ASK_TEXT, INTERNAL_DISCORD, etaAsksOf, etaOnly, lateSentence, matesOf, queueHome, undatedCount, undatedOnly, whoseLate,
   ASSIGN_ASK_TEXT, ASSIGN_BY_BASIS, assignAsksOf, assignMarkdown, assignOnly, committedCount,
-  STILL_NEEDS_YOU, checkNow, ownActBy, pinTitle, pinsFor, watchMarkdown, watchOf,
+  STILL_NEEDS_YOU, checkNow, ownActBy, pinReason, pinTitle, pinsFor, watchMarkdown, watchOf,
   LATE_WITH_TEAM, TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine, teamLateSegment, teamLateWho,
   GO_THEIRS, GO_WHAT, clientWaiting, goFirstText, goMarkdown, goMine, goOf, goOnly, goSentence, mayStart, ownPins, stepWord,
   okLateOnly, ownBesides, teamLateOnly,
@@ -3311,6 +3311,8 @@ describe('(0.7.24, Rob 2026-11-04) follow-up steps nobody approved pin at once f
     expect(goFirstText(goOf(it) as NonNullable<ReturnType<typeof goOf>>)).toBe('first text')
     expect(titleFor(it, wed)).toBe('🟡 Dealerosity · follow-ups need your go · first text · no due date')
     expect(pinsFor(it, wed)).toBe(true)
+    // (0.7.37) the line under the thread's band has no time to count from either, and threw a RangeError on Infinity
+    expect(pinReason(it, wed)).toBe('Pinned for you, no due date: follow-ups need your go · first text.')
   })
 
   test('the words, and an item an older version stored (no `go`): read as none', async () => {
