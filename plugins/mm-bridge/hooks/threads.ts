@@ -1173,6 +1173,17 @@ export const START_ALL_WORDS = 'Start the missing client threads'
  */
 export const packageReady = (it: Pick<QueueItem, 'kind' | 'packageId' | 'theirs'>): boolean => (it.kind === 'ready' || it.kind === 'ok') && Boolean(it.packageId) && !it.theirs
 
+/** (0.7.38) The viewer's ready reply packages (`packageReady`) in a list, once each and sorted: what a thread's pane keeps between lists. */
+export const readyPackages = (items: readonly Pick<QueueItem, 'kind' | 'packageId' | 'theirs'>[]): string[] =>
+  [...new Set(items.filter(packageReady).map(it => String(it.packageId)))].sort()
+
+/**
+ * (0.7.38, Rob 2026-11-07: "if one arrives, the side panel should scroll up to the top to see it automatically") Whether a list
+ * brings a ready package the thread's last list did not have. Never on a thread's first list (`had` null): a thread that starts,
+ * or the bridge reloading, does not jump.
+ */
+export const packageArrived = (had: readonly string[] | null, ready: readonly string[]): boolean => had !== null && ready.some(id => !had.includes(id))
+
 /** (0.7.34) Whether a client's mail still waits for its package, up to `wait` after the newest message: no chip for its new thread yet. */
 export const awaitingPackage = (it: Pick<QueueItem, 'messages' | 'packageId' | 'newest'>, now: number, wait: number): boolean =>
   it.messages > 0 && !it.packageId && now - (Number(it.newest?.mail) || 0) < wait

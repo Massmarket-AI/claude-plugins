@@ -7,7 +7,7 @@ import { buildLists, cleanTitle, clockText, isNewerVersion } from './queue'
 import { NEXT_LABEL, NEXT_PAGE, NEXT_SHA, NEXT_TREE, SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
 import { CARD_PAIRS } from './card-pairs.test-helper'
 import { VERSION } from './register'
-import { REFRESH_FAILED, carryKickoff, freshParagraph, lookupOrder, pinReport, recommend } from './threads'
+import { REFRESH_FAILED, carryKickoff, freshParagraph, lookupOrder, packageArrived, pinReport, readyPackages, recommend } from './threads'
 import type { PinReport } from './threads'
 import { localClock } from './track'
 
@@ -869,11 +869,12 @@ describe('R3: the buttons on each row', () => {
       ])
       // one action a row: no second action button beside it
       expect(await buttons(ui)).toEqual([
-        // (0.7.34) over them the two parts that fold
-        ['mm-teamnow-toggle', 'Team now  ▸'], ['mm-needs-toggle', 'Needs you now (3)  ▾'],
+        // (0.7.34) the two parts that fold; (0.7.38) Team now under the list, so a reply package is above it
+        ['mm-needs-toggle', 'Needs you now (3)  ▾'],
         [`start:${CEDAR}`, 'Start thread'], [`drafts:${CEDAR}`, 'Drafts'],
         [`update:${ACME}`, 'Update thread'], [`drafts:${ACME}`, 'Drafts'],
         [`update:${BOLT}`, 'Update thread'], [`drafts:${BOLT}`, 'Drafts'],
+        ['mm-teamnow-toggle', 'Team now  ▸'],
       ])
       expect((await ui.findAll({ type: 'Button' })).filter(b => b.props.variant === 'primary').map(b => b.key)).toEqual([`start:${CEDAR}`, `update:${ACME}`, `update:${BOLT}`])
       await ui.unmount()
@@ -14033,5 +14034,43 @@ describe('0.7.35 (measured 11-07: 73 of 97 pin records were threads of the profi
     for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
     expect(w.calls.filter(c => c.tool === 'dismiss_task').map(c => c.args.task_id)).toEqual([chip?.taskId])
     expect(sessionCalls(w).length).toBe(1)
+  })
+})
+
+describe('0.7.38 (Rob 2026-11-07: "Any Reply package should appear above the team member tracking. And if one arrives, the side panel should scroll up to the top to see it automatically")', () => {
+  const keysOf = async (ui: Parameters<typeof buttons>[0]) => (await buttons(ui)).map(b => b[0])
+
+  test('in a client\'s thread: its reply package first, then Needs you now and its rows, then Team now', async ($, on) => {
+    const w = world(on, { store: { 'mm.links': { [ACME]: SELF } } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
+    const ui = await pane($)
+    expect((await lines(ui)).slice(0, 3)).toEqual(['This thread: Acme Roofing', CARD_NOT_DRAWN, 'Needs you now (3)'])
+    const keys = await keysOf(ui)
+    expect(keys.indexOf('mm-teamnow-toggle')).toBeGreaterThan(keys.indexOf(`drafts:${BOLT}`))
+    expect(keys.indexOf('mm-teamnow-toggle')).toBeGreaterThan(keys.indexOf('mm-needs-toggle'))
+    await ui.unmount()
+  })
+
+  test('a package that arrives is one the last list did not have; never on a thread\'s first list; a teammate\'s or one in prep is none', () => {
+    const ready = (packageId: string, over: Record<string, unknown> = {}) => ({ kind: 'ready' as const, packageId, theirs: undefined, ...over })
+    expect(readyPackages([ready('b'), ready('a'), ready('a'), { kind: 'ok', packageId: 'c', theirs: undefined }])).toEqual(['a', 'b', 'c'])
+    expect(readyPackages([ready('a', { theirs: true }), { kind: 'reply', packageId: 'd', theirs: undefined }, ready('')])).toEqual([])
+    expect(packageArrived(null, ['a'])).toBe(false)
+    expect(packageArrived([], ['a'])).toBe(true)
+    expect(packageArrived(['a'], ['a'])).toBe(false)
+    expect(packageArrived(['a', 'b'], ['a'])).toBe(false)
+    expect(packageArrived(['a'], ['a', 'b'])).toBe(true)
+  })
+
+  test('a sync whose list brings a package does not fail where the surface has no window to move', async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [] }) })
+    await tickOnce($, w)
+    const ui = await pane($)
+    w.setFeed(feed())
+    await mm($, '')
+    expect((await lines(ui))).toContain('Needs you now (3)')
+    await ui.unmount()
   })
 })
