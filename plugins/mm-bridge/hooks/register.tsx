@@ -1,6 +1,6 @@
 import type { Elements, EngineInterface, Register } from 'claude-code'
 
-import type { MmBand, MmFolds, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTeam, MmTrack, MmTrackLine, MmView } from '../types'
+import type { MmBand, MmFolds, MmTeamNow, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTeam, MmTrack, MmTrackLine, MmView } from '../types'
 
 import {
   INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients,
@@ -21,12 +21,12 @@ import {
   FRESH_THREAD_BYTES, draftsComing, freshParagraph, prepDue,
   buildHeading, buildMore, buildOf, buildShown,
   teamCount, teamHeading, teamOf, teamPane, teamPerson,
-  START_ALL_MAX, startAllKickoff, startAllLabel, startMissingLabel, AWAY_REASON, ownThreads, START_ALL_WORDS, startWords, startFillSaid, kickoffsAnswer,
+  START_ALL_MAX, startAllKickoff, START_MISSING, notStartedText, packageReady, awaitingPackage, rowPinWords, rowPinsOf, startMissingLabel, AWAY_REASON, ownThreads, START_ALL_WORDS, startWords, startFillSaid, kickoffsAnswer,
   ARCHIVED_REASON, KICKOFF_PENDING_MS,
   lookupOrder, pinReport,
-  awayBandText, awayButton, awayHandoverText, awayPromptLine, awaySorted, carryKickoff, switchPromptLine, transcriptPath,
+  awayHandoverText, awayPromptLine, awaySorted, carryKickoff, switchPromptLine, transcriptPath,
 } from './threads'
-import type { AppThread, AwayClient, Fold, Kickoff, LookupSeen, Pairs, PinReport, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
+import type { RowPin, AppThread, AwayClient, Fold, Kickoff, LookupSeen, Pairs, PinReport, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
 import {
   INTERNAL_NAME, INTERNAL_NOTE, NUDGE_AFTER, NUDGE_INTERNAL, NUDGE_NONE, NUDGE_TEXT, SKILL_KEY, afterPersonClose, clientName, displayName, kindOf, mergeCurrent, mergeTime, opensBySelf,
   parseClientTime, parseSkillMap, pressNote, secondLine, skillName, taskFrom, thisThread, titleForClaude, trackLabel, trackLines, trackStatus, weekIsDue,
@@ -77,7 +77,8 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 //    days, whose row says Start, gets the same update by itself, under the same guards: by itself, an old thread is
 //    updated, never replaced. (0.7.6) Its row says Update now, so it is any linked thread here. (0.5.24) A client
 //    with no linked thread got its Start card by itself, and a person's Start put that card up too; (0.5.25) no card
-//    at all: see below.
+//    at all: see below. (0.7.34, Rob 2026-11-07: "still should have started a chip for them"; "Once they had reply
+//    packages ready") Its card again, once a reply package is ready or it pins (`needsFor`); never a thread started.
 //    (0.5.23, the cause of the refusals of 10-19 and 10-20) Those starts were for clients whose thread was there all
 //    along: the person works in two Claude profiles on this computer, the app answers "not found" for a thread of the
 //    other profile, and the sync dropped the link. A link now ends only when its thread is archived or deleted: a
@@ -132,11 +133,14 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 //    (`mm.switchPins`), and a pin found on a brand-new kickoff thread is the bridge's: see "(0.7.16)" in `reconcile`.
 //    ⛔ (0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you, not when something has a timer left
 //    for a teammate to answer") A teammate's part of a client (drafts they hold, a package they decide, their ticket)
-//    pins only once the viewer should check on them (`pinsFor`: the PM PM_CHECK_AHEAD_MS or a missed start-by), named
-//    `🔴 <client> · check on <teammate> · …`. ⛔ (0.7.21, Rob 2026-11-05: "When things are overdue but not assigned to me, I
-//    don't think they should be pinned here") Never for the founder: his own items alone pin his threads, and his
-//    teammates' late tickets are listed under Team · late, by person, then client (0.7.18 to 0.7.20 pinned his thread
-//    to check on them, 2 business hours ahead; a pin of ours put there for that comes off on the next pass). And ("Our bridge should
+//    pinned only once the viewer should check on them, named `🔴 <client> · check on <teammate> · …`. ⛔ (0.7.21, Rob
+//    2026-11-05: "When things are overdue but not assigned to me, I don't think they should be pinned here") Never for
+//    the founder: his own items alone pin his threads, and his teammates' late tickets are listed under Team · late, by
+//    person, then client (0.7.18 to 0.7.20 pinned his thread to check on them, 2 business hours ahead; a pin of ours put
+//    there for that comes off on the next pass). ⛔ (0.7.34, Rob 2026-11-07: "I know we just made it so only H9 sees every
+//    single task pinned, but I still think that's the wrong architecture") Nor for the PM, from 0.7.18 to 0.7.33 pinned
+//    for every teammate's: anyone's own items alone pin their threads, and the pane's Team now shows everyone the rest
+//    (`team.ts`). A pin of ours put there for that comes off on the next pass. And ("Our bridge should
 //    repin it if there's still something needed") a pin the person takes off while the client still pins is put back on
 //    the next pass, named ` · still needs you` (`Pin.again`); one taken off a thread with nothing needed stays off.
 //    (0.5.19, Rob 10-20) One exception, only on a computer where the person typed /mm rc on: Remote Control
@@ -200,7 +204,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.32'
+export const VERSION = '0.7.39'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -209,6 +213,8 @@ const QUEUE = { plugin: 'mm-bridge', key: 'queue' } as const
 const NOTICE = { plugin: 'mm-bridge', key: 'notice' } as const
 const BAND = { plugin: 'mm-bridge', key: 'band' } as const
 const FOLDS = { plugin: 'mm-bridge', key: 'folds' } as const
+/** (0.7.34) The pane's Team now, from the store (`drawTeam`). */
+const TEAMNOW = { plugin: 'mm-bridge', key: 'teamNow' } as const
 /** (New people) This thread's own presses on `New people`: the open picker, presses in flight, what OW refused. */
 const PEOPLE = { plugin: 'mm-bridge', key: 'people' } as const
 /** (0.6.0) This thread's Tracking part of the pane: its current project, the pane's title, the lines. */
@@ -237,7 +243,7 @@ const LEASE_RENEW_MS = 30_000
 const MAX_WRITES = 24
 /** (0.7.28) The most refused pins one sync record keeps. */
 const PIN_REFUSED_MAX = 10
-/** (0.7.29) How long a thread the app refused a pin or an unpin for waits before it is asked again (`mm.pinwait`). */
+/** (0.7.29) How long a thread the app refused a pin or an unpin for, (0.7.33) or a new name for, waits before it is asked again (`mm.pinwait`, `mm.namewait`). */
 const PIN_WAIT_MS = 6 * 3_600_000
 const DAY_MS = 24 * 3_600_000
 /** A session's own pair (Claude Code session id → app thread) is kept this long after it last ran. */
@@ -302,6 +308,14 @@ const AUTO_CHIPS_MAX = 5
 const CHIP_GEN = 4
 /** (0.5.4, C3) A thread whose tick ran no longer ago than this is running: it can hold a chip. */
 const ALIVE_MS = 5 * 60_000
+/** (0.7.34) How often Team now is read while its dropdown is open on this computer, and while it is closed. */
+const TEAM_OPEN_MS = 60_000
+const TEAM_CLOSED_MS = 5 * 60_000
+const TEAM_SLACK_MS = 10_000
+/** (0.7.34) Team now on a pane whose OW has no such route yet. */
+const TEAM_MISSING = 'Team now is not available yet.'
+/** (0.7.34) How long a client's mail with no package holds back the chip for a client with no thread: then it comes without one. */
+const CHIP_NO_DRAFTS_MS = 2 * 60 * 60_000
 /** (0.5.4, C3) A no-thread client's chip moves to the thread the person works in once they have worked elsewhere this long. */
 const HANDOVER_MS = 10 * 60_000
 /** (0.5.7) How long a session goes by its last look at which session tools the app gives it (`sessionTools`). */
@@ -494,6 +508,8 @@ type Mcp = { content?: Array<{ type: string; text?: string }>; isError?: boolean
 type Pin = { projectId: string; client: string; byUs: boolean; internal?: true; again?: true }
 /** (0.7.28) One `set_pinned` the app refused: which thread, whose, which way, and in its own words. */
 type PinRefused = { thread: string; client?: string; pinned: boolean; why: string }
+/** (0.7.33) One `set_session_title` the app refused: which thread, whose, and in its own words. */
+type NameRefused = { thread: string; client?: string; why: string }
 /**
  * (0.7.29) A thread the app refused a pin or an unpin for, as anything but a scheduled task's run (`mm.pinwait`): not asked
  * again before `until`. `why` outlives `until`, so the same refusal is reported once however many times it is retried.
@@ -504,6 +520,8 @@ const SCHEDULED_RUN = 'is a scheduled task run'
 type Last = {
   at: number
   member: string
+  /** (0.7.34) What the pin report said of each client that should be pinned, for the pane's marks. */
+  rowPins?: Record<string, RowPin>
   /** The clients that need the person now: what pins, and what the header and the band count. */
   items: QueueItem[]
   /** Clients whose reply drafts a teammate holds: listed, never pinned, never counted. ((0.7.12) No `older` any more: a record an older version stored with one is read without it.) */
@@ -519,6 +537,8 @@ type Last = {
   error?: string
   /** (0.7.28) What the app refused this pass when asked to pin or unpin a thread: the pass went on past each one. Absent: nothing. */
   pinRefused?: PinRefused[]
+  /** (0.7.33) What the app refused this pass when asked to name a thread: the pass went on past each one. Absent: nothing. */
+  nameRefused?: NameRefused[]
   /** (New people) For the founder and a PM: who wrote to us with no project matched, newest first, worded at `at`. Absent: none. */
   people?: MmPerson[]
   /** (New people) What Route to project offers: kept only while somebody is under `New people`. */
@@ -604,7 +624,7 @@ const replacesThread = (c: Chip, sid: string): boolean => c.need !== 'here' && (
  * (0.5.4, C3) What each running thread last said of itself: when its tick last ran, and when the person last wrote
  * in it (their own prompt). The thread the person is working in now holds a no-thread client's chip.
  */
-type Seen = Record<string, { tick: number; human?: number }>
+type Seen = Record<string, { tick: number; human?: number; home?: false }>
 type Verb = RowButton
 /** A link the person made or used: which thread, and when. */
 type Acted = Record<string, { sid: string; at: number }>
@@ -1164,7 +1184,7 @@ function feedProjects(feed: Feed): string[] {
   for (const d of feed.drafts ?? []) add(d.project_id)
   // (fix round 1, F5) `start_now` too
   for (const k of [feed.tickets?.overdue, feed.tickets?.due_today, feed.tickets?.due_soon, feed.tickets?.start_now]) for (const t of k ?? []) add(t.project_id)
-  // (0.7.18, A) and the founder's undated client tickets (`tickets.undated`): on 11-03 `/mm link <id>` answered "No client
+  // (0.7.18, A) and the viewer's undated client tickets (`tickets.undated`): on 11-03 `/mm link <id>` answered "No client
   // named ... is in your feed" for Black-Peak and Ground Crew Systems, listed by those alone, because the ids were looked up
   // here while the lists (`buildLists`) and the names (`feedClients`) read `tickets.undated` since 0.7.4
   for (const t of feed.tickets?.undated ?? []) add(t?.project_id)
@@ -1675,7 +1695,12 @@ function recordReader(
       const own = await ownDir()
       if (own === undefined || files.some(f => f.dir === own)) return undefined
       const said = await read(all, sid)
-      if (!said || said.dir === own) return undefined
+      // ⛔ (0.7.35, measured on Rob's computer 2026-11-07: 73 of 97 pin records were threads of the profile he left on 11-05, so
+      // they spent the sync's files before the links were reached and NextProjectX, due Monday, read neither away nor missing)
+      // The listing has already said it has no record here. A file only adds whether it is archived there, and either way the
+      // client has no thread in this profile.
+      if (!said) return budget.left <= 0 ? 'away' : undefined
+      if (said.dir === own) return undefined
       return said.archived ? 'archived' : 'away'
     },
     own: ownDir,
@@ -2768,9 +2793,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       stayedOff.add(sid)
     }
   }
-  // (0.7.18) a client whose drafts or tickets a teammate has pins once the PM should check on them (`pinsFor`: late, or
-  // within PM_CHECK_AHEAD_MS); named and never pinned until then, as before. ⛔ (0.7.21) For the founder, never: such a
-  // client's thread is named and our pin comes off it (0.7.18 to 0.7.20 pinned it to check on the teammate)
+  // (0.7.18) a client whose drafts or tickets a teammate has is named and never pinned. ⛔ (0.7.21) For the founder, and
+  // (0.7.34) for the PM: such a client's thread is named and our pin comes off it (0.7.18 to 0.7.33 pinned it for them)
   for (const it of quiet) {
     const sid = links[it.projectId]
     if (!sid || !live.has(sid) || named.has(sid)) continue
@@ -2785,14 +2809,13 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // thread of every ACTIVE client whatever its time, so threads named only `🟡 <client> · task`, whose items were undated
   // tickets, were pinned with no clock. A pin needs a clock again: an undated client is never pinned, active or not, and
   // the pins 0.7.11 put on such threads come off here (they are ours). The internal queue was never pinned that way.
-  // (0.7.27, Rob 2026-11-05, over that: "Shouldn't it be pinned?") An undated ticket with a known last activity inside the
-  // window pins for its owner as `needs a due date`, and a client's own pace row pins as its status says (`ownPins`); an
-  // undated item with nothing to measure it by still never pins.
+  // (0.7.27) A client's own pace row pins as its status says (`ownPins`). ⛔ (0.7.32, Rob 2026-11-06, over 0.7.27's "Shouldn't
+  // it be pinned?": "a ticket with no due date never pins and never asks for a date, for anyone") An undated ticket never
+  // does, and a pin 0.7.27 to 0.7.31 put on one comes off here (it is ours).
   // ⛔ (0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you, not when something has a timer left for a
   // teammate to answer") Only what needs the person pins by R1's 24 business hours (`ownActBy`): a reply whose drafts a
-  // teammate holds, a package a teammate decides on and a teammate's ticket pin only once the PM should check on them
-  // (`checkNow`), and the thread is then named for who to check on (`pinTitle`). ⛔ (0.7.21) For the founder they never pin:
-  // a thread of his that 0.7.18 to 0.7.20 pinned only for that is named for what is his and our pin comes off (`unpin: 'ours'`).
+  // teammate holds, a package a teammate decides on and a teammate's ticket never pin. ⛔ (0.7.21, 0.7.34) A thread 0.7.18 to
+  // 0.7.33 pinned only for that (the founder's, then the PM's) is named for what is its own and our pin comes off (`unpin: 'ours'`).
   for (const it of items) {
     const sid = links[it.projectId]
     if (!sid || !live.has(sid) || want.has(sid) || named.has(sid)) continue
@@ -2874,8 +2897,57 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       return false
     }
   }
+  /** (0.7.33) What the app refused this pass when asked to name a thread: on the sync record, and in /mm status. */
+  const nameRefused: NameRefused[] = []
+  /** (0.7.33) The refusals on record. */
+  const nameWaits = await storeGet<Record<string, PinWait>>($, 'mm.namewait', {})
+  /**
+   * ⛔ (0.7.33) One `set_session_title`, for every rename of this pass, in the shape of `setPin`: false when the app refused
+   * it, and ONE REFUSAL NEVER STOPS THE PASS (a typed /mm said "did not finish" and the list stood still on it, as for a pin
+   * in 0.7.28). Each caller keeps its records, for a later sync to finish. A refusal in the words the app uses for a scheduled
+   * task's run lets that run go. Any other waits PIN_WAIT_MS for that thread (`mm.namewait`), and is reported once per thread
+   * and reason: a line in bridge-notices.log, and `nameRefused` in the heartbeat file.
+   */
+  const setName = async (sid: string, title: string): Promise<boolean> => {
+    if (nameRefused.some(r => r.thread === sid)) return false
+    const client = pins[sid]?.client
+    const w = nameWaits[sid]
+    if (w !== undefined && now < w.until) {
+      nameRefused.push({ thread: sid, ...(client ? { client } : {}), why: w.why })
+      return false
+    }
+    try {
+      await mcpJson($, 'ccd_session_mgmt', 'set_session_title', { session_id: sid, title })
+      if (nameWaits[sid]) {
+        delete nameWaits[sid]
+        await patchStore<Record<string, PinWait>>($, 'mm.namewait', {}, fresh => {
+          delete fresh[sid]
+        }).catch(() => {})
+      }
+      return true
+    } catch (err) {
+      const why = errorText(err)
+      nameRefused.push({ thread: sid, ...(client ? { client } : {}), why })
+      if (why.includes(SCHEDULED_RUN)) {
+        letGoRun(sid)
+        want.delete(sid)
+        named.delete(sid)
+        return false
+      }
+      const known = nameWaits[sid]?.why === why
+      const wait: PinWait = { until: now + PIN_WAIT_MS, why }
+      nameWaits[sid] = wait
+      await patchStore<Record<string, PinWait>>($, 'mm.namewait', {}, fresh => {
+        fresh[sid] = wait
+        capped(fresh)
+      }).catch(() => {})
+      if (!known) await logAuto($, `thread ${sid}: the app refused to rename it (${why}); not asked again for 6 hours`)
+      return false
+    }
+  }
   let writes = 0
-  const rename = async (s: AppThread, title: string): Promise<void> => {
+  /** False when the app refused the name (`setName`). ⛔ A refused write of the name to give back still throws: nothing was asked of the app. */
+  const rename = async (s: AppThread, title: string): Promise<boolean> => {
     // The thread's own name is kept from before the first time we rename it, so /mm unlink can give it back.
     // ⛔ Stored BEFORE the app is asked to rename (review of 79cbc596, F2): a pass that fails after the rename
     // still leaves the name to give back. (A name another session stored first for the thread is kept.)
@@ -2889,9 +2961,10 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       titles[sid] = own
       was.titles[sid] = own
     }
-    await mcpJson($, 'ccd_session_mgmt', 'set_session_title', { session_id: sid, title })
+    if (!(await setName(sid, title))) return false
     s.title = title
     writes++
+    return true
   }
   /**
    * A pin record stored at once, BEFORE the app is asked to rename or pin the thread it is about (F2): a
@@ -2934,7 +3007,11 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     }
     const own = titles[sid]
     if (s && own !== undefined && s.title !== own) {
-      await mcpJson($, 'ccd_session_mgmt', 'set_session_title', { session_id: sid, title: own })
+      // (0.7.33) refused: its records stay, and it is on the list to give back at a later sync
+      if (!(await setName(sid, own))) {
+        if (live.has(sid) && !waiting.includes(sid)) waiting.push(sid)
+        continue
+      }
       s.title = own
       writes++
     }
@@ -2958,7 +3035,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     const record = (byUs: boolean): Pin => ({ ...pinOf(it, byUs), ...(back ? { again: true as const } : {}) })
     await recordPin(sid, record(s.pinned ? (pins[sid]?.byUs ?? false) : false))
     const title = pinTitle(it, now, back)
-    if (s.title !== title) await rename(s, title)
+    // (0.7.33) a name the app refused does not stand in the way of the pin. A run the refusal let go has no pin to get.
+    if (s.title !== title && !(await rename(s, title)) && !live.has(sid)) continue
     if (!s.pinned) {
       // (0.7.29) waiting on a refusal: its name is right, and its record stays not ours until the app is asked again
       if (heldBack(sid, true)) continue
@@ -2990,7 +3068,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       s.pinned = false
       writes++
     }
-    if (s.title !== n.title) await rename(s, n.title)
+    // (0.7.33) refused: named at a later sync. A run the refusal let go has no record to get.
+    if (s.title !== n.title && !(await rename(s, n.title)) && !live.has(sid)) continue
     pins[sid] = pinOf(n.it, false)
   }
 
@@ -3038,7 +3117,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
         // longer has (review of 79cbc596, F4: the thread a client was moved from kept that client's name).
         const own = titles[sid]
         if (own !== undefined && s.title !== own) {
-          await mcpJson($, 'ccd_session_mgmt', 'set_session_title', { session_id: sid, title: own })
+          // (0.7.33) refused: its records are kept, as for a sync with no writes left, and the next sync finishes it
+          if (!(await setName(sid, own))) continue
           s.title = own
           writes++
         }
@@ -3046,7 +3126,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       } else {
         // the name in a pin record may be one an older version stored as the feed wrote it
         const title = still ? titleFor(still, now) : clearedTitle(cleanName(pin.client), now)
-        if (s.title !== title) await rename(s, title)
+        // (0.7.33) refused: its record is kept, and the next sync finishes it
+        if (s.title !== title && !(await rename(s, title))) continue
       }
     }
     delete pins[sid]
@@ -3149,7 +3230,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // (0.7.11, 10-30: the status said 3 pinned while the sidebar showed 8) the client threads this profile's app shows
   // pinned once the pass is done: what the sidebar shows, never a pin record, and never a thread of another profile
   const pinnedHere = new Set(Object.values(links).filter(sid => live.get(sid)?.pinned === true && !gone.has(sid))).size
-  const last: Last = { at: now, member, items, ...also, ...founderMark, pinned: pinnedHere, recs, projects, ...newPeople, ...(refused.length ? { pinRefused: refused.slice(0, PIN_REFUSED_MAX) } : {}) }
+  const last: Last = { at: now, member, items, ...also, ...founderMark, pinned: pinnedHere, recs, projects, ...newPeople, ...(refused.length ? { pinRefused: refused.slice(0, PIN_REFUSED_MAX) } : {}), ...(nameRefused.length ? { nameRefused: nameRefused.slice(0, PIN_REFUSED_MAX) } : {}) }
   // (0.7.23, Rob 2026-11-05: "it should be everything that should be pinned, and there should be another indicator, like a
   // green light beside it, to show if it is or not.") What should be pinned and whether it is, once the pass is done: sent to
   // OW for the team's daily "Pins by person" image after everything else of this pass (`sendPinReport`). ⛔ Built from what
@@ -3163,12 +3244,16 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       links,
       thread: sid => (gone.has(sid) ? undefined : live.get(sid)),
       hidden: sid => unseen.has(sid) || away.has(sid),
+      // (0.7.35) a thread of the other profile is no thread here: its row says Start, and "can't see thread" would only confuse it
+      elsewhere: sid => away.has(sid),
       stayedOff,
       capped: outOfWrites,
       checkedOff,
       byUs: sid => pins[sid]?.byUs === true,
       client: (pid, sid) => listedNow.find(i => i.projectId === pid)?.client ?? pins[sid]?.client,
     })
+    // (0.7.34, Rob 2026-11-07: "what is pinned needs to be easy to see") and on the sync record, for the pane's marks
+    last.rowPins = rowPinsOf(report)
   } catch {
     report = undefined
   }
@@ -3228,6 +3313,12 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // (0.7.29) a refusal whose thread is gone, or a run now, or that nothing has asked about for a day past its wait, goes
   if (Object.keys(pinWaits).some(sid => gone.has(sid) || Object.hasOwn(runs, sid) || now - Number(pinWaits[sid]?.until) > DAY_MS)) {
     await patchStore<Record<string, PinWait>>($, 'mm.pinwait', {}, fresh => {
+      for (const sid of Object.keys(fresh)) if (gone.has(sid) || Object.hasOwn(runs, sid) || !(now - Number(fresh[sid]?.until) <= DAY_MS)) delete fresh[sid]
+    }).catch(() => {})
+  }
+  // (0.7.33) and the same for a name
+  if (Object.keys(nameWaits).some(sid => gone.has(sid) || Object.hasOwn(runs, sid) || now - Number(nameWaits[sid]?.until) > DAY_MS)) {
+    await patchStore<Record<string, PinWait>>($, 'mm.namewait', {}, fresh => {
       for (const sid of Object.keys(fresh)) if (gone.has(sid) || Object.hasOwn(runs, sid) || !(now - Number(fresh[sid]?.until) <= DAY_MS)) delete fresh[sid]
     }).catch(() => {})
   }
@@ -3370,14 +3461,12 @@ async function showQueue(
   now: number,
   folds: { teammate: Row[]; checking?: Row[]; team?: MmTeam[] },
   syncedAt = now,
-  found: Pick<Last, 'people' | 'routeTo' | 'away' | 'founder'> = {},
+  found: Pick<Last, 'people' | 'routeTo' | 'founder' | 'teammate' | 'rowPins'> = {},
 ): Promise<void> {
   const teammateRows = found.founder === true ? [] : folds.teammate
   const teamRows = found.founder === true ? [] : (folds.team ?? [])
   const people = await peopleShown($, found.people, now)
   const routeTo = Array.isArray(found.routeTo) ? found.routeTo : []
-  // (0.7.11) the band at the very top: the clients whose thread is in another Claude profile, with none of their own here
-  const away = found.away?.length ? stillAway(found, await storeGet<Record<string, string>>($, 'mm.links', {})) : []
   // (0.7.5, the panel redesign; Rob, 2026-10-27: "queue first, one merged time list, plain numbers") The list is what
   // needs the viewer now: the internal-ops item listed by the viewer's internal queue alone is drawn under it as `Your
   // build queue`, and a client listed by undated tickets alone goes to the closed group `No due date`.
@@ -3385,10 +3474,13 @@ async function showQueue(
   const home = items.find(it => queuedOf(it).length > 0)
   const homeRow = home ? rows.find(r => r.projectId === home.projectId) : undefined
   const build = home && homeRow ? buildOf(home, homeRow) : undefined
-  const undated = rows.filter(r => {
+  // (0.7.32, Rob 2026-11-06: "so it's still one press away") The founder's page has no With a teammate (0.7.27): an undated
+  // ticket of his on a client listed there is under `No due date` too, or it would be on no part of his page.
+  const besideMate = new Set(found.founder === true ? (found.teammate ?? []).filter(it => (it.undatedTasks ?? 0) > 0).map(it => it.projectId) : [])
+  const undated = [...rows.filter(r => {
     const it = byPid.get(r.projectId)
     return it !== undefined && noDateGroup(it)
-  })
+  }), ...folds.teammate.filter(r => besideMate.has(r.projectId))]
   const listed = rows.filter(r => {
     const it = byPid.get(r.projectId)
     return !it || needsYouNow(it) || (it.kind === 'queue' && !build)
@@ -3396,7 +3488,7 @@ async function showQueue(
   const queue: MmQueue = {
     // (R1: no cap on pins any more; the header counts the list)
     header: listed.length ? `Needs you now (${listed.length})` : 'Nothing needs you right now.',
-    rows: listed,
+    rows: listed.map(r => (found.rowPins?.[r.projectId] ? { ...r, pin: found.rowPins[r.projectId] as RowPin } : r)),
     // (0.7.5) one clock: the person's own, in the one line at the bottom of the pane
     note: `Updated ${localClock(syncedAt)}`,
     syncedAt,
@@ -3406,7 +3498,6 @@ async function showQueue(
     ...(build ? { build: { total: build.total, top: [...build.top], row: build.row } } : {}),
     ...(teamRows.length ? { team: teamRows } : {}),
     ...(people.length ? { people, ...(routeTo.length ? { routeTo } : {}) } : {}),
-    ...(away.length ? { away: { text: awayBandText(away, syncedAt), count: away.length } } : {}),
   }
   await $.state.set(QUEUE, queue)
   const { value: notice } = await $.state.get(NOTICE)
@@ -3555,13 +3646,15 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
 }
 
 // (0.7.26) The reply-package card: prepared on arrival, drawn natively above the page (card.tsx).
-import { cardHooks, cardOf, clearCard, currentOf, drawCard, marksOf, noteCurrent, prepareCard, pressAsk, pressSign, resetCard, showKept, togglePage } from './card'
+import { teamFrom, teamHeadingNow, teamLines, teamText, withMoves } from './team'
+import type { TeamNow, TeamSeen } from './team'
+import { agentListReadable, busyOf, cardHooks, cardOf, cardVerdict, checkMissOf, checkedOf, clearCard, currentOf, drawCard, isOnScreen, marksOf, noteDrawn, notePending, noteVersion, onWindows, prepareCard, pressAsk, pressCheck, pressSign, refreshCard, resetCard, showKept, togglePage, turnBegan, turnEnded, turnMark, type PageRead } from './card'
 import { holderName } from './queue'
 
 /**
  * The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that
  * waits for his OK. (0.7.24) A client listed by follow-up steps that wait for a go alone: their follow-ups-only package,
- * whose page lists every step in full (read, never picked up, by drawing it). (0.7.32) And with client messages that package already covers.
+ * whose page lists every step in full (read, never picked up, by drawing it). (0.7.39) And with client messages that package already covers.
  */
 function pickupOf(it: QueueItem): string | null {
   const packageId = it.packageId ?? (it.kind === 'ok' ? ((it.open ?? null)?.id ?? null) : null) ?? (goOnly(it) || goWithMail(it) ? (goOf(it)?.packageId ?? null) : null)
@@ -3571,20 +3664,13 @@ function pickupOf(it: QueueItem): string | null {
 async function renderPickup($: EngineInterface, it: QueueItem): Promise<string | null> {
   // The package that is the viewer's to work, or (for the founder) the one that waits for his OK: he reads it, he does not pick it up.
   const packageId = pickupOf(it)
-  if (!packageId) return null
-  try {
-    const r = await $.http.fetch(`${EXT}/reply-package?package_id=${packageId}&format=pickup`, {
-      headers: { Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER },
-    })
-    if (r.ok) {
-      const j = JSON.parse(r.text) as { markdown?: string; package_sha256?: unknown }
-      // (0.7.26) the package's hash as it stands: the card is offered for signing only when drawn from it
-      noteCurrent(packageId, j.package_sha256)
-      if (j.markdown) return j.markdown
-    }
-  } catch {
-    // fall through to the local renderer
-  }
+  return packageId ? readPickup($, packageId) : null
+}
+
+/** A package's pickup page as OW prints it now, else as this computer's renderer does; null when neither can. */
+async function readPickup($: EngineInterface, packageId: string): Promise<string | null> {
+  const { markdown } = await readOwPage($, packageId)
+  if (markdown) return markdown
   const script = `${await home($)}/.claude/skills/client-reply-prep/scripts/render_pickup.py`
   for (const py of [['python3'], ['python'], ['py', '-3']]) {
     try {
@@ -3595,6 +3681,46 @@ async function renderPickup($: EngineInterface, it: QueueItem): Promise<string |
     }
   }
   return null
+}
+
+/** (0.7.33) One read of OW's page, its markdown and hash from one answer, and nothing from this computer: never throws. */
+async function readOwPage($: EngineInterface, packageId: string): Promise<PageRead> {
+  try {
+    const r = await $.http.fetch(`${EXT}/reply-package?package_id=${packageId}&format=pickup`, {
+      headers: { Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER },
+    })
+    if (r.ok) {
+      const j = JSON.parse(r.text) as { markdown?: unknown; package_sha256?: unknown }
+      // (0.7.26) the package's hash as it stands: the card is offered for signing only when drawn from it
+      await noteVersion($, packageId, j.package_sha256)
+      return {
+        markdown: typeof j.markdown === 'string' && j.markdown ? j.markdown : null,
+        sha: typeof j.package_sha256 === 'string' && /^[0-9a-f]{64}$/.test(j.package_sha256) ? j.package_sha256 : null,
+      }
+    }
+  } catch {
+    // no page from OW
+  }
+  return { markdown: null, sha: null }
+}
+
+/** (0.7.33) The page folded under the card as OW prints it now: a person who opens it reads what the fresh card was checked against. */
+async function foldPage($: EngineInterface, markdown: string | null): Promise<void> {
+  const part = await clientPart($)
+  if (markdown && part.page && part.page !== markdown) await $.state.set(VIEW, { ...part, page: markdown })
+}
+
+/** (0.7.33) A press on the signature box: `pressSign` with where it records the signature, how it reads the page, and where it says a failure. */
+async function signPressed($: EngineInterface, label: string): Promise<void> {
+  await pressSign($, label, {
+    home: await home($),
+    note: line => logAuto($, line),
+    readPage: async id => {
+      const read = await readOwPage($, id)
+      await foldPage($, read.markdown)
+      return read
+    },
+  })
 }
 
 /** (0.5.28, internal asks) The most ask pages one draw of a client part reads. */
@@ -3663,12 +3789,17 @@ async function newDraw($: EngineInterface): Promise<() => Promise<boolean>> {
 async function beginClient($: EngineInterface, it: QueueItem, own: boolean, atOnce: boolean): Promise<() => Promise<void>> {
   const heading = own ? `This thread: ${it.client}` : ''
   const newest = await newDraw($)
-  const draw = async (text: string): Promise<void> => {
-    if (await newest()) await $.state.set(VIEW, { text, heading } satisfies MmView)
+  const draw = async (text: string, parts?: { page: string; extra: string }): Promise<void> => {
+    if (await newest()) await $.state.set(VIEW, { text, heading, ...parts } satisfies MmView)
   }
   const withBanner = (view: string): string => [holdBanner(it), view].filter(Boolean).join('\n\n')
   /** (0.5.28, internal asks) The client's open asks under a pickup view: '' adds nothing, for a client with none. (0.7.3) Then its internal queue, as `clientMarkdown` draws it. */
   const withAsks = (view: string, pages: Record<string, string>, at: number): string => [view, asksMarkdown(it, at, pages), queueMarkdown(it)].filter(Boolean).join('\n\n')
+  /** (0.7.33, G11) A pickup view's parts: under a drawn card the banner, asks and queue stay in sight, and only the page folds. */
+  const partsOf = (page: string, pages: Record<string, string>, at: number): { page: string; extra: string } => ({
+    page,
+    extra: [holdBanner(it), asksMarkdown(it, at, pages), queueMarkdown(it)].filter(Boolean).join('\n\n'),
+  })
   const now = await $.clock.now()
   const asking = openAsks(it).length > 0
   const packageId = pickupOf(it)
@@ -3687,9 +3818,12 @@ async function beginClient($: EngineInterface, it: QueueItem, own: boolean, atOn
   }
   if (atOnce) {
     const seen = pickups.get(packageId)
-    await draw(seen && now - seen.at < PICKUP_REUSE_MS ? withAsks(withBanner(seen.text), recentAskPages(it, now), now) : [`## ${it.projectName}`, titleFor(it, now), CHECKING].join('\n\n'))
+    if (seen && now - seen.at < PICKUP_REUSE_MS) {
+      const pages = recentAskPages(it, now)
+      await draw(withAsks(withBanner(seen.text), pages, now), partsOf(seen.text, pages, now))
+    } else await draw([`## ${it.projectName}`, titleFor(it, now), CHECKING].join('\n\n'))
     // (0.7.26) the card this session already drew for the package, at once (its box waits for the pickup read)
-    await showKept($, { packageId, projectId: it.projectId, client: it.client, own, current: currentOf(packageId, seen?.text ?? null), isNewest: newest })
+    await showKept($, { packageId, projectId: it.projectId, client: it.client, own, current: currentOf(packageId, seen?.text ?? null), page: seen?.text ?? null, isNewest: newest })
   }
   return async () => {
     const view = await renderPickup($, it)
@@ -3700,12 +3834,13 @@ async function beginClient($: EngineInterface, it: QueueItem, own: boolean, atOn
     }
     const pages = asking ? await askPages($, it) : {}
     const at = await $.clock.now()
-    await draw(view ? withAsks(withBanner(view), pages, at) : clientMarkdown(it, at, pages))
+    if (view) await draw(withAsks(withBanner(view), pages, at), partsOf(view, pages, at))
+    else await draw(clientMarkdown(it, at, pages))
     // (0.7.26) the card for this version of the package: kept, or drawn now on this computer (about 4 s)
     const last = await storeGet<Last | null>($, 'mm.last', null)
     await prepareCard($, {
-      packageId, projectId: it.projectId, client: it.client, own, current: currentOf(packageId, view), isNewest: newest,
-      signer: last?.member ? holderName(last.member) : 'Approver', home: await home($),
+      packageId, projectId: it.projectId, client: it.client, own, current: currentOf(packageId, view), page: view, isNewest: newest,
+      signer: last?.member ? holderName(last.member) : 'Approver', home: await home($), note: line => logAuto($, line),
     })
   }
 }
@@ -3749,7 +3884,13 @@ function partSig(it: QueueItem): string {
 async function clientPart($: EngineInterface): Promise<MmView> {
   const { value } = (await $.state.get(VIEW)) as { value: MmView | string | undefined }
   if (typeof value === 'string') return { text: value, heading: '' }
-  return value && typeof value.text === 'string' ? { text: value.text, heading: typeof value.heading === 'string' ? value.heading : '' } : { text: '', heading: '' }
+  if (!value || typeof value.text !== 'string') return { text: '', heading: '' }
+  return {
+    text: value.text,
+    heading: typeof value.heading === 'string' ? value.heading : '',
+    ...(typeof value.page === 'string' ? { page: value.page } : {}),
+    ...(typeof value.extra === 'string' ? { extra: value.extra } : {}),
+  }
 }
 
 /**
@@ -3824,6 +3965,106 @@ function listSaid(last: Last): string {
 
 /** (0.7.28) What /mm and the mm tool answer for a hook that ran out of its time. */
 const NOT_IN_TIME = 'The bridge did not finish that in time. /mm status says how its last sync went.'
+/** (0.7.33) The answer to a /mm that ran out of its time, by what it asked: `mm card` answers in one of its two forms, always. */
+function notInTime(args: unknown): string {
+  return /^\s*card(?:\s|$)/.test(String(args ?? '')) ? cardNotReady('the card could not be checked') : NOT_IN_TIME
+}
+
+/** (0.7.33) The words the signature box puts in the prompt box, as the person sends them. */
+const SIGNED_GO = /^Send package [0-9a-f]{12}$/
+/** (0.7.33) How many seconds `mm card` waits for the pane to draw a card it just set: a pane that is shown draws at once. */
+const CARD_DRAW_WAIT_S = 3
+function cardReady(label: string): string {
+  return `card ready: Package ${label}. The whole package is on screen in the side pane and its copy check passed. Do not print the page. Print one line saying it is in the side pane, ending "Package ${label}.", then wait for the person.`
+}
+/** (0.7.36) Ready with the pane not on a screen: most pickups run with the thread in the background. Its first sentence is the one the send gate parses, as `cardReady`'s is. */
+function cardReadyOffScreen(label: string): string {
+  return `card ready: Package ${label}. The whole package is checked and waiting in the side pane, which draws it when this thread is open on a screen. Do not print the page. Print one line saying it is in the side pane and that they can ask here for the page if they can't see the pane, ending "Package ${label}.", then wait for the person.`
+}
+function cardNotReady(reason: string): string {
+  return `card not ready: ${reason}. Print the whole page.`
+}
+/** (0.7.36) A tag is not an id, and there is nothing yet to print: the thread asks again with the whole id. */
+const CARD_WHOLE_ID = 'card not ready: give the whole package id, not the 8-character tag, and ask again.'
+
+/**
+ * (0.7.36) A session no surface will ever attach to, so that a person can never see the pane in it. Not from the engine's surface
+ * calls: measured in a `claude -p` on 2026-11-07, `$.ui.open` answers `no-surface: no surface is attached` and `$.session.surfaces()`
+ * is empty, and the engine says the same of any session until a page attaches, as a desktop thread in the background is. So from
+ * what `autoPane` goes by: a person's session (`tracks`), not MM_UNATTENDED=1, and no `SINGLE-SESSION` first prompt.
+ */
+async function nobodyWatches($: EngineInterface): Promise<boolean> {
+  return !(await tracks($)) || Boolean((await sessOf($)).single) || (await $.env.get('MM_UNATTENDED')) === '1'
+}
+
+/**
+ * A second that costs a hook none of its time: the engine stops the hook's clock while a `$` call is out, except for a
+ * `$.clock` wait, whose time is the hook's own (a 20 second wait through `$.clock.sleep` overruns the hook's 10).
+ */
+async function aSecond($: EngineInterface): Promise<void> {
+  for (const argv of [['sleep', '1'], ['python3', '-c', 'import time; time.sleep(1)'], ['py', '-3', '-c', 'import time; time.sleep(1)']]) {
+    try {
+      const r = await $.process.run(argv, { timeoutMs: 3_000 })
+      if (r.exitCode === 0) return
+    } catch {
+      // that one is not here; try the next
+    }
+  }
+  await $.clock.sleep(1_000)
+}
+
+/**
+ * (0.7.33) `mm card <package id>`: what a thread asks at pickup, to know whether to print the page (Rob, 2026-11-06: "the copy
+ * passes. I already think we should go ahead and implement that for everybody."). It sends nothing, starts nothing and picks
+ * up nothing. Ready only when the card of that package has just been drawn again from OW's page as it stands now
+ * (`refreshCard`), nothing holds its signature box back, that page is fully in it (`pageGap`), and it is in this thread's client
+ * part. ⛔ Anything else, any error at all, is not ready: the thread then prints the page, as every thread did before this.
+ * (0.7.36) Ready no longer needs the screen. On 2026-11-07 threads asked 7 times and none answered ready, 4 of them because the
+ * pane is not placed while a thread runs in the background; in one the person had the pane on screen minutes later and pressed
+ * the box. It answers by where the pane stands: on screen (placed, shown and this card drawn there) it says so, and otherwise the
+ * card is waiting for the thread to be opened (`cardReadyOffScreen`). The pane is still opened, so that it is there then. Only a
+ * session nobody will ever watch (`nobodyWatches`) stays not ready for want of a surface.
+ * (0.7.36) A ready answer to this thread's own tool call (`ownCall`) leaves that version pending (`notePending`), and the end of the
+ * turn it came in opens the signature box (`turnEnded`): threads have asked this at the start of their checks. A sub-agent's call does
+ * not count, as its thread is still at work and the send gate reads the main chain alone. Nor does a typed /mm card: it runs no turn
+ * (measured 2026-11-07), so there is no turn to end, and the gate does not count it either. Nor does a call that outlived its turn
+ * (`turnMark`): it says nothing of the turn under way when it answers.
+ */
+async function cardCommand($: EngineInterface, arg: string, ownCall: boolean): Promise<string> {
+  try {
+    const turn = turnMark()
+    const packageId = arg.trim().toLowerCase()
+    if (!isUuid(packageId)) return CARD_WHOLE_ID
+    // ⛔ Every `$.state.get` of one dispatch reads one moment, so waiting here on the state would never see a draw end: `refreshCard`
+    // waits for a render under way (a module's promise, not the state), then draws the card itself.
+    const held = await cardOf($)
+    if (held.packageId !== packageId) return cardNotReady(cardVerdict(held, packageId))
+    const read = await readOwPage($, packageId)
+    await foldPage($, read.markdown)
+    const last = await storeGet<Last | null>($, 'mm.last', null)
+    const signer = held.tree?.signer ?? (last?.member ? holderName(last.member) : 'Approver')
+    const outcome = await refreshCard($, { packageId, signer, home: await home($), note: line => logAuto($, line) }, read)
+    if (outcome === 'no-hash') return cardNotReady(read.sha ? 'the page could not be read to compare' : 'OW gave no usable hash for this package')
+    const card = await cardOf($)
+    const why = cardVerdict(card, packageId)
+    if (why) return cardNotReady(why)
+    if (!(await clientPart($)).text) return cardNotReady('the side pane is not showing this package')
+    if (await nobodyWatches($)) return cardNotReady('the side pane is not open on a surface that can draw it')
+    // (0.7.36) the box opens only once this thread's background work is seen to have ended: an engine that cannot say so would keep it shut
+    if (!(await agentListReadable($))) return cardNotReady("this bridge cannot see whether the thread's background work has finished")
+    const label = card.tree?.label
+    if (!label) return cardNotReady('the card could not be checked')
+    const opened = await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })
+    const pane = opened.isPlaced ? (await $.ui.panes()).find(p => p.id === PANE_QUEUE) : undefined
+    const shown = Boolean(pane?.isPlaced && pane.isShown)
+    // the state is set; the words are on the screen once the pane has drawn them. A pane that is not shown draws nothing to wait for.
+    for (let s = 0; shown && s < CARD_DRAW_WAIT_S && !isOnScreen(packageId, card.tree); s++) await aSecond($)
+    if (ownCall && turnMark() === turn) await notePending($, [label])
+    return shown && isOnScreen(packageId, card.tree) ? cardReady(label) : cardReadyOffScreen(label)
+  } catch {
+    return cardNotReady('the card could not be checked')
+  }
+}
 
 /**
  * (0.7.28) What the mm tool, and (0.7.29) a typed /mm, answer when a command failed: which, why, and the list as last stored
@@ -4008,9 +4249,11 @@ async function beat($: EngineInterface, extra: Record<string, unknown>): Promise
     const refreshError = await storeGet<unknown>($, 'mm.refreshError', null)
     // (0.7.29) the pins and unpins the app refused and that are still waiting: thread, why, when it is asked again
     const pinRefused = Object.entries(await storeGet<Record<string, PinWait>>($, 'mm.pinwait', {})).slice(0, PIN_REFUSED_MAX).map(([thread, w]) => ({ thread, why: w?.why, until: new Date(Number(w?.until)).toISOString() }))
+    // (0.7.33) and the names
+    const nameRefused = Object.entries(await storeGet<Record<string, PinWait>>($, 'mm.namewait', {})).slice(0, PIN_REFUSED_MAX).map(([thread, w]) => ({ thread, why: w?.why, until: new Date(Number(w?.until)).toISOString() }))
     await $.fs.write(
       `${await home($)}/.claude/mm-hooks/bridge-state.json`,
-      JSON.stringify({ version: VERSION, at: new Date(await $.clock.now()).toISOString(), session: await instanceId($), lastSync: last ? new Date(last.at).toISOString() : null, member: last?.member, need: last?.items.length ?? 0, pinned: last?.pinned ?? 0, appPairs, error: last?.error ?? null, refreshError, ...(pinRefused.length ? { pinRefused } : {}), ...extra }, null, 1),
+      JSON.stringify({ version: VERSION, at: new Date(await $.clock.now()).toISOString(), session: await instanceId($), lastSync: last ? new Date(last.at).toISOString() : null, member: last?.member, need: last?.items.length ?? 0, pinned: last?.pinned ?? 0, appPairs, error: last?.error ?? null, refreshError, ...(pinRefused.length ? { pinRefused } : {}), ...(nameRefused.length ? { nameRefused } : {}), ...extra }, null, 1),
     )
   } catch {
     // a heartbeat must never break the bridge
@@ -4295,6 +4538,8 @@ async function tick($: EngineInterface): Promise<void> {
         // (0.6.0) after each sync: the skill map (hourly) and the time of this computer's threads' projects
         await timePass($).catch(err => noteFailure($, 'client time', err))
       }
+      // (0.7.34) Team now, for every thread here
+      await teamPass($)
       // (0.5.19, Rob 10-20) Remote Control follows the pin while /mm rc is on: off, it asks the app nothing
       await rcFollowsPin($).catch(err => noteFailure($, 'remote control', err))
       // R15: the thread list's view, once on this machine
@@ -4306,6 +4551,7 @@ async function tick($: EngineInterface): Promise<void> {
     await refreshSelf($, false)
     // (0.6.0) this thread's Tracking part, status line and band line, from the store; the pane opens for a new project
     await drawTrack($, 'tick')
+    await drawTeam($)
     // R5: this thread's own chips: the ones no longer wanted withdrawn, the missing ones minted
     await chipsTick($).catch(() => {})
     await refreshBand($)
@@ -4564,9 +4810,18 @@ async function mintChip($: EngineInterface, m: MintSpec): Promise<Minted> {
   // The app's chip (spawn_task), the app before 10-14. (0.5.7 to 0.5.24: where the app had only start_session, its
   // proposal card, own_initiative. 0.5.25: never a card; Claude.app 3.1623 asked the person to allow each one, and a
   // card the bridge made never opened for Rob, 10-22.)
+  // (0.7.34, Rob 2026-11-07: "I'm not sure why a chip hasn't popped up for me to start missing threads. I think that's easier
+  // than having to click the button.") The card again, in the app's words: "initiation=own_initiative without a proposal_id
+  // only shows the user a proposal card and starts nothing", and the app's gate on a turn stops a start, never a proposal
+  // (Claude.app 4.23118, measured in its source). It carries no folder (`mayHoldCard`).
   try {
     try {
-      call = $.mcp.call('ccd_session', 'spawn_task', { title: m.title, tldr: m.tldr, prompt: m.prompt }) as Promise<Mcp>
+      const tools = await sessionTools($)
+      call = (
+        tools.start && !tools.spawn
+          ? $.mcp.call('ccd_session', 'start_session', { initiation: 'own_initiative', context: 'fresh', title: m.title, prompt: m.prompt, background: START_BACKGROUND })
+          : $.mcp.call('ccd_session', 'spawn_task', { title: m.title, tldr: m.tldr, prompt: m.prompt })
+      ) as Promise<Mcp>
       answered = await within($, call)
     } catch (err) {
       // the tool the app no longer gives this session: no chip, and none minted again (`sawTools`, `storedNeeds`)
@@ -4635,15 +4890,14 @@ const noTool = (err: unknown): boolean => /no connected MCP tool/i.test(errorTex
 
 /**
  * A line the band shows in every thread for NOTE_SHOW_MS (`bandNote`). (0.5.24) No thread is started by itself any
- * more, and `mm.autostarts`, the record of those starts, is no longer written. (0.5.25) Nor is a card put up by itself:
- * a client with no thread waits for the person's Start.
+ * more, and `mm.autostarts`, the record of those starts, is no longer written.
  */
 type BandNote = { text: string; at: number; key: string }
 
 /**
  * (0.5.7) Whether the bridge acts by itself on this computer: on unless the person typed /mm auto off. (0.5.11) It
- * updates a client's thread by itself (`autoUpdates`). (0.5.24) It starts no thread by itself either way; (0.5.25) and
- * puts up no card: a client with no thread waits for the person's Start.
+ * updates a client's thread by itself (`autoUpdates`). (0.5.24) It starts no thread by itself either way; (0.7.34) a client
+ * with no thread gets its card (`needsFor`), on or off, and the person starts it.
  */
 async function autoStartOn($: EngineInterface): Promise<boolean> {
   const v = await storeGet<{ on?: unknown } | null>($, 'mm.autostart', null)
@@ -5668,17 +5922,16 @@ function needingThreads(last: Last, links: Readonly<Record<string, string>>, now
 }
 
 /**
- * (0.5.12) How many clients the pane's Start all button offers, or 0 when it is not drawn: two or more that need a new
- * thread (with one, its row's own Start is the button). From what is stored only. (0.5.14) The band's button is always
- * drawn, from `needingThreads` itself: `bandLine`.
+ * (0.5.12) How many clients the pane's Start missing threads offers, or 0 when it is not drawn. From what is stored only.
+ * (0.5.14) The band's button is always drawn, from `needingThreads` itself: `bandLine`. (0.7.34) From one up: until 0.7.33
+ * two, as one had only its row's Start, and it went beside `Needs you now` with the clients of another profile counted in.
  */
 async function startAllOffer($: EngineInterface): Promise<number> {
   const last = await storeGet<Last | null>($, 'mm.last', null)
   if (!last || !Array.isArray(last.items) || !(await sessionTools($)).start) return 0
   const links = await storeGet<Record<string, string>>($, 'mm.links', {})
   // (0.7.11) with the clients off the list whose thread is in another Claude profile
-  const n = needingThreads(last, links, await $.clock.now()).length + awayOffList(last, links).length
-  return n >= 2 ? n : 0
+  return needingThreads(last, links, await $.clock.now()).length + awayOffList(last, links).length
 }
 
 /**
@@ -5790,6 +6043,8 @@ type ChipWorld = {
   seen: Readonly<Seen>
   /** The thread that polls (holds the lease), when it is known: a tie between threads goes to it. */
   poller: string
+  /** (0.7.34) False when this thread runs outside the client folder: it holds no no-thread client's card. */
+  home?: boolean
 }
 
 /**
@@ -5819,7 +6074,9 @@ function needsFor(last: Last, w: ChipWorld, now: number): Need[] {
     if (!isUuid(it.projectId) || heldInternal(it)) continue
     // (0.7.3, internal queue) the internal queue is never due, so it never pins: its chip is minted all the same, in its
     // linked thread alone (C1). With no linked thread it gets none (R17: nothing undated gets a no-thread chip).
-    if (!pinsFor(it, now) && !(internalQueueThread(it) && w.links[it.projectId] !== undefined)) continue
+    // (0.7.34, Rob 2026-11-07: "still should have started a chip for them ... Once they had reply packages ready") A client
+    // with no thread whose reply package is ready gets its chip however far off the reply is due.
+    if (!pinsFor(it, now) && !(internalQueueThread(it) && w.links[it.projectId] !== undefined) && !(w.links[it.projectId] === undefined && packageReady(it))) continue
     const rec = storedRec(last, it.projectId)
     if (!rec) continue
     const signature = signatureOf(it)
@@ -5828,14 +6085,24 @@ function needsFor(last: Last, w: ChipWorld, now: number): Need[] {
     // it: for a client with no thread, wherever it is; in this thread, always; and (0.5.6: Start moves the chip to the
     // thread it is pressed in) in another thread while it carries what is waiting now. The bridge cannot see a chip the
     // person dismissed, so one for something older never holds back the client's own thread once something new comes.
-    if (w.chips.some(c => c.projectId === it.projectId && !c.auto && !c.superseded && (linked === undefined || c.threadId === w.me || c.signature === signature))) continue
-    if (linked === undefined) {
+    // (0.7.35) A client whose thread is in the other Claude profile and who pins now has no thread here (`last.away`, 0.7.13's rule:
+    // the same clients `kickoffs` starts). Only while its link is still that thread: its new thread here takes the card back at once.
+    const away = stillAway(last, w.links).find(a => a.projectId === it.projectId)
+    const noThreadHere = linked === undefined || away !== undefined
+    if (w.chips.some(c => c.projectId === it.projectId && !c.auto && !c.superseded && (noThreadHere || c.threadId === w.me || c.signature === signature))) continue
+    if (noThreadHere) {
       // C3: a client with no linked thread, when its recommendation is a new thread
       // (0.7.10) never for a client whose own thread is archived: Restore thread is its row's action
-      if (rec.state !== 'start' || rec.archived || rec.dormant || noThreadHolder(it.projectId, w, now) !== w.me) continue
+      if (rec.state !== 'start' || rec.archived || rec.dormant || w.home === false || noThreadHolder(it.projectId, w, now) !== w.me) continue
+      // (0.7.34) a client whose mail has no package yet waits for it, so the thread opens with the reply ready (Rob, 10-23: "if i
+      // have to start the thread it cant be ready with the reply when i first pick it up"), CHIP_NO_DRAFTS_MS at most
+      if (awaitingPackage(it, now, CHIP_NO_DRAFTS_MS)) continue
       const target = rec.target && !rec.target.suggested && THREAD_ID.test(rec.target.sid) ? rec.target : undefined
       const replaces = target ? { sid: target.sid, title: w.titles[target.sid] || target.title } : undefined
-      out.push({ it, signature, need: 'start', title: startTitle(it), tldr: startTldr(it, now), prompt: startKickoff(it, replaces, now), kind: 'nothread', why: rec.reason })
+      // (0.7.35) its last thread in the other profile: which one, and the end of its transcript to read first, as `kickoffs` gives it
+      const handover = away ? awayHandoverText(it.projectName, away) : ''
+      const body = startKickoff(it, replaces, now)
+      out.push({ it, signature, need: 'start', title: startTitle(it), tldr: startTldr(it, now), prompt: handover ? `${body}\n\n${handover}` : body, kind: 'nothread', why: rec.reason })
       continue
     }
     // C1: only the client's own thread; C2: every other thread mints nothing for it
@@ -5863,7 +6130,9 @@ function needsFor(last: Last, w: ChipWorld, now: number): Need[] {
  * then it withdraws it, and the thread they work in mints it.
  */
 function noThreadHolder(projectId: string, w: ChipWorld, now: number): string {
-  const running = (sid: string): boolean => sid === w.me || now - (Number(w.seen[sid]?.tick) || -Infinity) <= ALIVE_MS
+  // (0.7.34) a card carries no folder, so it opens where the thread that holds it runs: never a thread outside the client folder
+  const fits = (sid: string): boolean => (sid === w.me ? w.home !== false : w.seen[sid]?.home !== false)
+  const running = (sid: string): boolean => fits(sid) && (sid === w.me || now - (Number(w.seen[sid]?.tick) || -Infinity) <= ALIVE_MS)
   const human = (sid: string): number => Number(w.seen[sid]?.human) || 0
   const runningIds = [...new Set([w.me, ...Object.keys(w.seen)])].filter(sid => THREAD_ID.test(sid) && running(sid)).sort()
   let best = ''
@@ -5872,7 +6141,7 @@ function noThreadHolder(projectId: string, w: ChipWorld, now: number): string {
   const live = w.chips.filter(c => c.projectId === projectId && c.auto && c.gen === CHIP_GEN && !c.superseded && c.had === undefined && (c.need ?? 'start') === 'start')
   // Nobody has written in a running thread yet: the thread that polls; else, the record itself says, the lowest
   // thread that holds one (every thread reads the same record); else the lowest running thread.
-  if (!best) return w.poller || live.map(c => c.threadId).sort()[0] || runningIds[0] || w.me
+  if (!best) return (w.poller && fits(w.poller) ? w.poller : '') || live.map(c => c.threadId).filter(fits).sort()[0] || runningIds[0] || w.me
   const held = live.find(c => c.threadId === best) ?? live.at(-1)
   if (!held || held.threadId === best || !running(held.threadId)) return best
   // (a thread the person never wrote in holds it only until they write in one)
@@ -5905,8 +6174,8 @@ async function chipsTick($: EngineInterface, atTurn = false): Promise<void> {
     if (minting.has(key) || mintedHere.has(key)) continue
     if (chips.some(c => c.threadId === me && c.projectId === n.it.projectId && sameNeed(c, n))) continue
     // (0.5.7) where the app gives only start_session, a client's kickoff run in its own thread has no chip: the pane's
-    // Update does it there. (0.5.25) Nor a client with no thread: no card by itself (`storedNeeds` holds none there)
-    if (!tools.spawn) continue
+    // Update does it there (`storedNeeds` holds none). (0.7.34) A client with no thread gets its card.
+    if (!tools.spawn && !tools.start) continue
     if (n.place === undefined && place === undefined) place = await ownPlace($)
     const made = await mintChip($, { ...n, auto: true, me, now, place: n.place ?? place })
     if (made.made) continue
@@ -5928,15 +6197,17 @@ async function storedNeeds($: EngineInterface, now: number): Promise<Need[] | nu
   const last = await storeGet<Last | null>($, 'mm.last', null)
   const fresh = Boolean(last && Array.isArray(last.items) && !last.error && Number.isFinite(last.at) && now - last.at <= STALE_SYNC_MS)
   if (!me || !fresh || !last) return null
-  // (0.5.25, Rob 10-22) Where the app gives no spawn_task (Claude.app since 10-14), the bridge mints nothing by itself:
-  // its only way there was a Start card, which never opened for Rob. None is wanted, so any still up is withdrawn.
-  if (!(await sessionTools($)).spawn) return []
+  // (0.7.34) Where the app gives no spawn_task (Claude.app since 10-14) a thread's kickoff has no chip: the pane's Update
+  // does it there. A client with no thread gets its card (`mintChip`). ((0.5.25 to 0.7.33: none at all, Rob 10-22, as a card
+  // never opened for him then. That is why no chip came for Doug Brockbank, Advanced Credit Therapy and Nirvvana on 11-07.)
+  const tools = await sessionTools($)
+  if (!tools.spawn && !tools.start) return []
   const lease = await storeGet<{ owner?: string } | null>($, 'mm.lease', null)
   const pairs = await storeGet<Pairs>($, 'mm.threads', {})
   // (a lease that has run out names nobody: its holder has stopped ticking)
   const poller = lease && typeof lease.owner === 'string' && !(Number((lease as { until?: unknown }).until) < now) ? (pairs[lease.owner]?.app ?? '') : ''
   const chips = await chipsOf($, now)
-  return needsFor(
+  const needs = needsFor(
     last,
     {
       me,
@@ -5947,9 +6218,26 @@ async function storedNeeds($: EngineInterface, now: number): Promise<Need[] | nu
       chips,
       seen: await storeGet<Seen>($, 'mm.seen', {}),
       poller,
+      home: await mayHoldCard($),
     },
     now,
   )
+  return tools.spawn ? needs : needs.filter(n => n.kind === 'nothread')
+}
+
+/**
+ * (0.7.34) Whether a card this thread holds opens its thread in the right folder: a proposal "cannot carry a host, folder,
+ * environment or preset" (the app), so the new thread starts where this one runs. In the member's client folder
+ * (`clientFolder`), or wherever when none is known; and never from a worktree, which the new thread would take after.
+ * True when the app cannot say.
+ */
+async function mayHoldCard($: EngineInterface): Promise<boolean> {
+  try {
+    const folder = await clientFolder($)
+    return !folder || (await $.session.root()) === folder
+  } catch {
+    return true
+  }
 }
 
 /** (0.5.4, C3) This thread's own name as the band gives it (`threadTitleShort`), from the app; '' when it does not answer. */
@@ -5969,9 +6257,10 @@ async function noteSeen($: EngineInterface, human: boolean): Promise<void> {
   const mine = (await storeGet<Seen>($, 'mm.seen', {}))[me]
   // (the tick's word is needed only every couple of minutes: ALIVE_MS is five)
   if (!human && mine && now - mine.tick < ALIVE_MS / 2) return
+  const home = await mayHoldCard($)
   await patchStore<Seen>($, 'mm.seen', {}, seen => {
     const was = seen[me]
-    seen[me] = { tick: now, ...(human ? { human: now } : was?.human ? { human: was.human } : {}) }
+    seen[me] = { tick: now, ...(human ? { human: now } : was?.human ? { human: was.human } : {}), ...(home ? {} : { home: false as const }) }
     for (const [sid, s] of Object.entries(seen)) if (!s || !(now - Number(s.tick) <= DAY_MS)) delete seen[sid]
   })
 }
@@ -5990,6 +6279,7 @@ async function chipsPass($: EngineInterface): Promise<void> {
     await withdrawChips($, await storedNeeds($, await $.clock.now()), true)
     // (0.5.4, C2/C3) the band says where each client's chip is: drawn again from the store, as chips come and go
     await refreshBand($)
+    await drawTeam($)
   } catch {
     // the minute's tick withdraws it
   }
@@ -6097,9 +6387,6 @@ async function withdrawNow($: EngineInterface, me: string, needs: readonly Need[
   const last = await storeGet<Last | null>($, 'mm.last', null)
   const waiting = last && Array.isArray(last.items) ? new Set(listedIn(last).map(i => i.projectId)) : null
   const claims = await storeGet<Record<string, ClaimedHere>>($, 'mm.claimedHere', {})
-  // (0.5.25, Rob 10-22: "it's kind of confusing having a button and chips appear that don't work") Where the app gives no
-  // spawn_task, whatever this thread made was a Start card (0.5.7 to 0.5.24), the person's own included: every one goes.
-  const cards = !(await sessionTools($)).spawn
   const forget = new Set<Chip>()
   let changed = false
   for (const [k, at] of withdrawnHere) if (now - at > CHIP_KEEP_MS) withdrawnHere.delete(k)
@@ -6119,7 +6406,7 @@ async function withdrawNow($: EngineInterface, me: string, needs: readonly Need[
     // (0.5.3) a new thread for a client the person went on with in its own thread, minted before they did
     const claim = claims[c.projectId]
     const spent = claimHolds(claim, c.projectId, links, last) && c.at <= claim.at && replacesThread(c, claim.sid)
-    if (!cards && !c.superseded && !movedOn && needed && !spent && (!waiting || waiting.has(c.projectId))) continue
+    if (!c.superseded && !movedOn && needed && !spent && (!waiting || waiting.has(c.projectId))) continue
     if (quick && (c.tries ?? 0) > 0) continue
     changed = true
     // a chip the app gave no id for cannot be withdrawn: it is only forgotten
@@ -6970,6 +7257,23 @@ async function toggleFold($: EngineInterface, key: Fold | 'people' | 'track' | '
   }
 }
 
+/** (0.7.34) What each of the pane's two folding parts was last left as on this computer: a new thread opens it the same way. */
+type Panel = { needs?: boolean; teamNow?: boolean }
+
+/** (0.7.34) Needs you now or Team now opened or closed: in this thread, and for the next thread drawn. Opening Team now reads it at once. */
+async function togglePanel($: EngineInterface, key: keyof Panel, wasOpen: boolean): Promise<void> {
+  try {
+    const { value } = await $.state.get(FOLDS)
+    await $.state.set(FOLDS, { ...(value ?? {}), [key]: !wasOpen } satisfies MmFolds)
+    await patchStore<Panel>($, 'mm.panel', {}, panel => {
+      panel[key] = !wasOpen
+    }).catch(() => {})
+    if (key === 'teamNow' && !wasOpen) await teamPass($, true)
+  } catch {
+    // a part that does not open is not worth an error
+  }
+}
+
 /** (0.7.5) A task of the time list opened to its threads, or closed again: at most 20 kept open. */
 async function toggleTask($: EngineInterface, key: string): Promise<void> {
   try {
@@ -7000,11 +7304,18 @@ async function openDrafts($: EngineInterface): Promise<void> {
  * from another session, a schedule, a channel or a plugin) they are refused here, first, before anything
  * is fetched, called, stored or stamped.
  */
-async function runCommand($: EngineInterface, args: string, by: By, press = false): Promise<string> {
+async function runCommand($: EngineInterface, args: string, by: By, press = false, ownCall = false): Promise<string> {
   const [verb = 'queue', ...rest] = args.trim().split(/\s+/).filter(Boolean)
   const arg = rest.join(' ')
   // (0.5.25) starts nothing: what starts each thread, for the model on the person's own words (`kickoffs`)
   if (verb === 'kickoffs') return kickoffs($, arg)
+  // (0.7.34) reads and starts nothing new: Team now as text, as last read (the pane's dropdown; a surface with no pane)
+  if (verb === 'team') {
+    await teamPass($, true)
+    return teamText((await storeGet<TeamKept>($, 'mm.team', {})).team, await $.clock.now())
+  }
+  // (0.7.33) sends nothing, starts nothing: whether the card stands in for the page, for a thread at pickup
+  if (verb === 'card') return cardCommand($, arg, ownCall)
   // (0.7.0) the line this thread's work counts toward: the person's or Claude's explicit call (never anything to a client)
   if (verb === 'line') return lineCommand($, arg, false)
   if (verb === 'bank') return lineCommand($, arg, true)
@@ -7023,8 +7334,8 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
     if (arg !== 'on' && arg !== 'off') return `Auto-update is ${(await autoStartOn($)) ? 'on' : 'off'} on this computer. Type /mm auto off or /mm auto on.`
     await $.store.set('mm.autostart', { on: arg === 'on' })
     return arg === 'on'
-      ? 'Auto-update is on: a client\'s thread is updated by itself when something new arrives, an old thread too. A client with no thread waits for you to press Start.'
-      : 'Auto-update is off: a client\'s thread waits for you to press Update. A client with no thread waits for you to press Start.'
+      ? 'Auto-update is on: a client\'s thread is updated by itself when something new arrives, an old thread too. A client with no thread gets a card to start it.'
+      : 'Auto-update is off: a client\'s thread waits for you to press Update. A client with no thread gets a card to start it.'
   }
   // (0.5.19, Rob 10-20) whether Remote Control follows the pin on this computer (off unless turned on)
   if (verb === 'rc') {
@@ -7059,6 +7370,8 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       `last error: ${last?.error ?? 'none'}`,
       // (0.7.28) what the app refused in the last sync's pin pass, which went on past each
       ...(last?.pinRefused?.length ? [`pins the app refused: ${last.pinRefused.map(r => `${r.client || r.thread} (${r.why})`).join('; ')}`] : []),
+      // (0.7.33) and the names
+      ...(last?.nameRefused?.length ? [`names the app refused: ${last.nameRefused.map(r => `${r.client || r.thread} (${r.why})`).join('; ')}`] : []),
     ].join('\n')
   }
   if (verb === 'view') {
@@ -7646,6 +7959,68 @@ async function sendPinReport($: EngineInterface, report: PinReport, now: number)
     await $.store.set('mm.pinReport', { hash, at: now } satisfies PinReportSent)
   } catch {
     // the next sync tries again; nothing of the report is kept or noted
+  }
+}
+
+/** (0.7.34) What the bridge keeps of Team now (`mm.team`): the last good read, when it was asked, and, while OW has no such route, until when not to ask. */
+type TeamKept = { asked?: number; got?: number; team?: TeamNow; seen?: TeamSeen; missingUntil?: number }
+
+/**
+ * (0.7.34, Rob 2026-11-07: "if we could see it live in the side panel when something gets assigned to a team member, I could see
+ * it pop over to them ... I could see what the teammate's working on") Team now from OW (`GET /api/ext/team-now`, read-only), into
+ * the store for every thread here: on the lease holder's tick, TEAM_OPEN_MS while the dropdown is open on this computer,
+ * TEAM_CLOSED_MS while it is closed (its line carries the counts); and at once (`force`) when the person opens it. A failure keeps
+ * the last read; a 404 or 405 is not asked again for PIN_REPORT_MISSING_MS. ⛔ Never throws into the tick.
+ */
+async function teamPass($: EngineInterface, force = false): Promise<void> {
+  try {
+    const now = await $.clock.now()
+    const kept = await storeGet<TeamKept>($, 'mm.team', {})
+    if (Number(kept.missingUntil) > now && !force) return
+    const open = (await storeGet<Panel>($, 'mm.panel', {})).teamNow === true
+    // (a tick early by a few seconds, as the first one after a start is, does not wait a whole minute more)
+    if (!force && now - (Number(kept.asked) || 0) < (open ? TEAM_OPEN_MS : TEAM_CLOSED_MS) - TEAM_SLACK_MS) return
+    await patchStore<TeamKept>($, 'mm.team', {}, t => {
+      t.asked = now
+    })
+    const asked = await within($, $.http.fetch(`${EXT}/team-now`, { headers: await authHeaders($) }))
+    if (!asked.ok) return
+    const r = asked.value
+    if (r.status === 404 || r.status === 405) {
+      await patchStore<TeamKept>($, 'mm.team', {}, t => {
+        t.missingUntil = now + PIN_REPORT_MISSING_MS
+      })
+      await drawTeam($)
+      return
+    }
+    if (r.status < 200 || r.status >= 300) return
+    const team = teamFrom(JSON.parse(r.text))
+    if (!team) return
+    const moved = withMoves(team, kept.seen ?? {})
+    await patchStore<TeamKept>($, 'mm.team', {}, t => {
+      t.asked = now
+      t.got = now
+      t.team = moved.team
+      t.seen = moved.seen
+      delete t.missingUntil
+    })
+    await drawTeam($)
+  } catch {
+    // the next tick asks again; the dropdown keeps the last read
+  }
+}
+
+/** (0.7.34) This thread's pane catches up with the store's Team now: a redraw only when a newer read is there. */
+async function drawTeam($: EngineInterface): Promise<void> {
+  try {
+    const kept = await storeGet<TeamKept>($, 'mm.team', {})
+    const now = await $.clock.now()
+    const { value: was } = await $.state.get(TEAMNOW)
+    const missing = Number(kept.missingUntil) > now
+    if ((was?.got ?? 0) === (kept.got ?? 0) && Boolean(was?.missing) === missing) return
+    await $.state.set(TEAMNOW, { ...(kept.team ? { team: kept.team } : {}), ...(kept.got ? { got: kept.got } : {}), ...(missing ? { missing: true } : {}) } satisfies MmTeamNow)
+  } catch {
+    // the next pass draws it
   }
 }
 
@@ -8338,9 +8713,6 @@ async function lineContext($: EngineInterface, needLines: boolean): Promise<{ pi
   return { pid: cur.pid, client, p, task: cur.task }
 }
 
-/** (0.7.0) Whether this computer runs Windows: the hook's command is given in PowerShell's form too. */
-const onWindows = async ($: EngineInterface): Promise<boolean> => platformOf({ OS: await $.env.get('OS'), HOME: await $.env.get('HOME') }) === 'windows'
-
 /** (0.7.0) OW's own words in an answer that refused (`message`, else `error`), one line. */
 function owSaid(text: string): string {
   try {
@@ -8661,6 +9033,9 @@ async function currentLine($: EngineInterface): Promise<string> {
 }
 
 export const register: Register = on => {
+  // (0.7.36) a pickup page this thread prints is its finished check of that version: the signature box opens
+  cardHooks(on)
+
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     // Runs in a person's session only: the terminal REPL (isInteractive) or the desktop app's Code tab, which
@@ -8681,12 +9056,12 @@ export const register: Register = on => {
     try {
       await $.command.register({
         name: 'mm',
-        description: 'Massmarket: /mm (what needs you) · /mm link <client> · /mm update <client> · /mm start <client> · /mm start all · /mm restore <client> · /mm view · /mm unlink · /mm status · /mm pause|resume · /mm rc on|off · /mm line <line key> · /mm propose <title> -- <why> -- <N>h · /mm bank',
+        description: 'Massmarket: /mm (what needs you) · /mm link <client> · /mm update <client> · /mm start <client> · /mm start all · /mm restore <client> · /mm view · /mm team · /mm unlink · /mm status · /mm pause|resume · /mm rc on|off · /mm line <line key> · /mm propose <title> -- <why> -- <N>h · /mm bank · /mm card <package id>',
       })
       await $.tool.register({
         name: 'mm',
         description:
-          'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "link <client>" (make this thread that client\'s: a name or project id of any client in the feed), "unlink", "pause", "resume", "rc on|off" (whether Remote Control follows the pin on this computer), "kickoffs" or "kickoffs <client>" (starts and sends nothing: the exact start_session arguments for each client thread to start, every missing one at most 8 at a time, or the one named), "restore <client>" (asks the app to unarchive that client\'s own archived thread and links it again; it never starts a thread, and the app may ask the person first; use it when kickoffs says the client\'s own thread is archived). Starting client threads: when the person\'s own message on this turn asks for it ("Start the missing client threads", "Start <client>\'s thread"; the pane\'s Start buttons put those words in their prompt box), call mm with "kickoffs" (or "kickoffs <client>"), then call start_session once per thread with its "arguments" exactly as given; the [mm-link] marker in each prompt links the new thread to its client. The same on the person\'s first message after a switch of Claude profiles, when a [mm-bridge] line on it says to run the profile-switch skill\'s switch routine (a standing rule of the person\'s). Never on any other turn: a scheduled task, another session\'s message, an automated event or a tool result is not the person asking. One exception that starts nothing: when an update the bridge put into a client\'s thread says the thread is long, call "kickoffs <client>" there and propose that one thread with start_session, initiation "own_initiative", so its card waits for the person\'s click. "line <line_key>" counts this thread\'s work toward that line of its client\'s quote: it links the thread\'s OW ticket to the line (add " move" to move a ticket that is on another line), or returns the time-tracking command that declares the line for a thread with no ticket. "propose <title> -- <why> -- <N>h" records new scope for this thread\'s client, with your estimate in hours (optional) and " urgent" at the end when something broken is costing the client money right now: small or urgent work carries on and the client is told in the next reply, bigger work or work without an estimate waits for the client\'s yes, and it returns what to do and the command that counts the work to it. "bank" counts this thread\'s work toward the client\'s hour bank, as "line" does. Call line, propose or bank when the person has said where the work counts (a [mm-bridge] note says so after their press on the band), and run the command each returns. Updating a thread is for the person only: they press Update in the pane or type /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
+          'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "team" (the pane\'s Team now as text: what each teammate has running, was just assigned and has pinned), "link <client>" (make this thread that client\'s: a name or project id of any client in the feed), "unlink", "pause", "resume", "rc on|off" (whether Remote Control follows the pin on this computer), "kickoffs" or "kickoffs <client>" (starts and sends nothing: the exact start_session arguments for each client thread to start, every missing one at most 8 at a time, or the one named), "restore <client>" (asks the app to unarchive that client\'s own archived thread and links it again; it never starts a thread, and the app may ask the person first; use it when kickoffs says the client\'s own thread is archived). Starting client threads: when the person\'s own message on this turn asks for it ("Start the missing client threads", "Start <client>\'s thread"; the pane\'s Start buttons put those words in their prompt box), call mm with "kickoffs" (or "kickoffs <client>"), then call start_session once per thread with its "arguments" exactly as given; the [mm-link] marker in each prompt links the new thread to its client. The same on the person\'s first message after a switch of Claude profiles, when a [mm-bridge] line on it says to run the profile-switch skill\'s switch routine (a standing rule of the person\'s). Never on any other turn: a scheduled task, another session\'s message, an automated event or a tool result is not the person asking. One exception that starts nothing: when an update the bridge put into a client\'s thread says the thread is long, call "kickoffs <client>" there and propose that one thread with start_session, initiation "own_initiative", so its card waits for the person\'s click. "line <line_key>" counts this thread\'s work toward that line of its client\'s quote: it links the thread\'s OW ticket to the line (add " move" to move a ticket that is on another line), or returns the time-tracking command that declares the line for a thread with no ticket. "propose <title> -- <why> -- <N>h" records new scope for this thread\'s client, with your estimate in hours (optional) and " urgent" at the end when something broken is costing the client money right now: small or urgent work carries on and the client is told in the next reply, bigger work or work without an estimate waits for the client\'s yes, and it returns what to do and the command that counts the work to it. "card <package id>" sends nothing, starts nothing and picks up nothing. Ask it last at pickup, after your checks, with the whole package id: it says whether the side pane stands in for the page ("card ready: ...", follow its words and do not print the page) or not ("card not ready: ...", follow its words). "bank" counts this thread\'s work toward the client\'s hour bank, as "line" does. Call line, propose or bank when the person has said where the work counts (a [mm-bridge] note says so after their press on the band), and run the command each returns. Updating a thread is for the person only: they press Update in the pane or type /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
         inputSchema: { type: 'object', properties: { args: { type: 'string', description: 'what follows /mm' } } },
         isDeferred: false,
       })
@@ -8713,6 +9088,8 @@ export const register: Register = on => {
     const done = await next(e)
     // the main conversation's turns only: a subagent's turn says nothing of this thread's work
     if ((e as { agentId?: unknown }).agentId) return done
+    // (0.7.36) the thread has stopped, unless a background sub-agent is at work: what this turn got `card ready` for, or printed the page of, is checked now, and the signature box opens
+    await turnEnded($, e.reason === 'answer').catch(() => {})
     void (async () => {
       await terminalTime($)
       await drawTrack($, 'turn')
@@ -8759,7 +9136,9 @@ export const register: Register = on => {
       // (0.6.0) the person's prompts, for the band; a SINGLE-SESSION run is known by its first
       await countPrompt($, text, origin).catch(() => {})
       // (0.7.11) the first prompt the person types after a switch of Claude profiles: one line for Claude, once a switch
-      if (!sentence) sentence = await awayNote($, text, origin).catch(() => undefined)
+      // ⛔ (0.7.33) never on the person's go: the send gate clears a signed card only on exactly `Send package <12>`. The line
+      // waits for their next prompt.
+      if (!sentence && !SIGNED_GO.test(text.trim())) sentence = await awayNote($, text, origin).catch(() => undefined)
     } catch {
       // a marker that cannot be acted on never holds a prompt back
     }
@@ -8773,6 +9152,8 @@ export const register: Register = on => {
   // R10: a chip the app did not answer outside a turn is tried again at the start of this thread's next turn
   on('turn.start', async ($, e, next) => {
     try {
+      // (0.7.36) the thread is working: no signature box until this turn ends (`turnBegan`)
+      if (!(e as { agentId?: unknown }).agentId) await turnBegan($)
       const id = await instanceId($)
       const paused = mintPause.get(id)
       if (paused?.atTurn) {
@@ -8798,7 +9179,7 @@ export const register: Register = on => {
     }
     await refreshBand($).catch(() => {})
     return { text }
-  }).catch(() => ({ text: NOT_IN_TIME }))
+  }).catch(($, e) => ({ text: notInTime(e.args) }))
 
   // ⛔ Claude calls this. It never starts or updates a thread: `runCommand` refuses both for it.
   // ⛔ (0.7.28) It always answers (`didNotFinish`), and its `.catch` answers for a hook that ran out of its time. The engine
@@ -8809,13 +9190,13 @@ export const register: Register = on => {
     const args = String((e as Record<string, unknown>).args ?? '')
     let result: string
     try {
-      result = await runCommand($, args, 'other')
+      result = await runCommand($, args, 'other', false, !(e as { agentId?: unknown }).agentId)
     } catch (err) {
       result = await didNotFinish($, args, err)
     }
     await refreshBand($).catch(() => {})
     return { result }
-  }).catch(() => ({ result: NOT_IN_TIME }))
+  }).catch(($, e) => ({ result: notInTime((e as Record<string, unknown>).args) }))
 
   // A route that can close something was called from this thread and worked (R6: a reply draft sent or
   // discarded, a team draft posted, any write to a reply package; (0.5.28, internal asks) an ask's reply stored,
@@ -8949,12 +9330,20 @@ export const register: Register = on => {
   // link and three buttons. A surface with no Select (the mobile app) has no picker, so it offers no Route. A HighLevel
   // Directory lead's row has two, anywhere: Mark handled and Not client mail (OW refuses route and bootstrap for it).
   on('ui.render', { component: 'Pane', requestId: PANE_QUEUE }, async ($, e) => {
+    // (0.7.33) nothing counts as drawn until this draw has been made (`noteDrawn` under the tree): `mm card` asks
+    noteDrawn(null)
     const { Box, Button, Link, Markdown, Text } = $.ui.resolve(e)
     // (New people) a picker only where the surface draws one: the mobile app's table has no Select
     const Select = PICKER_SURFACES.has(String(e.surface)) ? ($.ui.resolve(e) as Partial<Pick<Elements['desktop'], 'Select'>>).Select : undefined
     const { value: queue } = await $.state.get(QUEUE)
     const { value: notice } = await $.state.get(NOTICE)
     const { value: folds } = await $.state.get(FOLDS)
+    // (0.7.34) the two parts that fold: each thread's own press, else this computer's last one
+    const panel = await storeGet<Panel>($, 'mm.panel', {})
+    const needsOpen = folds?.needs ?? panel.needs ?? true
+    const teamOpen = folds?.teamNow ?? panel.teamNow ?? false
+    const { value: teamNow } = await $.state.get(TEAMNOW)
+    const teamClock = await $.clock.now()
     const people = queue && Array.isArray(queue.people) ? queue.people : []
     const routeTo = queue && Array.isArray(queue.routeTo) ? queue.routeTo : []
     const ui = people.length ? await peopleUi($) : {}
@@ -8962,8 +9351,13 @@ export const register: Register = on => {
     // (0.7.26) the reply-package card, above the page it draws (the page folds under it once the card is drawn)
     const card = await cardOf($)
     const cardMarks = await marksOf($)
+    const cardChecked = await checkedOf($)
+    const cardBusy = await busyOf($)
+    const cardCheckMiss = await checkMissOf($)
     const cardNow = await $.clock.now()
     const cardShown = Boolean(client.text && card?.packageId && card.tree)
+    // (0.7.33) the line that says it cannot be drawn on this computer, over the part as it is
+    const cardFailed = Boolean(client.text && card?.packageId && !card.tree && card.status === 'failed')
     // (0.6.0) this thread's Tracking part: what it is counted to, and the time tracked to that project
     const { value: track } = await $.state.get(TRACK)
     const tracking = track && track.pid && Array.isArray(track.lines) && track.lines.length ? track : undefined
@@ -8976,7 +9370,12 @@ export const register: Register = on => {
     const offer = hasList ? await startAllOffer($) : 0
     const drawRow = (row: Row, lead: string) => (
       <Box flexDirection="column" marginTop={1}>
-        <Text>{`${lead} ${row.title}`}</Text>
+        {/* (0.7.34) what is pinned is easy to see: the photo's marks. A thread that should be pinned and is not says why; a row with no thread already says so */}
+        <Box flexDirection="row" gap={1}>
+          {row.pin ? <Text color={row.pin.pinned ? 'success' : 'warning'}>{row.pin.pinned ? '●' : '○'}</Text> : null}
+          <Text>{`${lead} ${row.title}`}</Text>
+        </Box>
+        {row.pin && !row.pin.pinned && row.pin.why !== 'no_thread' ? <Text color="warning">{rowPinWords(row.pin)}</Text> : null}
         {rowDetail(row) ? <Text dimColor>{rowDetail(row)}</Text> : null}
         {row.note ? <Text dimColor>{row.note}</Text> : null}
         {isStillOpenRow(row) ? (row.stillOpen as string[]).map(item => <Text dimColor>{`- ${item}`}</Text>) : null}
@@ -9090,27 +9489,47 @@ export const register: Register = on => {
     const updated = hasList && queue ? queue.note : tracking?.at ? `Updated ${localClock(tracking.at)}` : ''
     // (0.7.11) At the very top, above everything: the clients whose thread is in another Claude profile, and ONE button
     // that puts the words that start them in the prompt box (Start missing threads' own press).
-    return (
+    const drawn = (
       <Box flexDirection="column">
-        {hasList && queue?.away?.text ? (
-          <Box key="mm-away" flexDirection="column" marginBottom={1}>
-            <Text>{queue.away.text}</Text>
-            <Button key="mm-away-start" label={awayButton(Number(queue.away.count) || 0)} variant="primary" onPress={() => void pressStartAll($)} />
-          </Box>
-        ) : null}
+        {/* (0.7.34, Rob 2026-11-07: "a dropdown that reveals something that looks just like what we added to the bottom of the daily team photo") */}
+        <Box key="mm-teamnow" flexDirection="column" marginBottom={1}>
+          <Button key="mm-teamnow-toggle" plain label={`${teamHeadingNow(teamNow?.team)}  ${teamOpen ? '▾' : '▸'}`} onPress={() => void togglePanel($, 'teamNow', teamOpen)} />
+          {teamOpen && teamNow?.missing ? <Text dimColor>{TEAM_MISSING}</Text> : null}
+          {teamOpen && !teamNow?.team && !teamNow?.missing ? <Text dimColor>{CHECKING}</Text> : null}
+          {teamOpen && teamNow?.team
+            ? teamLines(teamNow.team, teamClock).map((l, n) => (
+                <Box key={`mm-teamnow-line:${n}`} marginTop={l.person ? 1 : 0}>
+                  <Text bold={l.bold === true} dimColor={l.dim === true} {...(l.color ? { color: l.color } : {})}>
+                    {l.text}
+                  </Text>
+                </Box>
+              ))
+            : null}
+        </Box>
         {tracking?.second ? <Text dimColor>{tracking.second}</Text> : null}
         {client.text ? (
           <Box key="mm-client" flexDirection="column" marginBottom={1}>
             {client.heading ? <Text bold>{client.heading}</Text> : null}
-            {cardShown ? drawCard($.ui.resolve(e) as Parameters<typeof drawCard>[0], { card: card, marks: cardMarks, now: cardNow, onSign: label => void pressSign($, label), onAsk: words => void pressAsk($, words), onPage: () => void togglePage($) }) : null}
-            {cardShown && !cardMarks.pageOpen ? null : <Markdown text={client.text} />}
+            {cardShown || cardFailed ? drawCard($.ui.resolve(e) as Parameters<typeof drawCard>[0], { card: card, marks: cardMarks, checked: cardChecked, busy: cardBusy, checkMiss: cardCheckMiss, now: cardNow, onSign: label => void signPressed($, label), onCheck: label => void pressCheck($, label), onAsk: words => void pressAsk($, words), onPage: () => void togglePage($) }) : null}
+            {/* (0.7.33, G11) under a card the banner, the asks and the queue stay in sight: only the page folds */}
+            {cardShown && client.extra ? <Markdown text={client.extra} /> : null}
+            {cardShown && cardMarks.pageOpen ? <Markdown text={client.page ?? client.text} /> : null}
+            {cardShown ? null : <Markdown text={client.text} />}
           </Box>
         ) : null}
-        {hasList && queue ? <Text bold>{queue.header}</Text> : <Text dimColor>{CHECKING}</Text>}
-        {offer > 0 ? <Button key="mm-start-all" label={startAllLabel(offer)} variant="primary" onPress={() => void pressStartAll($)} /> : null}
+        {/* (0.7.34, Rob 2026-11-07: "Beside saying 'Needs you now,' it can say if there are any threads not started and have a 'Start missing threads' button only.") */}
+        {hasList && queue ? (
+          <Box key="mm-needs-head" flexDirection="row" flexWrap="wrap" gap={1}>
+            {queue.rows.length ? <Button key="mm-needs-toggle" plain label={`${queue.header}  ${needsOpen ? '▾' : '▸'}`} onPress={() => void togglePanel($, 'needs', needsOpen)} /> : <Text bold>{queue.header}</Text>}
+            {offer > 0 ? <Text dimColor>{notStartedText(offer)}</Text> : null}
+            {offer > 0 ? <Button key="mm-start-all" label={START_MISSING} variant="primary" onPress={() => void pressStartAll($)} /> : null}
+          </Box>
+        ) : (
+          <Text dimColor>{CHECKING}</Text>
+        )}
         {notice?.text ? <Text>{notice.text}</Text> : null}
         {hasList && queue?.warning ? <Text>{queue.warning}</Text> : null}
-        {hasList && queue ? rowGroups(queue.rows).flatMap(group => group.rows.map(({ row, n, mark }) => drawRow(row, `${mark}${n}.`))) : null}
+        {hasList && queue && needsOpen ? rowGroups(queue.rows).flatMap(group => group.rows.map(({ row, n, mark }) => drawRow(row, `${mark}${n}.`))) : null}
         {build ? (
           <Box key="mm-build" flexDirection="column" marginTop={1}>
             <Text bold>{buildHeading(build)}</Text>
@@ -9181,8 +9600,9 @@ export const register: Register = on => {
         ) : null}
       </Box>
     )
+    // (0.7.33) the tree is built: only now does this card count as drawn. ⛔ What the engine does with a tree it refuses after this
+    // return (`ui.render`: "An invalid tree, or a throw while drawn, draws the engine's") this hook cannot see.
+    noteDrawn(cardShown ? card : null)
+    return drawn
   })
-
-  // (0.7.26) A response of this thread that prints a pickup page opens the card's signature for that package's tag.
-  cardHooks(on)
 }

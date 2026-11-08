@@ -9,7 +9,7 @@ import {
   QUEUE_SHOWN_MAX, internalQueueThread, ownQueueRows, queueMarkdown, queueTotal, queuedOf,
   ETA_ASK_TEXT, INTERNAL_DISCORD, etaAsksOf, etaOnly, lateSentence, matesOf, queueHome, undatedCount, undatedOnly, whoseLate,
   ASSIGN_ASK_TEXT, ASSIGN_BY_BASIS, assignAsksOf, assignMarkdown, assignOnly, committedCount,
-  PM_CHECK_AHEAD_MS, STILL_NEEDS_YOU, checkAheadOf, checkNow, ownActBy, pinTitle, pinsFor, watchMarkdown, watchOf,
+  STILL_NEEDS_YOU, checkNow, ownActBy, pinReason, pinTitle, pinsFor, watchMarkdown, watchOf,
   LATE_WITH_TEAM, TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine, teamLateSegment, teamLateWho,
   GO_THEIRS, GO_WHAT, clientWaiting, goFirstText, goMarkdown, goMine, goOf, goOnly, goSentence, mayStart, ownPins, stepWord,
   okLateOnly, ownBesides, teamLateOnly,
@@ -449,7 +449,7 @@ describe('a reply package someone picked up', () => {
     expect(note).toContain('already picked up by')
     expect(note).not.toContain('no reply drafts are prepared yet')
     expect(note).toBe(
-      `Reply package aaaaaaaa is already picked up by Builder A, the person in this session, with 1 draft not sent yet; the one-package page is in the side pane. 1 client message arrived after that draft was written: read the package again and revise the open draft, never write a second email. The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${HELD}.`,
+      `Reply package ${HELD} is already picked up by Builder A, the person in this session, with 1 draft not sent yet; the one-package page is in the side pane. 1 client message arrived after that draft was written: read the package again and revise the open draft, never write a second email. The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${HELD}.`,
     )
     expect(holdBanner(it).startsWith('> **You picked this up**')).toBe(true)
     expect(holdBanner(it)).toBe('> **You picked this up** (Mon 4:30 PM). 1 draft not sent yet. 1 client message arrived after it was written.')
@@ -463,7 +463,7 @@ describe('a reply package someone picked up', () => {
     expect(titleFor(it, T)).toBe('🟡 17h left · Acme Roofing · your draft · flagged')
     expect(holdBanner(it)).toBe('> **You picked this up** (Mon 4:30 PM). 3 drafts not sent yet.')
     expect(noteText(it, ME)).toBe(
-      `Reply package aaaaaaaa is already picked up by Builder A, the person in this session, with 3 drafts not sent yet, flagged for approval; the one-package page is in the side pane. The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${HELD}.`,
+      `Reply package ${HELD} is already picked up by Builder A, the person in this session, with 3 drafts not sent yet, flagged for approval; the one-package page is in the side pane. The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${HELD}.`,
     )
     // two messages after two or more drafts
     const two = only(feed({ drafts: [pkg({ drafts_unsent: 2 })], mail: [newer(), mailAt(P1, ACME_NAME, '2026-10-12 11:30')] }))
@@ -588,8 +588,8 @@ describe('a reply package someone picked up', () => {
     const it = only(feed({ drafts: [pkg({ status: 'prepared', picked_up_by: null, picked_up_at: null })] }))
     expect(it).toMatchObject({ kind: 'ready', packageId: HELD, open: null })
     expect(draftsLine(it)).toBe('_Reply drafts are prepared for this client, but the pickup view could not be loaded here. Ask Claude: "Show me the reply drafts for Acme Roofing"._')
-    expect(noteText(it, ME)).toBe(`Reply package aaaaaaaa is prepared; the one-package page is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`)
-    expect(noteText({ ...it, flagged: true }, ME)).toBe(`Reply package aaaaaaaa is prepared and flagged for approval; the one-package page is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`)
+    expect(noteText(it, ME)).toBe(`Reply package ${HELD} is prepared; the one-package page is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`)
+    expect(noteText({ ...it, flagged: true }, ME)).toBe(`Reply package ${HELD} is prepared and flagged for approval; the one-package page is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`)
     expect(titleFor(it, T)).toBe('🟡 17h left · Acme Roofing · reply ready')
     expect(holdBanner(it)).toBe('')
   })
@@ -610,7 +610,7 @@ describe('a reply package someone picked up', () => {
       '🟡 17h left · Acme Roofing · reply ready', '🟡 17h left · Acme Roofing · reply · 2 new', '🔴 1h left · Acme Roofing · task',
     ])
     expect([ready, reply, task].map(it => noteText(it, ME))).toEqual([
-      `Reply package aaaaaaaa is prepared; the one-package page is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`,
+      `Reply package ${HELD} is prepared; the one-package page is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`,
       '2 client messages waiting on our reply and 0 committed tasks due; no reply drafts are prepared yet.',
       // (0.7.4) a task alone is not a reply to prepare (Rob, 2026-10-27: "It doesn't necessarily create the need for a new reply")
       '0 client messages waiting on our reply and 1 committed task due; no client message is waiting, so there is no reply to prepare.',
@@ -620,7 +620,7 @@ describe('a reply package someone picked up', () => {
     expect([ready, reply, task].map(holdBanner)).toEqual(['', '', ''])
     expect([ready, reply, task].map(waitingText)).toEqual(['drafts ready', '2 messages waiting', '1 task due'])
     expect([ready, reply, task].map(it => kickoffText(it))).toEqual([
-      `[mm-link ${P1}] Pick up the reply drafts for Acme Roofing Pat (OW project ${P1}). Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for package aaaaaaaa and wait for me. Send nothing without my go.`,
+      `[mm-link ${P1}] Pick up the reply drafts for Acme Roofing Pat (OW project ${P1}). Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for package aaaaaaaa-3333-4333-8333-333333333333 and wait for me. Send nothing without my go.`,
       `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9:52 AM ET. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the one-package page and wait for me. Send nothing without my go.`,
       `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}) has 1 committed task(s) due Mon, Oct 12 6 PM ET. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`,
     ])
@@ -751,7 +751,7 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
     const [it] = buildLists(asFounder({ drafts: [flagged()] }), TUE).teammate
     const stale = { ...(it as QueueItem), theirs: undefined, okLate: undefined, open: { ...((it as QueueItem).open as NonNullable<QueueItem['open']>), state: 'stale' as const } }
     expect(waitingText(stale)).toBe('needs your OK · Builder B sends, drafts out of date')
-    expect(kickoffText(stale)).toContain('reply package aaaaaaaa is flagged for my OK and is marked out of date, and Builder B sends it.')
+    expect(kickoffText(stale)).toContain('reply package aaaaaaaa-3333-4333-8333-333333333333 is flagged for my OK and is marked out of date, and Builder B sends it.')
   })
 
   test('it sorts by its due time with the rest, and (0.7.12) one past the cut is in no list', async () => {
@@ -787,7 +787,7 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
     for (const [now, list] of [[MON, 'teammate'], [TUE, 'teammate']] as const) {
       const [it] = buildLists(asFounder({ drafts: [flagged()] }), now)[list]
       expect(kickoffText(it as QueueItem)).toBe(
-        `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}): reply package aaaaaaaa is flagged for my OK, and Builder B sends it. Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go.`,
+        `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}): reply package aaaaaaaa-3333-4333-8333-333333333333 is flagged for my OK, and Builder B sends it. Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go.`,
       )
     }
     // feed text is data here too: an owner's address reaches the row, its name and the kickoff as a cleaned name, on one line
@@ -849,8 +849,8 @@ describe('B4: a package flagged for the founder lists for him whoever owns the c
     expect(held?.open?.state).toBe('held_by_me')
     // a third teammate sees no row for it
     expect(where({ member: 'someone-else@example.com', role: 'builder', drafts: [flagged()] })).toEqual({ queue: [], teammate: [] })
-    // (0.7.27) a pm sees it under With a teammate once it is due within 24 business hours: it is pinned for its owner then
-    expect(where({ member: 'someone-else@example.com', role: 'pm', drafts: [flagged()] })).toEqual({ queue: [], teammate: [P1] })
+    // (0.7.34) nor a pm: a teammate's part is on Team now, never on his list (0.7.27 to 0.7.33 listed it under With a teammate)
+    expect(where({ member: 'someone-else@example.com', role: 'pm', drafts: [flagged()] })).toEqual({ queue: [], teammate: [] })
   })
 
   test('not flagged, on a client a teammate owns: for him as it was, nothing listed; a hold by the owner is not his either', async () => {
@@ -880,7 +880,7 @@ describe('B4: a package flagged for the founder lists for him whoever owns the c
         const [it] = buildLists(asFounder({ drafts }), now)[list]
         expect(it).toMatchObject({ projectId: P1, kind: 'ok' })
         expect(it?.open).toMatchObject({ id: PKG_A, state: 'prepared' })
-        expect(kickoffText(it as QueueItem)).toContain('reply package aaaaaaaa is flagged for my OK')
+        expect(kickoffText(it as QueueItem)).toContain('reply package aaaaaaaa-3333-4333-8333-333333333333 is flagged for my OK')
       }
     }
   })
@@ -1004,7 +1004,7 @@ describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the 
     // the kickoff and the note treat it as a package a teammate holds (show what is waiting, no prep, no second
     // reply), in words for a package nobody picked up (Opus, 10-13)
     expect(kickoffText(it)).toBe(
-      `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}): Builder B has the reply drafts (package aaaaaaaa), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`,
+      `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}): Builder B has the reply drafts (package aaaaaaaa-3333-4333-8333-333333333333), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`,
     )
     expect(kickoffText(it)).not.toContain('picked up')
     expect(noteText(it, FOUNDER)).toBe('0 client messages waiting on our reply and 1 committed task due; Builder B has the reply drafts (package aaaaaaaa), and they are marked out of date. Do not write a second reply: ask Builder B.')
@@ -1018,12 +1018,12 @@ describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the 
     expect(note).toBe('1 client message waiting on our reply and 0 committed tasks due; Builder B has the reply drafts (package aaaaaaaa), and they are marked out of date. Do not write a second reply: ask Builder B.')
     expect(note).not.toContain('pick the package up')
     expect(kickoffText(it)).toBe(
-      `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}): Builder B has the reply drafts (package aaaaaaaa), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`,
+      `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}): Builder B has the reply drafts (package aaaaaaaa-3333-4333-8333-333333333333), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`,
     )
     // a package a teammate actually picked up keeps the held words exactly
     const held = buildLists(asFounder({ drafts: [pkg(pickedUp('J.Smith@example.com'))], mail: [{ ...theirMail('2026-10-12 10:30'), project_owner_email: FOUNDER }] }), MON).teammate[0] as QueueItem
     expect(held?.open?.state).toBe('held_by_other')
-    expect(kickoffText(held)).toContain(': J Smith picked up the reply drafts (package aaaaaaaa) and has 1 not sent yet. Load the client\'s project skill first')
+    expect(kickoffText(held)).toContain(': J Smith picked up the reply drafts (package aaaaaaaa-3333-4333-8333-333333333333) and has 1 not sent yet. Load the client\'s project skill first')
     expect(noteText(held, FOUNDER)).toContain('; J Smith picked up the reply drafts for this client (package aaaaaaaa) and has 1 draft not sent yet. Do not write a second reply: ask J Smith.')
     expect(handoverText(it, { sid: 'local_0f1e2d3c-aaaa-4bbb-8ccc-000000000001', title: 'Roof quote' })).toContain('Before showing me what is due')
     // his own client's stale package keeps the wording that rebuilds the drafts, as before
@@ -2810,7 +2810,7 @@ describe('(0.7.15) an `assign_by` commitment asks for an owner by its clock, nev
   })
 })
 
-describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you") a teammate\'s part pins only once the PM should check on them; (0.7.21) never for the founder', () => {
+describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you") a teammate\'s part never pins: (0.7.21) not for the founder; (0.7.34) not for the PM', () => {
   /** Wed 2026-10-28 3 PM in New York. */
   const wed = Date.parse('2026-10-28T19:00:00Z')
   const H = 3_600_000
@@ -2834,11 +2834,7 @@ describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from
     return it
   }
 
-  test('the numbers: (0.7.27) 24 business hours for the PM (0.7.18 to 0.7.26: 5); (0.7.21) none for the founder (0.7.18 to 0.7.20: 2), none for anyone else', async () => {
-    expect(PM_CHECK_AHEAD_MS).toBe(24 * H)
-    expect(checkAheadOf('pm')).toBe(24 * H)
-    expect(checkAheadOf('founder')).toBeNull()
-    expect(checkAheadOf('builder')).toBeNull()
+  test('the words: what a pinned row says of a stored check', async () => {
     expect(STILL_NEEDS_YOU).toBe('still needs you')
   })
 
@@ -2873,16 +2869,18 @@ describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from
     expect(pinTitle(late, wed)).toBe('🟡 Acme Legal · task · no due date')
   })
 
-  test('a reply whose drafts a teammate holds: the PM checks on them (0.7.27) 24 business hours out; (0.7.21) the founder and a teammate never; nothing of the viewer\'s own is lost', async () => {
+  test('a reply whose drafts a teammate holds: (0.7.34) nobody is pinned for it, the PM, the founder or a teammate; nothing of the viewer\'s own is lost', async () => {
     const held = { package_id: PKG, project_id: CLIENT, project_name: 'Acme Legal', status: 'picked_up', picked_up_by: ASIF, picked_up_at: at(-1), covers_through: at(-3), drafts_ready: 1, drafts_unsent: 1, project_owner_email: H9 }
     const msg = (dueH: number, owner: string) => ({ ...mail(CLIENT, 'Acme Legal', -3, owner), reply_due_at: at(dueH) })
+    // (0.7.18 to 0.7.33 pinned the PM 24 business hours out, `🔴 Acme Legal · check on Asif · reply due 7 PM`)
     const pm = (dueH: number): Feed => ({ member: H9, role: 'pm', mail: [msg(dueH, H9)], drafts: [{ ...held, due_at: at(dueH) }] })
-    expect(withTeammate(listed(pm(4)))).toBe(true)
-    expect(pinsFor(listed(pm(30)), wed)).toBe(false)
-    expect(pinsFor(listed(pm(20)), wed)).toBe(true)
-    expect(pinsFor(listed(pm(4)), wed)).toBe(true)
-    expect(pinTitle(listed(pm(4)), wed)).toBe('🔴 Acme Legal · check on Asif · reply due 7 PM')
-    expect(pinTitle(listed(pm(-2)), wed)).toBe('🔴 Acme Legal · check on Asif · reply 2h late')
+    for (const dueH of [30, 20, 4, -2]) {
+      const it = listed(pm(dueH))
+      expect(pinsFor(it, wed)).toBe(false)
+      expect(watchOf(it)).toEqual([])
+      expect(checkNow(it, wed)).toBeNull()
+      expect(pinTitle(it, wed)).not.toContain('check on')
+    }
     // a teammate who owns the client: never pinned for it, late or not (it was never pinned for them before either)
     const mate = (dueH: number): Feed => ({ member: 'builder-a@example.com', role: 'builder', mail: [msg(dueH, 'builder-a@example.com')], drafts: [{ ...held, project_owner_email: 'builder-a@example.com' }] })
     expect(pinsFor(listed(mate(-2)), wed)).toBe(false)
@@ -2907,38 +2905,31 @@ describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from
     expect(pinTitle(listed(both(10)), wed)).toBe(titleFor(listed(both(10)), wed))
   })
 
-  test('the PM and a teammate\'s ticket: listed and pinned only once late, (0.7.27) within 24 business hours, or past its start-by with no sign it started', async () => {
+  test('(0.7.34, Rob 2026-11-07: "I still think that\'s the wrong architecture") the PM and a teammate\'s ticket: never listed, never pinned, late or not, started or not; his own as anyone\'s', async () => {
     const pm = (...tickets: FeedTicket[]): Feed => ({ member: H9, role: 'pm', tickets: { due_soon: tickets } })
-    // 3 days out, its start-by still ahead: nothing, as before
-    expect(buildLists(pm(ticket(1, ASIF, 72, { start_by_at: at(30) })), wed).teammate).toEqual([])
-    // due in 4 hours
-    const soon = listed(pm(ticket(1, ASIF, 4)))
-    expect(withTeammate(soon)).toBe(true)
-    expect(soon).toMatchObject({ theirs: 'Asif', tasks: 0, dueAt: wed + 4 * H })
-    expect(pinsFor(soon, wed)).toBe(true)
-    expect(pinTitle(soon, wed)).toBe('🔴 Acme Legal · check on Asif · task due 7 PM')
-    // start-by missed (OW's start_by_at at 1.5 h a day, as it sends it), the work not started
-    const notStarted = listed(pm(ticket(1, ASIF, 50, { start_by_at: at(-1), status: 'open' })))
-    expect(pinsFor(notStarted, wed)).toBe(true)
-    expect(checkNow(notStarted, wed)).toMatchObject({ notStarted: true, late: false })
-    expect(pinTitle(notStarted, wed)).toBe('🟡 Acme Legal · check on Asif · behind · not started, had to start 2 PM')
-    expect(watchMarkdown(notStarted, wed)).toBe(`### Check on a teammate (1)\n\n- Asif · Build 1 (ticket ${tid(1).slice(0, 8)}) · behind · not started, had to start 2 PM`)
-    expect(clientMarkdown(notStarted, wed)).toContain('### Check on a teammate (1)')
-    // started (OW: in_progress): nothing until it is nearly due
-    expect(buildLists(pm(ticket(1, ASIF, 50, { start_by_at: at(-1), status: 'in_progress' })), wed).teammate).toEqual([])
-    // late
-    expect(pinTitle(listed(pm(ticket(1, ASIF, -3))), wed)).toBe('🔴 Acme Legal · check on Asif · task 3h late')
-    // ⛔ not for the founder (his teammates' client tickets are not his to see), nor a teammate, nor the PM's own ticket
+    for (const t of [ticket(1, ASIF, 72, { start_by_at: at(30) }), ticket(1, ASIF, 4), ticket(1, ASIF, 50, { start_by_at: at(-1), status: 'open' }), ticket(1, ASIF, -3)]) {
+      expect(buildLists(pm(t), wed)).toMatchObject({ queue: [], teammate: [] })
+    }
+    // ⛔ not for the founder (his teammates' client tickets are not his to see), nor a teammate
     expect(buildLists({ member: ROB, role: 'founder', tickets: { due_soon: [ticket(1, ASIF, 4)] } }, wed).teammate).toEqual([])
     expect(buildLists({ member: 'builder-a@example.com', role: 'builder', tickets: { due_soon: [ticket(1, ASIF, 4)] } }, wed).teammate).toEqual([])
     const own = listed(pm(ticket(1, H9, 30)))
     expect(withTeammate(own)).toBe(false)
     expect(own.watch).toBeUndefined()
-    // with a ticket of his own on the client too: his row, pinned for his own when it is due, else to check on Asif
+    // with a ticket of his own on the client too: his row, pinned for his own when it is due, and only then
     const mixed = listed(pm(ticket(1, H9, 72), ticket(2, ASIF, -1)))
     expect(withTeammate(mixed)).toBe(false)
-    expect(pinsFor(mixed, wed)).toBe(true)
-    expect(pinTitle(mixed, wed)).toBe('🔴 Acme Legal · check on Asif · task 1h late')
+    expect(pinsFor(mixed, wed)).toBe(false)
+    const due = listed(pm(ticket(1, H9, 10), ticket(2, ASIF, -1)))
+    expect(pinsFor(due, wed)).toBe(true)
+    expect(pinTitle(due, wed)).toBe(titleFor(due, wed))
+    expect(pinTitle(due, wed)).not.toContain('check on')
+  })
+
+  test('(0.7.34) an item 0.7.33 stored with a teammate\'s part reads as it did until the next sync replaces it: nothing new writes one', async () => {
+    const stored = { ...listed({ member: H9, role: 'pm', tickets: { due_soon: [ticket(1, H9, 72)] } }), watch: [{ by: 'Asif', due: wed + 4 * H, what: 'task', id: tid(1), title: 'Build 1' }], checkAhead: 24 * H } as unknown as QueueItem
+    expect(checkNow(stored, wed)).toMatchObject({ by: 'Asif', late: false })
+    expect(pinTitle(stored, wed)).toBe('🔴 Acme Legal · check on Asif · task due 7 PM')
   })
 
   test('(0.7.21) the founder\'s teammates\' late internal tickets (0.7.4) never pin his thread: Team · late lists them', async () => {
@@ -3132,19 +3123,14 @@ describe('0.7.21 (Rob, 11-05): the founder\'s teammates\' late tickets leave his
     expect(teamLate([none as QueueItem])).toEqual([])
   })
 
-  test('⛔ nobody but the founder: a PM\'s and a teammate\'s feed give no Team · late, and the PM\'s check-ahead pins are as they were', async () => {
+  test('⛔ nobody but the founder: a PM\'s and a teammate\'s feed give no Team · late, and (0.7.34) the PM\'s check-ahead pins are gone', async () => {
     const pm: Feed = { ...robFeed(), member: 'has9@massmarket.ai', role: 'pm' }
     expect(teamLate(all(pm))).toEqual([])
     const mate: Feed = { ...robFeed(), member: who('Asif'), role: 'builder' }
     expect(teamLate(all(mate))).toEqual([])
-    // the PM, a teammate's committed client ticket 3 hours late: listed with a teammate, pinned to check on them, as in 0.7.18
+    // the PM, a teammate's committed client ticket 3 hours late: nothing listed (0.7.18 to 0.7.33: pinned to check on them)
     const late: Feed = { member: 'has9@massmarket.ai', role: 'pm', tickets: { overdue: [{ ticket_id: tid(30), project_id: ACME, project_name: 'Acme Legal', title: 'Build 30', due_at: at(-3), due_source: 'commitment', assignee_email: who('Asif') }] } }
-    const it = buildLists(late, wed).teammate[0] as QueueItem
-    expect(it.checkAhead).toBe(PM_CHECK_AHEAD_MS)
-    expect(pinsFor(it, wed)).toBe(true)
-    expect(pinTitle(it, wed)).toBe('🔴 Acme Legal · check on Asif · task 3h late')
-    expect(lateOnly(it)).toBe(false)
-    expect(teamLate([it])).toEqual([])
+    expect(buildLists(late, wed).teammate).toEqual([])
   })
 
   test('the pane as text: Team · late last on the line of groups, and drawn below the founder\'s own groups', async () => {
@@ -3220,7 +3206,7 @@ describe('(0.7.24, Rob 2026-11-04) follow-up steps nobody approved pin at once f
   test('the kickoff, the note and the pane: the package, every step shown, nothing goes until the go', async () => {
     const it = listed(as(ROB, 'founder', waiting()))
     expect(kickoffText(it)).toBe(
-      `[mm-link ${DEALEROSITY}] Dealerosity Nicole Bassuk (OW project ${DEALEROSITY}) has 3 follow-up step(s) that nobody has approved, in package 3bacdfc2, the first (a text) opening Fri, Nov 6 9:30 AM ET. Nothing goes until I give the go. Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for package 3bacdfc2 with every step in full and wait for me. Send nothing without my go.`,
+      `[mm-link ${DEALEROSITY}] Dealerosity Nicole Bassuk (OW project ${DEALEROSITY}) has 3 follow-up step(s) that nobody has approved, in package 3bacdfc2-7533-42e5-b0c4-fbfe0d9c3c68, the first (a text) opening Fri, Nov 6 9:30 AM ET. Nothing goes until I give the go. Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for package 3bacdfc2-7533-42e5-b0c4-fbfe0d9c3c68 with every step in full and wait for me. Send nothing without my go.`,
     )
     expect(noteText(it, ROB)).toBe(
       `Package 3bacdfc2 holds 3 proposed follow-up steps that nobody has approved and that wait for Rob's go; the first, a text, opens Fri, Nov 6 9:30 AM ET. Nothing goes until the go. When the person asks to act on them, follow client-reply-prep §9 with --package ${PKG}.`,
@@ -3275,7 +3261,7 @@ describe('(0.7.24, Rob 2026-11-04) follow-up steps nobody approved pin at once f
     expect(buildLists(as('builder-a@example.com', 'builder', waiting()), wed)).toEqual({ queue: [], teammate: [], checking: [] })
   })
 
-  test('a teammate\'s go, for oversight: the PM checks (0.7.27) 24 business hours before the first step; the founder never pins for it (0.7.21); until then With a teammate', async () => {
+  test('a teammate\'s go: the founder never pins for it (0.7.21), and (0.7.34) nor does the PM; With a teammate for the founder', async () => {
     const mate = (role: string, member: string, firstH: number) => listed(as(member, role, waiting({ go_by: ASIF, go_first_at: new Date(wed + firstH * H).toISOString() })))
     const far = mate('founder', ROB, 30)
     expect(goOf(far)).toMatchObject({ mine: false, by: 'Asif' })
@@ -3286,14 +3272,8 @@ describe('(0.7.24, Rob 2026-11-04) follow-up steps nobody approved pin at once f
     // the founder: never pinned for a teammate's part (0.7.21), near or late
     for (const h of [30, 1, -2]) expect(pinsFor(mate('founder', ROB, h), wed)).toBe(false)
     expect(watchOf(far)).toEqual([])
-    // the PM: 30 hours out no, 4 yes, named for who to check on
-    const pmFar = mate('pm', H9, 30)
-    expect(watchOf(pmFar)).toEqual([{ by: 'Asif', due: wed + 30 * H, what: 'follow-ups go' }])
-    expect(pinsFor(pmFar, wed)).toBe(false)
-    const near = mate('pm', H9, 4)
-    expect(pinsFor(near, wed)).toBe(true)
-    expect(pinTitle(near, wed)).toBe('🔴 Dealerosity · check on Asif · follow-ups go due 3:52 PM')
-    expect(pinTitle(mate('pm', H9, -2), wed)).toBe('🔴 Dealerosity · check on Asif · follow-ups go 2h late')
+    // (0.7.34) the PM: nothing listed, 30 hours out, 4 or late (0.7.18 to 0.7.33: pinned from 24 business hours out)
+    for (const h of [30, 4, -2]) expect(buildLists(as(H9, 'pm', waiting({ go_by: ASIF, go_first_at: new Date(wed + h * H).toISOString() })), wed)).toMatchObject({ queue: [], teammate: [] })
     // the note and the kickoff never tell the viewer to approve them
     expect(noteText(far, ROB)).toBe(`Package 3bacdfc2 holds 3 proposed follow-up steps that wait for Asif's go; the first, a text, opens Thu, Nov 5 5:52 PM ET. They are Asif's to approve, not Rob's.`)
     expect(goKickoff(far, 'Dealerosity')).toContain("do not take it and do not approve it: the go is Asif's.")
@@ -3309,7 +3289,7 @@ describe('(0.7.24, Rob 2026-11-04) follow-up steps nobody approved pin at once f
     expect(goOnly(it)).toBe(false)
     expect(goMine(it)).toBe(true)
     expect(titleFor(it, wed)).toContain('Dealerosity · reply')
-    expect(goParagraph(it)).toBe('Package 3bacdfc2 also holds 3 follow-up step(s) that nobody has approved, the first (a text) opening Fri, Nov 6 9:30 AM ET. Show them with client-reply-prep §9 for package 3bacdfc2 once the rest is done, and wait for my go on them.')
+    expect(goParagraph(it)).toBe('Package 3bacdfc2-7533-42e5-b0c4-fbfe0d9c3c68 also holds 3 follow-up step(s) that nobody has approved, the first (a text) opening Fri, Nov 6 9:30 AM ET. Show them with client-reply-prep §9 for package 3bacdfc2-7533-42e5-b0c4-fbfe0d9c3c68 once the rest is done, and wait for my go on them.')
     expect(kickoffText(it)).toContain(goParagraph(it))
     expect(noteText(it, ROB)).toContain(goSentence(it, ROB))
     expect(waitingText(it)).toBe('1 message waiting, 3 follow-ups need your go')
@@ -3331,6 +3311,8 @@ describe('(0.7.24, Rob 2026-11-04) follow-up steps nobody approved pin at once f
     expect(goFirstText(goOf(it) as NonNullable<ReturnType<typeof goOf>>)).toBe('first text')
     expect(titleFor(it, wed)).toBe('🟡 Dealerosity · follow-ups need your go · first text · no due date')
     expect(pinsFor(it, wed)).toBe(true)
+    // (0.7.37) the line under the thread's band has no time to count from either, and threw a RangeError on Infinity
+    expect(pinReason(it, wed)).toBe('Pinned for you, no due date: follow-ups need your go · first text.')
   })
 
   test('the words, and an item an older version stored (no `go`): read as none', async () => {

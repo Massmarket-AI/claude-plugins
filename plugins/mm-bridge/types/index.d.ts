@@ -8,7 +8,14 @@ export type MmMarkdown = string
  * is the client of the thread the pane is in, and empty for another client's (shown from its row's Drafts
  * button). An empty `text` draws no client part.
  */
-export type MmView = { text: MmMarkdown; heading: string }
+export type MmView = {
+  text: MmMarkdown
+  heading: string
+  /** (0.7.33) With a pickup view: the page alone, which folds under the card (`Show the page as text`). */
+  page?: MmMarkdown
+  /** (0.7.33) With a pickup view: the hold banner, the open asks and the internal queue, drawn under the card and never folded with the page. */
+  extra?: MmMarkdown
+}
 
 /** One client on the Needs-you pane: what is due, what is waiting, and the one thing to do about its thread. */
 export type MmRow = {
@@ -64,6 +71,8 @@ export type MmRow = {
    * row stays, with no Start (Drafts alone), and no thread is started for it.
    */
   dormant?: true
+  /** (0.7.34) On a row of `Needs you now` that should be pinned: whether its thread is, and why not, as the pin report says. */
+  pin?: { pinned: boolean; why?: string }
 }
 
 /**
@@ -101,13 +110,7 @@ export type MmQueue = {
   undated?: MmRow[]
   /** (0.7.5) The viewer's internal queue, drawn under the list as `Your build queue · N`. Absent for a viewer with none. */
   build?: MmBuild
-  /**
-   * (0.7.11) The band at the very top of the pane while any client's thread is in another Claude profile and the client has
-   * no thread of its own here: its words (`You switched Claude profiles. ...`) and how many clients, for its one button,
-   * which puts "Start the missing client threads" in the prompt box. Absent when there are none.
-   */
-  away?: { text: string; count: number }
-  /**
+    /**
    * (0.7.21, for the founder) Team · late: his teammates' late internal tickets, by person, then client, each ticket one
    * line. A closed group `Team · late (n)` at the end of the line of groups under the list, drawn below the others once
    * opened. Never pinned, and never counted in the header: the status line says `· n late with the team`. Absent: none.
@@ -178,12 +181,28 @@ export type MmFolds = {
   undated?: boolean
   /** (0.7.21) `Team · late`. */
   team?: boolean
+  /** (0.7.34) `Needs you now` and `Team now`, this thread's press. Absent: this computer's last one (`mm.panel`). */
+  needs?: boolean
+  teamNow?: boolean
   /** (0.7.5) The Tracking part, closed to its one line until opened; `more`: its further numbers. */
   track?: boolean
   more?: boolean
   /** (0.7.5) The tasks of the time list opened to their threads, by key (`MmTrackLine.toggle`). */
   tasks?: string[]
 }
+
+/** (0.7.34) One row of a person's pins on `Team now`, as the daily photo has it. */
+export type MmTeamItem = { client: string; kind: string; tone: 'red' | 'yellow' | 'green'; dueAt: number | null; pinned: boolean; whyNot: string | null }
+/** (0.7.34) One of a person's threads with a tracked row in the last 30 minutes. A thread with no client said has none, and no task. */
+export type MmTeamThread = { client: string | null; working: boolean; auto: boolean; since: number | null; capped: boolean; lastAt: number; task: string | null }
+/** (0.7.34) A task assigned to a person in the last day. `from`: who this bridge last saw it with. */
+export type MmTeamTask = { ref: string; client: string; title: string | null; at: number; from?: string }
+/** (0.7.34) One person on `Team now`. */
+export type MmTeamPerson = { name: string; me: boolean; reportedAt: number | null; items: MmTeamItem[]; extra: Array<string | null>; seen: boolean; running: MmTeamThread[]; assigned: MmTeamTask[] }
+/** (0.7.34) OW's last read of the team, checked (`teamFrom`). */
+export type MmTeamRead = { at: number; partial: string[]; people: MmTeamPerson[] }
+/** (0.7.34) The pane's `Team now`: OW's last read; `missing` while OW has no such route. */
+export type MmTeamNow = { team?: MmTeamRead; got?: number; missing?: boolean }
 
 /** What the last button press did, shown above the list. */
 export type MmNotice = { text: string; at: number }
@@ -279,7 +298,14 @@ export type MmLineAsk = {
  * (0.7.26, the reply-package card) One run of a card paragraph, as `render_visual.py --tree` writes it: its exact text,
  * the card's classes on it, a link, and the fingerprint of a block that is one run.
  */
-export type MmCardRun = { s: string; c?: string; href?: string; fp?: string }
+export type MmCardRun = {
+  s: string
+  c?: string
+  href?: string
+  fp?: string
+  /** (0.7.33) A mention: the Discord id whose name `s` draws, so the check can tell who it names. */
+  m?: string
+}
 
 /**
  * (0.7.26) One node of the card: a box of nodes (`k`), a paragraph of runs (`r`, with `fp` when it is a fingerprinted
@@ -306,6 +332,8 @@ export type MmCardTree = {
   blocks: number
   signer: string
   can_sign: boolean
+  /** (0.7.33) How many images the words that go out hold: none of them can be drawn, so the card cannot stand in for the page. */
+  images?: number
   rendered_at: string
   nodes: MmCardNode[]
 }
@@ -324,17 +352,36 @@ export type MmCard = {
   tree: MmCardTree | null
   status: 'ready' | 'rendering' | 'failed' | 'none'
   error?: string
+  /**
+   * (0.7.33) Why this card cannot stand in for the page (`pageGap`), when it cannot: its signature box stays closed and
+   * `mm card` answers not ready. Holds up to 60 characters of the page: never logged.
+   */
+  gap?: string
+  /** (0.7.33) The hash of the page this card was last held against: what a signature is for (`standing`). None when no page was read. */
+  pageSha?: string
   at: number
 }
 
-/** (0.7.26) A signature given in this thread's pane: the tag signed, by whom, when, and what became of the words. */
-export type MmCardSigned = { label: string; signer: string; at: number; filled?: 'filled' | 'draft' | 'none' | 'stale' }
+/** (0.7.26) A signature given in this thread's pane: the tag signed, by whom, when, (0.7.33) the hash of the page it read, and what became of the words. */
+export type MmCardSigned = { label: string; signer: string; at: number; pageSha?: string; filled?: 'filled' | 'draft' | 'none' | 'stale' }
+
+/** (0.7.26) What this thread did with cards: each signature given here by tag, and whether the page as text is open under the card. */
+export type MmCardMarks = {
+  signed: Record<string, MmCardSigned>
+  pageOpen?: boolean
+  /** (0.7.33) A press reading the package again: which tag, and since when. */
+  checking?: { label: string; at: number }
+  /** (0.7.33) What the last press found when it recorded nothing: the card changed, or a read or record failed. */
+  notice?: { packageId: string; kind: 'changed' | 'retry' }
+}
 
 /**
- * (0.7.26) What this thread did with cards: the tags of the pickup pages it printed (newest last), each signature given
- * here by tag, and whether the page as text is open under the card.
+ * (0.7.36) Versions of a package by tag (the hash's first 12), and when. `cardPending`: this thread's turn got `card ready` for it, or
+ * printed its page, and has not ended. `cardChecked`: such a turn ended, so this thread has finished checking it. Keys of their own and
+ * not fields of `MmCardMarks`: one dispatch reads the state at one moment and `mm card` runs for seconds, so a shared key would write a
+ * press's marks back over what they became.
  */
-export type MmCardMarks = { printed: string[]; signed: Record<string, MmCardSigned>; pageOpen?: boolean }
+export type MmCardChecked = Record<string, number>
 
 declare module 'claude-code' {
   interface PluginState {
@@ -344,6 +391,7 @@ declare module 'claude-code' {
       notice: MmNotice
       band: MmBand
       folds: MmFolds
+      teamNow: MmTeamNow
       people: MmPeople
       track: MmTrack
       sess: MmSession
@@ -351,6 +399,12 @@ declare module 'claude-code' {
       lineAsk: MmLineAsk
       card: MmCard
       cardMarks: MmCardMarks
+      cardChecked: MmCardChecked
+      cardPending: MmCardChecked
+      /** (0.7.36) This thread is working: a turn of the main conversation is running, or a background sub-agent outlived the last one. No box then. */
+      cardBusy: boolean
+      /** (0.7.36) The tag whose Check button could not put its words in the prompt box, and why: the pane says what to type. Null with none. */
+      cardCheckMiss: { label: string; filled: 'draft' | 'none' } | null
     }
   }
 }

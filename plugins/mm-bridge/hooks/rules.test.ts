@@ -3,7 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import { fakeApp, mm, pid as appPid } from './fake-app.test-helper'
 import type { FakeThread } from './fake-app.test-helper'
 import {
-  NO_REPLY_WHAT, afterPackage, buildLists, clientInTitle, clockAndDue, draftsLine, fastState, goWithMail, holdBanner, noReplyNow, noteText, owesNoReply, keptPace, mayStart, needsYouNow, noDateGroup, paceOf, pastCutClients, pinReason, pinTitle, pinsFor, rowLine, shownDue, teamLate, threadTitleShort, threadWhy, titleFor, titleNames, waitingOnClient, withTeammate,
+  NO_REPLY_WHAT, afterPackage, buildLists, checkNow, clientInTitle, clientMarkdown, clockAndDue, committedCount, draftsLine, etaAsksOf, fastState, goWithMail, holdBanner, keptPace, mayStart, needsYouNow, noDateGroup, noReplyNow, noteText, owesNoReply, paceOf, pastCutClients, pinReason, pinsFor, pinTitle, rowLine, shownDue, statusOf, teamLate, threadTitle, threadTitleShort, threadWhy, titleFor, titleNames, undatedCount, undatedOnly, waitingOnClient, withTeammate,
 } from './queue'
 import type { Feed, FeedAsk, FeedDraft, FeedMail, FeedPace, FeedTicket, QueueItem } from './queue'
 import { asksForPrep, autoUpdatable, draftsComing, kickoffText, pinReport, rowExtra, signatureOf, waitingText } from './threads'
@@ -83,12 +83,10 @@ describe("Rob's pin and clock rules, one test each (0.7.25)", () => {
     expect(pins(feed({ mail: [mail(1, NOW - 60_000)], drafts: [pkg(1, { covers_through: iso(NOW - 60_000) })] }))).toBe(true)
   })
 
-  test('P4 (11-05, over 10-30\'s "a pin needs a clock": "Shouldn\'t it be pinned?"): an undated open item inside the window pins for its owner as `needs a due date`; outside it, nothing; with nothing to measure it by, it says `no due date` and does not pin', () => {
-    const undated = (over: Partial<FeedTicket>) => feed({ member: ROB, role: 'founder', tickets: { undated: [ticket(1, null, { assignee_email: ROB, ...over })] } })
-    const inside = one(undated({ last_activity_at: '2026-11-01' }))
-    expect(pinsFor(inside, NOW)).toBe(true)
-    expect(titleFor(inside, NOW)).toBe(`🟡 ${ACME} · needs a due date`)
-    expect(all(undated({ last_activity_at: '2026-10-01' }))).toEqual([])
+  test('P4 (0.7.32, Rob 2026-11-06, over 11-05\'s "Shouldn\'t it be pinned?": "a ticket with no due date never pins and never asks for a date, for anyone"): an undated open item says `no due date` and does not pin, whatever its age', () => {
+    const undated = feed({ member: ROB, role: 'founder', tickets: { undated: [ticket(1, null, { assignee_email: ROB })] } })
+    expect(pinsFor(one(undated), NOW)).toBe(false)
+    expect(titleFor(one(undated), NOW)).toBe(`🟡 ${ACME} · task · no due date`)
     const it = one(feed({ tickets: { due_soon: [ticket(1, null)] } }))
     expect(pinsFor(it, NOW)).toBe(false)
     expect(titleFor(it, NOW)).toBe(`🟡 ${ACME} · task · no due date`)
@@ -108,15 +106,12 @@ describe("Rob's pin and clock rules, one test each (0.7.25)", () => {
     expect(titleFor(one(f2), NOW)).toContain('Asif decides')
   })
 
-  test('P6 (11-05, over 11-04\'s 5 hours: "everything that\'s yellow or red should show up pinned for H9 as well if it\'s yellow or red for any of the team members"): the PM is pinned whenever the teammate is, 24 business hours ahead of their due time, named who to check on', () => {
+  test('P6 (0.7.34, Rob 2026-11-07, over his rule of 11-05: "I know we just made it so only H9 sees every single task pinned, but I still think that\'s the wrong architecture"): the PM is pinned for his own work, never a teammate\'s', () => {
     const pm = (dueIn: number) => feed({ member: 'h9@example.com', role: 'pm', tickets: { due_soon: [ticket(1, NOW + dueIn * H, { assignee_email: ASIF })] } })
-    const near = one(pm(4))
-    expect(pinsFor(near, NOW)).toBe(true)
-    expect(pinTitle(near, NOW)).toBe(`🔴 ${ACME} · check on Asif · task due 7 PM`)
-    const tomorrow = one(pm(20))
-    expect(pinsFor(tomorrow, NOW)).toBe(true)
-    expect(pinTitle(tomorrow, NOW)).toBe(`🟡 ${ACME} · check on Asif · task due Thu 11 AM`)
-    expect(all(pm(30)).some(it => pinsFor(it, NOW))).toBe(false)
+    for (const dueIn of [-3, 4, 20, 30]) expect(all(pm(dueIn))).toEqual([])
+    const own = one(feed({ member: 'h9@example.com', role: 'pm', tickets: { due_soon: [ticket(1, NOW + 4 * H, { assignee_email: 'h9@example.com' })] } }))
+    expect(pinsFor(own, NOW)).toBe(true)
+    expect(pinTitle(own, NOW)).not.toContain('check on')
   })
 
   test('P7 (11-03: "whoever sent the ETA should have been showing up in their Claude after that, pinned"; "he has a 24-hour timer to assign it to a teammate"): an ETA owed and an owner to give each pin, by their own clocks', () => {
@@ -303,7 +298,7 @@ describe("Rob's pin and clock rules, one test each (0.7.25)", () => {
       feed({ tickets: { due_soon: [ticket(1, null)] } }),
       feed({ tickets: { due_soon: [ticket(1, NOW + 50 * H)] } }),
       feed({ tickets: { start_now: [{ ...ticket(1, Date.parse('2026-11-09T15:00:00-05:00')), start_by_at: iso(NOW - 2 * H) }] } }),
-      feed({ member: 'h9@example.com', role: 'pm', tickets: { due_soon: [ticket(1, NOW + 4 * H, { assignee_email: ASIF })] } }),
+      feed({ member: 'h9@example.com', role: 'pm', tickets: { due_soon: [ticket(1, NOW + 4 * H, { assignee_email: 'h9@example.com' })] } }),
       feed({ member: ROB, role: 'founder', drafts: [pkg(1, { status: 'picked_up', picked_up_by: ASIF, project_owner_email: ASIF, flagged_for_rob: true })] }),
     ]
     fixtures.push(feed({ drafts: [pkg(1, { covers_through: iso(NOW - 3 * H), last_outbound_at: iso(NOW - 10 * 60_000) })] }))
@@ -315,7 +310,7 @@ describe("Rob's pin and clock rules, one test each (0.7.25)", () => {
     expect(pinReason(one(fixtures[2] as Feed), NOW)).toBe('No pin needed: nothing of yours here has a due date.')
     expect(pinReason(one(fixtures[3] as Feed), NOW)).toBe('No pin needed: the next thing of yours is due Fri 5 PM, more than 24 business hours away.')
     expect(pinReason(one(fixtures[4] as Feed), NOW)).toBe('Pinned for you: your task "Build the intake form" is due Mon 3 PM, and to land on time its work had to start 1 PM.')
-    expect(pinReason(one(fixtures[5] as Feed), NOW)).toBe('Pinned to check on Asif: their task is due 7 PM (4h left).')
+    expect(pinReason(one(fixtures[5] as Feed), NOW)).toStartWith('Pinned for you')
     expect(pinReason(one(fixtures[6] as Feed), NOW)).toBe(`No pin needed: Asif has ${ACME}'s reply drafts, so nothing here needs you.`)
     // the person's own pin, and a pin put back over their unpin, are said too
     expect(threadWhy(one(fixtures[2] as Feed), ACME, NOW, { person: true })).toBe('No pin needed: nothing of yours here has a due date. You pinned it yourself, so it stays until you unpin it.')
@@ -381,47 +376,22 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
   /** The founder's own undated client ticket, as `tickets.undated` lists it. */
   const undatedRow = (over: Partial<FeedTicket> = {}): FeedTicket => ticket(1, null, { assignee_email: ROB, ...over })
 
-  test('S2 (11-05: "everything that\'s yellow or red should show up pinned for H9 as well if it\'s yellow or red for any of the team members"): a client pins for H9 when it is pinned for a teammate: late, within 24 business hours, or start-by passed', () => {
+  test('S2 (0.7.34, Rob 2026-11-07, over his rule of 11-05): nothing of a teammate\'s lists or pins for H9: a ticket, a missed start-by, a reply, a package, a pace row', () => {
     const tk = (dueIn: number, over: Partial<FeedTicket> = {}) => h9({ tickets: { due_soon: [ticket(1, NOW + dueIn * H, { assignee_email: ASIF, ...over })] } })
-    // 20 business hours out pinned, where 0.7.18's 5 did not; 30 out is not on his list at all
-    expect(pinsFor(one(tk(20)), NOW)).toBe(true)
-    expect(pinTitle(one(tk(20)), NOW)).toBe(`🟡 ${ACME} · check on Asif · task due Thu 11 AM`)
-    expect(all(tk(30))).toEqual([])
-    // due today and late are red
-    expect(pinTitle(one(tk(4)), NOW)).toBe(`🔴 ${ACME} · check on Asif · task due 7 PM`)
-    expect(pinTitle(one(tk(-3)), NOW)).toBe(`🔴 ${ACME} · check on Asif · task 3h late`)
-    // start-by passed with the work not started: a kind of behind, whatever the due date
-    const notStarted = h9({ tickets: { start_now: [ticket(1, NOV_9, { assignee_email: ASIF, start_by_at: iso(NOW - 26 * H) })] } })
-    expect(pinTitle(one(notStarted), NOW)).toBe(`🟡 ${ACME} · check on Asif · behind · not started, had to start Tue 1 PM`)
-    // the work started: nothing to check on while its time is left
-    expect(all(h9({ tickets: { start_now: [ticket(1, NOV_9, { assignee_email: ASIF, start_by_at: iso(NOW - 26 * H), status: 'in_progress' })] } }))).toEqual([])
-    // a teammate's reply and reply package, due within the same 24 business hours
-    const reply = h9({ mail: [mail(1, NOW - 4 * H, { project_owner_email: ASIF, reply_due_at: iso(NOW + 20 * H) })] })
-    expect(pinTitle(one(reply), NOW)).toBe(`🟡 ${ACME} · check on Asif · reply due Thu 11 AM`)
-    expect(all(h9({ mail: [mail(1, NOW - 4 * H, { project_owner_email: ASIF, reply_due_at: iso(NOW + 30 * H) })] }))).toEqual([])
-    const prepared = h9({ drafts: [pkg(1, { project_owner_email: ASIF, due_at: iso(NOW + 20 * H) })] })
-    expect(pinsFor(one(prepared), NOW)).toBe(true)
-    const heldDrafts = h9({ drafts: [pkg(1, { status: 'picked_up', picked_up_by: ASIF, project_owner_email: 'antu@example.com', due_at: iso(NOW - H) })] })
-    expect(pinTitle(one(heldDrafts), NOW)).toBe(`🔴 ${ACME} · check on Asif · reply 1h late`)
-    // his pace rows reading behind, overbooked or late pin H9 too
-    for (const [state, words] of [
-      ['behind', '🟡 Acme Legal · check on Asif · behind · needs 2.4 h/day, paid 1.5 · due Mon Nov 30'],
-      ['overbooked', '🔴 Acme Legal · check on Asif · overbooked · needs 2.4 h/day, paid 1.5 · due Mon Nov 30'],
-      ['late', '🔴 Acme Legal · check on Asif · late · 3 h past Mon Nov 30'],
-    ] as const) {
-      const it = one(h9({ pace: [paceRow(state, { holder_email: ASIF })] }))
-      expect(pinsFor(it, NOW), state).toBe(true)
-      expect(pinTitle(it, NOW), state).toBe(words)
-    }
-    // a worse part of the client names it, whichever is sooner
-    const both = one(h9({ tickets: { due_soon: [ticket(1, NOW + 20 * H, { assignee_email: ASIF })] }, pace: [paceRow('overbooked', { holder_email: 'antu@example.com' })] }))
-    expect(pinTitle(both, NOW)).toContain('check on Antu · overbooked')
+    for (const dueIn of [-3, 4, 20, 30]) expect(all(tk(dueIn))).toEqual([])
+    expect(all(h9({ tickets: { start_now: [ticket(1, NOV_9, { assignee_email: ASIF, start_by_at: iso(NOW - 26 * H) })] } }))).toEqual([])
+    expect(all(h9({ mail: [mail(1, NOW - 4 * H, { project_owner_email: ASIF, reply_due_at: iso(NOW + 20 * H) })] }))).toEqual([])
+    expect(all(h9({ drafts: [pkg(1, { project_owner_email: ASIF, due_at: iso(NOW + 20 * H) })] }))).toEqual([])
+    expect(all(h9({ drafts: [pkg(1, { status: 'picked_up', picked_up_by: ASIF, project_owner_email: 'antu@example.com', due_at: iso(NOW - H) })] }))).toEqual([])
+    for (const state of ['behind', 'overbooked', 'late'] as const) expect(all(h9({ pace: [paceRow(state, { holder_email: ASIF })] })), state).toEqual([])
+    // his own pace row, as anyone's
+    expect(pinsFor(one(h9({ pace: [paceRow('behind', { holder_email: H9 })] })), NOW)).toBe(true)
   })
 
   test('S2b (approved 11-05: "never for undated items"; "H9 is NOT pinned for teammates\' green"): it never pins H9 for an undated item, an ETA ask, a teammate\'s on-track row, a row nobody holds or the founder\'s work', () => {
     expect(all(h9({ tickets: { due_soon: [ticket(1, null, { assignee_email: ASIF })] } }))).toEqual([])
     expect(all(h9({ tickets: { overdue: [{ ...ticket(1, null, { assignee_email: ASIF }), eta_needed_by: iso(NOW - H), eta_ask: 'no ETA' }] } }))).toEqual([])
-    expect(all(h9({ tickets: { undated: [ticket(1, null, { assignee_email: ASIF, last_activity_at: '2026-11-03' })] } }))).toEqual([])
+    expect(all(h9({ tickets: { undated: [ticket(1, null, { assignee_email: ASIF })] } }))).toEqual([])
     expect(all(h9({ pace: [onTrack({ holder_email: ASIF })] }))).toEqual([])
     expect(all(h9({ pace: [paceRow('behind', { holder_email: null })] }))).toEqual([])
     const robs = 'rob@massmarket.ai'
@@ -432,19 +402,10 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
     expect(all(feed({ tickets: { overdue: [ticket(1, NOW - H, { assignee_email: ASIF })] }, pace: [paceRow('behind', { holder_email: ASIF })] }))).toEqual([])
   })
 
-  test('S2c (11-05: "He can also have constant clarity about whether something\'s showing up for a teammate or not"): H9\'s row says `pinned for <teammate>` or `not pinned for <teammate>` from `member_pins`, and neither when the key or the report is absent', () => {
-    const row = (over: Partial<Feed>) => rowLine(one(h9({ tickets: { due_soon: [ticket(1, NOW + 4 * H, { assignee_email: ASIF })] }, ...over })), NOW)
-    expect(row({ member_pins: [asifReport([{ project_id: P(1), pinned: true, kind: 'task' }])] })).toBe(`🔴 ${ACME} · task due 7 PM · pinned for Asif`)
-    expect(row({ member_pins: [asifReport([{ project_id: P(1), pinned: false, kind: 'task' }])] })).toBe(`🔴 ${ACME} · task due 7 PM · not pinned for Asif`)
-    // a report that does not list the client: not pinned for him
-    expect(row({ member_pins: [asifReport([{ project_id: P(2), pinned: true, kind: 'task' }])] })).toBe(`🔴 ${ACME} · task due 7 PM · not pinned for Asif`)
-    expect(row({ member_pins: [asifReport([])] })).toBe(`🔴 ${ACME} · task due 7 PM · not pinned for Asif`)
-    // no report from him, or no key: neither, and the row still says whose it is
-    expect(row({ member_pins: [{ member_email: 'antu@example.com', reported_at: iso(NOW), items: [] }] })).toBe(`🔴 ${ACME} · task due 7 PM · with Asif`)
-    expect(row({})).toBe(`🔴 ${ACME} · task due 7 PM · with Asif`)
-    // a pace row, in its own words
-    const behind = one(h9({ pace: [paceRow('behind', { holder_email: ASIF })], member_pins: [asifReport([{ project_id: P(1), pinned: true, kind: 'behind' }])] }))
-    expect(rowLine(behind, NOW)).toBe(`🟡 ${ACME} · behind · needs 2.4 h/day, paid 1.5 · due Mon Nov 30 · pinned for Asif`)
+  test('S2c (0.7.34, Rob 2026-11-07, for his words of 11-05: "He can also have constant clarity about whether something\'s showing up for a teammate or not"): that clarity is Team now\'s; `member_pins` on the feed adds nothing to H9\'s list', () => {
+    const f = { tickets: { due_soon: [ticket(1, NOW + 4 * H, { assignee_email: ASIF })] } }
+    expect(all(h9({ ...f, member_pins: [asifReport([{ project_id: P(1), pinned: true, kind: 'task' }])] }))).toEqual([])
+    expect(all(h9(f))).toEqual([])
   })
 
   test('S3 (11-05, approved "Yes, use them": "behind · needs 2.4 h/day, paid 1.5 · due Mon Nov 30"): a pace row\'s name and row, in the approved words', () => {
@@ -478,7 +439,7 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
   test('S3b (11-05: "worst one shown per item"): the worst status names a client; a reply, an OK or a go the viewer owes keeps its name when it is at least as urgent', () => {
     const name = (over: Partial<Feed>) => titleFor(one(feed(over)), NOW)
     const due = (dueIn: number) => ({ due_soon: [ticket(1, NOW + dueIn * H)] })
-    // a task: by the list. Red late, overbooked, due today; then yellow behind, due within 24 business hours, needs a due date
+    // a task: by the list. Red late, overbooked, due today; then yellow behind, due within 24 business hours
     expect(name({ tickets: due(4), pace: [paceRow('overbooked')] })).toBe(`🔴 ${ACME} · overbooked · needs 2.4 h/day, paid 1.5 · due Mon Nov 30`)
     expect(name({ tickets: due(4), pace: [paceRow('behind')] })).toBe(`🔴 4h left · ${ACME} · task`)
     expect(name({ tickets: due(20), pace: [paceRow('behind')] })).toBe(`🟡 ${ACME} · behind · needs 2.4 h/day, paid 1.5 · due Mon Nov 30`)
@@ -597,53 +558,6 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
     expect(w.app.get('local_c1')).toMatchObject({ pinned: true, title: `🟢 ${ACME} · on track · due Mon 3 PM · 1.5 h/day` })
   })
 
-  test('S5 (11-05: "Shouldn\'t it be pinned?"): an undated open item inside the window pins for its owner as `needs a due date`; outside it counts nowhere; waiting on the client is skipped; nothing to measure by reads as before', () => {
-    const f = (...rows: FeedTicket[]) => founder({ tickets: { undated: rows } })
-    const inside = one(f(undatedRow({ last_activity_at: '2026-11-01' })))
-    expect(pinsFor(inside, NOW)).toBe(true)
-    expect(titleFor(inside, NOW)).toBe(`🟡 ${ACME} · needs a due date`)
-    expect(rowLine(inside, NOW)).toBe(`🟡 ${ACME} · needs a due date`)
-    expect(needsYouNow(inside)).toBe(true)
-    expect(noDateGroup(inside)).toBe(false)
-    // the window: 3 weeks back, measured by the day
-    expect(pinsFor(one(f(undatedRow({ last_activity_at: '2026-10-14' }))), NOW)).toBe(true)
-    expect(all(f(undatedRow({ last_activity_at: '2026-10-13' })))).toEqual([])
-    // never before Oct 14, however early in the 3 weeks
-    const early = Date.parse('2026-10-20T12:00:00-04:00')
-    expect(all(f(undatedRow({ last_activity_at: '2026-10-13' })), early)).toEqual([])
-    expect(one(f(undatedRow({ last_activity_at: '2026-10-14' })), early).needsDate).toBe(1)
-    // a client cleared by the window alone counts as cut, so a pin the person made there stays
-    expect([...pastCutClients(f(undatedRow({ last_activity_at: '2026-10-01' })), NOW)]).toEqual([P(1)])
-    // the client's move: the existing skip, whatever its last activity
-    expect(all(f(undatedRow({ last_activity_at: '2026-11-01', waiting_on: 'client' })))).toEqual([])
-    // (0.7.31, Rob 11-06: "It shouldn't be prompting me to do anything") the owner picks it up when ready: lists, never pins
-    const whenReady = one(f(undatedRow({ last_activity_at: '2026-11-01', waiting_on: 'owner_when_ready' })))
-    expect(whenReady.needsDate ?? 0).toBe(0)
-    expect(pinsFor(whenReady, NOW)).toBe(false)
-    expect(needsYouNow(whenReady)).toBe(false)
-    expect(titleFor(whenReady, NOW)).toBe(`🟡 ${ACME} · task · no due date`)
-    expect(noDateGroup(whenReady)).toBe(true)
-    // any other value is read as none: only the exact mark stops the pin
-    expect(pinsFor(one(f(undatedRow({ last_activity_at: '2026-11-01', waiting_on: 'massmarket' }))), NOW)).toBe(true)
-    // null or absent: lists undated and does not pin
-    for (const row of [undatedRow({ last_activity_at: null }), undatedRow()]) {
-      const it = one(f(row))
-      expect(pinsFor(it, NOW)).toBe(false)
-      expect(titleFor(it, NOW)).toBe(`🟡 ${ACME} · task · no due date`)
-      expect(noDateGroup(it)).toBe(true)
-    }
-    // never for a teammate's item, for the founder or H9
-    expect(all(founder({ tickets: { undated: [undatedRow({ assignee_email: ASIF, last_activity_at: '2026-11-01' })] } }))).toEqual([])
-    expect(all(h9({ tickets: { undated: [undatedRow({ assignee_email: ASIF, last_activity_at: '2026-11-01' })] } }))).toEqual([])
-    // one in the window and one past it: the client's one ticket counts
-    const mixed = one(f(undatedRow({ last_activity_at: '2026-11-01' }), undatedRow({ ticket_id: P(120), last_activity_at: '2026-09-01' })))
-    expect(mixed.tasks).toBe(1)
-    expect(mixed.needsDate).toBe(1)
-    // it gives way to anything worse, and never updates a thread by itself
-    expect(titleFor(one(f(undatedRow({ last_activity_at: '2026-11-01' }), ticket(1, NOW + 4 * H, { assignee_email: ROB, ticket_id: P(121) }))), NOW)).toBe(`🔴 4h left · ${ACME} · task`)
-    expect(autoUpdatable(inside, NOW)).toBe(false)
-  })
-
   test('S6 (11-05: "Every status shows by name in each person\'s row on the 9 AM image"): the pin report carries each status as its kind, with its tone and date', () => {
     const report = (f: Feed, now = NOW) =>
       pinReport({
@@ -654,19 +568,16 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
     expect(report(feed({ pace: [paceRow('overbooked')] }))).toMatchObject({ kind: 'overbooked', tone: 'red', due_at: iso(NOV_30) })
     expect(report(feed({ pace: [paceRow('late')] }))).toMatchObject({ kind: 'late', tone: 'red', due_at: iso(NOV_30) })
     expect(report(feed({ pace: [onTrack()] }))).toMatchObject({ kind: 'on_track', tone: 'green', due_at: iso(NOV_9) })
-    expect(report(founder({ tickets: { undated: [undatedRow({ last_activity_at: '2026-11-01' })] } }))).toMatchObject({ kind: 'needs_date', tone: 'yellow', due_at: null })
+    // (0.7.32, Rob 2026-11-06) an undated ticket is not one that should be pinned: the report no longer says `needs_date`
+    expect(report(founder({ tickets: { undated: [undatedRow()] } }))).toBeUndefined()
     expect(report(feed({ tickets: { start_now: [ticket(1, NOV_9, { start_by_at: iso(NOW - 26 * H) })] } }))).toMatchObject({ kind: 'behind', tone: 'yellow', due_at: iso(NOV_9) })
     // today's hours done is not one that should be pinned
     expect(report(feed({ pace: [onTrack({ hours_logged_today: 1.5 })] }))).toBeUndefined()
-    // H9's own report: a teammate's status by its name, an ordinary ticket as before
-    expect(report(h9({ pace: [paceRow('overbooked', { holder_email: ASIF })] }))).toMatchObject({ kind: 'overbooked', tone: 'red' })
-    expect(report(h9({ tickets: { start_now: [ticket(1, NOV_9, { assignee_email: ASIF, start_by_at: iso(NOW - 26 * H) })] } }))).toMatchObject({ kind: 'behind', tone: 'yellow' })
-    expect(report(h9({ tickets: { due_soon: [ticket(1, NOW + 20 * H, { assignee_email: ASIF })] } }))).toMatchObject({ kind: 'task', tone: 'yellow' })
     // what names nothing new reports as before
     expect(report(feed({ mail: [mail(1, NOW - H)] }))).toMatchObject({ kind: 'reply', tone: 'yellow' })
     expect(report(feed({ tickets: { overdue: [ticket(1, NOW - 2 * H)] } }))).toMatchObject({ kind: 'task', tone: 'red' })
     // the report's cap on a kind holds every one of them
-    for (const k of ['behind', 'overbooked', 'on_track', 'needs_date', 'late']) expect(k.length).toBeLessThanOrEqual(16)
+    for (const k of ['behind', 'overbooked', 'on_track', 'late']) expect(k.length).toBeLessThanOrEqual(16)
   })
 
   test('S7 (11-03: "I don\'t know why this is pinned"; 0.7.25\'s rule): `pinReason` and `threadWhy` explain every status from the same test that sets the pin', () => {
@@ -678,17 +589,14 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
     expect(why(feed({ pace: [paceRow('behind')] }))).toBe('Pinned for you: behind, this needs 2.4 h a day and 1.5 is paid, and it is due Mon Nov 30.')
     expect(why(feed({ pace: [paceRow('overbooked')] }))).toBe("Pinned for you: overbooked, this needs 2.4 h a day and 1.5 is paid, it is due Mon Nov 30, and you don't have the hours across your clients.")
     expect(why(feed({ pace: [paceRow('late')] }))).toBe('Pinned for you: late, 3 h of quoted work are past Mon Nov 30.')
-    expect(why(founder({ tickets: { undated: [undatedRow({ last_activity_at: '2026-11-01' })] } }))).toBe('Pinned for you: 1 open ticket here has no due date and needs one.')
-    expect(why(h9({ pace: [paceRow('behind', { holder_email: ASIF })] }))).toBe('Pinned to check on Asif: behind, this needs 2.4 h a day and 1.5 is paid, and it is due Mon Nov 30.')
-    expect(why(h9({ pace: [paceRow('overbooked', { holder_email: ASIF })] }))).toBe("Pinned to check on Asif: overbooked, this needs 2.4 h a day and 1.5 is paid, it is due Mon Nov 30, and they don't have the hours across their clients.")
+    expect(why(founder({ tickets: { undated: [undatedRow()] } }))).toBe('No pin needed: nothing of yours here has a due date.')
     expect(why(feed({ tickets: { start_now: [ticket(1, NOV_9, { start_by_at: iso(NOW - 26 * H) })] } }))).toBe('Pinned for you: your task "Build the intake form" is due Mon 3 PM, and to land on time its work had to start Tue 1 PM.')
     // `Pinned` exactly when the thread pins, whichever status names it
     const fixtures: Array<[Feed, number]> = [
-      ...(['behind', 'overbooked', 'late'] as const).flatMap(s => [[feed({ pace: [paceRow(s)] }), NOW], [h9({ pace: [paceRow(s, { holder_email: ASIF })] }), NOW]] as Array<[Feed, number]>),
+      ...(['behind', 'overbooked', 'late'] as const).flatMap(s => [[feed({ pace: [paceRow(s)] }), NOW]] as Array<[Feed, number]>),
       [feed({ pace: [onTrack()] }), NOW], [feed({ pace: [onTrack()] }), SAT], [feed({ pace: [onTrack({ hours_logged_today: 9 })] }), NOW],
       [feed({ pace: [onTrack({ hours_logged_today: 9 })], tickets: { due_soon: [ticket(1, NOW + 4 * H)] } }), NOW],
       [feed({ pace: [onTrack({ hours_logged_today: 9 })], mail: [mail(1, NOW - H)] }), NOW],
-      [founder({ tickets: { undated: [undatedRow({ last_activity_at: '2026-11-01' })] } }), NOW],
       [founder({ tickets: { undated: [undatedRow()] } }), NOW],
       [feed({ tickets: { due_soon: [ticket(1, NOW + 50 * H)] }, pace: [onTrack({ hours_logged_today: 9 })] }), NOW],
     ]
@@ -754,14 +662,13 @@ describe("Rob's statuses, one test per rule (0.7.27)", () => {
   })
 })
 
-// ⛔ (0.7.32) Since 2026-11-04 a client message that needs no reply still gets a reply package, with `reply_owed` false and
+// ⛔ (0.7.39) Since 2026-11-04 a client message that needs no reply still gets a reply package, with `reply_owed` false and
 // no client email or text, and a person's one go closes it (client-reply-prep §2b). BST Executive Search, 2026-11-06:
 // package bf68fd64 had been prepared for 9 hours when the kickoff said "no package exists yet, so run prep (§2) to build
 // one", and the band said no reply drafts were prepared. A thread that obeys that researches again or builds a second package.
-describe('0.7.32: an open package that owes no reply and has no draft reaches its thread as a package', () => {
+describe('0.7.39: an open package that owes no reply and has no draft reaches its thread as a package', () => {
   const WHO = `${ACME} Jeff (OW project ${P(1)})`
   const PKG = P(201)
-  const SHORT = PKG.slice(0, 8)
   const STOP = 'Do not run prep and do not draft a reply. Send nothing without my go.'
   const noReply = (over: Partial<FeedDraft> = {}): FeedDraft => pkg(1, { no_reply: true, drafts_ready: 0, drafts_unsent: 0, due_at: iso(NOW + 5 * H), ...over })
   /** The client's message the package covers: `pkg` covers through two hours ago. */
@@ -778,11 +685,11 @@ describe('0.7.32: an open package that owes no reply and has no draft reaches it
     expect([it.kind, it.packageId, it.messages, it.noReply]).toEqual(['ready', PKG, 1, true])
     expect(asksForPrep(it)).toBe(false)
     expect(draftsComing(it, NOW, undefined)).toBe(false)
-    expect(kickoffText(it)).toBe(`[mm-link ${P(1)}] ${WHO}: package ${SHORT} owes no reply and has no draft, and one go closes it. Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for package ${SHORT} and wait for me. ${STOP}`)
-    expect(kickoffText(it, { auto: true })).toBe(`[mm-link ${P(1)}] ${WHO}: package ${SHORT} owes no reply and has no draft, and one go closes it. Load the client's project skill first, then follow client-reply-prep §9 to show the one-package page for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. ${STOP}`)
+    expect(kickoffText(it)).toBe(`[mm-link ${P(1)}] ${WHO}: package ${PKG} owes no reply and has no draft, and one go closes it. Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for package ${PKG} and wait for me. ${STOP}`)
+    expect(kickoffText(it, { auto: true })).toBe(`[mm-link ${P(1)}] ${WHO}: package ${PKG} owes no reply and has no draft, and one go closes it. Load the client's project skill first, then follow client-reply-prep §9 to show the one-package page for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. ${STOP}`)
     for (const text of everyKickoff(it)) {
       neverPrep(text)
-      expect(text).toContain(SHORT)
+      expect(text).toContain(PKG)
       expect(text).toContain('client-reply-prep §9')
     }
   })
@@ -790,9 +697,9 @@ describe('0.7.32: an open package that owes no reply and has no draft reaches it
   test('one the viewer holds: no count of drafts, and read again rather than built again', () => {
     const it = one(feed({ drafts: [noReply({ status: 'picked_up', picked_up_by: ME, picked_up_at: iso(NOW - H) })], mail: [covered()] }))
     expect(it.open?.state).toBe('held_by_me')
-    expect(kickoffText(it)).toBe(`[mm-link ${P(1)}] ${WHO}: I already picked up package ${SHORT}, which owes no reply and has no draft, and one go closes it. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the one-package page and wait for me. ${STOP}`)
+    expect(kickoffText(it)).toBe(`[mm-link ${P(1)}] ${WHO}: I already picked up package ${PKG}, which owes no reply and has no draft, and one go closes it. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the one-package page and wait for me. ${STOP}`)
     for (const text of everyKickoff(it)) neverPrep(text)
-    expect(noteText(it, ME)).toBe(`Reply package ${SHORT} owes no reply, is already picked up by Builder A, the person in this session, and has no draft: one go closes it. The one-package page is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${PKG}; do not run prep.`)
+    expect(noteText(it, ME)).toBe(`Reply package ${PKG} owes no reply, is already picked up by Builder A, the person in this session, and has no draft: one go closes it. The one-package page is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${PKG}; do not run prep.`)
     expect(holdBanner(it)).toContain('No reply needed, one go closes it.')
     expect(holdBanner(it)).not.toContain('draft')
     expect(waitingText(it)).toBe(NO_REPLY_WHAT)
@@ -803,9 +710,9 @@ describe('0.7.32: an open package that owes no reply and has no draft reaches it
     expect(held.open).toMatchObject({ state: 'held_by_other', by: 'Asif', noReply: true })
     expect(owesNoReply(held)).toBe(true)
     expect(asksForPrep(held)).toBe(false)
-    expect(kickoffText(held)).toBe(`[mm-link ${P(1)}] ${WHO}: package ${SHORT} owes no reply, and Asif holds it. Load the client's project skill first, then show me what the client sent and wait for me. ${STOP}`)
+    expect(kickoffText(held)).toBe(`[mm-link ${P(1)}] ${WHO}: package ${PKG} owes no reply, and Asif holds it. Load the client's project skill first, then show me what the client sent and wait for me. ${STOP}`)
     for (const text of everyKickoff(held)) neverPrep(text)
-    expect(noteText(held, ME)).toBe(`Reply package ${SHORT} owes no reply, and Asif holds it. There is nothing to draft: ask Asif before writing anything.`)
+    expect(noteText(held, ME)).toBe(`Reply package ${PKG} owes no reply, and Asif holds it. There is nothing to draft: ask Asif before writing anything.`)
     expect(draftsLine(held)).toBe('_No reply needed, and Asif holds this package. Ask Asif before writing anything._')
     expect(waitingText(held)).toContain('no reply needed, with Asif')
     expect(waitingText(held)).not.toContain('drafts')
@@ -815,7 +722,7 @@ describe('0.7.32: an open package that owes no reply and has no draft reaches it
     expect(asksForPrep(theirs)).toBe(false)
     for (const text of everyKickoff(theirs)) {
       neverPrep(text)
-      expect(text).toContain(SHORT)
+      expect(text).toContain(PKG)
     }
     expect(waitingText(theirs)).toContain(NO_REPLY_WHAT)
     expect(waitingText(theirs)).not.toContain('drafts')
@@ -823,7 +730,7 @@ describe('0.7.32: an open package that owes no reply and has no draft reaches it
 
   test('the band, the pane and the row say what §9.3 says, and never that no drafts are prepared', () => {
     const it = one(feed({ drafts: [noReply()], mail: [covered()] }))
-    expect(noteText(it, ME)).toBe(`Reply package ${SHORT} owes no reply and has no draft: one go closes it. The one-package page is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${PKG}; do not run prep.`)
+    expect(noteText(it, ME)).toBe(`Reply package ${PKG} owes no reply and has no draft: one go closes it. The one-package page is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${PKG}; do not run prep.`)
     expect(draftsLine(it)).toBe(`_No reply needed, one go closes it. Ask Claude: "Show me the reply package for ${ACME}"._`)
     // the message it covers is not waiting on a reply: §9.3's words alone
     expect(waitingText(it)).toBe(NO_REPLY_WHAT)
@@ -838,7 +745,7 @@ describe('0.7.32: an open package that owes no reply and has no draft reaches it
     expect(asksForPrep(it)).toBe(false)
     expect(waitingText(it)).toBe('package says no reply, 1 message waiting')
     expect(titleFor(it, NOW)).toBe(`🔴 5h left · ${ACME} · reply · 2 new`)
-    expect(kickoffText(it)).toContain(`package ${SHORT} owes no reply and has no draft, and one go closes it. 1 client message(s) arrived after it, so read them before it closes.`)
+    expect(kickoffText(it)).toContain(`package ${PKG} owes no reply and has no draft, and one go closes it. 1 client message(s) arrived after it, so read them before it closes.`)
     neverPrep(kickoffText(it))
     expect(noteText(it, ME)).toContain('1 client message arrived after it: read it before anyone closes it.')
     expect(draftsLine(it)).toBe(`_This package said no reply was needed, but the client wrote again after it. Ask Claude: "Show me the reply package for ${ACME}"._`)
@@ -846,8 +753,8 @@ describe('0.7.32: an open package that owes no reply and has no draft reaches it
     expect(signatureOf(it)).not.toBe(signatureOf(one(feed({ drafts: [noReply()], mail: [covered()] }))))
   })
 
-  test('a change of words updates nobody\'s thread: a signature reads as it did in 0.7.31', () => {
-    const OLD = `[mm-link ${P(1)}] Pick up the reply drafts for ${WHO}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${SHORT} and wait for me. Send nothing without my go.`
+  test('a change of words updates nobody\'s thread: a signature reads as it did before 0.7.39', () => {
+    const OLD = `[mm-link ${P(1)}] Pick up the reply drafts for ${WHO}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${PKG} and wait for me. Send nothing without my go.`
     const first = (it: QueueItem): string => signatureOf(it).split('\n')[0] ?? ''
     // the page's new name, on a package with drafts ready
     const ready = one(feed({ drafts: [pkg(1, { due_at: iso(NOW + 5 * H) })], mail: [covered()] }))
@@ -857,12 +764,11 @@ describe('0.7.32: an open package that owes no reply and has no draft reaches it
     // the new words for a package that owes no reply, prepared or held: the thread that has it is not sent it again
     expect(first(one(feed({ drafts: [noReply()], mail: [covered()] })))).toBe(OLD)
     expect(first(one(feed({ drafts: [noReply({ status: 'picked_up', picked_up_by: ME })], mail: [covered()] })))).toBe(OLD)
-    expect(first(one(feed({ drafts: [noReply({ status: 'picked_up', picked_up_by: ASIF })], mail: [covered()] })))).toBe(`[mm-link ${P(1)}] ${WHO}: Asif picked up the reply drafts (package ${SHORT}) and has 0 not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`)
+    expect(first(one(feed({ drafts: [noReply({ status: 'picked_up', picked_up_by: ASIF })], mail: [covered()] })))).toBe(`[mm-link ${P(1)}] ${WHO}: Asif picked up the reply drafts (package ${PKG}) and has 0 not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`)
   })
 
   test('a follow-ups-only package that covers the client\'s message is the client\'s package (Money Badger, 2026-11-06), never prep', () => {
     const GO = P(301)
-    const GO_SHORT = GO.slice(0, 8)
     /** The project row of a follow-ups-only package covering through an hour ago: `covered` came an hour before that. */
     const project = (by: string, through: string | undefined = iso(NOW - H)) => ({ project_id: P(1), name: `${ACME} — Jeff`, followups: { active: 0, next_at: null, next_kind: null, awaiting_go: 3, go_package_id: GO, go_first_at: iso(NOW + 72 * H), go_first_kind: 'client_email', go_by: by, go_steps: 3, ...(through ? { go_covers_through: through } : {}) } })
     const it = one(feed({ mail: [covered()], projects: [project(ME)] as Feed['projects'] }))
@@ -871,25 +777,26 @@ describe('0.7.32: an open package that owes no reply and has no draft reaches it
     expect(asksForPrep(it)).toBe(false)
     expect(draftsComing(it, NOW, undefined)).toBe(false)
     const text = kickoffText(it)
-    expect(text.split(', the first')[0]).toBe(`[mm-link ${P(1)}] ${WHO} has 3 follow-up step(s) that nobody has approved, in package ${GO_SHORT}`)
-    expect(text.split(' ET. ').slice(1).join(' ET. ')).toBe(`It already covers the 1 client message(s) waiting, so do not run prep and do not build a second package. Nothing goes until I give the go. Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for package ${GO_SHORT} with every step in full and wait for me. Send nothing without my go.`)
+    expect(text.split(', the first')[0]).toBe(`[mm-link ${P(1)}] ${WHO} has 3 follow-up step(s) that nobody has approved, in package ${GO}`)
+    expect(text.split(' ET. ').slice(1).join(' ET. ')).toBe(`It already covers the 1 client message(s) waiting, so do not run prep and do not build a second package. Nothing goes until I give the go. Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for package ${GO} with every step in full and wait for me. Send nothing without my go.`)
     // one paragraph about the package: not again as "also holds"
     expect(text).not.toContain('also holds')
     for (const sent of [kickoffText(it, { auto: true }), kickoffText(it, { auto: true, wait: true })]) expect(sent).toBe(text)
     expect(text).not.toContain('no package exists')
     expect(noteText(it, ME).startsWith('1 client message waiting on our reply and 0 committed tasks due; the package named next covers it, so there is no reply to prepare. Package ')).toBe(true)
     expect(noteText(it, ME)).not.toContain('no reply drafts are prepared')
-    expect(draftsLine(it)).toBe(`_Package ${GO_SHORT} covers the client's message and holds follow-up steps, with no reply drafts. Ask Claude: "Show me the follow-ups for ${ACME}"._`)
+    expect(draftsLine(it)).toBe(`_Package ${GO} covers the client's message and holds follow-up steps, with no reply drafts. Ask Claude: "Show me the follow-ups for ${ACME}"._`)
     expect(waitingText(it)).toBe('3 follow-ups need your go')
     expect(titleFor(it, NOW).split(' · ').slice(1, 3)).toEqual([ACME, 'follow-ups need your go'])
 
-    // a teammate's go, for the PM: shown, not taken and not approved
-    const pm = one(feed({ role: 'pm', mail: [covered()], projects: [project(ASIF)] as Feed['projects'] }))
-    expect(goWithMail(pm)).toBe(true)
-    expect(asksForPrep(pm)).toBe(false)
-    expect(kickoffText(pm)).toContain(`It already covers the 1 client message(s) waiting, so do not run prep and do not build a second package. Load the client's project skill first`)
-    expect(kickoffText(pm)).toContain(`do not take it and do not approve it: the go is Asif's.`)
-    expect(kickoffText(pm)).not.toContain('no package exists')
+    // a teammate's go beside the viewer's own message, for the founder (since 0.7.34 the PM sees a teammate's go on Team now,
+    // not on his list): shown, not taken and not approved
+    const watched = one(feed({ member: ROB, role: 'founder', mail: [covered({ project_owner_email: ROB })], projects: [project(ASIF)] as Feed['projects'] }))
+    expect(goWithMail(watched)).toBe(true)
+    expect(asksForPrep(watched)).toBe(false)
+    expect(kickoffText(watched)).toContain(`It already covers the 1 client message(s) waiting, so do not run prep and do not build a second package. Load the client's project skill first`)
+    expect(kickoffText(watched)).toContain(`do not take it and do not approve it: the go is Asif's.`)
+    expect(kickoffText(watched)).not.toContain('no package exists')
 
     // with no message beside them the kickoff is as it was, in the page's new name
     const alone = one(feed({ projects: [project(ME)] as Feed['projects'] }))
@@ -907,5 +814,216 @@ describe('0.7.32: an open package that owes no reply and has no draft reaches it
     const none = one(feed({ mail: [covered()] }))
     expect(asksForPrep(none)).toBe(true)
     expect(kickoffText(none)).toContain('no package exists yet, so run prep first')
+  })
+})
+
+// ============================================================================================================================
+// (0.7.32, Rob 2026-11-06) "Panels: a ticket with no due date never pins and never asks for a date, for anyone. It goes back
+// under the closed No due date toggle, so it's still one press away." And: "a ticket's age no longer matters if no-date
+// tickets never pin." Over his call of 2026-11-05 that shipped in 0.7.27 (`needs a due date`). ⛔ From OW's next release a
+// teammate's and a PM's feed send `tickets.undated` as well, so the rules below hold for all three.
+// ============================================================================================================================
+describe('0.7.32: a ticket with no due date never pins and never asks for a date, for anyone', () => {
+  const H9 = 'h9@example.com'
+  const VIEWERS: ReadonlyArray<readonly [string, string, string]> = [['the founder', ROB, 'founder'], ['a teammate', ME, 'builder'], ['the PM', H9, 'pm']]
+  const as = (who: string, role: string, over: Partial<Feed> = {}): Feed => feed({ member: who, role, ...over })
+  /** The viewer's own undated client ticket, as `tickets.undated` lists it. */
+  const noDate = (who: string, n = 0, over: Partial<FeedTicket> = {}): FeedTicket => ticket(1, null, { ticket_id: P(150 + n), title: `Not dated ${n}`, assignee_email: who, ...over })
+  const paceBehind = (who: string): FeedPace => ({ project_id: P(1), project_name: `${ACME} — Jeff`, holder_email: who, state: 'behind', need_per_day: 2.4, paid_per_day: 1.5, hours_left: 20, hours_short: 3, date: iso(NOW + 300 * H), date_kind: 'ticket' })
+  const etaAsk = (who: string): FeedTicket => ({ ...ticket(1, null, { ticket_id: P(102), assignee_email: who }), eta_needed_by: iso(NOW + 3 * H), eta_ask: 'no ETA' })
+
+  for (const [name, who, role] of VIEWERS) {
+    test(`${name}: a client with no-date tickets alone does not pin, is under the toggle, offers no Start and updates nothing`, () => {
+      const it = one(as(who, role, { tickets: { undated: [noDate(who), noDate(who, 1)] } }))
+      expect(pinsFor(it, NOW)).toBe(false)
+      expect(noDateGroup(it)).toBe(true)
+      expect(needsYouNow(it)).toBe(false)
+      expect(mayStart(it, undefined, NOW)).toBe(false)
+      expect(autoUpdatable(it, NOW)).toBe(false)
+      expect(checkNow(it, NOW)).toBeNull()
+      expect(statusOf(it, NOW)).toBeNull()
+      expect([it.tasks, undatedCount(it), committedCount(it)]).toEqual([2, 2, 0])
+      expect(titleFor(it, NOW)).toBe(`🟡 ${ACME} · task · no due date`)
+      expect(pinTitle(it, NOW)).toBe(`🟡 ${ACME} · task · no due date`)
+      expect(rowLine(it, NOW)).toBe(`🟡 ${ACME} · task · no due date`)
+      expect(pinReason(it, NOW)).toBe('No pin needed: nothing of yours here has a due date.')
+      // a message from the client in the last six weeks offers Start with or without them (0.7.11): never the tickets themselves
+      expect(mayStart(it, NOW - H, NOW)).toBe(true)
+    })
+
+    test(`${name}: a dated ticket beside them pins by itself, and the counts stay right`, () => {
+      const tickets = (dueIn: number) => ({ due_soon: [ticket(1, NOW + dueIn * H, { assignee_email: who })], undated: [noDate(who), noDate(who, 1)] })
+      const near = one(as(who, role, { tickets: tickets(4) }))
+      expect(pinsFor(near, NOW)).toBe(true)
+      expect(titleFor(near, NOW)).toBe(`🔴 4h left · ${ACME} · task`)
+      expect([near.tasks, undatedCount(near), committedCount(near)]).toEqual([3, 2, 1])
+      expect(waitingText(near)).toBe('1 task due, 2 tasks with no date')
+      expect(noDateGroup(near)).toBe(false)
+      expect(needsYouNow(near)).toBe(true)
+      // due further out it pins by nothing, on the list by its own clock
+      const far = one(as(who, role, { tickets: tickets(50) }))
+      expect(pinsFor(far, NOW)).toBe(false)
+      expect(titleFor(far, NOW)).toBe(`🟡 2d left · ${ACME} · task`)
+      expect(noDateGroup(far)).toBe(false)
+    })
+
+    test(`${name}: an undated ticket older than the cut is still listed under the toggle`, () => {
+      const ancient = { ...noDate(who), last_activity_at: '2026-01-05', created_at: '2026-01-05T12:00:00Z' } as FeedTicket
+      const f = as(who, role, { tickets: { undated: [ancient] } })
+      const it = one(f)
+      expect(noDateGroup(it)).toBe(true)
+      expect(pinsFor(it, NOW)).toBe(false)
+      // the cut clears nothing here, so a client with nothing else open is not read as cleared by it
+      expect([...pastCutClients(f, NOW)]).toEqual([])
+      // whatever a row says of its last activity, each one counts, and none of them pins
+      const both = one(as(who, role, { tickets: { undated: [ancient, { ...noDate(who, 1), last_activity_at: iso(NOW - H).slice(0, 10) } as FeedTicket] } }))
+      expect(both.tasks).toBe(2)
+      expect(pinsFor(both, NOW)).toBe(false)
+      // the client's move: the existing skip, whatever its age
+      expect(all(as(who, role, { tickets: { undated: [{ ...ancient, waiting_on: 'client' }] } }))).toEqual([])
+      // (0.7.31, Rob 11-06: "It shouldn't be prompting me to do anything") the owner picks it up when ready: it reads as any undated ticket
+      const whenReady = one(as(who, role, { tickets: { undated: [{ ...noDate(who), waiting_on: 'owner_when_ready' } as FeedTicket] } }))
+      expect(pinsFor(whenReady, NOW)).toBe(false)
+      expect(noDateGroup(whenReady)).toBe(true)
+    })
+
+    test(`${name}: a message, a package, an ETA ask or anything else beside them reads as it does without them`, () => {
+      const reply = (over: Partial<FeedMail> = {}) => mail(1, NOW - 4 * H, { reply_due_at: iso(NOW + 20 * H), project_owner_email: who, ...over })
+      const held = (by: string) => pkg(1, { status: 'picked_up', picked_up_by: by, picked_up_at: iso(NOW - H), project_owner_email: who, due_at: iso(NOW + 20 * H) })
+      const scenarios: Record<string, Partial<Feed>> = {
+        'a message': { mail: [reply()] },
+        'a message due further out': { mail: [reply({ reply_due_at: iso(NOW + 50 * H) })] },
+        'a message with no clock': { mail: [reply({ reply_due_at: null })] },
+        'a package': { mail: [reply()], drafts: [pkg(1, { project_owner_email: who, due_at: iso(NOW + 20 * H) })] },
+        'a package the viewer holds': { drafts: [held(who)] },
+        'a reply a teammate holds': { mail: [reply()], drafts: [held(ASIF)] },
+        'an ETA ask': { tickets: { due_today: [etaAsk(who)] } },
+        'a late ETA ask': { tickets: { overdue: [{ ...etaAsk(who), eta_needed_by: iso(NOW - 3 * H) }] } },
+        'an owner ask': { tickets: { due_today: [ticket(1, NOW + 3 * H, { ticket_id: P(103), assignee_email: who, commitment_basis: 'assign_by' })] } },
+        'a dated task': { tickets: { due_soon: [ticket(1, NOW + 4 * H, { assignee_email: who })] } },
+        'an internal ask': { asks: [{ ask_id: P(300), project_id: P(1), project_name: `${ACME} — Jeff`, asker_name: 'Asif', asker_email: ASIF, asked_email: who, asked_at: iso(NOW - H), due_at: iso(NOW + 5 * H) }] },
+        'a go': { projects: [{ project_id: P(1), name: `${ACME} — Jeff`, followups: { go_steps: 2, go_package_id: P(50), go_first_at: iso(NOW + 72 * H), go_first_kind: 'client_sms', go_by: who } }] },
+        "a teammate's go": { projects: [{ project_id: P(1), name: `${ACME} — Jeff`, followups: { go_steps: 2, go_package_id: P(50), go_first_at: iso(NOW + 3 * H), go_first_kind: 'client_sms', go_by: ASIF } }] },
+        'a pace row': { pace: [paceBehind(who)] },
+      }
+      const read = (f: Feed) => {
+        const l = buildLists(f, NOW)
+        const it = [...l.queue, ...l.teammate, ...l.checking][0]
+        if (!it) return null
+        return {
+          list: l.teammate.includes(it) ? 'teammate' : l.queue.includes(it) ? 'queue' : 'checking', kind: it.kind, due: it.dueAt, pins: pinsFor(it, NOW), toggle: noDateGroup(it), needsYou: needsYouNow(it), start: mayStart(it, undefined, NOW),
+          auto: autoUpdatable(it, NOW), name: titleFor(it, NOW), pinned: pinTitle(it, NOW), row: rowLine(it, NOW), why: pinReason(it, NOW), signature: signatureOf(it),
+        }
+      }
+      for (const [what, over] of Object.entries(scenarios)) {
+        const without = read(as(who, role, over))
+        const beside = read(as(who, role, { ...over, tickets: { ...over.tickets, undated: [noDate(who)] } }))
+        // a teammate's go that is nothing to the viewer lists nothing without them, and then they stand alone
+        if (without === null) expect(beside?.toggle, what).toBe(true)
+        else expect(beside, what).toEqual(without)
+      }
+    })
+
+    test(`${name}: an ETA ask stays an ETA ask, and a ticket on both lists counts once, as the ask`, () => {
+      const it = one(as(who, role, { tickets: { due_today: [etaAsk(who)], undated: [noDate(who)] } }))
+      expect(etaAsksOf(it).map(a => a.id)).toEqual([P(102)])
+      expect(pinsFor(it, NOW)).toBe(true)
+      expect(titleFor(it, NOW)).toBe(`🔴 3h left · ${ACME} · ETA needed`)
+      expect([it.tasks, undatedCount(it)]).toEqual([2, 1])
+      expect(noDateGroup(it)).toBe(false)
+      const twice = one(as(who, role, { tickets: { due_today: [etaAsk(who)], undated: [noDate(who, 0, { ticket_id: P(102) })] } }))
+      expect([twice.tasks, undatedCount(twice), twice.undatedTasks ?? 0]).toEqual([1, 0, 0])
+      expect(titleFor(twice, NOW)).toBe(`🔴 3h left · ${ACME} · ETA needed`)
+    })
+
+    test(`${name}: a package that is not the viewer's lists nothing by itself, so it takes nothing out from under the toggle`, () => {
+      const packages: FeedDraft[] = [
+        // their own stale one (M1: a stale package alone lists nothing)
+        pkg(1, { status: 'stale', project_owner_email: who, due_at: iso(NOW + 50 * H) }),
+        // one a teammate holds, due further out than anyone checks on it
+        pkg(1, { status: 'picked_up', picked_up_by: ASIF, picked_up_at: iso(NOW - H), project_owner_email: who, due_at: iso(NOW + 50 * H) }),
+      ]
+      for (const d of packages) {
+        const it = one(as(who, role, { drafts: [d], tickets: { undated: [noDate(who)] } }))
+        expect(undatedOnly(it), d.status).toBe(true)
+        expect(noDateGroup(it), d.status).toBe(true)
+        expect(withTeammate(it), d.status).toBe(false)
+        expect(pinsFor(it, NOW), d.status).toBe(false)
+        expect(mayStart(it, undefined, NOW), d.status).toBe(false)
+        expect(autoUpdatable(it, NOW), d.status).toBe(false)
+      }
+    })
+
+    test(`${name}: a teammate's row in the list goes nowhere, and neither \`holder_pin\` nor a start-by pins an undated row`, () => {
+      expect(all(as(who, role, { tickets: { undated: [noDate(ASIF)] } }))).toEqual([])
+      expect(all(as(who, role, { tickets: { undated: [{ ...noDate(ASIF), holder_pin: true } as FeedTicket] } }))).toEqual([])
+      const own = one(as(who, role, { tickets: { undated: [{ ...noDate(who), holder_pin: true } as FeedTicket] } }))
+      expect(pinsFor(own, NOW)).toBe(false)
+      expect(checkNow(own, NOW)).toBeNull()
+      expect(noDateGroup(own)).toBe(true)
+      const started = one(as(who, role, { tickets: { undated: [noDate(who, 0, { start_by_at: iso(NOW - 26 * H) })] } }))
+      expect(pinsFor(started, NOW)).toBe(false)
+      expect(statusOf(started, NOW)).toBeNull()
+      expect(titleFor(started, NOW)).toBe(`🟡 ${ACME} · task · no due date`)
+    })
+  }
+
+  test('what pins beside them is never hidden under the closed toggle: a go with no date, a pace row; (0.7.34) a teammate\'s late ticket no longer pins the PM', () => {
+    const pm = one(as(H9, 'pm', { tickets: { overdue: [ticket(1, NOW - 3 * H, { ticket_id: P(105), assignee_email: ASIF })], undated: [noDate(H9)] } }))
+    expect(pinsFor(pm, NOW)).toBe(false)
+    expect(noDateGroup(pm)).toBe(true)
+    const go = one(as(ME, 'builder', { tickets: { undated: [noDate(ME)] }, projects: [{ project_id: P(1), name: `${ACME} — Jeff`, followups: { go_steps: 2, go_package_id: P(50), go_first_at: null, go_first_kind: 'client_sms', go_by: ME } }] }))
+    expect(pinsFor(go, NOW)).toBe(true)
+    expect(noDateGroup(go)).toBe(false)
+    const paced = one(as(ME, 'builder', { tickets: { undated: [noDate(ME)] }, pace: [paceBehind(ME)] }))
+    expect(pinsFor(paced, NOW)).toBe(true)
+    expect(noDateGroup(paced)).toBe(false)
+  })
+
+  test('nothing says `needs a due date`, and an item an older bridge stored with `needsDate` reads as any other', () => {
+    const it = one(as(ROB, 'founder', { tickets: { undated: [noDate(ROB)] } }))
+    for (const text of [titleFor(it, NOW), threadTitle(it, NOW), pinTitle(it, NOW), rowLine(it, NOW), pinReason(it, NOW), threadWhy(it, ACME, NOW), waitingText(it), kickoffText(it), noteText(it, ROB), clientMarkdown(it, NOW)]) {
+      expect(text).not.toContain('needs a due date')
+      expect(text).not.toContain('needs one')
+    }
+    const stored = JSON.parse(JSON.stringify({ ...it, needsDate: 3 })) as QueueItem
+    expect(pinsFor(stored, NOW)).toBe(false)
+    expect(statusOf(stored, NOW)).toBeNull()
+    expect(noDateGroup(stored)).toBe(true)
+    expect(titleFor(stored, NOW)).toBe(`🟡 ${ACME} · task · no due date`)
+  })
+
+  type Row = { projectId: string }
+  type Queue = { header: string; rows: Row[]; undated?: Row[]; teammate?: Row[] }
+  const ids = (rows: Row[] | undefined) => (rows ?? []).map(r => r.projectId)
+
+  test('on a thread: a pin 0.7.27 put on one comes off and the name goes, for all three, and the row is under `No due date`, not `Needs you now`', async () => {
+    for (const [name, who, role] of VIEWERS) {
+      const w = fakeApp(as(who, role, { tickets: { undated: [noDate(who)] } }), [{ sessionId: 'local_hub', title: 'Hub' }, { sessionId: 'local_c1', title: `🟡 ${ACME} · needs a due date`, pinned: true }], [], { now: NOW })
+      w.put('mm.links', { [P(1)]: 'local_c1' })
+      w.put('mm.pins', { local_c1: { projectId: P(1), client: ACME, byUs: true } })
+      await mm(w.session('local_hub'), '')
+      expect(w.app.get('local_c1'), name).toMatchObject({ pinned: false, title: `🟡 ${ACME} · task · no due date` })
+      const q = w.view('local_hub', 'queue') as Queue
+      expect(q.header, name).toBe('Nothing needs you right now.')
+      expect(ids(q.rows), name).toEqual([])
+      expect(ids(q.undated), name).toEqual([P(1)])
+    }
+  })
+
+  test('on the page: a reply a teammate holds beside them stays under With a teammate; the founder, whose page has no such part, finds the client under `No due date`', async () => {
+    for (const [name, who, role] of VIEWERS) {
+      const f = as(who, role, {
+        mail: [mail(1, NOW - 4 * H, { reply_due_at: iso(NOW + 20 * H), project_owner_email: who })],
+        drafts: [pkg(1, { status: 'picked_up', picked_up_by: ASIF, picked_up_at: iso(NOW - H), project_owner_email: who, due_at: iso(NOW + 20 * H) })],
+        tickets: { undated: [noDate(who)] },
+      })
+      const w = fakeApp(f, [{ sessionId: 'local_hub', title: 'Hub' }], [], { now: NOW })
+      await mm(w.session('local_hub'), '')
+      const q = w.view('local_hub', 'queue') as Queue
+      expect(ids(q.rows), name).toEqual([])
+      expect(ids(q.teammate), name).toEqual(role === 'founder' ? [] : [P(1)])
+      expect(ids(q.undated), name).toEqual(role === 'founder' ? [P(1)] : [])
+    }
   })
 })

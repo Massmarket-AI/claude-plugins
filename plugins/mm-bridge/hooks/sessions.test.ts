@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
+import { readTree } from './card'
+import { SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
 import { ME, NOW, ago, bandButtons, fakeApp, hooks, mm, next, paneButtons, pid, press, tool } from './fake-app.test-helper'
 import type { FakeThread } from './fake-app.test-helper'
 import type { Feed } from './queue'
@@ -279,6 +281,129 @@ describe('0.7.29: a pin the app refuses waits 6 hours and is reported once; a ty
     await w.advance(6 * 60_000)
     await mm(hub, '')
     expect(w.stored('mm.pinwait')).toEqual({})
+  })
+
+  // ⛔ (0.7.33) The same for a name: `setName`, in the shape of `setPin`
+  describe('0.7.33: a name the app refuses', () => {
+    const titled = () => {
+      const w = fakeApp(threeClients(), [{ sessionId: 'local_hub' }, { sessionId: 'local_a', title: 'A work' }, { sessionId: 'local_b', title: 'B work' }, { sessionId: 'local_c', title: 'C work' }])
+      w.put('mm.links', { [pid(1)]: 'local_a', [pid(2)]: 'local_b', [pid(3)]: 'local_c' })
+      w.refuseTitles.set('local_a', 'The app will not rename this one.')
+      return w
+    }
+    const nameCalls = (w: ReturnType<typeof fakeApp>, sid: string) => w.calls.filter(c => c.tool === 'set_session_title' && c.args.session_id === sid).length
+    const nameNotices = (w: ReturnType<typeof fakeApp>, sid: string) => w.written.filter(f => f.path.endsWith('bridge-notices.log') && f.text.includes(`thread ${sid}: the app refused to rename it`))
+
+    test('every other thread is named and pinned, this one is still pinned, a typed /mm answers and the sync advances', async () => {
+      const w = titled()
+      const hub = w.session('local_hub')
+      expect(await mm(hub, '')).toContain('3 clients need you; 3 threads pinned.')
+      expect(w.app.get('local_a')).toMatchObject({ title: 'A work', pinned: true })
+      for (const [sid, name] of [['local_b', 'Client Two'], ['local_c', 'Client Three']] as const) {
+        expect(w.app.get(sid)?.pinned).toBe(true)
+        expect(w.app.get(sid)?.title).toContain(name)
+      }
+      expect((w.stored('mm.last') as { error?: string }).error).toBeUndefined()
+      const first = lastAt(w)
+      await w.advance(6 * 60_000)
+      await mm(hub, '')
+      expect(lastAt(w)).toBeGreaterThan(first)
+    })
+
+    test('asked again no sooner than 6 hours; reported once per thread and reason; in /mm status and the heartbeat while it waits', async () => {
+      const w = titled()
+      const hub = w.session('local_hub')
+      await mm(hub, '')
+      expect(nameCalls(w, 'local_a')).toBe(1)
+      expect(nameNotices(w, 'local_a').length).toBe(1)
+      await w.advance(6 * 60_000)
+      await mm(hub, '')
+      expect(nameCalls(w, 'local_a')).toBe(1)
+      expect(await mm(hub, 'status')).toContain('names the app refused: Client One (')
+      w.feedAnswers(503)
+      await w.advance(6 * 60_000)
+      await mm(hub, '')
+      const state = JSON.parse(w.written.filter(f => f.path.endsWith('bridge-state.json')).at(-1)?.text ?? '{}') as { nameRefused?: Array<{ thread: string; why: string; until: string }> }
+      expect(state.nameRefused?.map(r => r.thread)).toEqual(['local_a'])
+      expect(state.nameRefused?.[0]?.why).toContain('The app will not rename this one.')
+      w.feedAnswers(200)
+      await w.advance(SIX_HOURS)
+      await mm(hub, '')
+      expect(nameCalls(w, 'local_a')).toBe(2)
+      expect(nameNotices(w, 'local_a').length).toBe(1)
+      // a new reason is a new report
+      w.refuseTitles.set('local_a', 'Busy now.')
+      await w.advance(SIX_HOURS + 60_000)
+      await mm(hub, '')
+      expect(nameCalls(w, 'local_a')).toBe(3)
+      expect(nameNotices(w, 'local_a').length).toBe(2)
+      // the app takes it: named, and the wait goes
+      w.refuseTitles.clear()
+      await w.advance(SIX_HOURS + 60_000)
+      await mm(hub, '')
+      expect(w.app.get('local_a')?.title).toContain('Client One')
+      expect(w.stored('mm.namewait')).toEqual({})
+      expect(await mm(hub, 'status')).not.toContain('names the app refused')
+    })
+
+    test('a thread that gives its own name back, refused: its records stay and a later sync finishes it', async () => {
+      const w = fakeApp({ member: ME, role: 'founder', tickets: {}, threads: [], mail: [mail(2, 'Client Two')] }, [{ sessionId: 'local_hub' }, { sessionId: 'local_a', title: 'A work' }, { sessionId: 'local_b', title: 'B work' }])
+      w.put('mm.links', { [pid(2)]: 'local_b' })
+      w.put('mm.titles', { local_a: 'A work' })
+      w.put('mm.pins', { local_a: { client: 'Client One', projectId: pid(1), byUs: false } })
+      w.put('mm.released', ['local_a'])
+      const a = w.app.get('local_a')
+      if (a) a.title = 'Client One · due'
+      w.refuseTitles.set('local_a', 'No.')
+      const hub = w.session('local_hub')
+      await mm(hub, '')
+      expect((w.stored('mm.last') as { error?: string }).error).toBeUndefined()
+      expect((w.stored('mm.titles') as Record<string, string>).local_a).toBe('A work')
+      expect(w.stored('mm.released')).toEqual(['local_a'])
+      expect(w.app.get('local_b')?.title).toContain('Client Two')
+      w.refuseTitles.clear()
+      await w.advance(SIX_HOURS + 60_000)
+      await mm(hub, '')
+      expect(w.app.get('local_a')?.title).toBe('A work')
+      expect(w.stored('mm.released')).toEqual([])
+      expect((w.stored('mm.titles') as Record<string, string>).local_a).toBeUndefined()
+    })
+
+    test('a refusal in the words for a scheduled task\'s run lets the run go', async () => {
+      const w = titled()
+      w.refuseTitles.set('local_a', 'Session "local_a" is a scheduled task run. These runs show under their task.')
+      const hub = w.session('local_hub')
+      await mm(hub, '')
+      expect(w.stored('mm.links')).not.toHaveProperty(pid(1))
+      expect(w.app.get('local_a')?.pinned).toBeFalsy()
+      expect((w.stored('mm.last') as { error?: string }).error).toBeUndefined()
+      expect(w.stored('mm.namewait') ?? {}).toEqual({})
+    })
+
+    test('`mm card` on a card still being drawn never waits on the state, which one dispatch reads at one moment: it draws the card itself, then answers', async () => {
+      const PKG = SMS_TREE.package_id
+      const w = fakeApp(threeClients(), [{ sessionId: 'local_hub' }])
+      const hub = w.session('local_hub') as unknown as {
+        process: { run: (argv: string[]) => Promise<unknown> }
+        http: { fetch: (url: string) => Promise<unknown> }
+        state: { set: (ref: unknown, value: unknown) => Promise<unknown>; get: (ref: unknown) => Promise<{ value: { status: string } }> }
+      }
+      await mm(hub as never, '')
+      const ref = { plugin: 'mm-bridge', key: 'card' }
+      await hub.state.set(ref, { packageId: PKG, projectId: pid(1), client: 'Acme', own: true, current: SMS_TREE.package_sha256, tree: null, status: 'rendering', at: 0 })
+      const fetch = hub.http.fetch
+      hub.http.fetch = async (url: string) =>
+        url.includes('/reply-package') ? { status: 200, ok: true, headers: {}, text: JSON.stringify({ markdown: SMS_PAGE, package_sha256: SMS_TREE.package_sha256 }) } : fetch(url)
+      let seconds = 0
+      hub.process.run = async (argv: string[]) => {
+        if (argv[0] === 'sleep') seconds++
+        return { exitCode: 0, stdout: JSON.stringify(SMS_TREE), stderr: '' }
+      }
+      // this fake thread's client part shows nothing, so that is its next question; no second went by waiting
+      expect(await mm(hub as never, `card ${PKG}`)).toBe('card not ready: the side pane is not showing this package. Print the whole page.')
+      expect(seconds).toBe(0)
+      expect((await hub.state.get(ref)).value.status).toBe('ready')
+    })
   })
 
   test('a typed /mm answers why a pass failed, with the list as last loaded', async () => {
@@ -915,6 +1040,8 @@ describe('L3: a refresh that fails after a press shows in one line, until a sync
         return
       }
       const o = node as { props?: Record<string, unknown>; children?: unknown }
+      // (0.7.34) the Needs you now heading is a button now, and reads as the heading it is
+      if (typeof o.props?.label === 'string' && /^Needs you now/.test(o.props.label)) out.push(o.props.label.replace(/\s+[▾▸]$/, ''))
       walk(o.props?.children, depth + 1)
       walk(o.children, depth + 1)
     }
@@ -985,7 +1112,7 @@ const human = { kind: 'composer' }
 
 describe('C3 (0.5.4): a client with no thread has ONE chip, in the thread the person works in', () => {
   test('two threads, one chip, in the thread that polls while the person has written in neither; started, it takes the client, and its thread withdraws it on its next pass', async () => {
-    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(51, 'Client Five One', 1)] }
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(51, 'Client Five One', 3)] }
     const w = fakeApp(feed, [{ sessionId: 'local_r5a' }, { sessionId: 'local_r5b' }, { sessionId: 'local_r5n1' }], [], { every: true })
     const [a, b, n1] = ['local_r5a', 'local_r5b', 'local_r5n1'].map(id => w.session(id))
     await mm(a, '')
@@ -1008,7 +1135,7 @@ describe('C3 (0.5.4): a client with no thread has ONE chip, in the thread the pe
   })
 
   test('the person works in another thread for 10 minutes without using it: the chip\'s thread withdraws it, and the thread they work in mints it', async () => {
-    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(52, 'Client Five Two', 1)] }
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(52, 'Client Five Two', 3)] }
     const ids = ['local_r5c', 'local_r5d']
     const w = fakeApp(feed, ids.map(sessionId => ({ sessionId })), [], { every: true })
     const sessions = new Map(ids.map(id => [id, w.session(id)] as const))
@@ -1078,7 +1205,7 @@ describe('C1 and C2 (0.5.4): a client with a thread has ONE chip, in that thread
   })
 
   test('C6: on its first pass, a thread withdraws every chip 0.5.3 minted by itself there, and mints what 0.5.4 would', async () => {
-    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(63, 'Client Six Three', 1)] }
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(63, 'Client Six Three', 3)] }
     const ids = ['local_c6a', 'local_c6b']
     const w = fakeApp(feed, ids.map(sessionId => ({ sessionId })), [], { every: true })
     w.put('mm.links', { [pid(63)]: ids[0] })
@@ -1238,7 +1365,7 @@ describe('0.5.3 claim in place, as 0.5.4 has it: the long thread\'s own fresh-th
   })
 
   test('a client with no thread is never claimed in place, whatever the person writes', async () => {
-    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(72, 'Client Seven Two', 1)] }
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(72, 'Client Seven Two', 3)] }
     const w = fakeApp(feed, [{ sessionId: 'local_r4a' }, { sessionId: 'local_r4b' }], [], { every: true })
     const [a, b] = ['local_r4a', 'local_r4b'].map(id => w.session(id))
     await mm(a, '')
@@ -1258,7 +1385,7 @@ describe('0.5.3 claim in place, as 0.5.4 has it: the long thread\'s own fresh-th
 
 describe('0.5.6: Start moves the chip to the thread it is pressed in (Rob, 10-14: "Start in the thread that I click it on")', () => {
   test('the chip in Y; Start pressed in X: X mints, Y\'s is superseded and Y withdraws it on its pass; one live chip; again in X: already here; a third thread says where it is now', async () => {
-    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(81, 'Client Eight One', 1)] }
+    const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(81, 'Client Eight One', 3)] }
     const [Y, X, Z] = ['local_mvy', 'local_mvx', 'local_mvz']
     const w = fakeApp(feed, [{ sessionId: Y, title: 'Fabrikam Media HighLevel Build' }, { sessionId: X, title: 'Where I am' }, { sessionId: Z, title: 'Elsewhere' }], [], { every: true })
     const [ys, xs, zs] = [Y, X, Z].map(id => w.session(id))
