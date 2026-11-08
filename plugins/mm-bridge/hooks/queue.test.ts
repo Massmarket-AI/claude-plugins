@@ -449,7 +449,7 @@ describe('a reply package someone picked up', () => {
     expect(note).toContain('already picked up by')
     expect(note).not.toContain('no reply drafts are prepared yet')
     expect(note).toBe(
-      `Reply package aaaaaaaa is already picked up by Builder A, the person in this session, with 1 draft not sent yet; the five-part pickup view is in the side pane. 1 client message arrived after that draft was written: read the package again and revise the open draft, never write a second email. The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${HELD}.`,
+      `Reply package ${HELD} is already picked up by Builder A, the person in this session, with 1 draft not sent yet; the five-part pickup view is in the side pane. 1 client message arrived after that draft was written: read the package again and revise the open draft, never write a second email. The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${HELD}.`,
     )
     expect(holdBanner(it).startsWith('> **You picked this up**')).toBe(true)
     expect(holdBanner(it)).toBe('> **You picked this up** (Mon 4:30 PM). 1 draft not sent yet. 1 client message arrived after it was written.')
@@ -463,7 +463,7 @@ describe('a reply package someone picked up', () => {
     expect(titleFor(it, T)).toBe('🟡 17h left · Acme Roofing · your draft · flagged')
     expect(holdBanner(it)).toBe('> **You picked this up** (Mon 4:30 PM). 3 drafts not sent yet.')
     expect(noteText(it, ME)).toBe(
-      `Reply package aaaaaaaa is already picked up by Builder A, the person in this session, with 3 drafts not sent yet, flagged for approval; the five-part pickup view is in the side pane. The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${HELD}.`,
+      `Reply package ${HELD} is already picked up by Builder A, the person in this session, with 3 drafts not sent yet, flagged for approval; the five-part pickup view is in the side pane. The drafts are being worked in the thread that picked them up: to act on them, follow client-reply-prep §9 with --package ${HELD}.`,
     )
     // two messages after two or more drafts
     const two = only(feed({ drafts: [pkg({ drafts_unsent: 2 })], mail: [newer(), mailAt(P1, ACME_NAME, '2026-10-12 11:30')] }))
@@ -588,8 +588,8 @@ describe('a reply package someone picked up', () => {
     const it = only(feed({ drafts: [pkg({ status: 'prepared', picked_up_by: null, picked_up_at: null })] }))
     expect(it).toMatchObject({ kind: 'ready', packageId: HELD, open: null })
     expect(draftsLine(it)).toBe('_Reply drafts are prepared for this client, but the pickup view could not be loaded here. Ask Claude: "Show me the reply drafts for Acme Roofing"._')
-    expect(noteText(it, ME)).toBe(`Reply package aaaaaaaa is prepared; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`)
-    expect(noteText({ ...it, flagged: true }, ME)).toBe(`Reply package aaaaaaaa is prepared and flagged for approval; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`)
+    expect(noteText(it, ME)).toBe(`Reply package ${HELD} is prepared; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`)
+    expect(noteText({ ...it, flagged: true }, ME)).toBe(`Reply package ${HELD} is prepared and flagged for approval; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`)
     expect(titleFor(it, T)).toBe('🟡 17h left · Acme Roofing · reply ready')
     expect(holdBanner(it)).toBe('')
   })
@@ -610,7 +610,7 @@ describe('a reply package someone picked up', () => {
       '🟡 17h left · Acme Roofing · reply ready', '🟡 17h left · Acme Roofing · reply · 2 new', '🔴 1h left · Acme Roofing · task',
     ])
     expect([ready, reply, task].map(it => noteText(it, ME))).toEqual([
-      `Reply package aaaaaaaa is prepared; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`,
+      `Reply package ${HELD} is prepared; the five-part pickup view is in the side pane. When the person asks to act on it, follow client-reply-prep §9 with --package ${HELD}.`,
       '2 client messages waiting on our reply and 0 committed tasks due; no reply drafts are prepared yet.',
       // (0.7.4) a task alone is not a reply to prepare (Rob, 2026-10-27: "It doesn't necessarily create the need for a new reply")
       '0 client messages waiting on our reply and 1 committed task due; no client message is waiting, so there is no reply to prepare.',
@@ -620,7 +620,7 @@ describe('a reply package someone picked up', () => {
     expect([ready, reply, task].map(holdBanner)).toEqual(['', '', ''])
     expect([ready, reply, task].map(waitingText)).toEqual(['drafts ready', '2 messages waiting', '1 task due'])
     expect([ready, reply, task].map(it => kickoffText(it))).toEqual([
-      `[mm-link ${P1}] Pick up the reply drafts for Acme Roofing Pat (OW project ${P1}). Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package aaaaaaaa and wait for me. Send nothing without my go.`,
+      `[mm-link ${P1}] Pick up the reply drafts for Acme Roofing Pat (OW project ${P1}). Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package aaaaaaaa-3333-4333-8333-333333333333 and wait for me. Send nothing without my go.`,
       `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}) needs a reply: 2 client message(s) waiting, reply due Tue, Oct 13 9:52 AM ET. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`,
       `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}) has 1 committed task(s) due Mon, Oct 12 6 PM ET. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`,
     ])
@@ -751,7 +751,7 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
     const [it] = buildLists(asFounder({ drafts: [flagged()] }), TUE).teammate
     const stale = { ...(it as QueueItem), theirs: undefined, okLate: undefined, open: { ...((it as QueueItem).open as NonNullable<QueueItem['open']>), state: 'stale' as const } }
     expect(waitingText(stale)).toBe('needs your OK · Builder B sends, drafts out of date')
-    expect(kickoffText(stale)).toContain('reply package aaaaaaaa is flagged for my OK and is marked out of date, and Builder B sends it.')
+    expect(kickoffText(stale)).toContain('reply package aaaaaaaa-3333-4333-8333-333333333333 is flagged for my OK and is marked out of date, and Builder B sends it.')
   })
 
   test('it sorts by its due time with the rest, and (0.7.12) one past the cut is in no list', async () => {
@@ -787,7 +787,7 @@ describe('(r) for the founder alone: a package flagged for his OK is listed whoe
     for (const [now, list] of [[MON, 'teammate'], [TUE, 'teammate']] as const) {
       const [it] = buildLists(asFounder({ drafts: [flagged()] }), now)[list]
       expect(kickoffText(it as QueueItem)).toBe(
-        `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}): reply package aaaaaaaa is flagged for my OK, and Builder B sends it. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go.`,
+        `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}): reply package aaaaaaaa-3333-4333-8333-333333333333 is flagged for my OK, and Builder B sends it. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go.`,
       )
     }
     // feed text is data here too: an owner's address reaches the row, its name and the kickoff as a cleaned name, on one line
@@ -880,7 +880,7 @@ describe('B4: a package flagged for the founder lists for him whoever owns the c
         const [it] = buildLists(asFounder({ drafts }), now)[list]
         expect(it).toMatchObject({ projectId: P1, kind: 'ok' })
         expect(it?.open).toMatchObject({ id: PKG_A, state: 'prepared' })
-        expect(kickoffText(it as QueueItem)).toContain('reply package aaaaaaaa is flagged for my OK')
+        expect(kickoffText(it as QueueItem)).toContain('reply package aaaaaaaa-3333-4333-8333-333333333333 is flagged for my OK')
       }
     }
   })
@@ -1004,7 +1004,7 @@ describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the 
     // the kickoff and the note treat it as a package a teammate holds (show what is waiting, no prep, no second
     // reply), in words for a package nobody picked up (Opus, 10-13)
     expect(kickoffText(it)).toBe(
-      `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}): Builder B has the reply drafts (package aaaaaaaa), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`,
+      `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}): Builder B has the reply drafts (package aaaaaaaa-3333-4333-8333-333333333333), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`,
     )
     expect(kickoffText(it)).not.toContain('picked up')
     expect(noteText(it, FOUNDER)).toBe('0 client messages waiting on our reply and 1 committed task due; Builder B has the reply drafts (package aaaaaaaa), and they are marked out of date. Do not write a second reply: ask Builder B.')
@@ -1018,12 +1018,12 @@ describe('R1 and R2 (0.5.1): which rows reach the founder, before and after the 
     expect(note).toBe('1 client message waiting on our reply and 0 committed tasks due; Builder B has the reply drafts (package aaaaaaaa), and they are marked out of date. Do not write a second reply: ask Builder B.')
     expect(note).not.toContain('pick the package up')
     expect(kickoffText(it)).toBe(
-      `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}): Builder B has the reply drafts (package aaaaaaaa), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`,
+      `[mm-link ${P1}] Acme Roofing Pat (OW project ${P1}): Builder B has the reply drafts (package aaaaaaaa-3333-4333-8333-333333333333), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`,
     )
     // a package a teammate actually picked up keeps the held words exactly
     const held = buildLists(asFounder({ drafts: [pkg(pickedUp('J.Smith@example.com'))], mail: [{ ...theirMail('2026-10-12 10:30'), project_owner_email: FOUNDER }] }), MON).teammate[0] as QueueItem
     expect(held?.open?.state).toBe('held_by_other')
-    expect(kickoffText(held)).toContain(': J Smith picked up the reply drafts (package aaaaaaaa) and has 1 not sent yet. Load the client\'s project skill first')
+    expect(kickoffText(held)).toContain(': J Smith picked up the reply drafts (package aaaaaaaa-3333-4333-8333-333333333333) and has 1 not sent yet. Load the client\'s project skill first')
     expect(noteText(held, FOUNDER)).toContain('; J Smith picked up the reply drafts for this client (package aaaaaaaa) and has 1 draft not sent yet. Do not write a second reply: ask J Smith.')
     expect(handoverText(it, { sid: 'local_0f1e2d3c-aaaa-4bbb-8ccc-000000000001', title: 'Roof quote' })).toContain('Before showing me what is due')
     // his own client's stale package keeps the wording that rebuilds the drafts, as before
@@ -3206,7 +3206,7 @@ describe('(0.7.24, Rob 2026-11-04) follow-up steps nobody approved pin at once f
   test('the kickoff, the note and the pane: the package, every step shown, nothing goes until the go', async () => {
     const it = listed(as(ROB, 'founder', waiting()))
     expect(kickoffText(it)).toBe(
-      `[mm-link ${DEALEROSITY}] Dealerosity Nicole Bassuk (OW project ${DEALEROSITY}) has 3 follow-up step(s) that nobody has approved, in package 3bacdfc2, the first (a text) opening Fri, Nov 6 9:30 AM ET. Nothing goes until I give the go. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package 3bacdfc2 with every step in full and wait for me. Send nothing without my go.`,
+      `[mm-link ${DEALEROSITY}] Dealerosity Nicole Bassuk (OW project ${DEALEROSITY}) has 3 follow-up step(s) that nobody has approved, in package 3bacdfc2-7533-42e5-b0c4-fbfe0d9c3c68, the first (a text) opening Fri, Nov 6 9:30 AM ET. Nothing goes until I give the go. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package 3bacdfc2-7533-42e5-b0c4-fbfe0d9c3c68 with every step in full and wait for me. Send nothing without my go.`,
     )
     expect(noteText(it, ROB)).toBe(
       `Package 3bacdfc2 holds 3 proposed follow-up steps that nobody has approved and that wait for Rob's go; the first, a text, opens Fri, Nov 6 9:30 AM ET. Nothing goes until the go. When the person asks to act on them, follow client-reply-prep §9 with --package ${PKG}.`,
@@ -3289,7 +3289,7 @@ describe('(0.7.24, Rob 2026-11-04) follow-up steps nobody approved pin at once f
     expect(goOnly(it)).toBe(false)
     expect(goMine(it)).toBe(true)
     expect(titleFor(it, wed)).toContain('Dealerosity · reply')
-    expect(goParagraph(it)).toBe('Package 3bacdfc2 also holds 3 follow-up step(s) that nobody has approved, the first (a text) opening Fri, Nov 6 9:30 AM ET. Show them with client-reply-prep §9 for package 3bacdfc2 once the rest is done, and wait for my go on them.')
+    expect(goParagraph(it)).toBe('Package 3bacdfc2-7533-42e5-b0c4-fbfe0d9c3c68 also holds 3 follow-up step(s) that nobody has approved, the first (a text) opening Fri, Nov 6 9:30 AM ET. Show them with client-reply-prep §9 for package 3bacdfc2-7533-42e5-b0c4-fbfe0d9c3c68 once the rest is done, and wait for my go on them.')
     expect(kickoffText(it)).toContain(goParagraph(it))
     expect(noteText(it, ROB)).toContain(goSentence(it, ROB))
     expect(waitingText(it)).toBe('1 message waiting, 3 follow-ups need your go')

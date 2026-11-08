@@ -874,7 +874,7 @@ export function askParagraph(a: Pick<AskRef, 'id' | 'asker' | 'dueAt'>): string 
 export function goKickoff(it: QueueItem, who: string): string {
   const g = goOf(it)
   if (!g) return `[mm-link ${it.projectId}] ${who}: follow-up steps wait for a go. Load the client's project skill first, then show me what is due and wait for me. Send nothing without my go.`
-  const pkg = g.packageId.slice(0, 8)
+  const pkg = g.packageId
   const first = typeof g.firstAt === 'number' && Number.isFinite(g.firstAt) ? `, the first (a ${stepWord(g.firstKind)}) opening ${dueText(g.firstAt)}` : ''
   const n = `${g.steps} follow-up step(s)`
   if (!g.mine) {
@@ -890,7 +890,7 @@ export function goKickoff(it: QueueItem, who: string): string {
 export function goParagraph(it: QueueItem): string {
   const g = goOf(it)
   if (!g) return ''
-  const pkg = g.packageId.slice(0, 8)
+  const pkg = g.packageId
   const first = typeof g.firstAt === 'number' && Number.isFinite(g.firstAt) ? `, the first (a ${stepWord(g.firstKind)}) opening ${dueText(g.firstAt)}` : ''
   return g.mine
     ? `Package ${pkg} also holds ${g.steps} follow-up step(s) that nobody has approved${first}. Show them with client-reply-prep §9 for package ${pkg} once the rest is done, and wait for my go on them.`
@@ -947,27 +947,27 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
     `[mm-link ${id}] The reply drafts for ${who} are ready in package ${pkg}. Load the client's project skill first, then follow client-reply-prep §9 to show the five-part pickup view for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. Send nothing without my go.`
   const lead =
     o?.state === 'held_by_me' && it.packageId
-      ? `[mm-link ${id}] Carry on with the reply drafts for ${who}. I already picked up package ${it.packageId.slice(0, 8)}: ${o.unsent} draft(s) not sent yet${o.newer > 0 ? `, and ${o.newer} client message(s) arrived since` : ''}. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the five-part pickup view and wait for me. Send nothing without my go.`
+      ? `[mm-link ${id}] Carry on with the reply drafts for ${who}. I already picked up package ${it.packageId}: ${o.unsent} draft(s) not sent yet${o.newer > 0 ? `, and ${o.newer} client message(s) arrived since` : ''}. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the five-part pickup view and wait for me. Send nothing without my go.`
       : it.packageId
         ? opts.auto
-          ? notTaken(it.packageId.slice(0, 8))
-          : `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${it.packageId.slice(0, 8)} and wait for me. Send nothing without my go.`
+          ? notTaken(it.packageId)
+          : `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${it.packageId} and wait for me. Send nothing without my go.`
         : it.kind === 'ok' && o
           ? okKickoff(it, o)
         : o?.state === 'held_by_other'
-          ? `[mm-link ${id}] ${who}: ${o.by} picked up the reply drafts (package ${o.id.slice(0, 8)}) and has ${o.unsent} not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`
+          ? `[mm-link ${id}] ${who}: ${o.by} picked up the reply drafts (package ${o.id}) and has ${o.unsent} not sent yet. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`
         : o && withHolder(o)
           ? // (the founder) a stale package a teammate has, not held: Opus's words, 10-13
-            `[mm-link ${id}] ${who}: ${o.by} has the reply drafts (package ${o.id.slice(0, 8)}), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`
+            `[mm-link ${id}] ${who}: ${o.by} has the reply drafts (package ${o.id}), and they are marked out of date. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep and do not draft a second reply. Send nothing without my go.`
           : o?.state === 'stale' && it.messages > 0
             ? opts.auto
               ? // (0.5.11, Opus 10-15, verbatim) case 4 sent by itself
-                `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Package ${o.id.slice(0, 8)} is marked out of date. Load the client's project skill first, then show me what the client sent, the current drafts and what is due, and wait for me. Do not take the package or rebuild the drafts until I answer here. Send nothing without my go.`
-              : `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: package ${o.id.slice(0, 8)} exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.`
+                `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Package ${o.id} is marked out of date. Load the client's project skill first, then show me what the client sent, the current drafts and what is due, and wait for me. Do not take the package or rebuild the drafts until I answer here. Send nothing without my go.`
+              : `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: package ${o.id} exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.`
             : o?.state === 'prepared' && it.messages > 0
               ? opts.auto
-                ? notTaken(o.id.slice(0, 8))
-                : `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${o.id.slice(0, 8)} and wait for me. Send nothing without my go.`
+                ? notTaken(o.id)
+                : `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${o.id} and wait for me. Send nothing without my go.`
               : it.messages > 0
                 ? opts.auto && opts.wait
                   ? // (0.7.14, Opus 10-30, verbatim) case 6 sent by itself while Lane-2 may still build the drafts (`draftsComing`)
@@ -1039,7 +1039,7 @@ function tasksLead(it: QueueItem, who: string, tasksDue: string): string {
 function okKickoff(it: QueueItem, o: NonNullable<QueueItem['open']>): string {
   const who = `${it.projectName} (OW project ${it.projectId})`
   const sends = (it.ok ?? null)?.sends ?? NOBODY
-  return `[mm-link ${it.projectId}] ${who}: reply package ${o.id.slice(0, 8)} is flagged for my OK${o.state === 'stale' ? ' and is marked out of date' : ''}, and ${sends} sends it. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go.`
+  return `[mm-link ${it.projectId}] ${who}: reply package ${o.id} is flagged for my OK${o.state === 'stale' ? ' and is marked out of date' : ''}, and ${sends} sends it. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go.`
 }
 
 /** The thread a new one takes over from: the app's id for it and its own title. */
