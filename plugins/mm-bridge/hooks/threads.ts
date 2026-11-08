@@ -22,8 +22,8 @@ import {
   MAY_NEED_OK, NOBODY, assignAsksOf, assignOnly, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, committedCount, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
   checkNow, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, tasksBesidesUndated, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
   TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine,
-  goOf, goOnly, stepWord,
-  NO_REPLY_WHAT, checkDot, paceOf, paceOnly, paceStatus, paceWord, statusOf,
+  goOf, goOnly, goWithMail, stepWord,
+  NO_REPLY_WHAT, afterPackage, checkDot, noReplyNow, owesNoReply, paceOf, paceOnly, paceStatus, paceWord, statusOf,
 } from './queue'
 import type { AskRef, FeedThread, QueueItem, StatusDot } from './queue'
 
@@ -495,6 +495,9 @@ export function titleSuggestion(client: string, links: Readonly<Record<string, s
  * below the top QUEUE_SHOWN_MAX is not something new for the thread, a change to the top of the queue is.
  * (0.7.4) And without the tickets nobody dated: one that comes or goes is not something new for the thread either (Rob,
  * 2026-10-27: "It doesn't necessarily create the need for a new reply"). They ride along with what is.
+ * (0.7.39) And in the words from before 0.7.39 where only the words changed: the page's name (`PAGE_WORDS`), and a package that owes
+ * no reply, with nothing from the client after it. A thread that has the package already has that, so a change of words
+ * updates nobody's thread: every thread with an open package would get a turn for nothing, one waiting on its person too.
  */
 export function signatureOf(it: QueueItem): string {
   const o = it.open ?? null
@@ -505,7 +508,21 @@ export function signatureOf(it: QueueItem): string {
   const queuedPlain: QueueItem = queuedOf(it).length ? { ...unpicked, queue: { tickets: queuedOf(it), total: 0 } } : unpicked
   const nodate = undatedCount(it)
   const plain: QueueItem = nodate ? { ...queuedPlain, tasks: it.tasks - nodate, undatedTitles: [], undatedTasks: 0 } : queuedPlain
-  return [kickoffText(plain), it.coversThrough ?? '', mine ? `held:${o.newer}` : (it.packageUpdatedAt ?? '')].join('\n')
+  const said = owesNoReply(plain) && afterPackage(it) === 0 ? withoutNoReply(plain) : plain
+  return [kickoffText(said).split(PAGE_WORDS).join(PAGE_WORDS_BEFORE), it.coversThrough ?? '', mine ? `held:${o.newer}` : (it.packageUpdatedAt ?? '')].join('\n')
+}
+
+/** (0.7.39) What the kickoffs call the page client-reply-prep §9.3 prints, and what they called it before 0.7.39 (`signatureOf`). */
+const PAGE_WORDS = 'the one-package page'
+const PAGE_WORDS_BEFORE = 'the five-part pickup view'
+
+/** (0.7.39) An item as it reads with no word of its package owing no reply (`signatureOf`). */
+function withoutNoReply(it: QueueItem): QueueItem {
+  const { noReply: _item, ...rest } = it
+  const o = rest.open ?? null
+  if (!o?.noReply) return rest
+  const { noReply: _open, ...open } = o
+  return { ...rest, open }
 }
 
 /**
@@ -560,7 +577,7 @@ export function seenNow(prev: FirstSeen | undefined, it: QueueItem, sig: string,
  * (0.5.11, review of PR #15, F3) Kickoff case 6: client mail waiting and no package at all, so the thread is asked
  * to build one (prep). Sent by itself, the package that then appears is the thread's own work (`Sent.prep`).
  */
-export const asksForPrep = (it: QueueItem): boolean => it.messages > 0 && !it.packageId && !(it.open ?? null) && it.kind !== 'ok'
+export const asksForPrep = (it: QueueItem): boolean => it.messages > 0 && !it.packageId && !(it.open ?? null) && it.kind !== 'ok' && !goWithMail(it)
 
 /**
  * (0.5.11, Rob 10-15: "I think we should start updating threads automatically") Whether a client on the person's
@@ -723,7 +740,8 @@ export function recommend(
 /** What is waiting on a client, as its row shows it: `2 messages waiting, 1 task due`, or `drafts ready`. */
 export function waitingText(it: QueueItem): string {
   const o = it.open ?? null
-  const drafts = !o || it.noReply === true ? '' : o.state === 'held_by_me' ? `${o.unsent} draft${o.unsent === 1 ? '' : 's'} not sent` : o.state === 'held_by_other' ? `drafts with ${o.by}` : o.state === 'stale' ? 'drafts out of date' : 'drafts ready'
+  // (0.7.39) a package that owes no reply has no drafts to count: a teammate's says whose it is
+  const drafts = !o || it.noReply === true ? '' : owesNoReply(it) ? (o.state === 'held_by_other' ? `no reply needed, with ${o.by}` : NO_REPLY_WHAT) : o.state === 'held_by_me' ? `${o.unsent} draft${o.unsent === 1 ? '' : 's'} not sent` : o.state === 'held_by_other' ? `drafts with ${o.by}` : o.state === 'stale' ? 'drafts out of date' : 'drafts ready'
   // for the founder, a package that waits for his OK: that first, and who sends it once he has given it; one a
   // teammate decides on, before its reply is due, says so instead (R2)
   const ok = it.kind === 'ok' ? (it.theirs ? decidesText(it.theirs) : `needs your OK · ${(it.ok ?? null)?.sends ?? NOBODY} sends`) : ''
@@ -743,8 +761,10 @@ export function waitingText(it: QueueItem): string {
   const go = g ? `${g.steps} follow-up${g.steps > 1 ? 's' : ''} need${g.steps > 1 ? '' : 's'} ${g.mine ? 'your' : `${g.by}'s`} go` : ''
   // (0.7.27) the viewer's own pace on the client: `on track`, `behind`
   const pace = paceOf(it) ? paceWord(it) : ''
-  // (0.7.27, OW #638) a package that owes no reply says so, whatever else is on it
-  const parts = [it.noReply === true ? NO_REPLY_WHAT : '', ok, it.messages ? `${it.messages} message${it.messages > 1 ? 's' : ''} waiting` : '', ...tasks, drafts, go, pace]
+  // (0.7.27, OW #638) a package that owes no reply says so, whatever else is on it. (0.7.39) The messages it covers are not
+  // waiting on a reply, so they are not counted beside it (§9.3's words alone); one that came after it is, and it says so.
+  const messages = it.noReply === true ? afterPackage(it) : goWithMail(it) ? 0 : it.messages
+  const parts = [it.noReply === true ? (noReplyNow(it) ? NO_REPLY_WHAT : 'package says no reply') : '', ok, messages ? `${messages} message${messages > 1 ? 's' : ''} waiting` : '', ...tasks, drafts, go, pace]
   const base = parts.filter(Boolean).join(', ')
   // (0.5.28, internal asks) and then the viewer's open asks, `1 internal ask`: after what the client has otherwise (a
   // package of theirs with nothing else waiting is still `drafts ready`), or alone for a client listed by its asks alone
@@ -790,7 +810,7 @@ export function rowExtra(it: QueueItem): string {
   // the drafts, where the first line does not say them (`your draft`, `reply ready`, `with <Name>`)
   if (o?.state === 'held_by_me' && o.unsent > 0) parts.push(`${o.unsent} draft${o.unsent === 1 ? '' : 's'} not sent`)
   else if (o?.state === 'stale') parts.push('drafts out of date')
-  else if (o && o.state !== 'held_by_me' && o.state !== 'held_by_other' && it.kind !== 'ready' && it.kind !== 'ok') parts.push('drafts ready')
+  else if (o && o.state !== 'held_by_me' && o.state !== 'held_by_other' && it.kind !== 'ready' && it.kind !== 'ok') parts.push(owesNoReply(it) ? NO_REPLY_WHAT : 'drafts ready')
   // the viewer's open asks, past the one the first line names
   const asks = openAsks(it).length
   if (asks && !(it.kind === 'ask' && asks === 1)) parts.push(`${asks} internal ask${asks > 1 ? 's' : ''}`)
@@ -877,10 +897,34 @@ export function goKickoff(it: QueueItem, who: string): string {
   const pkg = g.packageId
   const first = typeof g.firstAt === 'number' && Number.isFinite(g.firstAt) ? `, the first (a ${stepWord(g.firstKind)}) opening ${dueText(g.firstAt)}` : ''
   const n = `${g.steps} follow-up step(s)`
+  // (0.7.39) with client messages it already covers (`goWithMail`): this package is the client's, and the thread never builds another
+  const covers = it.messages > 0 ? ` It already covers the ${it.messages} client message(s) waiting, so do not run prep and do not build a second package.` : ''
   if (!g.mine) {
-    return `[mm-link ${it.projectId}] ${who}: package ${pkg} holds ${n} that wait for ${g.by}'s go${first}. Load the client's project skill first, then follow client-reply-prep §9 to show the five-part pickup view for that package, but do not take it and do not approve it: the go is ${g.by}'s. Then wait for me. Send nothing without my go.`
+    return `[mm-link ${it.projectId}] ${who}: package ${pkg} holds ${n} that wait for ${g.by}'s go${first}.${covers} Load the client's project skill first, then follow client-reply-prep §9 to show the one-package page for that package, but do not take it and do not approve it: the go is ${g.by}'s. Then wait for me. Send nothing without my go.`
   }
-  return `[mm-link ${it.projectId}] ${who} has ${n} that nobody has approved, in package ${pkg}${first}. Nothing goes until I give the go. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${pkg} with every step in full and wait for me. Send nothing without my go.`
+  return `[mm-link ${it.projectId}] ${who} has ${n} that nobody has approved, in package ${pkg}${first}.${covers} Nothing goes until I give the go. Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for package ${pkg} with every step in full and wait for me. Send nothing without my go.`
+}
+
+/**
+ * (0.7.39, Rob 2026-11-04: "it's just us approving that we don't need to do anything") The first line of a kickoff for an
+ * open package that owes no reply and has nothing to send (client-reply-prep §2b, §9.3): it is a package, so it points at the
+ * page for that package id. Never "reply drafts", never a count of them, and never prep: there is nothing to draft, and the
+ * package exists (BST Executive Search, 2026-11-06: package bf68fd64, and the kickoff said "no package exists yet"). The
+ * words for taking it follow the other kickoffs: sent by itself it is shown and not taken, and a teammate's stays theirs.
+ */
+function noReplyKickoff(it: QueueItem, who: string, auto: boolean): string {
+  const o = it.open ?? null
+  const id = it.projectId
+  const pkg = it.packageId ?? o?.id ?? ''
+  const stop = 'Do not run prep and do not draft a reply. Send nothing without my go.'
+  if (o?.state === 'held_by_other') return `[mm-link ${id}] ${who}: package ${pkg} owes no reply, and ${o.by} holds it. Load the client's project skill first, then show me what the client sent and wait for me. ${stop}`
+  const since = afterPackage(it)
+  const newer = since > 0 ? ` ${since} client message(s) arrived after it, so read them before it closes.` : ''
+  if (o?.state === 'held_by_me') return `[mm-link ${id}] ${who}: I already picked up package ${pkg}, which owes no reply and has no draft, and one go closes it.${newer} Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the one-package page and wait for me. ${stop}`
+  const first = `[mm-link ${id}] ${who}: package ${pkg} owes no reply and has no draft, and one go closes it.${newer} Load the client's project skill first, then follow client-reply-prep §9`
+  return auto
+    ? `${first} to show the one-package page for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. ${stop}`
+    : `${first}: show the one-package page for package ${pkg} and wait for me. ${stop}`
 }
 
 /**
@@ -908,7 +952,7 @@ export function goParagraph(it: QueueItem): string {
  *      the founder, a stale package a teammate has, not held: the same, in words of its own)
  *   4. client messages waiting and a package marked out of date: pick it up and rebuild the drafts
  *   5. client messages waiting and a prepared package older than the window: pick it up
- *   6. client messages with no package yet
+ *   6. client messages with no package yet (0.7.39: a follow-ups-only package that covers them is one: `goKickoff`)
  *   7. committed tasks only (a package that is out of date, or another owner's, changes nothing here:
  *      the client is in the list for the task)
  * (0.7.14) `wait`, with `auto`: case 6 sent while Lane-2 may still build the drafts (`draftsComing`): its words say they
@@ -944,14 +988,17 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
   const queue = queueParagraph(it)
   // (0.5.11, Opus 10-15, verbatim) cases 2 and 5 sent by itself: the pickup view, and no pickup call
   const notTaken = (pkg: string): string =>
-    `[mm-link ${id}] The reply drafts for ${who} are ready in package ${pkg}. Load the client's project skill first, then follow client-reply-prep §9 to show the five-part pickup view for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. Send nothing without my go.`
+    `[mm-link ${id}] The reply drafts for ${who} are ready in package ${pkg}. Load the client's project skill first, then follow client-reply-prep §9 to show the one-package page for that package, but do not take it: no pickup call until I answer here, so the team can still pick it up. Then wait for me. Send nothing without my go.`
   const lead =
-    o?.state === 'held_by_me' && it.packageId
-      ? `[mm-link ${id}] Carry on with the reply drafts for ${who}. I already picked up package ${it.packageId}: ${o.unsent} draft(s) not sent yet${o.newer > 0 ? `, and ${o.newer} client message(s) arrived since` : ''}. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the five-part pickup view and wait for me. Send nothing without my go.`
+    // (0.7.39) a package that owes no reply, whoever's it is: a prepared one that is not the viewer's only where it is what lists the client, as for any other
+    owesNoReply(it) && (it.packageId || o?.state === 'held_by_other' || (o && it.messages > 0))
+      ? noReplyKickoff(it, who, opts.auto === true)
+      : o?.state === 'held_by_me' && it.packageId
+      ? `[mm-link ${id}] Carry on with the reply drafts for ${who}. I already picked up package ${it.packageId}: ${o.unsent} draft(s) not sent yet${o.newer > 0 ? `, and ${o.newer} client message(s) arrived since` : ''}. Load the client's project skill first, then follow client-reply-prep §9: read the package again, show the one-package page and wait for me. Send nothing without my go.`
       : it.packageId
         ? opts.auto
           ? notTaken(it.packageId)
-          : `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${it.packageId} and wait for me. Send nothing without my go.`
+          : `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for package ${it.packageId} and wait for me. Send nothing without my go.`
         : it.kind === 'ok' && o
           ? okKickoff(it, o)
         : o?.state === 'held_by_other'
@@ -963,19 +1010,22 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
             ? opts.auto
               ? // (0.5.11, Opus 10-15, verbatim) case 4 sent by itself
                 `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Package ${o.id} is marked out of date. Load the client's project skill first, then show me what the client sent, the current drafts and what is due, and wait for me. Do not take the package or rebuild the drafts until I answer here. Send nothing without my go.`
-              : `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: package ${o.id} exists but is marked out of date, so pick it up, rebuild the drafts, then show the five-part pickup view and wait for me. Send nothing without my go.`
+              : `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: package ${o.id} exists but is marked out of date, so pick it up, rebuild the drafts, then show the one-package page and wait for me. Send nothing without my go.`
             : o?.state === 'prepared' && it.messages > 0
               ? opts.auto
                 ? notTaken(o.id)
-                : `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for package ${o.id} and wait for me. Send nothing without my go.`
+                : `[mm-link ${id}] Pick up the reply drafts for ${who}. Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for package ${o.id} and wait for me. Send nothing without my go.`
+              : goWithMail(it)
+                ? // (0.7.39) client messages a follow-ups-only package already covers: that package is the client's, never prep
+                  goKickoff(it, who)
               : it.messages > 0
                 ? opts.auto && opts.wait
                   ? // (0.7.14, Opus 10-30, verbatim) case 6 sent by itself while Lane-2 may still build the drafts (`draftsComing`)
                     `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Lane-2 is building the reply drafts, and they come into this thread as a second update once they are ready. Load the client's project skill first, then show me what the client sent and what is due, and wait for me. Do not run prep before the drafts come unless I ask you to. Send nothing without my go.`
                   : opts.auto
                   ? // (0.5.11, Opus 10-15, verbatim) case 6 sent by itself
-                    `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep: no package exists yet, so run prep (§2) to build one, then show the five-part pickup view without taking the package: no pickup call until I answer here. Then wait for me. Send nothing without my go.`
-                  : `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the five-part pickup view and wait for me. Send nothing without my go.`
+                    `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep: no package exists yet, so run prep (§2) to build one, then show the one-package page without taking the package: no pickup call until I answer here. Then wait for me. Send nothing without my go.`
+                  : `[mm-link ${id}] ${who} needs a reply: ${it.messages} client message(s) waiting${replyDue}. Load the client's project skill first, then follow client-reply-prep §9: no package exists yet, so run prep first, then show the one-package page and wait for me. Send nothing without my go.`
                 : goOnly(it)
                   ? // (0.7.24) listed by follow-up steps that wait for a go alone
                     goKickoff(it, who)
@@ -998,7 +1048,7 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
   // (0.5.28, internal asks) once per open ask, after the body and before any hand-over: `askParagraph`, verbatim;
   // (0.7.4, ETA asks) then the tickets that owe an ETA (`etaParagraph`); (0.7.15, owner asks) then the tickets to give an
   // owner (`assignParagraph`); (0.7.3, internal queue) then the queue, in rank order (`queueParagraph`)
-  const body = [lead, ...asks.map(askParagraph), etaParagraph(it), assignParagraph(it), goOnly(it) ? '' : goParagraph(it), queue].filter(Boolean).join('\n\n')
+  const body = [lead, ...asks.map(askParagraph), etaParagraph(it), assignParagraph(it), goOnly(it) || goWithMail(it) ? '' : goParagraph(it), queue].filter(Boolean).join('\n\n')
   const news = `New since this thread last worked on this client: ${waitingText(it)}.`
   // ⛔ (0.5.11, review of PR #15, F4) sent by itself: the marker first, at the very start of the text, as every hook
   // that tells the person's time from the bridge's reads it (a time-tracking hook too old to read the app's own
@@ -1039,7 +1089,7 @@ function tasksLead(it: QueueItem, who: string, tasksDue: string): string {
 function okKickoff(it: QueueItem, o: NonNullable<QueueItem['open']>): string {
   const who = `${it.projectName} (OW project ${it.projectId})`
   const sends = (it.ok ?? null)?.sends ?? NOBODY
-  return `[mm-link ${it.projectId}] ${who}: reply package ${o.id} is flagged for my OK${o.state === 'stale' ? ' and is marked out of date' : ''}, and ${sends} sends it. Load the client's project skill first, then follow client-reply-prep §9: show the five-part pickup view for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go.`
+  return `[mm-link ${it.projectId}] ${who}: reply package ${o.id} is flagged for my OK${o.state === 'stale' ? ' and is marked out of date' : ''}, and ${sends} sends it. Load the client's project skill first, then follow client-reply-prep §9: show the one-package page for that package and what needs my OK, and wait for me. Do not pick the package up and do not draft a second reply. Send nothing without my go.`
 }
 
 /** The thread a new one takes over from: the app's id for it and its own title. */
