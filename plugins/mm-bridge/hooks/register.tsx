@@ -21,7 +21,7 @@ import {
   FRESH_THREAD_BYTES, draftsComing, freshParagraph, prepDue,
   buildHeading, buildMore, buildOf, buildShown,
   teamCount, teamHeading, teamOf, teamPane, teamPerson,
-  START_ALL_MAX, startAllKickoff, START_MISSING, notStartedText, packageReady, awaitingPackage, rowPinWords, rowPinsOf, startMissingLabel, AWAY_REASON, ownThreads, START_ALL_WORDS, startWords, startFillSaid, kickoffsAnswer,
+  START_ALL_MAX, startAllKickoff, START_MISSING, notStartedText, packageReady, awaitingPackage, readyPackages, packageArrived, rowPinWords, rowPinsOf, startMissingLabel, AWAY_REASON, ownThreads, START_ALL_WORDS, startWords, startFillSaid, kickoffsAnswer,
   ARCHIVED_REASON, KICKOFF_PENDING_MS,
   lookupOrder, pinReport,
   awayHandoverText, awayPromptLine, awaySorted, carryKickoff, switchPromptLine, transcriptPath,
@@ -215,6 +215,8 @@ const BAND = { plugin: 'mm-bridge', key: 'band' } as const
 const FOLDS = { plugin: 'mm-bridge', key: 'folds' } as const
 /** (0.7.34) The pane's Team now, from the store (`drawTeam`). */
 const TEAMNOW = { plugin: 'mm-bridge', key: 'teamNow' } as const
+/** (0.7.38) The ready reply packages this thread's pane listed last (`revealNewPackages`). */
+const SEEN_PACKAGES = { plugin: 'mm-bridge', key: 'seenPackages' } as const
 /** (New people) This thread's own presses on `New people`: the open picker, presses in flight, what OW refused. */
 const PEOPLE = { plugin: 'mm-bridge', key: 'people' } as const
 /** (0.6.0) This thread's Tracking part of the pane: its current project, the pane's title, the lines. */
@@ -3441,6 +3443,26 @@ async function storeLast($: EngineInterface, feed: Feed, last: Last): Promise<vo
 }
 
 /**
+ * (0.7.38, Rob 2026-11-07: "if one arrives, the side panel should scroll up to the top to see it automatically") The viewer's
+ * ready reply packages this thread's pane lists now (`readyPackages`), kept per thread: one it did not list before
+ * (`packageArrived`) scrolls the pane to its top, where the client part and Needs you now are. A pane that is not drawn, or a
+ * surface that does not scroll it, says why (`deny`) or throws, and nothing else happens. (The test kit has no window to move:
+ * its engine answers this call "no implementation", so the tests cover `packageArrived` and the order, not the move.)
+ */
+async function revealNewPackages($: EngineInterface, items: readonly QueueItem[]): Promise<void> {
+  const ready = readyPackages(items)
+  const { value: seen } = await $.state.get(SEEN_PACKAGES)
+  const had = Array.isArray(seen) ? seen : null
+  if (!had || had.length !== ready.length || had.some((id, n) => id !== ready[n])) await $.state.set(SEEN_PACKAGES, ready)
+  if (!packageArrived(had, ready)) return
+  try {
+    await $.ui.scroll({ in: PANE_QUEUE, to: 'start', block: 'start' })
+  } catch {
+    // a refused move moves nothing: the package is still drawn at the top
+  }
+}
+
+/**
  * Puts the list in the Needs-you pane and on the status line. `folds` are the two closed groups under it:
  * neither is counted. `syncedAt` is when the list was worked out: the list drawn from a stored sync says that
  * sync's time, not the time it was drawn. `found` (New people): the sync record's people and where Route can send
@@ -3500,6 +3522,7 @@ async function showQueue(
     ...(people.length ? { people, ...(routeTo.length ? { routeTo } : {}) } : {}),
   }
   await $.state.set(QUEUE, queue)
+  await revealNewPackages($, items)
   const { value: notice } = await $.state.get(NOTICE)
   if (notice?.text && now - notice.at > SYNC_MS) await $.state.set(NOTICE, { text: '', at: now })
   // (0.7.21) and, for the founder, how many of his teammates' tickets are late (`· 5 late with the team`): none, no segment
@@ -9487,25 +9510,10 @@ export const register: Register = on => {
       )
     }
     const updated = hasList && queue ? queue.note : tracking?.at ? `Updated ${localClock(tracking.at)}` : ''
-    // (0.7.11) At the very top, above everything: the clients whose thread is in another Claude profile, and ONE button
-    // that puts the words that start them in the prompt box (Start missing threads' own press).
+    // (0.7.38, Rob 2026-11-07: "Any Reply package should appear above the team member tracking") Top to bottom: this thread's
+    // client part (its reply package), Needs you now and its rows, then Team now, then the rest.
     const drawn = (
       <Box flexDirection="column">
-        {/* (0.7.34, Rob 2026-11-07: "a dropdown that reveals something that looks just like what we added to the bottom of the daily team photo") */}
-        <Box key="mm-teamnow" flexDirection="column" marginBottom={1}>
-          <Button key="mm-teamnow-toggle" plain label={`${teamHeadingNow(teamNow?.team)}  ${teamOpen ? '▾' : '▸'}`} onPress={() => void togglePanel($, 'teamNow', teamOpen)} />
-          {teamOpen && teamNow?.missing ? <Text dimColor>{TEAM_MISSING}</Text> : null}
-          {teamOpen && !teamNow?.team && !teamNow?.missing ? <Text dimColor>{CHECKING}</Text> : null}
-          {teamOpen && teamNow?.team
-            ? teamLines(teamNow.team, teamClock).map((l, n) => (
-                <Box key={`mm-teamnow-line:${n}`} marginTop={l.person ? 1 : 0}>
-                  <Text bold={l.bold === true} dimColor={l.dim === true} {...(l.color ? { color: l.color } : {})}>
-                    {l.text}
-                  </Text>
-                </Box>
-              ))
-            : null}
-        </Box>
         {tracking?.second ? <Text dimColor>{tracking.second}</Text> : null}
         {client.text ? (
           <Box key="mm-client" flexDirection="column" marginBottom={1}>
@@ -9530,6 +9538,22 @@ export const register: Register = on => {
         {notice?.text ? <Text>{notice.text}</Text> : null}
         {hasList && queue?.warning ? <Text>{queue.warning}</Text> : null}
         {hasList && queue && needsOpen ? rowGroups(queue.rows).flatMap(group => group.rows.map(({ row, n, mark }) => drawRow(row, `${mark}${n}.`))) : null}
+        {/* (0.7.34, Rob 2026-11-07: "a dropdown that reveals something that looks just like what we added to the bottom of the daily team photo")
+            (0.7.38, Rob 2026-11-07: "Any Reply package should appear above the team member tracking") under the client part and the list */}
+        <Box key="mm-teamnow" flexDirection="column" marginTop={1}>
+          <Button key="mm-teamnow-toggle" plain label={`${teamHeadingNow(teamNow?.team)}  ${teamOpen ? '▾' : '▸'}`} onPress={() => void togglePanel($, 'teamNow', teamOpen)} />
+          {teamOpen && teamNow?.missing ? <Text dimColor>{TEAM_MISSING}</Text> : null}
+          {teamOpen && !teamNow?.team && !teamNow?.missing ? <Text dimColor>{CHECKING}</Text> : null}
+          {teamOpen && teamNow?.team
+            ? teamLines(teamNow.team, teamClock).map((l, n) => (
+                <Box key={`mm-teamnow-line:${n}`} marginTop={l.person ? 1 : 0}>
+                  <Text bold={l.bold === true} dimColor={l.dim === true} {...(l.color ? { color: l.color } : {})}>
+                    {l.text}
+                  </Text>
+                </Box>
+              ))
+            : null}
+        </Box>
         {build ? (
           <Box key="mm-build" flexDirection="column" marginTop={1}>
             <Text bold>{buildHeading(build)}</Text>
