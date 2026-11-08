@@ -405,6 +405,8 @@ declare module 'claude-code' {
       cardBusy: boolean
       /** (0.7.36) The tag whose Check button could not put its words in the prompt box, and why: the pane says what to type. Null with none. */
       cardCheckMiss: { label: string; filled: 'draft' | 'none' } | null
+      /** (0.7.37) The ready reply packages this thread's pane listed last: a new one scrolls the pane to its top. */
+      seenPackages: string[]
     }
   }
 }
