@@ -1381,6 +1381,9 @@ export function pinReason(it: QueueItem, now: number): string {
   if (ownPins(it, now)) {
     if (status?.why) return status.why
     const own = ownActBy(it)
+    // (0.7.37) pinned with no time to count from, as the viewer's own go on follow-up steps whose first step OW could not
+    // date (`go_first_at` null): there is no due time to print, and formatting Infinity threw a RangeError (Invalid Date)
+    if (!Number.isFinite(own)) return `Pinned for you, no due date: ${ownReason(it)}.`
     // a start-by (the work's own estimate at the client's pace) came before every due time: the work must start
     if (own < it.dueAt && committedCount(it) > 0 && it.messages === 0) {
       const due = clockText(shownDue(it.dueAt), now)
