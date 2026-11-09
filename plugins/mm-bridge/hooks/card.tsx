@@ -59,7 +59,7 @@
 import type { BoxProps, ButtonProps, ElementConstructor, EngineInterface, InputProps, LinkProps, Register, RenderNode, SvgProps, TextProps } from 'claude-code'
 
 import type { MmCard, MmCardAsked, MmCardChecked, MmCardFeedback, MmCardMarks, MmCardNode, MmCardRun, MmCardSigned, MmCardTree } from '../types'
-import { frameLines, isOwUrl, pageGap } from './card-parity'
+import { isOwUrl, pageGap, settleLines } from './card-parity'
 import { platformOf } from './threads'
 
 const CARD = { plugin: 'mm-bridge', key: 'card' } as const
@@ -288,10 +288,11 @@ const SETTLED: readonly RegExp[] = [/^Closed: no reply needed\.$/, /^Nothing is 
 
 /**
  * (0.7.40) Whether the package this card was drawn from can still change: not closed, not already sent and not approved (`SETTLED`), as
- * the card's own lines say it, never a body or a quote (`frameLines`): a client who writes "Approved, thanks" settles nothing.
+ * the renderer's closing, foot and banner lines say it (`settleLines`), never a subject or any client text: a client whose subject is
+ * "Approved, thanks" settles nothing.
  */
 export function canChange(tree: MmCardTree): boolean {
-  for (const text of frameLines(tree)) if (SETTLED.some(re => re.test(text))) return false
+  for (const text of settleLines(tree)) if (SETTLED.some(re => re.test(text))) return false
   return true
 }
 
@@ -943,8 +944,9 @@ export async function pressSign($: EngineInterface, label: string, log: SignLog)
   await $.clock.after(SIGN_FILL_MS, async () => {
     const { value: now } = await $.state.get(CARD)
     const latest = await marksOf($)
-    // the package or its page changed, or the pane moved to another package, while the envelope flew: nothing goes in the box
-    const holds = !now || now.tree?.label !== label || now.pageSha !== pageSha || Boolean(holdOf(now))
+    // the package or its page changed, or the pane moved to another package, while the envelope flew: nothing goes in the box.
+    // (0.7.40) Nor when the thread has started a turn since (a change sent from the card, say): the package may be changing.
+    const holds = !now || now.tree?.label !== label || now.pageSha !== pageSha || Boolean(holdOf(now)) || (await busyOf($))
     const filled = holds ? 'stale' : await fillWords($, `Send package ${label}`)
     const mine = latest.signed[label]
     if (mine) await $.state.set(CARD_MARKS, { ...latest, signed: { ...latest.signed, [label]: { ...mine, filled } } })
@@ -1029,8 +1031,10 @@ export async function pressFeedback($: EngineInterface, drawn: { packageId: stri
     if (LABEL.test(card.tree.label)) await say(card.tree.label, 'changed')
     return
   }
-  // a package closed, sent or approved since the field was drawn takes no changes, and nor does one whose go is armed
-  if (!canChange(card.tree) || standing(await marksOf($), tag, card, await $.clock.now())) return
+  // a package closed, sent or approved since the field was drawn takes no changes, and nor does one whose go is armed or being signed
+  const marks = await marksOf($)
+  const at = await $.clock.now()
+  if (!canChange(card.tree) || standing(marks, tag, card, at) || isChecking(marks, tag, at)) return
   if (READS_LIKE_GO.test(words)) {
     await say(tag, 'go')
     return
@@ -1328,6 +1332,11 @@ export type CardDraw = {
   feedback?: MmCardFeedback | null
   /** (0.7.40) Enter in the Changes field, with the tag drawn and the words (`pressFeedback`). Left out, no field is drawn. */
   onFeedback?: (label: string, words: string) => void
+  /**
+   * (0.7.40) The surface this drawing is for (`e.surface`). The Changes field, and the caption that names it, are drawn on the desktop
+   * alone: the engine completes every element table, so an `Input` in it says nothing of whether the surface draws one (mobile does not).
+   */
+  surface?: string
 }
 
 /**
@@ -1353,15 +1362,18 @@ export function drawCard(els: Els, d: CardDraw): Node {
   // while a signature for this tag stands (a go is armed) or once the package is closed, sent or approved (`canChange`).
   const fb = tree.label && d.feedback?.label === tree.label ? (FEEDBACK_SAID[d.feedback.said] ?? '') : ''
   const onFeedback = d.onFeedback
+  // (0.7.40) the field itself on the desktop alone (`surface`), and never while a press is being checked (`isChecking`)
+  const open = card.own && tree.label && canChange(tree) && !standing(marks, tree.label, card, d.now) && !isChecking(marks, tree.label, d.now)
+  const fieldHere = d.surface === 'desktop' && Input && onFeedback ? { Input, onFeedback } : null
   const changes =
-    card.own && tree.label && canChange(tree) && !standing(marks, tree.label, card, d.now) ? (
+    open && (fb || fieldHere) ? (
       <Box key={`mm-card-changes:${tree.label}`} flexDirection="column">
         {fb ? <Text color={d.feedback?.said === 'sent' ? 'success' : 'warning'}>{fb}</Text> : null}
-        {Input && onFeedback ? <Input key={`mm-card-feedback:${tree.label}`} label={FEEDBACK_LABEL} placeholder={FEEDBACK_PLACEHOLDER} submitLabel={FEEDBACK_SUBMIT} rows={3} onSubmit={value => onFeedback(tree.label, value)} /> : null}
+        {fieldHere ? <fieldHere.Input key={`mm-card-feedback:${tree.label}`} label={FEEDBACK_LABEL} placeholder={FEEDBACK_PLACEHOLDER} submitLabel={FEEDBACK_SUBMIT} rows={3} onSubmit={value => fieldHere.onFeedback(tree.label, value)} /> : null}
       </Box>
     ) : null
-  // (0.7.40) the caption names the Changes box only where it is drawn above the box: a surface with no Input (mobile) has none
-  const fieldDrawn = Boolean(changes && Input && onFeedback)
+  // (0.7.40) the caption names the Changes box only where it is drawn above the box: on the desktop, with the field open
+  const fieldDrawn = Boolean(open && fieldHere)
   let changesPlaced = false
   const withChanges = (label: string, node: Node): Node => {
     if (!changes || changesPlaced) return node

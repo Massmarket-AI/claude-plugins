@@ -3754,9 +3754,11 @@ async function signPressed($: EngineInterface, label: string): Promise<void> {
  * (`drawCard`), one state and one set of handlers for both: the box opens and closes on exactly the same reads, a press in either is
  * `signPressed` (the same record, the same note), and its Sealed shows in both. Reads only: a render hook never writes.
  */
-async function drawLiveCard($: EngineInterface, els: Els, card: MmCard): Promise<ReturnType<typeof drawCard>> {
+async function drawLiveCard($: EngineInterface, els: Els, card: MmCard, surface: string): Promise<ReturnType<typeof drawCard>> {
   return drawCard(els, {
     card,
+    // (0.7.40) the Changes field is the desktop's alone
+    surface,
     marks: await marksOf($),
     checked: await checkedOf($),
     busy: await busyOf($),
@@ -9491,7 +9493,7 @@ export const register: Register = on => {
     // (0.7.33) the line that says it cannot be drawn on this computer, over the part as it is
     const cardFailed = Boolean(client.text && card?.packageId && !card.tree && card.status === 'failed')
     // (0.7.40) the same drawing as the row of the thread's own `mm card` call (`drawLiveCard`)
-    const cardDrawn = cardShown || cardFailed ? await drawLiveCard($, $.ui.resolve(e) as Els, card) : null
+    const cardDrawn = cardShown || cardFailed ? await drawLiveCard($, $.ui.resolve(e) as Els, card, String(e.surface)) : null
     // (0.6.0) this thread's Tracking part: what it is counted to, and the time tracked to that project
     const { value: track } = await $.state.get(TRACK)
     const tracking = track && track.pid && Array.isArray(track.lines) && track.lines.length ? track : undefined
@@ -9781,7 +9783,7 @@ export const register: Register = on => {
       else if (card.tree.label !== label) tree = <Text dimColor>{ROW_REPLACED(label, card.tree.label)}</Text>
       else if (asked.toolUseId !== (p.tool_use_id || e.requestId)) tree = <Text dimColor>{ROW_AGAIN(label)}</Text>
       else {
-        const drawn = await drawLiveCard($, $.ui.resolve(e) as Els, card)
+        const drawn = await drawLiveCard($, $.ui.resolve(e) as Els, card, String(e.surface))
         // the card's own `Show the page as text` opens the page here as it does in the pane: one mark for both
         const page = (await marksOf($)).pageOpen ? await clientPart($) : null
         const text = page ? (page.page ?? page.text) : ''

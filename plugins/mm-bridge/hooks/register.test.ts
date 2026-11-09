@@ -14173,6 +14173,43 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       for (const m of [again, u]) await m.unmount()
     })
 
+    test('the field is the desktop\'s alone: the terminal\'s pane draws the card with no field, and its caption names the chat box', async ($, on) => {
+      world(on, own)
+      await mm($, '')
+      const t = await $.ui.mount({ plugin: 'mm-bridge', surface: 'terminal', component: 'Pane', requestId: 'mm-queue', props: PANE })
+      await t.press({ key: `drafts:${ACME}` })
+      await tool($, `card ${PKG}`)
+      await endTurn($)
+      const said = (await lines(t)).join('\n')
+      expect(said).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
+      expect(await t.findAll({ type: 'Input' })).toEqual([])
+      expect(said).toContain(`Signing puts "Send package ${LABEL}" in your prompt box; Enter sends it. Changes go in the chat box.`)
+      expect(said).not.toContain('Changes box')
+      await t.unmount()
+    })
+
+    test('a turn that starts while the envelope flies puts nothing in the prompt box: the record and the note as always, and the box says to sign again', async ($, on) => {
+      const w = world(on, own)
+      const asked = watchAsked(on)
+      const u = await shown($)
+      const said = await tool($, `card ${PKG}`)
+      const r = await row($, String(asked()?.toolUseId), said)
+      await endTurn($)
+      await r.press({ key: `mm-card-sign-btn:${LABEL}` })
+      for (let i = 0; i < 200 && !w.appended.some(t => t.includes(SIGNED_START)); i++) await new Promise(res => setTimeout(res, 2))
+      expect(recorded(w)).toBeDefined()
+      expect(w.appended.filter(t => t.includes(SIGNED_START))).toHaveLength(1)
+      // a change sent from the card, say: the thread is at work before the words go in
+      await $.turn.start({ text: 'make it shorter', turnId: 't-change' })
+      await w.clock.advance(3_100)
+      expect(w.fills).toEqual([])
+      const stale = 'The package changed while signing, so nothing went in the prompt box. Read the new package and sign again.'
+      for (let i = 0; i < 200 && !(await lines(r)).join('\n').includes(stale); i++) await new Promise(res => setTimeout(res, 2))
+      expect((await lines(r)).join('\n')).toContain(stale)
+      expect((await lines(u)).join('\n')).toContain(stale)
+      for (const m of [r, u]) await m.unmount()
+    })
+
     test('once the row is signed there is no Changes field in the row or the pane, and nothing in its place', async ($, on) => {
       const w = world(on, own)
       const asked = watchAsked(on)
