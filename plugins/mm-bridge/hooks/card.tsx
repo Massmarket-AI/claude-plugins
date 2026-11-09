@@ -50,9 +50,10 @@
  *   the card itself (register.tsx, the `ToolUse` hook), drawn by the same `drawCard` from the same state with the same handlers
  *   (`drawLiveCard`), so a press in either place is one press and the holds are the same. The model reads only the one-line answer.
  * - Changes go in from the card. (0.7.40, Rob, 2026-11-09: "Once a team member leaves feedback, it should kick into the thread for
- *   revision, or it should make the revision and then show it in the thread for approval.") Above the open box, a `Changes` field
- *   sends `Feedback on Package <12> from <signer>: <words>` into the thread as a prompt (`pressFeedback`). It never writes the go,
- *   a signature record or a note: the thread revises, asks `mm card` again, and the new card is drawn under that call.
+ *   revision, or it should make the revision and then show it in the thread for approval.") On every card of the thread's own client
+ *   that can still change (`canChange`), above the sign box whatever it shows, a `Changes` field sends `Feedback on Package <12> from
+ *   <signer>: <words>` into the thread as the person's own prompt (`pressFeedback`). It never writes the go, a signature record or a
+ *   note: the thread revises, asks `mm card` again, and the new card is drawn under that call.
  */
 import type { BoxProps, ButtonProps, ElementConstructor, EngineInterface, InputProps, LinkProps, Register, RenderNode, SvgProps, TextProps } from 'claude-code'
 
@@ -274,6 +275,23 @@ export function signOf(tree: MmCardTree | null): { label: string; signer: string
   if (!tree) return null
   for (const n of walk(tree.nodes)) if (n.sign) return n.sign
   return null
+}
+
+/**
+ * (0.7.40) The renderer's lines for a package nothing more can change: closed with no reply owed (`Closed: no reply needed.`), or with
+ * everything in it already sent (`Nothing is left to send.`, as the closing line or as the foot where the go would be). client-reply-prep's
+ * render_pickup.py `closing_lines` and render_visual.py write them; card-parity.ts holds them as state lines.
+ */
+const SETTLED: readonly RegExp[] = [/^Closed: no reply needed\.$/, /^Nothing is left to send\./]
+
+/** (0.7.40) Whether the package this card was drawn from can still change: not closed, and not already sent (`SETTLED`). */
+export function canChange(tree: MmCardTree): boolean {
+  for (const node of walk(tree.nodes)) {
+    if (!node.r) continue
+    const text = node.r.map(r => r.s).join('').trim()
+    if (SETTLED.some(re => re.test(text))) return false
+  }
+  return true
 }
 
 // ---------------------------------------------------------------- the package as it stands
@@ -961,10 +979,11 @@ export const FEEDBACK_SUBMIT = 'Send to thread'
 const READS_LIKE_GO = /^send\s+package/i
 
 /**
- * (0.7.40) Enter in the Changes field: the person's words, trimmed and cut to FEEDBACK_MAX characters, go into this thread as a prompt
- * (`FEEDBACK_TEXT`), for the card's current tag and signer, and the card says it went. Empty words do nothing. ⛔ Words that read like the go
- * (`Send package ...`) are never sent from here: the go is the box's alone. ⛔ No signature record, no note, no `Send package` words: this is
- * not a press. A submit the engine refuses, or that fails, falls back to the prompt box, a draft of the person's never written over.
+ * (0.7.40) Enter in the Changes field: the person's words, trimmed and cut to FEEDBACK_MAX characters, go into this thread as their own
+ * prompt (`FEEDBACK_TEXT`, `asUser`), for the card's current tag and signer, and the card says it went. A thread at work takes it once
+ * idle. Empty words do nothing. ⛔ Words that read like the go (`Send package ...`) are never sent from here: the go is the box's alone.
+ * ⛔ No signature record, no note, no `Send package` words: this is not a press. A submit the engine refuses, or that fails, falls back to
+ * the prompt box, a draft of the person's never written over.
  */
 export async function pressFeedback($: EngineInterface, label: string, value: string): Promise<void> {
   const words = Array.from(String(value ?? '').trim()).slice(0, FEEDBACK_MAX).join('')
@@ -972,6 +991,8 @@ export async function pressFeedback($: EngineInterface, label: string, value: st
   const card = await cardOf($)
   const tag = card.tree?.label || label
   if (!LABEL.test(tag)) return
+  // a package closed or sent since the field was drawn takes no changes: its field is gone at the next draw
+  if (card.tree && !canChange(card.tree)) return
   const say = (said: MmCardFeedback['said']) => $.state.set(CARD_FEEDBACK, { label: tag, said } satisfies MmCardFeedback)
   if (READS_LIKE_GO.test(words)) {
     await say('go')
@@ -981,7 +1002,8 @@ export async function pressFeedback($: EngineInterface, label: string, value: st
   const text = FEEDBACK_TEXT(tag, signer, words)
   let went = false
   try {
-    const r = (await $.prompt.submit({ text })) as { drop?: unknown } | undefined
+    // the person's own words, typed in the card: the model reads them bare, as theirs (the origin every hook sees stays this plugin's)
+    const r = (await $.prompt.submit({ text, asUser: true })) as { drop?: unknown } | undefined
     went = !(r && typeof r === 'object' && r.drop !== undefined)
   } catch {
     went = false
@@ -1273,7 +1295,31 @@ export function drawCard(els: Els, d: CardDraw): Node {
   const notice = marks.notice?.packageId === card.packageId ? NOTICE[marks.notice.kind] : ''
   let n = 0
   const ctx: Ctx = { dark: false, out: null, parent: '', own: card.own, onAsk: d.onAsk, keyOf: () => `${card.packageId}:${n++}` }
-  const sign = (s: { label: string; signer: string }): Node => {
+  // (0.7.40) the Changes field, on every card of the thread's own client that can still change, whatever its box shows (a hold, the
+  // thread at work, a signature: a submit waits until the thread is idle), with the line it last left for this tag alone. Drawn once, just
+  // above the sign box, or at the card's end when the renderer drew none. Enter sends the words into the thread, never the go.
+  const fb = tree.label && d.feedback?.label === tree.label ? (FEEDBACK_SAID[d.feedback.said] ?? '') : ''
+  const onFeedback = d.onFeedback
+  const changes =
+    card.own && tree.label && canChange(tree) ? (
+      <Box key={`mm-card-changes:${tree.label}`} flexDirection="column">
+        {fb ? <Text color={d.feedback?.said === 'sent' ? 'success' : 'warning'}>{fb}</Text> : null}
+        {Input && onFeedback ? <Input key={`mm-card-feedback:${tree.label}`} label={FEEDBACK_LABEL} placeholder={FEEDBACK_PLACEHOLDER} submitLabel={FEEDBACK_SUBMIT} rows={3} onSubmit={value => onFeedback(tree.label, value)} /> : null}
+      </Box>
+    ) : null
+  let changesPlaced = false
+  const withChanges = (label: string, node: Node): Node => {
+    if (!changes || changesPlaced) return node
+    changesPlaced = true
+    return (
+      <Box key={`mm-card-signarea:${label}`} flexDirection="column">
+        {changes}
+        {node}
+      </Box>
+    )
+  }
+  const sign = (s: { label: string; signer: string }): Node => withChanges(s.label, signArea(s))
+  const signArea = (s: { label: string; signer: string }): Node => {
     // the send gate no longer takes a signature past SIGN_VALID_MS, or for another page, so the box asks for a new one and never says Sealed
     const signed = standing(marks, s.label, card, d.now)
     if (signed) {
@@ -1296,12 +1342,8 @@ export function drawCard(els: Els, d: CardDraw): Node {
         </Box>
       )
     }
-    // (0.7.40) what the Changes field last said, for this tag alone: a new tag draws none
-    const fb = d.feedback?.label === s.label ? FEEDBACK_SAID[d.feedback.said] : ''
-    const fbLine = fb ? <Text color={d.feedback?.said === 'sent' ? 'success' : 'warning'}>{fb}</Text> : null
     if (hold) return (
       <Box key={`mm-card-hold:${s.label}`} flexDirection="column">
-        {fbLine}
         {notice ? <Text color="warning">{notice}</Text> : null}
         <Text color={hold === 'drift' || hold === 'page' ? 'error' : undefined} dimColor={hold !== 'drift' && hold !== 'page'}>{holdText(hold, card, tree.label)}</Text>
       </Box>
@@ -1309,7 +1351,6 @@ export function drawCard(els: Els, d: CardDraw): Node {
     // (0.7.36) the thread is working, or has not checked this version: the card stands in full, and the box waits
     if (d.busy || !isChecked(d.checked, s.label)) return (
       <Box key={`mm-card-wait:${s.label}`} flexDirection="column">
-        {fbLine}
         {notice ? <Text color="warning">{notice}</Text> : null}
         <Text dimColor>{d.busy ? THREAD_CHECKING : THREAD_NOT_CHECKED}</Text>
         {d.checkMiss?.label === s.label ? <Text>{d.checkMiss.filled === 'draft' ? CHECK_DRAFT(s.label) : CHECK_TYPE(s.label)}</Text> : null}
@@ -1317,7 +1358,7 @@ export function drawCard(els: Els, d: CardDraw): Node {
       </Box>
     )
     if (isChecking(marks, s.label, d.now)) return <Text dimColor>Checking this is still the package…</Text>
-    const box = (
+    return (
       <Box key={`mm-card-sign:${s.label}`} flexDirection="column" borderStyle="round" borderColor="suggestion" paddingX={1}>
         {notice ? <Text color="warning">{notice}</Text> : null}
         {Button ? <Button key={`mm-card-sign-btn:${s.label}`} label="✍  Click to sign and send" variant="primary" onPress={() => d.onSign(s.label)} /> : <Text>{`Type in the thread: Send package ${s.label}`}</Text>}
@@ -1325,23 +1366,15 @@ export function drawCard(els: Els, d: CardDraw): Node {
         <Text size="caption" dimColor>{`Signing puts "Send package ${s.label}" in your prompt box; Enter sends it. Changes go in the Changes box above or the chat box.`}</Text>
       </Box>
     )
-    // (0.7.40) the Changes field, just above the open box, in the client's own thread: Enter sends the words into the thread, never the go
-    const onFeedback = d.onFeedback
-    if (!card.own || !Input || !onFeedback) return fbLine ? <Box key={`mm-card-open:${s.label}`} flexDirection="column">{fbLine}{box}</Box> : box
-    return (
-      <Box key={`mm-card-open:${s.label}`} flexDirection="column">
-        {fbLine}
-        <Input key={`mm-card-feedback:${s.label}`} label={FEEDBACK_LABEL} placeholder={FEEDBACK_PLACEHOLDER} submitLabel={FEEDBACK_SUBMIT} rows={3} onSubmit={value => onFeedback(s.label, value)} />
-        {box}
-      </Box>
-    )
   }
+  const nodes = drawNodes(els, tree.nodes, ctx, sign)
   return (
     <Box key={`mm-card:${card.packageId}`} flexDirection="column">
       {hold === 'drift' || hold === 'page' ? <Text color="error">This view does not match the stored drafts, so signing is off here. Go by the page printed in the thread.</Text> : null}
       {hold === 'stale' && !signOf(tree) ? <Text dimColor>{holdText('stale', card, tree.label)}</Text> : null}
       {notice && !signOf(tree) ? <Text color="warning">{notice}</Text> : null}
-      {drawNodes(els, tree.nodes, ctx, sign)}
+      {nodes}
+      {changesPlaced ? null : changes}
       {Button ? <Button key={`mm-card-page:${card.packageId}`} plain label={`${marks.pageOpen ? 'Hide' : 'Show'} the page as text  ${marks.pageOpen ? '▾' : '▸'}`} onPress={() => d.onPage()} /> : null}
     </Box>
   )

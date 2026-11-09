@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import type { MmCard, MmCardMarks, MmCardTree } from '../types'
 import {
-  CHECK_BUTTON, CHECK_DRAFT, CHECK_TYPE, FEEDBACK_LABEL, FEEDBACK_MAX, FEEDBACK_PLACEHOLDER, FEEDBACK_SAID, FEEDBACK_SUBMIT, FEEDBACK_TEXT, NOT_DRAWN, NO_CARD, NO_OWNER_CHECK, SIGNED_NOTE, SIGN_FILL_MS, SIGN_VALID_MS, THREAD_CHECKING, THREAD_NOT_CHECKED, askedOf, busyOf, cardVerdict, checkMissOf, checkedOf, copyCheck, currentOf, drawCard, feedbackOf, fnv1a, holdOf, holdText, isChecked, isFresh, marksOf, noteAsked, noteCurrent, notePending, noteVersion, prepareCard, pressAsk, pressCheck, pressFeedback, pressSign, readTree,
+  CHECK_BUTTON, CHECK_DRAFT, CHECK_TYPE, FEEDBACK_LABEL, FEEDBACK_MAX, FEEDBACK_PLACEHOLDER, FEEDBACK_SAID, FEEDBACK_SUBMIT, FEEDBACK_TEXT, NOT_DRAWN, NO_CARD, NO_OWNER_CHECK, SIGNED_NOTE, SIGN_FILL_MS, SIGN_VALID_MS, THREAD_CHECKING, THREAD_NOT_CHECKED, askedOf, busyOf, canChange, cardVerdict, checkMissOf, checkedOf, copyCheck, currentOf, drawCard, feedbackOf, fnv1a, holdOf, holdText, isChecked, isFresh, marksOf, noteAsked, noteCurrent, notePending, noteVersion, prepareCard, pressAsk, pressCheck, pressFeedback, pressSign, readTree,
   printedTags, refreshCard, sha256Hex, signOf, signatureLine, signatureSvg, standing, turnBegan, turnEnded, turnMark, type CardDraw,
 } from './card'
 import { drawnText, pageGap } from './card-parity'
@@ -1559,14 +1559,19 @@ describe('0.7.40 the Changes field: the person\'s words go into the thread, neve
     const t = thread(box)
     t.state.set('card', cardOf())
     const submitted: string[] = []
+    /** Every submit as the field made it, its options with it. */
+    const asks: Array<Record<string, unknown>> = []
     ;(t.$ as unknown as { prompt: Record<string, unknown> }).prompt.submit = async (input: { text: string }) => {
+      asks.push({ ...input })
       if (how === 'throws') throw new Error('the session could not take a prompt')
       if (how === 'drop') return { drop: 'a Stop hook stands' }
       submitted.push(input.text)
       return { text: input.text }
     }
-    return { ...t, submitted }
+    return { ...t, submitted, asks }
   }
+  /** A tree whose drawn text has `from` swapped for `to`, as the renderer would draw that package. */
+  const swapped = (from: string, to: string): MmCardTree => readTree(JSON.parse(JSON.stringify(SMS_TREE).replace(from, to))) as MmCardTree
 
   test('the field sits just above the open box, in the client\'s own thread, with its words; the caption names it', () => {
     const open = draw(cardOf())
@@ -1581,12 +1586,59 @@ describe('0.7.40 the Changes field: the person\'s words go into the thread, neve
     expect(order.indexOf(`mm-card-feedback:${LABEL}`)).toBeLessThan(order.indexOf(`mm-card-sign-btn:${LABEL}`))
   })
 
-  test('no field where the box is closed, on another client\'s card, on a surface with no Input, or with no handler', () => {
-    expect(inputs(draw(cardOf(), { busy: true }))).toEqual([])
-    expect(inputs(draw(cardOf(), { checked: {} }))).toEqual([])
+  test('the field is not tied to the box: it shows while the thread works, before the check, under a hold, and after a signature', () => {
+    const field = [{ key: `mm-card-feedback:${LABEL}` }]
+    expect(inputs(draw(cardOf(), { busy: true }))).toMatchObject(field)
+    expect(inputs(draw(cardOf(), { checked: {} }))).toMatchObject(field)
+    expect(inputs(draw(cardOf({ current: OTHER })))).toMatchObject(field)
+    expect(inputs(draw(cardOf({ gap: 'the page holds a line the card does not' })))).toMatchObject(field)
+    const signedAt = 1_000_000 - 60_000
+    const sealed = draw(cardOf({ pageSha: 'p'.repeat(64) }), { marks: { signed: { [LABEL]: { label: LABEL, signer: 'Test Signer', at: signedAt, pageSha: 'p'.repeat(64), filled: 'filled' } } } })
+    expect(texts(sealed).join('\n')).toContain(`Sealed: "Send package ${LABEL}" is in your prompt box.`)
+    expect(inputs(sealed)).toMatchObject(field)
+    // once, above whatever the sign area shows
+    for (const d of [draw(cardOf(), { busy: true }), sealed]) {
+      expect(inputs(d)).toHaveLength(1)
+      const order = JSON.stringify(d)
+      const under = order.indexOf(`mm-card-${d === sealed ? 'signed' : 'wait'}:${LABEL}`)
+      expect(under).toBeGreaterThan(-1)
+      expect(order.indexOf(`mm-card-feedback:${LABEL}`)).toBeLessThan(under)
+    }
+  })
+
+  test('a card the renderer drew with no sign box still has the field, once, at its end', () => {
+    const pair = CARD_PAIRS['later messages'] as { tree: unknown }
+    const t = readTree(JSON.parse(JSON.stringify(pair.tree))) as MmCardTree
+    expect(signOf(t)).toBeNull()
+    expect(canChange(t)).toBe(true)
+    const d = draw(cardOf({ tree: t, current: t.package_sha256 }), { checked: { [t.label]: 0 } })
+    expect(inputs(d)).toMatchObject([{ key: `mm-card-feedback:${t.label}` }])
+    const order = JSON.stringify(d)
+    expect(order.indexOf(`mm-card-feedback:${t.label}`)).toBeLessThan(order.indexOf('mm-card-page:'))
+  })
+
+  test('no field on a package that can no longer change: closed with no reply owed, or with nothing left to send', () => {
+    const closed = readTree(JSON.parse(JSON.stringify((CARD_PAIRS['closed no reply'] as { tree: unknown }).tree))) as MmCardTree
+    expect(canChange(closed)).toBe(false)
+    expect(inputs(draw(cardOf({ tree: closed, current: closed.package_sha256 }), { checked: { [closed.label]: 0 } }))).toEqual([])
+    const sent = swapped('One go sends 1 item. Package ', 'Nothing is left to send. Package ')
+    expect(canChange(sent)).toBe(false)
+    expect(inputs(draw(cardOf({ tree: sent })))).toEqual([])
+    const foot = swapped('Nothing for Rob to decide.', 'Nothing is left to send.')
+    expect(canChange(foot)).toBe(false)
+    // the words alone inside a body are no state line
+    expect(canChange(swapped('Book a test slot and tell us if anything looks off.', 'Book a test slot. Nothing is left to send.'))).toBe(true)
+    expect(canChange(tree())).toBe(true)
+    // and the line it left is not drawn there either
+    expect(texts(draw(cardOf({ tree: sent }), { feedback: { label: LABEL, said: 'sent' } })).join('\n')).not.toContain(FEEDBACK_SAID.sent)
+  })
+
+  test('no field on another client\'s card, on a surface with no Input, or with no handler; the line still shows where the field cannot', () => {
     expect(inputs(draw(cardOf({ own: false })))).toEqual([])
-    expect(inputs(draw(cardOf({ current: OTHER })))).toEqual([])
-    expect(inputs(drawCard(ELS, { card: cardOf(), marks: { signed: {} }, checked: { [LABEL]: 0 }, busy: false, checkMiss: null, now: 1_000_000, onSign: () => undefined, onCheck: () => undefined, onAsk: () => undefined, onPage: () => undefined, onFeedback: () => undefined }))).toEqual([])
+    expect(texts(draw(cardOf({ own: false }), { feedback: { label: LABEL, said: 'sent' } })).join('\n')).not.toContain(FEEDBACK_SAID.sent)
+    const noInput = drawCard(ELS, { card: cardOf(), marks: { signed: {} }, checked: { [LABEL]: 0 }, busy: false, checkMiss: null, now: 1_000_000, onSign: () => undefined, onCheck: () => undefined, onAsk: () => undefined, onPage: () => undefined, onFeedback: () => undefined, feedback: { label: LABEL, said: 'sent' } })
+    expect(inputs(noInput)).toEqual([])
+    expect(texts(noInput).join('\n')).toContain(FEEDBACK_SAID.sent)
     expect(inputs(draw(cardOf(), { onFeedback: undefined }))).toEqual([])
   })
 
@@ -1612,6 +1664,8 @@ describe('0.7.40 the Changes field: the person\'s words go into the thread, neve
     const t = withSubmit()
     await pressFeedback(t.$, LABEL, '   Make the second paragraph shorter.  \n')
     expect(t.submitted).toEqual([`Feedback on Package ${LABEL} from Test Signer: Make the second paragraph shorter.`])
+    // the person's own words, as theirs
+    expect(t.asks).toEqual([{ text: `Feedback on Package ${LABEL} from Test Signer: Make the second paragraph shorter.`, asUser: true }])
     expect(FEEDBACK_TEXT(LABEL, 'Test Signer', 'x')).toBe(`Feedback on Package ${LABEL} from Test Signer: x`)
     expect(await feedbackOf(t.$)).toEqual({ label: LABEL, said: 'sent' })
     // never a press: no record, no note, no words in the prompt box, no signature mark
@@ -1668,6 +1722,17 @@ describe('0.7.40 the Changes field: the person\'s words go into the thread, neve
     await pressFeedback(t.$, LABEL, 'tighten the subject line')
     expect(t.fills).toEqual([])
     expect(await feedbackOf(t.$)).toEqual({ label: LABEL, said: 'draft' })
+  })
+
+  test('a package closed or sent since the field was drawn takes no changes: nothing sent, nothing filled, no line', async () => {
+    for (const tr of [swapped('One go sends 1 item. Package ', 'Nothing is left to send. Package '), readTree(JSON.parse(JSON.stringify((CARD_PAIRS['closed no reply'] as { tree: unknown }).tree))) as MmCardTree]) {
+      const t = withSubmit()
+      t.state.set('card', cardOf({ tree: tr, current: tr.package_sha256 }))
+      await pressFeedback(t.$, tr.label, 'tighten the subject line')
+      expect(t.submitted).toEqual([])
+      expect(t.fills).toEqual([])
+      expect(await feedbackOf(t.$)).toBeNull()
+    }
   })
 
   test('the tag is the card\'s current one', async () => {
@@ -1775,5 +1840,106 @@ describe('0.7.40 the row of the thread\'s own `mm card` call: everything but a r
       expect(all).toContain('✍  Click to sign and send')
     }
     expect(await askedOf(t.$)).toMatchObject({ packageId: PKG, label: LABEL, toolUseId: 'toolu_1' })
+  })
+})
+
+describe('0.7.40 the answer under a row the bridge drew is hidden, and a folded group holding the live call is unfolded', () => {
+  type Hook = ($: unknown, e: Record<string, unknown>, next: (e: unknown) => unknown) => Promise<unknown>
+  const rowHook = hooks['ui.render:{"component":"ToolUse"}'] as Hook
+  const resultHook = hooks['ui.render:{"component":"ToolResult"}'] as Hook
+  const groupHook = hooks['ui.render:{"component":"ToolGroup"}'] as Hook
+  const PKG = SMS_TREE.package_id as string
+  const READY = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call, and in the side pane.`
+  const ENGINE = { engine: 'drawing' }
+  const engine = () => ENGINE
+  const drawing = () => {
+    const t = thread()
+    const invalidated: string[] = []
+    ;(t.$ as unknown as Record<string, unknown>).ui = {
+      resolve: () => ({ Box: 'Box', Text: 'Text', Button: 'Button', Link: 'Link', Svg: 'Svg', Input: 'Input', Markdown: 'Markdown' }),
+      invalidate: (event: string) => void invalidated.push(event),
+    }
+    t.state.set('card', cardOf())
+    return { ...t, invalidated }
+  }
+  const useRow = (id: string, props: Record<string, unknown> = {}, surface = 'desktop') => ({
+    surface, component: 'ToolUse', requestId: id,
+    props: { tool_use_id: id, tool: 'mcp__mm-bridge__mm', input: { args: `card ${PKG}` }, isRunning: false, isErrored: false, isInterrupted: false, output: READY, ...props },
+  })
+  const resultRow = (id: string, props: Record<string, unknown> = {}, surface = 'desktop') => ({
+    surface, component: 'ToolResult', requestId: id, props: { tool_use_id: id, tool: 'mcp__mm-bridge__mm', output: READY, isErrored: false, ...props },
+  })
+  /** An empty Box: nothing visible. */
+  const isEmptyBox = (tree: unknown) => {
+    const o = tree as { type?: unknown; props?: { children?: unknown }; children?: unknown }
+    const kids = [o.props?.children, o.children].flat().filter(x => x !== undefined && x !== null && x !== false && !(Array.isArray(x) && x.length === 0))
+    return o.type === 'Box' && kids.length === 0 && texts(tree).length === 0
+  }
+
+  test('the hooks are registered', () => {
+    expect(typeof resultHook).toBe('function')
+    expect(typeof groupHook).toBe('function')
+  })
+
+  test('under the live card, and under each of the three lines: nothing visible. Any other result: the engine\'s', async () => {
+    const t = drawing()
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_r1' })
+    // the live call: the card
+    expect(texts(await rowHook(t.$, useRow('toolu_r1'), engine)).join('\n')).toContain('Hi! Is the new booking link live yet?')
+    expect(isEmptyBox(await resultHook(t.$, resultRow('toolu_r1'), engine))).toBe(true)
+    // an earlier ask of the same tag: its line, and its answer hidden too
+    expect(texts(await rowHook(t.$, useRow('toolu_r0'), engine))).toEqual([ROW_AGAIN(LABEL)])
+    expect(isEmptyBox(await resultHook(t.$, resultRow('toolu_r0'), engine))).toBe(true)
+    // a row the hook never drew, another tool, another surface: the engine's
+    expect(await resultHook(t.$, resultRow('toolu_never'), engine)).toBe(ENGINE)
+    expect(await resultHook(t.$, resultRow('toolu_r1', { tool: 'Bash' }), engine)).toBe(ENGINE)
+    expect(await resultHook(t.$, resultRow('toolu_r1', {}, 'terminal'), engine)).toBe(ENGINE)
+    // the first draw of each row asked for one redraw, so an answer drawn before its row is hidden too; a second draw asks for none
+    expect(t.invalidated).toEqual(['ui.render', 'ui.render'])
+    await rowHook(t.$, useRow('toolu_r1'), engine)
+    expect(t.invalidated).toEqual(['ui.render', 'ui.render'])
+  })
+
+  test('a row whose draw fell back to the engine\'s keeps its answer: a not-ready answer, a terminal row, a draw that throws', async () => {
+    const t = drawing()
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_f1' })
+    expect(await rowHook(t.$, useRow('toolu_f2', { output: 'card not ready: the card is still being drawn. Print the whole page.' }), engine)).toBe(ENGINE)
+    expect(await resultHook(t.$, resultRow('toolu_f2', { output: 'card not ready: the card is still being drawn. Print the whole page.' }), engine)).toBe(ENGINE)
+    expect(await rowHook(t.$, useRow('toolu_f1', {}, 'terminal'), engine)).toBe(ENGINE)
+    expect(await resultHook(t.$, resultRow('toolu_f1', {}, 'terminal'), engine)).toBe(ENGINE)
+    // drawn, then a later draw of the same row falls back (it throws): its answer shows again
+    expect(texts(await rowHook(t.$, useRow('toolu_f1'), engine)).join('\n')).toContain('Hi! Is the new booking link live yet?')
+    expect(isEmptyBox(await resultHook(t.$, resultRow('toolu_f1'), engine))).toBe(true)
+    expect(t.invalidated).toEqual(['ui.render'])
+    t.state.set('card', cardOf({ tree: { ...tree(), nodes: 5 as never } }))
+    expect(await rowHook(t.$, useRow('toolu_f1'), engine)).toBe(ENGINE)
+    expect(await resultHook(t.$, resultRow('toolu_f1'), engine)).toBe(ENGINE)
+    // unlisting a listed row asks for one redraw, so an answer already hidden is drawn again; a row never listed asks for none
+    expect(t.invalidated).toEqual(['ui.render', 'ui.render'])
+    expect(await rowHook(t.$, useRow('toolu_f1'), engine)).toBe(ENGINE)
+    expect(t.invalidated).toEqual(['ui.render', 'ui.render'])
+  })
+
+  test('a folded group that holds the live call is unfolded; any other group, an unfolded one, or another surface is the engine\'s', async () => {
+    const t = drawing()
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_g1' })
+    const call = (id?: string) => ({ ...(id ? { tool_use_id: id } : {}), tool: 'mcp__mm-bridge__mm', input: { args: `card ${PKG}` }, isRunning: false, isErrored: false, isInterrupted: false, output: READY })
+    const group = (calls: unknown[], over: Record<string, unknown> = {}, surface = 'desktop') => ({ surface, component: 'ToolGroup', requestId: 'g', props: { calls, isActive: false, isExpanded: false, ...over } })
+    let seen: unknown
+    const next = (e: unknown) => {
+      seen = e
+      return ENGINE
+    }
+    const holding = group([{ tool_use_id: 'toolu_read', tool: 'Read', input: {}, isRunning: false, isErrored: false, isInterrupted: false }, call('toolu_g1')])
+    expect(await groupHook(t.$, holding, next)).toBe(ENGINE)
+    expect(seen).toEqual({ ...holding, props: { ...holding.props, isExpanded: true } })
+    for (const e of [group([call('toolu_other')]), group([call()]), group([call('toolu_g1')], { isExpanded: true }), group([call('toolu_g1')], {}, 'terminal'), group([])]) {
+      expect(await groupHook(t.$, e, next)).toBe(ENGINE)
+      expect(seen).toBe(e)
+    }
+    // with no live call on record, nothing is unfolded
+    t.state.delete('cardAsked')
+    expect(await groupHook(t.$, holding, next)).toBe(ENGINE)
+    expect(seen).toBe(holding)
   })
 })

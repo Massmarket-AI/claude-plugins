@@ -13799,11 +13799,12 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       expect(await hasBox(u)).toBe(true)
       expect((await r.findAll({ type: 'Input' })).map(i => i.key)).toEqual([`mm-card-feedback:${LABEL}`])
       expect(rowText).not.toContain('card ready:')
-      // a turn that starts closes both again
+      // a turn that starts closes both boxes again; the Changes field stays, as a submit waits until the thread is idle
       await $.turn.start({ text: 'change the second paragraph', turnId: 't2' })
       expect(await hasBox(r)).toBe(false)
       expect(await hasBox(u)).toBe(false)
-      expect(await r.findAll({ type: 'Input' })).toEqual([])
+      expect((await r.findAll({ type: 'Input' })).map(i => i.key)).toEqual([`mm-card-feedback:${LABEL}`])
+      expect((await u.findAll({ type: 'Input' })).map(i => i.key)).toEqual([`mm-card-feedback:${LABEL}`])
       await r.unmount()
       await u.unmount()
     })
@@ -13981,7 +13982,8 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       const sent = 'Sent to your thread. It is revising the package and will show the new card here.'
       for (let i = 0; i < 200 && !(await lines(r)).join('\n').includes(sent); i++) await new Promise(res => setTimeout(res, 2))
       expect(w.prompts.map(p => p.text)).toEqual([`Feedback on Package ${LABEL} from Test Signer: Make the second paragraph shorter.`])
-      expect((w.prompts[0]?.origin as { kind?: string } | undefined)?.kind).toBe('plugin')
+      // the person's own words: the model reads them bare, and every hook still sees this plugin's origin
+      expect(w.prompts[0]?.origin).toMatchObject({ kind: 'plugin', name: 'mm-bridge', asUser: true })
       expect((await lines(r)).join('\n')).toContain(sent)
       expect((await lines(u)).join('\n')).toContain(sent)
       expect(recorded(w)).toBeUndefined()
@@ -14042,6 +14044,83 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       expect(recorded(w)).toBeUndefined()
       await r.unmount()
       await u.unmount()
+    })
+
+    test('the field stays on a card whose box is closed, and a submit while the thread works is taken as the person\'s words', async ($, on) => {
+      const w = world(on, own)
+      const asked = watchAsked(on)
+      const u = await shown($)
+      await $.turn.start({ text: 'pick it up', turnId: 't1' })
+      const said = await tool($, `card ${PKG}`)
+      const r = await row($, String(asked()?.toolUseId), said)
+      expect(await hasBox(r)).toBe(false)
+      expect((await lines(r)).join('\n')).toContain('This thread is still checking this package.')
+      await r.input({ key: `mm-card-feedback:${LABEL}`, text: 'and add the Saturday hours' })
+      for (let i = 0; i < 200 && !w.prompts.length; i++) await new Promise(res => setTimeout(res, 2))
+      expect(w.prompts.map(p => p.text)).toEqual([`Feedback on Package ${LABEL} from Test Signer: and add the Saturday hours`])
+      expect(recorded(w)).toBeUndefined()
+      await r.unmount()
+      await u.unmount()
+    })
+
+    /** The engine's own drawing of a component beneath the plugins, as a test stands in for it: one line naming it. */
+    const engineDraws = (on: On, component: 'ToolResult' | 'ToolGroup' | 'ToolUse', seen?: Array<Record<string, unknown>>) =>
+      on('ui.render', { component }, (t$, e) => {
+        seen?.push(e.props as Record<string, unknown>)
+        return (t$.ui.resolve(e) as { Text: (p: { children: string }) => unknown }).Text({ children: `the engine's ${component}` }) as never
+      })
+    const result = ($: Engine, toolUseId: string, output: unknown) =>
+      $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'ToolResult', requestId: toolUseId, props: { tool_use_id: toolUseId, tool: 'mcp__mm-bridge__mm', output, isErrored: false } as never })
+
+    test('the model\'s answer under the card is not drawn for the person; under a row the bridge left to the engine it is', async ($, on) => {
+      world(on, own)
+      const asked = watchAsked(on)
+      engineDraws(on, 'ToolResult')
+      engineDraws(on, 'ToolUse')
+      const u = await shown($)
+      const first = await tool($, `card ${PKG}`)
+      const firstId = String(asked()?.toolUseId)
+      const second = await tool($, `card ${PKG}`)
+      const secondId = String(asked()?.toolUseId)
+      // the card's row, then its answer: nothing visible
+      const r = await row($, secondId, second)
+      const res = await result($, secondId, second)
+      expect(await lines(res)).toEqual([])
+      expect(await res.drawn()).toMatchObject({ type: 'Box' })
+      expect(JSON.stringify(await res.drawn())).not.toContain('card ready')
+      // an earlier ready row draws its line, and its answer is hidden as well
+      const old = await row($, firstId, first)
+      expect(await lines(old)).toEqual([`Shown again below. Package ${LABEL}.`])
+      const oldRes = await result($, firstId, first)
+      expect(await lines(oldRes)).toEqual([])
+      // a not-ready row is the engine's, and so is its answer
+      const notReady = 'card not ready: the card is still being drawn. Print the whole page.'
+      const nr = await row($, 'toolu_not_ready', notReady)
+      expect(await lines(nr)).toEqual(["the engine's ToolUse"])
+      const nrRes = await result($, 'toolu_not_ready', notReady)
+      expect(await lines(nrRes)).toEqual(["the engine's ToolResult"])
+      // and a result whose row was never drawn
+      const stray = await result($, 'toolu_stray', second)
+      expect(await lines(stray)).toEqual(["the engine's ToolResult"])
+      for (const m of [r, res, old, oldRes, nr, nrRes, stray, u]) await m.unmount()
+    })
+
+    test('a group the desktop folds is unfolded when it holds the live call, and left as it is otherwise', async ($, on) => {
+      world(on, own)
+      const asked = watchAsked(on)
+      const seen: Array<Record<string, unknown>> = []
+      engineDraws(on, 'ToolGroup', seen)
+      const u = await shown($)
+      const said = await tool($, `card ${PKG}`)
+      const live = String(asked()?.toolUseId)
+      const call = (id: string, tool = 'mcp__mm-bridge__mm') => ({ tool_use_id: id, tool, input: { args: `card ${PKG}` }, isRunning: false, isErrored: false, isInterrupted: false, output: said })
+      const group = (calls: unknown[], requestId: string) =>
+        $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'ToolGroup', requestId, props: { calls, isActive: false, isExpanded: false } as never })
+      const holding = await group([call('toolu_read', 'Read'), call(live)], 'g1')
+      expect(seen.at(-1)?.isExpanded).toBe(true)
+      const other = await group([call('toolu_read', 'Read'), call('toolu_elsewhere')], 'g2')
+      expect(seen.at(-1)?.isExpanded).toBe(false)
+      for (const m of [holding, other, u]) await m.unmount()
     })
   })
 })

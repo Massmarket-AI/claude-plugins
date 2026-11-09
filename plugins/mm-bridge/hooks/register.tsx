@@ -1,4 +1,4 @@
-import type { Elements, EngineInterface, Register } from 'claude-code'
+import type { Elements, EngineInterface, Register, RenderElement } from 'claude-code'
 
 import type { MmBand, MmCard, MmFolds, MmTeamNow, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTeam, MmTrack, MmTrackLine, MmView } from '../types'
 
@@ -3800,6 +3800,37 @@ export const ROW_AGAIN = (label: string): string => `Shown again below. Package 
 export const ROW_GONE = 'This card is no longer held here. Ask your thread to show the package again.'
 /** (0.7.40) The draw failures of a row already noted this session: one line each in bridge-notices.log. */
 const rowFailures = new Set<string>()
+/**
+ * (0.7.40) The rows the `ToolUse` hook drew a tree for, by `<surface>:<tool_use_id>`: the `ToolResult` hook hides the model's answer under
+ * these alone. A row is taken off again whenever its draw falls back to the engine's. At most ROWS_MAX, the oldest dropped first.
+ */
+const drawnRows = new Map<string, number>()
+const ROWS_MAX = 500
+
+/**
+ * (0.7.40) This row drew its own tree. A row new to the list asks for one redraw (`$.ui.invalidate`), so an answer drawn before its row was
+ * built is hidden too; one already listed asks for none, so the redraw ends there.
+ */
+function noteRow($: EngineInterface, row: string): void {
+  if (drawnRows.has(row)) return
+  drawnRows.set(row, drawnRows.size)
+  for (const old of [...drawnRows.keys()].slice(0, Math.max(0, drawnRows.size - ROWS_MAX))) drawnRows.delete(old)
+  try {
+    $.ui.invalidate('ui.render')
+  } catch {
+    // the answer is hidden at its next draw
+  }
+}
+
+/** (0.7.40) This row fell back to the engine's: unlisted, and a row that was listed asks for one redraw, so its answer shows again. */
+function forgetRow($: EngineInterface, row: string): void {
+  if (!drawnRows.delete(row)) return
+  try {
+    $.ui.invalidate('ui.render')
+  } catch {
+    // the answer shows at its next draw
+  }
+}
 
 /** (0.5.28, internal asks) The most ask pages one draw of a client part reads. */
 const ASK_PAGES_MAX = 5
@@ -9704,40 +9735,75 @@ export const register: Register = on => {
   //   package the bridge no longer holds says so. One dim line each, no tree, no box.
   // - Anything else is the engine's row, untouched: another tool, another command, a not-ready answer, a call still running, errored or
   //   interrupted, and every surface but the desktop's. ⛔ A draw that throws is the engine's row too, with one line in bridge-notices.log.
+  // - A row that drew its own tree is listed (`drawnRows`), and the answer under it is hidden (the `ToolResult` hook); a fallback unlists it.
   // Reads only: a render hook never writes.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const p = e.props
-    if (e.surface !== 'desktop' || p.tool !== 'mcp__mm-bridge__mm' || p.isRunning || p.isErrored || p.isInterrupted) return next(e)
+    // (0.7.40) this row's own answer is hidden under it (the `ToolResult` hook) only once this hook has drawn its tree, never on a fallback
+    const row = `${e.surface}:${p.tool_use_id || e.requestId}`
+    const pass = () => {
+      forgetRow($, row)
+      return next(e)
+    }
+    if (e.surface !== 'desktop' || p.tool !== 'mcp__mm-bridge__mm' || p.isRunning || p.isErrored || p.isInterrupted) return pass()
     const packageId = cardAskOf((p.input as { args?: unknown } | null | undefined)?.args)
-    if (!packageId) return next(e)
+    if (!packageId) return pass()
     const out = rowText(p.output)
-    if (!out.startsWith('card ready:')) return next(e)
+    if (!out.startsWith('card ready:')) return pass()
     try {
       const { Box, Markdown, Text } = $.ui.resolve(e)
       const card = await cardOf($)
-      if (card.packageId !== packageId || !card.tree || !card.tree.label) return <Text dimColor>{ROW_GONE}</Text>
+      let tree: RenderElement
       const label = CARD_READY_HEAD.exec(out)?.[1]
-      if (!label) return next(e)
-      if (card.tree.label !== label) return <Text dimColor>{ROW_REPLACED(label, card.tree.label)}</Text>
       const asked = await askedOf($)
-      if (!asked || asked.toolUseId !== (p.tool_use_id || e.requestId)) return <Text dimColor>{ROW_AGAIN(label)}</Text>
-      const drawn = await drawLiveCard($, $.ui.resolve(e) as Els, card)
-      // the card's own `Show the page as text` opens the page here as it does in the pane: one mark for both
-      const page = (await marksOf($)).pageOpen ? await clientPart($) : null
-      const text = page ? (page.page ?? page.text) : ''
-      return (
-        <Box key={`mm-card-row:${packageId}`} flexDirection="column">
-          {drawn}
-          {text ? <Markdown text={text} /> : null}
-        </Box>
-      )
+      if (card.packageId !== packageId || !card.tree || !card.tree.label) tree = <Text dimColor>{ROW_GONE}</Text>
+      else if (!label) return pass()
+      else if (card.tree.label !== label) tree = <Text dimColor>{ROW_REPLACED(label, card.tree.label)}</Text>
+      else if (!asked || asked.toolUseId !== (p.tool_use_id || e.requestId)) tree = <Text dimColor>{ROW_AGAIN(label)}</Text>
+      else {
+        const drawn = await drawLiveCard($, $.ui.resolve(e) as Els, card)
+        // the card's own `Show the page as text` opens the page here as it does in the pane: one mark for both
+        const page = (await marksOf($)).pageOpen ? await clientPart($) : null
+        const text = page ? (page.page ?? page.text) : ''
+        tree = (
+          <Box key={`mm-card-row:${packageId}`} flexDirection="column">
+            {drawn}
+            {text ? <Markdown text={text} /> : null}
+          </Box>
+        )
+      }
+      noteRow($, row)
+      return tree
     } catch (err) {
       const why = (err instanceof Error ? err.message : String(err)).slice(0, 160)
       if (!rowFailures.has(`${packageId}\n${why}`)) {
         rowFailures.add(`${packageId}\n${why}`)
         void logAuto($, `card for package ${packageId} could not be drawn in the thread: ${why.split('{')[0]?.trim() ?? ''}`)
       }
-      return next(e)
+      return pass()
     }
+  })
+
+  // (0.7.40) The model's answer under a row the `ToolUse` hook drew (the card, or one of its three lines): "Do not print the page..." is the
+  // thread's to read, not the person's. Nothing visible is drawn in its place. Any other result, and one whose row fell back, is the engine's.
+  on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
+    const p = e.props
+    if (p.tool !== 'mcp__mm-bridge__mm' || !drawnRows.has(`${e.surface}:${p.tool_use_id || e.requestId}`)) return next(e)
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
+
+  // (0.7.40) A run of calls the desktop folds into one count line holds its `ToolUse` rows unseen: a group that holds the live `mm card`
+  // call is unfolded, so the card is drawn where the thread asked for it. Every other group, and every other surface, is as the engine
+  // draws it. Reads the live call (`askedOf`), so a group drawn before the answer is drawn again once it lands.
+  on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
+    try {
+      if (e.surface !== 'desktop' || e.props.isExpanded) return next(e)
+      const asked = await askedOf($)
+      if (asked && e.props.calls.some(c => c.tool_use_id === asked.toolUseId)) return next({ ...e, props: { ...e.props, isExpanded: true } })
+    } catch {
+      // the group as the engine draws it
+    }
+    return next(e)
   })
 }
