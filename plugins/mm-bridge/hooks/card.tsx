@@ -905,6 +905,21 @@ const isChecking = (marks: MmCardMarks, label: string, now: number) => marks.che
  * running too: the box is not drawn then, so this is the second line of defence for a press that was already under way.
  */
 export async function pressSign($: EngineInterface, label: string, log: SignLog): Promise<void> {
+  // (0.7.41) one press of a tag at a time: two clicks a few milliseconds apart both read the marks before either set `checking`,
+  // and each would sign and send a go
+  if (pressing.has(label)) return
+  pressing.add(label)
+  try {
+    await signOnce($, label, log)
+  } finally {
+    pressing.delete(label)
+  }
+}
+
+/** (0.7.41) The tags whose press is under way in this session, up to its record and note (the go follows on the timer). */
+const pressing = new Set<string>()
+
+async function signOnce($: EngineInterface, label: string, log: SignLog): Promise<void> {
   const { value: card } = await $.state.get(CARD)
   const marks = await marksOf($)
   const pressed = await $.clock.now()
@@ -974,17 +989,19 @@ export async function pressSign($: EngineInterface, label: string, log: SignLog)
  * (`pressSign`), after the record and the note, with the card still holding and the thread idle. `sent` when it entered the session.
  * - ⛔ The prompt box is never written over: a draft of the person's stays as it is. Only the exact go of this tag left there by an older
  *   press is cleared, so it can never be sent a second time.
- * - A message the engine refuses (`{ drop }`) or that fails falls back to the prompt box as up to 0.7.40 (`fillWords`): `filled`, or
- *   `draft` / `none` when the box holds other text or cannot be filled. The card then says to press Enter or what to type.
+ * - A message the engine refuses (`{ drop }`) falls back to the prompt box as up to 0.7.40 (`fillWords`): `filled`, or `draft` / `none`
+ *   when the box holds other text or cannot be filled. The card then says to press Enter or what to type. One that throws may have gone
+ *   in before it failed, so the box is left alone (`unsure`) and the card says to type the go only if it does not show in the thread.
  */
-export async function sendGo($: EngineInterface, label: string): Promise<'sent' | 'filled' | 'draft' | 'none'> {
+export async function sendGo($: EngineInterface, label: string): Promise<'sent' | 'filled' | 'draft' | 'none' | 'unsure'> {
   const words = `Send package ${label}`
   let went = false
   try {
     const r = (await $.prompt.submit({ text: words, asUser: true })) as { drop?: unknown } | undefined
     went = !(r && typeof r === 'object' && r.drop !== undefined)
   } catch {
-    went = false
+    // (review of 0.7.41) a submit that throws may have gone in before it failed: words in the box then invite a second go
+    return 'unsure'
   }
   if (!went) return fillWords($, words)
   try {
@@ -1449,12 +1466,14 @@ export function drawCard(els: Els, d: CardDraw): Node {
                 ? 'The package changed while signing, so nothing was sent. Read the new package and sign again.'
                 : signed.filled === 'none'
                   ? `Sealed, but the go did not reach your thread. Type this in the thread: Send package ${s.label}`
-                  : 'Signing…'
+                  : signed.filled === 'unsure'
+                    ? `Sealed. If "Send package ${s.label}" does not show in your thread, type it there.`
+                    : 'Signing…'
       return (
         <Box key={`mm-card-signed:${s.label}`} flexDirection="column">
           {Svg ? <Svg key={`mm-card-sig:${s.label}:${still ? 'still' : 'ink'}`} source={signatureSvg(signed.signer, still)} alt={`Signed by ${signed.signer}`} isInteractive /> : null}
           <Text size="caption" dimColor>{`Signed by ${signed.signer} · ${etTime(signed.at)} · Package ${s.label}`}</Text>
-          <Text color={signed.filled === 'sent' ? 'success' : signed.filled === 'stale' || signed.filled === 'filled' || signed.filled === 'draft' || signed.filled === 'none' ? 'warning' : undefined}>{said}</Text>
+          <Text color={signed.filled === 'sent' ? 'success' : signed.filled === 'stale' || signed.filled === 'filled' || signed.filled === 'draft' || signed.filled === 'none' || signed.filled === 'unsure' ? 'warning' : undefined}>{said}</Text>
         </Box>
       )
     }

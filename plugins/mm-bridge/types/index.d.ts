@@ -365,9 +365,10 @@ export type MmCard = {
 /**
  * (0.7.26) A signature given in this thread's pane: the tag signed, by whom, when, (0.7.33) the hash of the page it read, and what became of the words.
  * (0.7.41) `sent`: the go went into the thread as the person's message (`sendGo`). `filled`, `draft`, `none`: it did not, and the words went in the
- * prompt box, or could not (a draft there, a box that cannot be filled). `stale`: the package changed while signing, so nothing was sent.
+ * prompt box, or could not (a draft there, a box that cannot be filled). `unsure`: the send failed in a way that may have gone in, so the box was
+ * left alone. `stale`: the package changed while signing, so nothing was sent.
  */
-export type MmCardSigned = { label: string; signer: string; at: number; pageSha?: string; filled?: 'sent' | 'filled' | 'draft' | 'none' | 'stale' }
+export type MmCardSigned = { label: string; signer: string; at: number; pageSha?: string; filled?: 'sent' | 'filled' | 'draft' | 'none' | 'unsure' | 'stale' }
 
 /** (0.7.26) What this thread did with cards: each signature given here by tag, and whether the page as text is open under the card. */
 export type MmCardMarks = {

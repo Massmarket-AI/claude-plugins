@@ -332,11 +332,12 @@ describe('0.7.26 signing: the name, the envelope, then (0.7.41) exactly the go s
     expect(t.gos).toEqual([`Send package ${LABEL}`])
   })
 
-  test('(0.7.41) a message the engine refuses, or that fails, falls back to the prompt box as before: Press Enter, or what to type over a draft', async () => {
+  test('(0.7.41) a message the engine refuses falls back to the prompt box as before (Press Enter, or what to type over a draft); one that throws leaves the box alone', async () => {
     for (const [how, box, filled, said] of [
       ['drop', '', 'filled', `Sealed, but the go did not reach your thread, so "Send package ${LABEL}" is in your prompt box. Press Enter to send it.`],
-      ['throws', '', 'filled', `Sealed, but the go did not reach your thread, so "Send package ${LABEL}" is in your prompt box. Press Enter to send it.`],
       ['drop', 'a note I was writing', 'draft', `Sealed, but the go did not reach your thread and your prompt box holds a draft, so type: Send package ${LABEL}`],
+      // (review of 0.7.41) a throw may have gone in before it failed: nothing in the box, and type it only if it does not show
+      ['throws', '', 'unsure', `Sealed. If "Send package ${LABEL}" does not show in your thread, type it there.`],
     ] as const) {
       const t = thread(box)
       t.now.submit = how
@@ -350,6 +351,17 @@ describe('0.7.26 signing: the name, the envelope, then (0.7.41) exactly the go s
       expect(m.signed[LABEL]?.filled, how).toBe(filled)
       expect(texts(drawChecked({ card: t.state.get('card') as MmCard, marks: m, now: 1_000_000 + 10_000, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined })).join(' '), how).toContain(said)
     }
+  })
+
+  test('(0.7.41) two clicks a few milliseconds apart are one press: one record, one note, one go', async () => {
+    const t = thread()
+    t.state.set('card', cardOf())
+    t.state.set('cardMarks', { signed: {} })
+    await Promise.all([pressSign(t.$, LABEL, t.log), pressSign(t.$, LABEL, t.log)])
+    await t.advance(SIGN_FILL_MS)
+    expect(t.files.get(SIGNED_FILE)?.trim().split('\n')).toHaveLength(1)
+    expect(t.appends).toHaveLength(1)
+    expect(t.gos).toEqual([`Send package ${LABEL}`])
   })
 
   test('(0.7.41) the exact go an older press left in the prompt box is cleared once the go is sent, so it can never be sent twice', async () => {
