@@ -179,6 +179,17 @@ interface Card {
   frame: Set<string>
 }
 
+/** (0.7.40) The renderer's closing line, its foot lines and its banners: where it says what the go will do or has done. */
+const SETTLE_LEAF = /\brp-(?:closing|foot|banner)\b/
+
+/**
+ * (0.7.40) The card's closing, foot and banner lines (`rp-closing`, `rp-foot`, `rp-banner`), and nothing else: never a subject, a title,
+ * a body, a quote or any other words a client or a teammate wrote, so that none of them reads as the card's state. `canChange` reads it.
+ */
+export function settleLines(tree: MmCardTree): string[] {
+  return leavesOf(tree.nodes).filter(l => SETTLE_LEAF.test(l.c) && !l.isBody && !SEND_BODY.test(l.c)).map(l => squash(l.text))
+}
+
 function readCard(tree: MmCardTree): Card {
   const root: MmCardNode[] = []
   const sections = new Map<string, MmCardNode>()

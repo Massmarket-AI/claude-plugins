@@ -371,8 +371,11 @@ export type MmCardMarks = {
   pageOpen?: boolean
   /** (0.7.33) A press reading the package again: which tag, and since when. */
   checking?: { label: string; at: number }
-  /** (0.7.33) What the last press found when it recorded nothing: the card changed, or a read or record failed. */
-  notice?: { packageId: string; kind: 'changed' | 'retry' }
+  /**
+   * (0.7.33) What the last press found when it recorded nothing: the card changed, or a read or record failed. (0.7.40) Or `busy`: the
+   * thread started a turn while the envelope flew, so the words never went in the prompt box and the signature was dropped.
+   */
+  notice?: { packageId: string; kind: 'changed' | 'retry' | 'busy' }
 }
 
 /**
@@ -382,6 +385,20 @@ export type MmCardMarks = {
  * press's marks back over what they became.
  */
 export type MmCardChecked = Record<string, number>
+
+/**
+ * (0.7.40) The live `mm card` call: the main thread's own call (no `agentId`) whose answer was the last `card ready: Package <12>.`,
+ * by its `tool_use_id`. That call's row in the thread draws the whole card; any earlier ready row draws one line. A later ready replaces it.
+ */
+export type MmCardAsked = { packageId: string; label: string; toolUseId: string; at: number }
+
+/**
+ * (0.7.40) What the card's Changes field last said, for the tag it was submitted on: the words went into the thread (`sent`; `busy` when the
+ * thread was working, so it reads them once it finishes), read like the go and were not sent (`go`), came for a tag the card has since moved
+ * on from (`changed`, said under the new tag), or did not reach the thread and were put in the prompt box (`filled`), or could not be because
+ * the box holds a draft (`draft`) or could not be filled (`none`). Drawn for that tag alone.
+ */
+export type MmCardFeedback = { label: string; said: 'sent' | 'busy' | 'go' | 'changed' | 'filled' | 'draft' | 'none' }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -405,6 +422,10 @@ declare module 'claude-code' {
       cardBusy: boolean
       /** (0.7.36) The tag whose Check button could not put its words in the prompt box, and why: the pane says what to type. Null with none. */
       cardCheckMiss: { label: string; filled: 'draft' | 'none' } | null
+      /** (0.7.40) The main thread's own `mm card` call that got the last `card ready`: its row draws the card. */
+      cardAsked: MmCardAsked
+      /** (0.7.40) What the card's Changes field last said, and for which tag. Null with nothing. */
+      cardFeedback: MmCardFeedback | null
       /** (0.7.38) The ready reply packages this thread's pane listed last: a new one scrolls the pane to its top. */
       seenPackages: string[]
     }
