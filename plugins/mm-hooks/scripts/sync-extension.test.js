@@ -14,7 +14,7 @@ const path = require("path");
 const { spawnSync, spawn } = require("child_process");
 
 const sx = require("./sync-extension.js");
-const { updateStatus } = require("./plugin-status.js");
+const { LOCK_STALE_MS, breakStale, lock, unlock, updateStatus } = require("./plugin-status.js");
 
 // The tracker's public manifest key (Massmarket-AI/massmarket-time-tracker manifest.json). It is what pins the
 // extension id lcnfnlckdnnmgijlfmedfikafaogenga; a public key, not a secret.
@@ -480,6 +480,85 @@ test("plugin-sync.json: each step changes only its own part", () => {
   assert.deepEqual(statusOf(home), { plugin: "mm-hooks", version: "1.0.10", action: "current", extension: { action: "updated" } });
   assert.equal(updateStatus(path.join(home, "missing"), () => ({ x: 1 })), false, "no mm-hooks folder, no file");
   assert.equal(fs.existsSync(path.join(home, "missing")), false);
+});
+
+// ── the plugin-sync.json lock (mm-hooks 1.0.24) ──
+const lockIn = (home) => path.join(home, ".claude", "mm-hooks", "plugin-sync.json.lock");
+const lockLeftovers = (home) => fs.readdirSync(path.join(home, ".claude", "mm-hooks")).filter((f) => f.includes(".lock") || f.includes(".new-"));
+/** A lock file with `content`, its time set `ageMs` back (older than LOCK_STALE_MS = left by a session that died). */
+function plantLock(file, content, ageMs) {
+  fs.writeFileSync(file, content);
+  const t = new Date(Date.now() - ageMs);
+  fs.utimesSync(file, t, t);
+}
+
+test("plugin-sync.json lock: one left by a session that died (older than 5 s) is broken, and nothing is left behind", () => {
+  const home = hookHome();
+  plantLock(lockIn(home), "dead-session", LOCK_STALE_MS + 5000);
+  assert.equal(updateStatus(path.join(home, ".claude", "mm-hooks"), () => ({ plugin: "mm-hooks" })), true);
+  assert.deepEqual(statusOf(home), { plugin: "mm-hooks" });
+  assert.deepEqual(lockLeftovers(home), []);
+});
+
+test("plugin-sync.json lock: a live lock is waited on and never broken; after the 2-second wait the step writes nothing", () => {
+  const home = hookHome();
+  plantLock(lockIn(home), "live-session", 0);
+  const t0 = Date.now();
+  assert.equal(updateStatus(path.join(home, ".claude", "mm-hooks"), () => ({ plugin: "mm-hooks" })), false);
+  assert.ok(Date.now() - t0 >= 1900, "it waited for the lock");
+  assert.equal(fs.readFileSync(lockIn(home), "utf8"), "live-session", "the live session's lock is untouched");
+  assert.equal(fs.existsSync(path.join(home, ".claude", "mm-hooks", "plugin-sync.json")), false);
+});
+
+// Before 1.0.24 a session that had once seen the lock stale deleted whatever lock file had that name. Here, with the
+// timing taken out: session B sees the dead session's lock; A breaks it and C takes a fresh one; then B acts.
+test("⛔ plugin-sync.json lock: a session that saw a stale lock never deletes the fresh lock another session took meanwhile", () => {
+  const home = hookHome();
+  const file = lockIn(home);
+  plantLock(file, "dead-session", LOCK_STALE_MS + 5000);
+  assert.equal(breakStale(file), true, "A broke the dead session's lock");
+  const c = lock(file);
+  assert.ok(c, "C took a fresh lock");
+  assert.equal(breakStale(file), false, "B leaves C's lock alone");
+  assert.equal(fs.readFileSync(file, "utf8"), c, "C still holds it");
+  unlock(file, c);
+  assert.deepEqual(lockLeftovers(home), []);
+});
+
+test("plugin-sync.json lock: only the session holding .break removes a stale lock; a .break left by a session that died goes after 5 s", () => {
+  const home = hookHome();
+  const file = lockIn(home);
+  plantLock(file, "dead-session", LOCK_STALE_MS + 5000);
+  plantLock(file + ".break", "", 0); // another session is breaking it right now
+  assert.equal(breakStale(file), false);
+  assert.equal(fs.readFileSync(file, "utf8"), "dead-session", "left to the session holding .break");
+  assert.ok(fs.existsSync(file + ".break"), "a live .break is not removed");
+  plantLock(file + ".break", "", LOCK_STALE_MS + 5000); // that session died mid-break
+  assert.equal(breakStale(file), false, "the dead .break is cleared first");
+  assert.equal(fs.existsSync(file + ".break"), false);
+  assert.equal(breakStale(file), true, "then the stale lock is broken");
+  assert.deepEqual(lockLeftovers(home), []);
+  // The whole step: a stale lock and a dead .break together do not stop it.
+  plantLock(file, "dead-session", LOCK_STALE_MS + 5000);
+  plantLock(file + ".break", "", LOCK_STALE_MS + 5000);
+  assert.equal(updateStatus(path.join(home, ".claude", "mm-hooks"), () => ({ ok: 1 })), true);
+  assert.deepEqual(statusOf(home), { ok: 1 });
+  assert.deepEqual(lockLeftovers(home), []);
+});
+
+test("⛔ plugin-sync.json lock: a session releases only its own lock, never one another session has taken since", () => {
+  const home = hookHome();
+  const file = lockIn(home);
+  const mine = lock(file);
+  assert.ok(mine);
+  // This session stalled for more than 5 seconds; another session broke its lock and took its own.
+  fs.unlinkSync(file);
+  const theirs = lock(file);
+  assert.ok(theirs && theirs !== mine);
+  unlock(file, mine);
+  assert.equal(fs.readFileSync(file, "utf8"), theirs, "the other session still holds it");
+  unlock(file, theirs);
+  assert.equal(fs.existsSync(file), false);
 });
 
 test("⛔ the two SessionStart steps run at the same time and neither record is lost", async () => {

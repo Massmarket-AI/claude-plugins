@@ -221,6 +221,28 @@ test("⛔ two sessions starting together show the notice once", async () => {
   }
 });
 
+// The same, beside a plugin-sync.json lock left by a session that died (older than its 5 s): the waiting sessions
+// break it, and before mm-hooks 1.0.24 two of them could break it at once and both hold the lock (1 round in 150 with
+// 8 sessions). Exactly one notice, one claim, and no .lock, .break or .new- file left.
+test("⛔ a lock left by a session that died: sessions starting together still show the notice once", async () => {
+  for (let i = 0; i < 6; i++) {
+    const home = makeHome();
+    const lockFile = path.join(hookDir(home), "plugin-sync.json.lock");
+    fs.writeFileSync(lockFile, "dead-session");
+    const old = new Date(Date.now() - 10000);
+    fs.utimesSync(lockFile, old, old);
+    const env = envFor(home);
+    const runs = await Promise.all(Array.from({ length: 6 }, () => run(SCRIPT, env)));
+    for (const r of runs) {
+      assert.equal(r.code, 0);
+      assert.equal(r.stderr, "");
+    }
+    assert.equal(runs.filter((r) => r.stdout !== "").length, 1, `round ${i}: exactly one session got it`);
+    assert.equal(statusOf(home).revision_insights_notice.count, 1);
+    assert.deepEqual(leftovers(home), []);
+  }
+});
+
 // The race above, with the timing taken out: it needs no luck to fail. A session reads its clock, waits for the lock,
 // and finds a claim another session wrote in the meantime, whose time is later than the clock it read.
 test("⛔ a session that read its clock before another session's claim does not show the notice too", () => {
