@@ -9,7 +9,7 @@ import { drawnText, pageGap } from './card-parity'
 import { CARD_PAIRS } from './card-pairs.test-helper'
 import { NEXT_LABEL as NEXT, NEXT_PAGE, NEXT_SHA, NEXT_TREE, SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
 import { ME, fakeApp, hooks, mm, pid, press } from './fake-app.test-helper'
-import { ROW_AGAIN, ROW_FAILURES_MAX, ROW_GONE, ROW_REPLACED, firstRowFailure } from './register'
+import { DRAW_FAILED, RESULT_HINT, ROW_AGAIN, ROW_FAILURES_MAX, ROW_GONE, ROW_REPLACED, firstRowFailure } from './register'
 import type { Feed } from './queue'
 
 const tree = (): MmCardTree => readTree(JSON.parse(JSON.stringify(SMS_TREE))) as MmCardTree
@@ -2148,12 +2148,17 @@ describe('0.7.40 the answer under a row the bridge drew is hidden, and a folded 
     expect(typeof groupHook).toBe('function')
   })
 
-  test('under the live card, and under each of the three lines: nothing visible. Any other result: the engine\'s', async () => {
+  test('under the live card one dim line says how to get the page; under each of the three lines nothing visible. Any other result: the engine\'s', async () => {
     const t = drawing()
     await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_r1' })
-    // the live call: the card
+    // the live call: the card, and under it the fail-safe line in place of the model's answer, drawn by the result itself
     expect(texts(await rowHook(t.$, useRow('toolu_r1'), engine)).join('\n')).toContain('Hi! Is the new booking link live yet?')
-    expect(isEmptyBox(await resultHook(t.$, resultRow('toolu_r1'), engine))).toBe(true)
+    const hint = (await resultHook(t.$, resultRow('toolu_r1'), engine)) as { type?: unknown; props?: { dimColor?: unknown } }
+    expect(texts(hint)).toEqual([RESULT_HINT])
+    expect(hint.type).toBe('Text')
+    expect(hint.props?.dimColor).toBe(true)
+    expect(RESULT_HINT).toBe(`If any part of the card above doesn't show, say "print the page" and your thread prints the whole package as text.`)
+    expect(texts(hint).join('')).not.toContain('card ready')
     // an earlier ask of the same tag: its line, and its answer hidden too
     expect(texts(await rowHook(t.$, useRow('toolu_r0'), engine))).toEqual([ROW_AGAIN(LABEL)])
     expect(isEmptyBox(await resultHook(t.$, resultRow('toolu_r0'), engine))).toBe(true)
@@ -2176,7 +2181,7 @@ describe('0.7.40 the answer under a row the bridge drew is hidden, and a folded 
     expect(await resultHook(t.$, resultRow('toolu_f1', {}, 'terminal'), engine)).toBe(ENGINE)
     // drawn, then a later draw of the same row falls back (it throws): its answer shows again
     expect(texts(await rowHook(t.$, useRow('toolu_f1'), engine)).join('\n')).toContain('Hi! Is the new booking link live yet?')
-    expect(isEmptyBox(await resultHook(t.$, resultRow('toolu_f1'), engine))).toBe(true)
+    expect(texts(await resultHook(t.$, resultRow('toolu_f1'), engine))).toEqual([RESULT_HINT])
     expect(t.invalidated).toEqual(['ui.render'])
     t.state.set('card', cardOf({ tree: { ...tree(), nodes: 5 as never } }))
     expect(await rowHook(t.$, useRow('toolu_f1'), engine)).toBe(ENGINE)
@@ -2185,6 +2190,53 @@ describe('0.7.40 the answer under a row the bridge drew is hidden, and a folded 
     expect(t.invalidated).toEqual(['ui.render', 'ui.render'])
     expect(await rowHook(t.$, useRow('toolu_f1'), engine)).toBe(ENGINE)
     expect(t.invalidated).toEqual(['ui.render', 'ui.render'])
+  })
+
+  test('a draw failure of the live ready row tells the thread once a tag, framed as the bridge\'s; never for an old row, a not-ready answer or no live call', async () => {
+    // a tag no other test here fails on: the told tags are kept for the session
+    const next = readTree(JSON.parse(NEXT_TREE)) as MmCardTree
+    const NEXT_READY = `card ready: Package ${NEXT}. The whole package is checked and drawn in this thread, under this call, and in the side pane.`
+    const t = drawing()
+    const asks: Array<Record<string, unknown>> = []
+    ;(t.$ as unknown as { prompt: Record<string, unknown> }).prompt.submit = async (input: Record<string, unknown>) => {
+      asks.push({ ...input })
+      return { text: input.text }
+    }
+    const settle = async () => {
+      for (let i = 0; i < 50; i++) await Promise.resolve()
+    }
+    t.state.set('card', cardOf({ current: NEXT_SHA, tree: { ...next, nodes: 5 as never } }))
+    // with no live call on record, and for a row that is not the live one: their lines, which draw, and nothing told
+    expect(texts(await rowHook(t.$, useRow('toolu_x1', { output: NEXT_READY }), engine))).toEqual([ROW_GONE])
+    await noteAsked(t.$, { packageId: PKG, label: NEXT, toolUseId: 'toolu_x2' })
+    expect(texts(await rowHook(t.$, useRow('toolu_x1', { output: NEXT_READY }), engine))).toEqual([ROW_AGAIN(NEXT)])
+    // a not-ready answer of the live call never reaches the draw
+    expect(await rowHook(t.$, useRow('toolu_x2', { output: 'card not ready: the card is still being drawn. Print the whole page.' }), engine)).toBe(ENGINE)
+    await settle()
+    expect(asks).toEqual([])
+    // the live ready row: told once, framed (no asUser), in exactly these words
+    expect(await rowHook(t.$, useRow('toolu_x2', { output: NEXT_READY }), engine)).toBe(ENGINE)
+    await settle()
+    expect(asks).toEqual([{ text: DRAW_FAILED(NEXT) }])
+    expect(DRAW_FAILED(NEXT)).toBe(`[Massmarket bridge] The card for Package ${NEXT} could not be drawn in this thread. Print the whole page now, as client-reply-prep §9.3 says for a card that is not ready.`)
+    // and never again for this tag: a redraw, a later live call
+    expect(await rowHook(t.$, useRow('toolu_x2', { output: NEXT_READY }), engine)).toBe(ENGINE)
+    await noteAsked(t.$, { packageId: PKG, label: NEXT, toolUseId: 'toolu_x3' })
+    expect(await rowHook(t.$, useRow('toolu_x3', { output: NEXT_READY }), engine)).toBe(ENGINE)
+    await settle()
+    expect(asks).toHaveLength(1)
+    // no record, no note, no words in the prompt box
+    expect(t.files.has(SIGNED_FILE)).toBe(false)
+    expect(t.appends).toEqual([])
+    expect(t.fills).toEqual([])
+  })
+
+  test('the card\'s page button asks whether anything is missing; open, it says what it always said', () => {
+    const els = { Box: 'Box', Text: 'Text', Button: 'Button', Link: 'Link', Svg: 'Svg', Input: 'Input' } as never
+    const base = { card: cardOf(), checked: { [LABEL]: 0 }, busy: false, checkMiss: null, now: 1_000_000, onSign: () => undefined, onCheck: () => undefined, onAsk: () => undefined, onPage: () => undefined, surface: 'desktop' }
+    expect([...buttons(drawCard(els, { ...base, marks: { signed: {} } })).keys()]).toContain('Anything missing? Show the whole package as text  ▸')
+    expect([...buttons(drawCard(els, { ...base, marks: { signed: {} } })).keys()]).not.toContain('Show the page as text  ▸')
+    expect([...buttons(drawCard(els, { ...base, marks: { signed: {}, pageOpen: true } })).keys()]).toContain('Hide the page as text  ▾')
   })
 
   test('a folded group that holds the live call is unfolded; any other group, an unfolded one, or another surface is the engine\'s', async () => {

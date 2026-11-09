@@ -3815,25 +3815,56 @@ export function firstRowFailure(key: string): boolean {
   return true
 }
 /**
- * (0.7.40) The rows the `ToolUse` hook drew a tree for, by `<surface>:<tool_use_id>`: the `ToolResult` hook hides the model's answer under
- * these alone. A row is taken off again whenever its draw falls back to the engine's. At most ROWS_MAX, the oldest dropped first.
+ * (0.7.40) The rows the `ToolUse` hook drew a tree for, by `<surface>:<tool_use_id>`, and what it drew: the card, or one of its three
+ * lines. The `ToolResult` hook draws under these alone, in place of the model's answer. A row is taken off again whenever its draw falls
+ * back to the engine's. At most ROWS_MAX, the oldest dropped first.
  */
-const drawnRows = new Map<string, number>()
+const drawnRows = new Map<string, 'card' | 'line'>()
 const ROWS_MAX = 500
 
 /**
- * (0.7.40) This row drew its own tree. A row new to the list asks for one redraw (`$.ui.invalidate`), so an answer drawn before its row was
- * built is hidden too; one already listed asks for none, so the redraw ends there.
+ * (0.7.40) What a `ToolResult` under the live card draws in place of the model's answer (Rob, 2026-11-09: "Maybe the thread should just
+ * detect when something didn't render properly and should know to express that. There needs to be some fail-safe here"). It is the
+ * result's own drawing, so it still shows when the app refuses the card's own tree.
  */
-function noteRow($: EngineInterface, row: string): void {
-  if (drawnRows.has(row)) return
-  drawnRows.set(row, drawnRows.size)
+export const RESULT_HINT = `If any part of the card above doesn't show, say "print the page" and your thread prints the whole package as text.`
+
+/**
+ * (0.7.40) This row drew its own tree, the card or a line. A row new to the list, or one that drew the other kind, asks for one redraw
+ * (`$.ui.invalidate`), so an answer drawn before its row was built is drawn for it too; one already listed as it is asks for none, so the
+ * redraw ends there.
+ */
+function noteRow($: EngineInterface, row: string, kind: 'card' | 'line'): void {
+  if (drawnRows.get(row) === kind) return
+  drawnRows.set(row, kind)
   for (const old of [...drawnRows.keys()].slice(0, Math.max(0, drawnRows.size - ROWS_MAX))) drawnRows.delete(old)
   try {
     $.ui.invalidate('ui.render')
   } catch {
     // the answer is hidden at its next draw
   }
+}
+
+/**
+ * (0.7.40) What the thread is told when the live ready row could not be drawn (Rob, 2026-11-09: "There needs to be some fail-safe here"):
+ * framed as the bridge's, never the person's words. It changes no record, no note and no prompt box.
+ */
+export const DRAW_FAILED = (label: string): string =>
+  `[Massmarket bridge] The card for Package ${label} could not be drawn in this thread. Print the whole page now, as client-reply-prep §9.3 says for a card that is not ready.`
+/** (0.7.40) The tags the thread was told of (`DRAW_FAILED`): once a tag a session, so it can never repeat or loop. */
+const drawFailTold = new Set<string>()
+
+/** (0.7.40) Tell the thread, once for this tag in this session, that the live card could not be drawn: it then prints the page. */
+function tellDrawFailed($: EngineInterface, label: string): void {
+  if (!/^[0-9a-f]{12}$/.test(label) || drawFailTold.has(label)) return
+  drawFailTold.add(label)
+  void (async () => {
+    try {
+      await $.prompt.submit({ text: DRAW_FAILED(label) })
+    } catch {
+      // the row is the engine's, and its answer shows: the person can still ask for the page
+    }
+  })()
 }
 
 /** (0.7.40) This row fell back to the engine's: unlisted, and a row that was listed asks for one redraw, so its answer shows again. */
@@ -4099,11 +4130,11 @@ const SIGNED_GO = /^Send package [0-9a-f]{12}$/
 const CARD_DRAW_WAIT_S = 3
 /** (0.7.40) The card is drawn in this thread under the call (the `ToolUse` row), and in the side pane. ⛔ Its first sentence is the one the send gate parses. */
 function cardReady(label: string): string {
-  return `card ready: Package ${label}. The whole package is checked and drawn in this thread, under this call, and in the side pane. Do not print the page. Print one line saying the card is above and the go comes from its box, ending "Package ${label}.", then wait for the person.`
+  return `card ready: Package ${label}. The whole package is checked and drawn in this thread, under this call, and in the side pane. Do not print the page. Print one line saying the card is above, the go comes from its box, and they can say "print the page" if any of it doesn't show, ending "Package ${label}.", then wait for the person.`
 }
 /** (0.7.36) Ready with the pane not on a screen: most pickups run with the thread in the background. Its first sentence is the one the send gate parses, as `cardReady`'s is. */
 function cardReadyOffScreen(label: string): string {
-  return `card ready: Package ${label}. The whole package is checked and drawn in this thread, under this call; the side pane draws it too when this thread is open on a screen. Do not print the page. Print one line saying the card is above and the go comes from its box, and that they can ask here for the page if they can't see it, ending "Package ${label}.", then wait for the person.`
+  return `card ready: Package ${label}. The whole package is checked and drawn in this thread, under this call; the side pane draws it too when this thread is open on a screen. Do not print the page. Print one line saying the card is above, the go comes from its box, and they can say "print the page" if they can't see it or any of it doesn't show, ending "Package ${label}.", then wait for the person.`
 }
 function cardNotReady(reason: string): string {
   return `card not ready: ${reason}. Print the whole page.`
@@ -9772,6 +9803,7 @@ export const register: Register = on => {
       const { Box, Markdown, Text } = $.ui.resolve(e)
       const card = await cardOf($)
       let tree: RenderElement
+      let kind: 'card' | 'line' = 'line'
       const label = CARD_READY_HEAD.exec(out)?.[1]
       const asked = await askedOf($)
       // (0.7.40) the pane's own test (`cardDrawable`): where the pane draws no card, the row draws none either, and so no box to press.
@@ -9793,25 +9825,36 @@ export const register: Register = on => {
             {text ? <Markdown text={text} /> : null}
           </Box>
         )
+        kind = 'card'
       }
-      noteRow($, row)
+      noteRow($, row, kind)
       return tree
     } catch (err) {
       const why = (err instanceof Error ? err.message : String(err)).slice(0, 160)
       if (firstRowFailure(`${packageId}\n${why}`)) {
         void logAuto($, `card for package ${packageId} could not be drawn in the thread: ${why.split('{')[0]?.trim() ?? ''}`)
       }
+      // (0.7.40) the live ready row could not be drawn: the thread is told once a tag, and prints the page (`tellDrawFailed`)
+      try {
+        const asked = await askedOf($)
+        if (asked && asked.packageId === packageId && asked.toolUseId === (p.tool_use_id || e.requestId)) tellDrawFailed($, asked.label)
+      } catch {
+        // nothing on record to tell of
+      }
       return pass()
     }
   })
 
   // (0.7.40) The model's answer under a row the `ToolUse` hook drew (the card, or one of its three lines): "Do not print the page..." is the
-  // thread's to read, not the person's. Nothing visible is drawn in its place. Any other result, and one whose row fell back, is the engine's.
+  // thread's to read, not the person's. Under the live card, one dim line in its place says how to get the page if any of the card does not
+  // show (`RESULT_HINT`): drawn by this component, it stands when the app refuses the card's own tree. Under a line, nothing visible. Any
+  // other result, and one whose row fell back, is the engine's.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     const p = e.props
-    if (p.tool !== 'mcp__mm-bridge__mm' || !drawnRows.has(`${e.surface}:${p.tool_use_id || e.requestId}`)) return next(e)
-    const { Box } = $.ui.resolve(e)
-    return <Box />
+    const kind = p.tool === 'mcp__mm-bridge__mm' ? drawnRows.get(`${e.surface}:${p.tool_use_id || e.requestId}`) : undefined
+    if (!kind) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    return kind === 'card' ? <Text dimColor>{RESULT_HINT}</Text> : <Box />
   })
 
   // (0.7.40) A run of calls the desktop folds into one count line holds its `ToolUse` rows unseen: a group that holds the live `mm card`

@@ -1442,7 +1442,7 @@ export function drawCard(els: Els, d: CardDraw): Node {
       {notice && !signOf(tree) ? <Text color="warning">{notice}</Text> : null}
       {nodes}
       {changesPlaced ? null : changes}
-      {Button ? <Button key={`mm-card-page:${card.packageId}`} plain label={`${marks.pageOpen ? 'Hide' : 'Show'} the page as text  ${marks.pageOpen ? '▾' : '▸'}`} onPress={() => d.onPage()} /> : null}
+      {Button ? <Button key={`mm-card-page:${card.packageId}`} plain label={marks.pageOpen ? 'Hide the page as text  ▾' : 'Anything missing? Show the whole package as text  ▸'} onPress={() => d.onPage()} /> : null}
     </Box>
   )
 }

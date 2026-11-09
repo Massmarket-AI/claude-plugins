@@ -13033,9 +13033,9 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
   }
 
   describe('0.7.33 `mm card <package id>`: whether the thread prints the page', () => {
-    const READY = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call, and in the side pane. Do not print the page. Print one line saying the card is above and the go comes from its box, ending "Package ${LABEL}.", then wait for the person.`
+    const READY = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call, and in the side pane. Do not print the page. Print one line saying the card is above, the go comes from its box, and they can say "print the page" if any of it doesn't show, ending "Package ${LABEL}.", then wait for the person.`
     /** (0.7.36) Ready with the pane not on a screen. */
-    const OFF_SCREEN = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call; the side pane draws it too when this thread is open on a screen. Do not print the page. Print one line saying the card is above and the go comes from its box, and that they can ask here for the page if they can't see it, ending "Package ${LABEL}.", then wait for the person.`
+    const OFF_SCREEN = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call; the side pane draws it too when this thread is open on a screen. Do not print the page. Print one line saying the card is above, the go comes from its box, and they can say "print the page" if they can't see it or any of it doesn't show, ending "Package ${LABEL}.", then wait for the person.`
     const WHOLE_ID = 'card not ready: give the whole package id, not the 8-character tag, and ask again.'
     const notReady = (why: string) => `card not ready: ${why}. Print the whole page.`
     const own = { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } }, renderer: 'tree' as const, pickup: PICKUP }
@@ -13268,7 +13268,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       // global-config/hooks/send-gate.js, CARD_READY: its first capture is held against the go's 12
       const CARD_READY = /^card ready: Package ([0-9a-f]{12})\./
       for (const said of [READY, OFF_SCREEN]) expect(CARD_READY.exec(said)?.[1]).toBe(LABEL)
-      expect(READY).toBe(`card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call, and in the side pane. Do not print the page. Print one line saying the card is above and the go comes from its box, ending "Package ${LABEL}.", then wait for the person.`)
+      expect(READY).toBe(`card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call, and in the side pane. Do not print the page. Print one line saying the card is above, the go comes from its box, and they can say "print the page" if any of it doesn't show, ending "Package ${LABEL}.", then wait for the person.`)
       expect(OFF_SCREEN.endsWith(`ending "Package ${LABEL}.", then wait for the person.`)).toBe(true)
     })
 
@@ -13734,8 +13734,8 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
   })
 
   describe('0.7.40 the card in the thread: the row of the thread\'s own `mm card` call is the whole card, with a Changes field', () => {
-    const READY = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call, and in the side pane. Do not print the page. Print one line saying the card is above and the go comes from its box, ending "Package ${LABEL}.", then wait for the person.`
-    const OFF_SCREEN = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call; the side pane draws it too when this thread is open on a screen. Do not print the page. Print one line saying the card is above and the go comes from its box, and that they can ask here for the page if they can't see it, ending "Package ${LABEL}.", then wait for the person.`
+    const READY = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call, and in the side pane. Do not print the page. Print one line saying the card is above, the go comes from its box, and they can say "print the page" if any of it doesn't show, ending "Package ${LABEL}.", then wait for the person.`
+    const OFF_SCREEN = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call; the side pane draws it too when this thread is open on a screen. Do not print the page. Print one line saying the card is above, the go comes from its box, and they can say "print the page" if they can't see it or any of it doesn't show, ending "Package ${LABEL}.", then wait for the person.`
     /** The send gate's own two patterns (global-config/hooks/send-gate.js `CARD_READY` and `CARD_PRESS_NOTE`), copied here as it pins them. */
     const CARD_READY = /^card ready: Package ([0-9a-f]{12})\./
     const CARD_PRESS_NOTE = /^\[Massmarket bridge, no reply needed\] Card signed in the side pane: Package ([0-9a-f]{12}), page ([0-9a-f]{12})\. Nothing has been sent\.$/
@@ -14083,7 +14083,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
     const result = ($: Engine, toolUseId: string, output: unknown) =>
       $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'ToolResult', requestId: toolUseId, props: { tool_use_id: toolUseId, tool: 'mcp__mm-bridge__mm', output, isErrored: false } as never })
 
-    test('the model\'s answer under the card is not drawn for the person; under a row the bridge left to the engine it is', async ($, on) => {
+    test('the model\'s answer under the card is not drawn for the person, the fail-safe line is in its place; under a row the bridge left to the engine it is', async ($, on) => {
       world(on, own)
       const asked = watchAsked(on)
       engineDraws(on, 'ToolResult')
@@ -14093,13 +14093,13 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       const firstId = String(asked()?.toolUseId)
       const second = await tool($, `card ${PKG}`)
       const secondId = String(asked()?.toolUseId)
-      // the card's row, then its answer: nothing visible
+      // the card's row, then under it in place of its answer one dim line: how to get the page if any of the card does not show
       const r = await row($, secondId, second)
       const res = await result($, secondId, second)
-      expect(await lines(res)).toEqual([])
-      expect(await res.drawn()).toMatchObject({ type: 'Box' })
+      expect(await lines(res)).toEqual([`If any part of the card above doesn't show, say "print the page" and your thread prints the whole package as text.`])
+      expect(await res.drawn()).toMatchObject({ type: 'Text' })
       expect(JSON.stringify(await res.drawn())).not.toContain('card ready')
-      // an earlier ready row draws its line, and its answer is hidden as well
+      // an earlier ready row draws its line, and its answer is hidden, with nothing in its place
       const old = await row($, firstId, first)
       expect(await lines(old)).toEqual([`Shown again below. Package ${LABEL}.`])
       const oldRes = await result($, firstId, first)
