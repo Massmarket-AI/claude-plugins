@@ -12998,7 +12998,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
   })
 
   for (const surface of SURFACES) {
-    test(`in the client's own thread (${surface}): the box opens at the end of the turn that got \`mm card\`'s ready, with no page printed, and a signature is recorded and puts exactly the go in the prompt box`, async ($, on) => {
+    test(`in the client's own thread (${surface}): the box opens at the end of the turn that got \`mm card\`'s ready, with no page printed, and a signature is recorded and (0.7.41) sends exactly the go into the thread as the person's own message`, async ($, on) => {
       const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } }, renderer: 'tree', pickup: PICKUP })
       await mm($, '')
       const u = await mount($, surface)
@@ -13024,10 +13024,13 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       const signedNote = SIGNED(String(record.page_sha256).slice(0, 12))
       expect(w.appended.filter(t => t.includes(SIGNED_START)).map(t => JSON.parse(t)), surface).toEqual([{ type: 'user', role: 'user', isMeta: true, content: [{ type: 'text', text: signedNote }] }])
       expect(w.fills, surface).toEqual([])
-      await w.clock.advance(3_100)
-      expect(w.fills, surface).toEqual([`Send package ${LABEL}`])
       expect(w.prompts, surface).toEqual([])
-      expect((await lines(u)).join('\n'), surface).toContain(`Sealed: "Send package ${LABEL}" is in your prompt box. Press Enter to send it.`)
+      await w.clock.advance(3_100)
+      // (0.7.41) one press is the go: the words go into the thread under the bridge's origin, as the person's own, and nothing in the prompt box
+      for (let i = 0; i < 200 && !w.prompts.length; i++) await new Promise(r => setTimeout(r, 2))
+      expect(w.prompts, surface).toEqual([{ text: `Send package ${LABEL}`, origin: { kind: 'plugin', name: 'mm-bridge', asUser: true } }])
+      expect(w.fills, surface).toEqual([])
+      expect((await lines(u)).join('\n'), surface).toContain(`Sealed and sent: your go for Package ${LABEL} is in the thread, and it is sending the package now.`)
       await u.unmount()
     })
   }
@@ -13544,8 +13547,9 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
         for (let i = 0; i < 200 && !w.appended.some(t => t.includes(SIGNED_START)); i++) await new Promise(r => setTimeout(r, 2))
         expect(w.written.filter(f => f.path.endsWith('/.claude/mm-hooks/card-signed.jsonl')).length).toBe(1)
         await w.clock.advance(3_100)
-        expect(w.fills).toEqual([`Send package ${LABEL}`])
-        expect(w.prompts).toEqual([])
+        for (let i = 0; i < 200 && !w.prompts.length; i++) await new Promise(r => setTimeout(r, 2))
+        expect(w.prompts).toEqual([{ text: `Send package ${LABEL}`, origin: { kind: 'plugin', name: 'mm-bridge', asUser: true } }])
+        expect(w.fills).toEqual([])
         await u.unmount()
       })
 
@@ -13762,7 +13766,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
         props: { tool_use_id: toolUseId, tool: 'mcp__mm-bridge__mm', input: { args: `card ${PKG}` }, isRunning: false, isErrored: false, isInterrupted: false, output } as never,
       })
     const hasBox = async (u: Drawing) => (await buttons(u)).some(([k]) => k === `mm-card-sign-btn:${LABEL}`)
-    const SEALED = `Sealed: "Send package ${LABEL}" is in your prompt box. Press Enter to send it.`
+    const SEALED = `Sealed and sent: your go for Package ${LABEL} is in the thread, and it is sending the package now.`
     const recorded = (w: { written: Array<{ path: string; text: string }> }) => w.written.findLast(f => f.path.endsWith('/.claude/mm-hooks/card-signed.jsonl'))
     const ROW_GONE_TEXT = 'This card is not held here right now. Open this client in the side pane, or ask your thread to show the package again.'
 
@@ -13832,16 +13836,19 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       expect(m?.[1]).toBe(LABEL)
       expect(m?.[2]).toBe(String(record.page_sha256).slice(0, 12))
       expect(w.fills).toEqual([])
-      await w.clock.advance(3_100)
-      expect(w.fills).toEqual([`Send package ${LABEL}`])
       expect(w.prompts).toEqual([])
+      await w.clock.advance(3_100)
+      for (let i = 0; i < 200 && !w.prompts.length; i++) await new Promise(res => setTimeout(res, 2))
+      expect(w.prompts).toEqual([{ text: `Send package ${LABEL}`, origin: { kind: 'plugin', name: 'mm-bridge', asUser: true } }])
+      expect(w.fills).toEqual([])
+      for (let i = 0; i < 200 && !(await lines(r)).join('\n').includes(SEALED); i++) await new Promise(res => setTimeout(res, 2))
       expect((await lines(r)).join('\n')).toContain(SEALED)
       expect((await lines(u)).join('\n')).toContain(SEALED)
-      // a press in the pane now writes nothing more: one signature for both
+      // a press in the pane now writes nothing more: one signature for both, one go
       await u.press({ key: `mm-card-sign-btn:${LABEL}` }).catch(() => undefined)
       await w.clock.advance(3_100)
       expect(w.appended.filter(t => t.includes(SIGNED_START))).toHaveLength(1)
-      expect(w.fills).toEqual([`Send package ${LABEL}`])
+      expect(w.prompts).toEqual([{ text: `Send package ${LABEL}`, origin: { kind: 'plugin', name: 'mm-bridge', asUser: true } }])
       await r.unmount()
       await u.unmount()
     })
@@ -14183,12 +14190,12 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       const said = (await lines(t)).join('\n')
       expect(said).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
       expect(await t.findAll({ type: 'Input' })).toEqual([])
-      expect(said).toContain(`Signing puts "Send package ${LABEL}" in your prompt box; Enter sends it. Changes go in the chat box.`)
+      expect(said).toContain(`One press signs and sends: "Send package ${LABEL}" goes to your thread as your go, and it sends the package. Changes go in the chat box.`)
       expect(said).not.toContain('Changes box')
       await t.unmount()
     })
 
-    test('a turn that starts while the envelope flies puts nothing in the prompt box and drops the signature: the box closes, says why, and comes back for a second press once the turn ends', async ($, on) => {
+    test('a turn that starts while the envelope flies sends nothing and drops the signature: the box closes, says why, and comes back for a second press once the turn ends', async ($, on) => {
       const w = world(on, own)
       const asked = watchAsked(on)
       const u = await shown($)
@@ -14203,7 +14210,8 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await $.turn.start({ text: 'make it shorter', turnId: 't-change' })
       await w.clock.advance(3_100)
       expect(w.fills).toEqual([])
-      const BUSY = 'Your thread started working while you signed, so nothing went in your prompt box. Sign again once it finishes.'
+      expect(w.prompts.filter(p => p.text.startsWith('Send package'))).toEqual([])
+      const BUSY = 'Your thread started working while you signed, so nothing was sent. Sign again once it finishes.'
       for (let i = 0; i < 200 && !(await lines(r)).join('\n').includes(BUSY); i++) await new Promise(res => setTimeout(res, 2))
       expect((await lines(r)).join('\n')).toContain(BUSY)
       expect((await lines(u)).join('\n')).toContain(BUSY)
@@ -14220,7 +14228,9 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       expect(w.appended.filter(t => t.includes(SIGNED_START))).toHaveLength(2)
       expect(w.written.filter(f => f.path.endsWith('/.claude/mm-hooks/card-signed.jsonl'))).toHaveLength(2)
       await w.clock.advance(3_100)
-      expect(w.fills).toEqual([`Send package ${LABEL}`])
+      for (let i = 0; i < 200 && !w.prompts.some(p => p.text.startsWith('Send package')); i++) await new Promise(res => setTimeout(res, 2))
+      expect(w.prompts.filter(p => p.text.startsWith('Send package'))).toEqual([{ text: `Send package ${LABEL}`, origin: { kind: 'plugin', name: 'mm-bridge', asUser: true } }])
+      expect(w.fills).toEqual([])
       for (let i = 0; i < 200 && !(await lines(r)).join('\n').includes(SEALED); i++) await new Promise(res => setTimeout(res, 2))
       expect((await lines(r)).join('\n')).toContain(SEALED)
       for (const m of [r, u]) await m.unmount()
@@ -14237,7 +14247,9 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await r.press({ key: `mm-card-sign-btn:${LABEL}` })
       for (let i = 0; i < 200 && !w.appended.some(t => t.includes(SIGNED_START)); i++) await new Promise(res => setTimeout(res, 2))
       await w.clock.advance(3_100)
-      expect(w.fills).toEqual([`Send package ${LABEL}`])
+      for (let i = 0; i < 200 && !(await lines(r)).join('\n').includes(SEALED); i++) await new Promise(res => setTimeout(res, 2))
+      expect(w.prompts).toEqual([{ text: `Send package ${LABEL}`, origin: { kind: 'plugin', name: 'mm-bridge', asUser: true } }])
+      expect(w.fills).toEqual([])
       expect((await lines(r)).join('\n')).toContain(SEALED)
       expect(await r.findAll({ type: 'Input' })).toEqual([])
       expect(await u.findAll({ type: 'Input' })).toEqual([])
