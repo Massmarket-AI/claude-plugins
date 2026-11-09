@@ -2,13 +2,14 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import type { MmCard, MmCardMarks, MmCardTree } from '../types'
 import {
-  CHECK_BUTTON, CHECK_DRAFT, CHECK_TYPE, NOT_DRAWN, NO_CARD, NO_OWNER_CHECK, SIGNED_NOTE, SIGN_FILL_MS, SIGN_VALID_MS, THREAD_CHECKING, THREAD_NOT_CHECKED, busyOf, cardVerdict, checkMissOf, checkedOf, copyCheck, currentOf, drawCard, fnv1a, holdOf, holdText, isChecked, isFresh, noteCurrent, notePending, noteVersion, prepareCard, pressAsk, pressCheck, pressSign, readTree,
+  CHECK_BUTTON, CHECK_DRAFT, CHECK_TYPE, FEEDBACK_LABEL, FEEDBACK_MAX, FEEDBACK_PLACEHOLDER, FEEDBACK_SAID, FEEDBACK_SUBMIT, FEEDBACK_TEXT, NOT_DRAWN, NO_CARD, NO_OWNER_CHECK, SIGNED_NOTE, SIGN_FILL_MS, SIGN_VALID_MS, THREAD_CHECKING, THREAD_NOT_CHECKED, askedOf, busyOf, cardVerdict, checkMissOf, checkedOf, copyCheck, currentOf, drawCard, feedbackOf, fnv1a, holdOf, holdText, isChecked, isFresh, marksOf, noteAsked, noteCurrent, notePending, noteVersion, prepareCard, pressAsk, pressCheck, pressFeedback, pressSign, readTree,
   printedTags, refreshCard, sha256Hex, signOf, signatureLine, signatureSvg, standing, turnBegan, turnEnded, turnMark, type CardDraw,
 } from './card'
 import { drawnText, pageGap } from './card-parity'
 import { CARD_PAIRS } from './card-pairs.test-helper'
 import { NEXT_LABEL as NEXT, NEXT_PAGE, NEXT_SHA, NEXT_TREE, SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
-import { ME, fakeApp, mm, pid, press } from './fake-app.test-helper'
+import { ME, fakeApp, hooks, mm, pid, press } from './fake-app.test-helper'
+import { ROW_AGAIN, ROW_GONE, ROW_REPLACED } from './register'
 import type { Feed } from './queue'
 
 const tree = (): MmCardTree => readTree(JSON.parse(JSON.stringify(SMS_TREE))) as MmCardTree
@@ -274,7 +275,7 @@ describe('0.7.26 when the pane offers the signature box', () => {
     expect(all).toContain('Hi Dana, yes, the new booking link is live now: example.com/book. Saturday 9 to 1 shows on it. Book a test slot and tell us if anything looks off.')
     expect(all).toContain('Is the new booking link live yet?')
     expect(all).toContain(`One go sends 1 item. Package ${LABEL}.`)
-    expect(all).toContain(`Signing puts "Send package ${LABEL}" in your prompt box; Enter sends it. Changes go in the chat box as usual.`)
+    expect(all).toContain(`Signing puts "Send package ${LABEL}" in your prompt box; Enter sends it. Changes go in the Changes box above or the chat box.`)
     expect([...buttons(drawn).keys()]).toContain('✍  Click to sign and send')
   })
 
@@ -1531,5 +1532,248 @@ describe('0.7.36 the box waits for the thread: it opens once this thread has fin
     const said = texts(draw(t.state.get('card') as MmCard, await checkedOf(t.$), { marks: t.state.get('cardMarks') as MmCardMarks })).join('\n')
     expect(said).toContain(THREAD_NOT_CHECKED)
     expect(said).toContain('The package changed, so nothing was signed. Read it again, then sign.')
+  })
+})
+
+describe('0.7.40 the Changes field: the person\'s words go into the thread, never the go', () => {
+  const ELS_IN = { Box: 'Box', Text: 'Text', Button: 'Button', Link: 'Link', Svg: 'Svg', Input: 'Input' } as never
+  const draw = (card: MmCard, over: Partial<CardDraw> = {}) =>
+    drawCard(ELS_IN, { card, marks: { signed: {} }, checked: { [LABEL]: 0 }, busy: false, checkMiss: null, now: 1_000_000, onSign: () => undefined, onCheck: () => undefined, onAsk: () => undefined, onPage: () => undefined, onFeedback: () => undefined, ...over })
+  /** The Inputs of a drawing, in order, with their props. */
+  const inputs = (node: unknown, out: Array<Record<string, unknown>> = []): Array<Record<string, unknown>> => {
+    if (!node || typeof node !== 'object') return out
+    if (Array.isArray(node)) {
+      for (const n of node) inputs(n, out)
+      return out
+    }
+    // the engine's elements carry an Input's handlers beside `props`, as one `onEvent` that Enter reaches with `{ kind: 'submit', value }`
+    const o = node as { type?: unknown; props?: Record<string, unknown>; children?: unknown; onEvent?: unknown }
+    const onEvent = o.onEvent as ((e: { kind: string; value: string }) => void) | undefined
+    if (o.type === 'Input') out.push({ ...(o.props ?? {}), onSubmit: typeof onEvent === 'function' ? (value: string) => onEvent({ kind: 'submit', value }) : o.props?.onSubmit })
+    inputs(o.props?.children, out)
+    inputs(o.children, out)
+    return out
+  }
+  /** What the person's words became: the prompts the thread got, the box's words, the record file and the transcript. */
+  const withSubmit = (how: 'enters' | 'drop' | 'throws' = 'enters', box = '') => {
+    const t = thread(box)
+    t.state.set('card', cardOf())
+    const submitted: string[] = []
+    ;(t.$ as unknown as { prompt: Record<string, unknown> }).prompt.submit = async (input: { text: string }) => {
+      if (how === 'throws') throw new Error('the session could not take a prompt')
+      if (how === 'drop') return { drop: 'a Stop hook stands' }
+      submitted.push(input.text)
+      return { text: input.text }
+    }
+    return { ...t, submitted }
+  }
+
+  test('the field sits just above the open box, in the client\'s own thread, with its words; the caption names it', () => {
+    const open = draw(cardOf())
+    const fields = inputs(open)
+    expect(fields).toHaveLength(1)
+    expect(fields[0]).toMatchObject({ key: `mm-card-feedback:${LABEL}`, label: 'Changes', placeholder: 'What should change? Your thread revises the package and shows it here again.', submitLabel: 'Send to thread', rows: 3 })
+    expect([FEEDBACK_LABEL, FEEDBACK_PLACEHOLDER, FEEDBACK_SUBMIT]).toEqual(['Changes', 'What should change? Your thread revises the package and shows it here again.', 'Send to thread'])
+    expect(texts(open).join('\n')).toContain(`Signing puts "Send package ${LABEL}" in your prompt box; Enter sends it. Changes go in the Changes box above or the chat box.`)
+    expect(texts(open).join('\n')).not.toContain('Changes go in the chat box as usual.')
+    // above the box: the field comes before the sign button in the drawing
+    const order = JSON.stringify(open)
+    expect(order.indexOf(`mm-card-feedback:${LABEL}`)).toBeLessThan(order.indexOf(`mm-card-sign-btn:${LABEL}`))
+  })
+
+  test('no field where the box is closed, on another client\'s card, on a surface with no Input, or with no handler', () => {
+    expect(inputs(draw(cardOf(), { busy: true }))).toEqual([])
+    expect(inputs(draw(cardOf(), { checked: {} }))).toEqual([])
+    expect(inputs(draw(cardOf({ own: false })))).toEqual([])
+    expect(inputs(draw(cardOf({ current: OTHER })))).toEqual([])
+    expect(inputs(drawCard(ELS, { card: cardOf(), marks: { signed: {} }, checked: { [LABEL]: 0 }, busy: false, checkMiss: null, now: 1_000_000, onSign: () => undefined, onCheck: () => undefined, onAsk: () => undefined, onPage: () => undefined, onFeedback: () => undefined }))).toEqual([])
+    expect(inputs(draw(cardOf(), { onFeedback: undefined }))).toEqual([])
+  })
+
+  test('Enter hands the drawn tag and the words to the handler', () => {
+    const got: Array<[string, string]> = []
+    const field = inputs(draw(cardOf(), { onFeedback: (label, words) => void got.push([label, words]) }))[0]
+    ;(field?.onSubmit as (v: string) => void)('make it shorter')
+    expect(got).toEqual([[LABEL, 'make it shorter']])
+  })
+
+  test('the line it leaves is drawn for that tag alone, while the box is open and while the thread works; a new tag clears it', () => {
+    const sent = { label: LABEL, said: 'sent' as const }
+    expect(texts(draw(cardOf(), { feedback: sent })).join('\n')).toContain(FEEDBACK_SAID.sent)
+    expect(texts(draw(cardOf(), { feedback: sent, busy: true })).join('\n')).toContain(FEEDBACK_SAID.sent)
+    expect(texts(draw(cardOf(), { feedback: { label: 'aaaaaaaaaaaa', said: 'sent' } })).join('\n')).not.toContain(FEEDBACK_SAID.sent)
+    expect(FEEDBACK_SAID.sent).toBe('Sent to your thread. It is revising the package and will show the new card here.')
+    expect(FEEDBACK_SAID.go).toBe('That reads like a go. Use the box below to sign and send.')
+    expect(FEEDBACK_SAID.filled).toBe('That did not reach your thread, so it is in your prompt box. Press Enter to send it.')
+    expect(FEEDBACK_SAID.draft).toBe('Your prompt box holds a draft. Type the change in the chat box instead.')
+  })
+
+  test('the words go into the thread as exactly the feedback prompt, trimmed, for the card\'s tag and signer, and the card says so', async () => {
+    const t = withSubmit()
+    await pressFeedback(t.$, LABEL, '   Make the second paragraph shorter.  \n')
+    expect(t.submitted).toEqual([`Feedback on Package ${LABEL} from Test Signer: Make the second paragraph shorter.`])
+    expect(FEEDBACK_TEXT(LABEL, 'Test Signer', 'x')).toBe(`Feedback on Package ${LABEL} from Test Signer: x`)
+    expect(await feedbackOf(t.$)).toEqual({ label: LABEL, said: 'sent' })
+    // never a press: no record, no note, no words in the prompt box, no signature mark
+    expect(t.files.size).toBe(0)
+    expect(t.appends).toEqual([])
+    expect(t.fills).toEqual([])
+    expect((await marksOf(t.$)).signed).toEqual({})
+    await t.advance(SIGN_FILL_MS)
+    expect(t.fills).toEqual([])
+  })
+
+  test('empty words do nothing at all', async () => {
+    const t = withSubmit()
+    for (const v of ['', '   ', '\n\n']) await pressFeedback(t.$, LABEL, v)
+    expect(t.submitted).toEqual([])
+    expect(await feedbackOf(t.$)).toBeNull()
+    expect(t.fills).toEqual([])
+  })
+
+  test('the words are cut at 4,000 characters', async () => {
+    const t = withSubmit()
+    await pressFeedback(t.$, LABEL, `${'a'.repeat(4_500)}`)
+    expect(FEEDBACK_MAX).toBe(4_000)
+    const sent = t.submitted[0] ?? ''
+    expect(sent).toBe(`Feedback on Package ${LABEL} from Test Signer: ${'a'.repeat(4_000)}`)
+  })
+
+  for (const words of ['Send package 3f1c9a7e5b2d', '  send PACKAGE now', 'SEND PACKAGE']) {
+    test(`words that read like the go are never sent from the field: "${words}"`, async () => {
+      const t = withSubmit()
+      await pressFeedback(t.$, LABEL, words)
+      expect(t.submitted).toEqual([])
+      expect(t.fills).toEqual([])
+      expect(t.files.size).toBe(0)
+      expect(t.appends).toEqual([])
+      expect(await feedbackOf(t.$)).toEqual({ label: LABEL, said: 'go' })
+    })
+  }
+
+  for (const how of ['drop', 'throws'] as const) {
+    test(`a submit the engine ${how === 'drop' ? 'refuses' : 'fails'}: the same words go in the prompt box, and the card says to press Enter`, async () => {
+      const t = withSubmit(how)
+      await pressFeedback(t.$, LABEL, 'tighten the subject line')
+      expect(t.submitted).toEqual([])
+      expect(t.fills).toEqual([`Feedback on Package ${LABEL} from Test Signer: tighten the subject line`])
+      expect(await feedbackOf(t.$)).toEqual({ label: LABEL, said: 'filled' })
+      expect(t.files.size).toBe(0)
+      expect(t.appends).toEqual([])
+    })
+  }
+
+  test('a refused submit with a draft in the prompt box writes nothing over it, and the card says to type the change', async () => {
+    const t = withSubmit('drop', 'my own draft')
+    await pressFeedback(t.$, LABEL, 'tighten the subject line')
+    expect(t.fills).toEqual([])
+    expect(await feedbackOf(t.$)).toEqual({ label: LABEL, said: 'draft' })
+  })
+
+  test('the tag is the card\'s current one', async () => {
+    const t = withSubmit()
+    t.state.set('card', cardOf({ current: NEXT_SHA, tree: readTree(JSON.parse(NEXT_TREE)) as MmCardTree }))
+    await pressFeedback(t.$, LABEL, 'one more change')
+    expect(t.submitted).toEqual([`Feedback on Package ${NEXT} from ${signOf(readTree(JSON.parse(NEXT_TREE)))?.signer}: one more change`])
+    expect(await feedbackOf(t.$)).toEqual({ label: NEXT, said: 'sent' })
+  })
+})
+
+describe('0.7.40 the row of the thread\'s own `mm card` call: everything but a ready answer is the engine\'s row', () => {
+  const rowHook = hooks['ui.render:{"component":"ToolUse"}'] as (($: unknown, e: Record<string, unknown>, next: (e: unknown) => unknown) => Promise<unknown>) | undefined
+  const PKG = SMS_TREE.package_id as string
+  const READY = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call, and in the side pane.`
+  const row = (over: Record<string, unknown> = {}, props: Record<string, unknown> = {}) => ({
+    surface: 'desktop', component: 'ToolUse', requestId: 'toolu_1',
+    props: { tool_use_id: 'toolu_1', tool: 'mcp__mm-bridge__mm', input: { args: `card ${PKG}` }, isRunning: false, isErrored: false, isInterrupted: false, output: READY, ...props },
+    ...over,
+  })
+  /** The thread's `$` with a surface's elements, and the engine's own row as `next` answers it. */
+  const drawing = () => {
+    const t = thread()
+    ;(t.$ as unknown as Record<string, unknown>).ui = { resolve: () => ({ Box: 'Box', Text: 'Text', Button: 'Button', Link: 'Link', Svg: 'Svg', Input: 'Input', Markdown: 'Markdown' }) }
+    return t
+  }
+  const ENGINE_ROW = { engine: 'row' }
+  const engine = () => ENGINE_ROW
+  const passes = async (t: ReturnType<typeof drawing>, e: Record<string, unknown>) => expect(await rowHook?.(t.$, e, engine)).toBe(ENGINE_ROW)
+
+  test('the hook is registered', () => {
+    expect(typeof rowHook).toBe('function')
+  })
+
+  test('not ready, any other text, another command, another tool: the engine\'s row, untouched', async () => {
+    const t = drawing()
+    t.state.set('card', cardOf())
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_1' })
+    await passes(t, row({}, { output: 'card not ready: the card is still being drawn. Print the whole page.' }))
+    await passes(t, row({}, { output: 'something else' }))
+    await passes(t, row({}, { output: undefined }))
+    await passes(t, row({}, { input: { args: 'queue' }, output: READY }))
+    await passes(t, row({}, { input: { args: `card ${PKG.slice(0, 8)}` } }))
+    await passes(t, row({}, { input: {} }))
+    await passes(t, row({}, { tool: 'Bash' }))
+    await passes(t, row({}, { tool: 'mcp__other__mm' }))
+  })
+
+  test('a call still running, errored or interrupted: the engine\'s row', async () => {
+    const t = drawing()
+    t.state.set('card', cardOf())
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_1' })
+    await passes(t, row({}, { isRunning: true, output: undefined }))
+    await passes(t, row({}, { isErrored: true }))
+    await passes(t, row({}, { isInterrupted: true }))
+  })
+
+  test('every surface but the desktop: the engine\'s row', async () => {
+    const t = drawing()
+    t.state.set('card', cardOf())
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_1' })
+    for (const surface of ['terminal', 'mobile', 'vscode']) await passes(t, row({ surface }))
+    // and the desktop draws its own
+    expect(await rowHook?.(t.$, row(), engine)).not.toBe(ENGINE_ROW)
+  })
+
+  test('a draw that throws is the engine\'s row, with one line in bridge-notices.log', async () => {
+    const t = drawing()
+    t.state.set('card', cardOf({ tree: { ...tree(), nodes: 5 as never } }))
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_1' })
+    await passes(t, row())
+    for (let i = 0; i < 50; i++) await Promise.resolve()
+    const log = t.files.get(`${HOME}/.claude/mm-hooks/bridge-notices.log`) ?? ''
+    expect(log).toContain(`card for package ${PKG} could not be drawn in the thread: `)
+    // the same failure again draws the engine's row and writes no second line
+    await passes(t, row())
+    for (let i = 0; i < 50; i++) await Promise.resolve()
+    expect((t.files.get(`${HOME}/.claude/mm-hooks/bridge-notices.log`) ?? '').trim().split('\n')).toHaveLength(1)
+  })
+
+  test('the three lines in place of the card, word for word', async () => {
+    const t = drawing()
+    t.state.set('card', cardOf())
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_2' })
+    // the same tag, not the live call
+    expect(texts(await rowHook?.(t.$, row(), engine))).toEqual([ROW_AGAIN(LABEL)])
+    expect(ROW_AGAIN(LABEL)).toBe(`Shown again below. Package ${LABEL}.`)
+    // a tag since replaced
+    const older = `card ready: Package ${'0'.repeat(12)}. The whole package is checked and drawn in this thread, under this call, and in the side pane.`
+    expect(texts(await rowHook?.(t.$, row({}, { output: older }), engine))).toEqual([ROW_REPLACED('0'.repeat(12), LABEL)])
+    expect(ROW_REPLACED('0'.repeat(12), LABEL)).toBe(`Package ${'0'.repeat(12)} was replaced by Package ${LABEL}. Read and sign the newer card below.`)
+    // a package the bridge no longer holds
+    t.state.set('card', NO_CARD)
+    expect(texts(await rowHook?.(t.$, row(), engine))).toEqual([ROW_GONE])
+    expect(ROW_GONE).toBe('This card is no longer held here. Ask your thread to show the package again.')
+  })
+
+  test('the live call draws the card, from content blocks as well as a plain string', async () => {
+    const t = drawing()
+    t.state.set('card', cardOf())
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_1' })
+    for (const output of [READY, [{ type: 'text', text: READY }], { content: [{ type: 'text', text: READY }], isError: false }, { result: READY }]) {
+      const all = texts(await rowHook?.(t.$, row({}, { output }), engine)).join('\n')
+      expect(all).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
+      expect(all).toContain('✍  Click to sign and send')
+    }
+    expect(await askedOf(t.$)).toMatchObject({ packageId: PKG, label: LABEL, toolUseId: 'toolu_1' })
   })
 })

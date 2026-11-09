@@ -383,6 +383,19 @@ export type MmCardMarks = {
  */
 export type MmCardChecked = Record<string, number>
 
+/**
+ * (0.7.40) The live `mm card` call: the main thread's own call (no `agentId`) whose answer was the last `card ready: Package <12>.`,
+ * by its `tool_use_id`. That call's row in the thread draws the whole card; any earlier ready row draws one line. A later ready replaces it.
+ */
+export type MmCardAsked = { packageId: string; label: string; toolUseId: string; at: number }
+
+/**
+ * (0.7.40) What the card's Changes field last said, for the tag it was submitted on: the words went into the thread (`sent`), read like the
+ * go and were not sent (`go`), or did not reach the thread and were put in the prompt box (`filled`), or could not be because the box holds
+ * a draft (`draft`) or could not be filled (`none`). Drawn for that tag alone.
+ */
+export type MmCardFeedback = { label: string; said: 'sent' | 'go' | 'filled' | 'draft' | 'none' }
+
 declare module 'claude-code' {
   interface PluginState {
     'mm-bridge': {
@@ -405,6 +418,10 @@ declare module 'claude-code' {
       cardBusy: boolean
       /** (0.7.36) The tag whose Check button could not put its words in the prompt box, and why: the pane says what to type. Null with none. */
       cardCheckMiss: { label: string; filled: 'draft' | 'none' } | null
+      /** (0.7.40) The main thread's own `mm card` call that got the last `card ready`: its row draws the card. */
+      cardAsked: MmCardAsked
+      /** (0.7.40) What the card's Changes field last said, and for which tag. Null with nothing. */
+      cardFeedback: MmCardFeedback | null
       /** (0.7.38) The ready reply packages this thread's pane listed last: a new one scrolls the pane to its top. */
       seenPackages: string[]
     }
