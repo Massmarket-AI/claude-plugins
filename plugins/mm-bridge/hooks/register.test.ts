@@ -14188,7 +14188,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await t.unmount()
     })
 
-    test('a turn that starts while the envelope flies puts nothing in the prompt box: the record and the note as always, and the box says to sign again', async ($, on) => {
+    test('a turn that starts while the envelope flies puts nothing in the prompt box and drops the signature: the box closes, says why, and comes back for a second press once the turn ends', async ($, on) => {
       const w = world(on, own)
       const asked = watchAsked(on)
       const u = await shown($)
@@ -14203,10 +14203,26 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await $.turn.start({ text: 'make it shorter', turnId: 't-change' })
       await w.clock.advance(3_100)
       expect(w.fills).toEqual([])
-      const stale = 'The package changed while signing, so nothing went in the prompt box. Read the new package and sign again.'
-      for (let i = 0; i < 200 && !(await lines(r)).join('\n').includes(stale); i++) await new Promise(res => setTimeout(res, 2))
-      expect((await lines(r)).join('\n')).toContain(stale)
-      expect((await lines(u)).join('\n')).toContain(stale)
+      const BUSY = 'Your thread started working while you signed, so nothing went in your prompt box. Sign again once it finishes.'
+      for (let i = 0; i < 200 && !(await lines(r)).join('\n').includes(BUSY); i++) await new Promise(res => setTimeout(res, 2))
+      expect((await lines(r)).join('\n')).toContain(BUSY)
+      expect((await lines(u)).join('\n')).toContain(BUSY)
+      expect((await lines(r)).join('\n')).not.toContain(SEALED)
+      expect(await hasBox(r)).toBe(false)
+      expect(await hasBox(u)).toBe(false)
+      // the turn ends: the box is offered again for the same tag, in the row and the pane
+      await endTurn($)
+      expect(await hasBox(r)).toBe(true)
+      expect(await hasBox(u)).toBe(true)
+      // a second press: a second record line and note, then exactly the go
+      await r.press({ key: `mm-card-sign-btn:${LABEL}` })
+      for (let i = 0; i < 200 && w.appended.filter(t => t.includes(SIGNED_START)).length < 2; i++) await new Promise(res => setTimeout(res, 2))
+      expect(w.appended.filter(t => t.includes(SIGNED_START))).toHaveLength(2)
+      expect(w.written.filter(f => f.path.endsWith('/.claude/mm-hooks/card-signed.jsonl'))).toHaveLength(2)
+      await w.clock.advance(3_100)
+      expect(w.fills).toEqual([`Send package ${LABEL}`])
+      for (let i = 0; i < 200 && !(await lines(r)).join('\n').includes(SEALED); i++) await new Promise(res => setTimeout(res, 2))
+      expect((await lines(r)).join('\n')).toContain(SEALED)
       for (const m of [r, u]) await m.unmount()
     })
 

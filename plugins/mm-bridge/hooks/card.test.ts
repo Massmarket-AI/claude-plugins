@@ -321,7 +321,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     expect(texts(drawn).join(' ')).toContain(`Sealed. Your prompt box holds a draft, so type: Send package ${LABEL}`)
   })
 
-  test('(0.7.40) the thread starts a turn while the envelope flies (a change sent from the card): nothing goes in the box, and the box says to read and sign again', async () => {
+  test('(0.7.40) the thread starts a turn while the envelope flies: nothing goes in the box, the signature is dropped, and the box comes back for a new one once the turn ends', async () => {
     const t = thread()
     t.state.set('card', cardOf())
     t.state.set('cardMarks', { signed: {} })
@@ -334,10 +334,28 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     await t.advance(SIGN_FILL_MS)
     expect(t.fills).toEqual([])
     const m = t.state.get('cardMarks') as MmCardMarks
-    expect(m.signed[LABEL]?.filled).toBe('stale')
-    const said = texts(drawChecked({ card: t.state.get('card') as MmCard, marks: m, now: 1_000_000 + SIGN_FILL_MS, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined })).join(' ')
-    expect(said).toContain('The package changed while signing, so nothing went in the prompt box. Read the new package and sign again.')
-    expect(t.order).toEqual(['record', 'note'])
+    // nothing stands for the tag: the signature is dropped, never left as a stale one that holds the box shut
+    expect(m.signed).toEqual({})
+    expect(m.notice).toEqual({ packageId: SMS_TREE.package_id, kind: 'busy' })
+    const BUSY = 'Your thread started working while you signed, so nothing went in your prompt box. Sign again once it finishes.'
+    const at = (busy: boolean) =>
+      drawCard(ELS, { card: t.state.get('card') as MmCard, marks: t.state.get('cardMarks') as MmCardMarks, checked: { [LABEL]: 0 }, busy, checkMiss: null, now: 1_000_000 + SIGN_FILL_MS, onSign: () => undefined, onCheck: () => undefined, onAsk: () => undefined, onPage: () => undefined })
+    // while the thread works: the box is closed, and the card says why
+    expect([...buttons(at(true)).keys()]).not.toContain('✍  Click to sign and send')
+    expect(texts(at(true)).join(' ')).toContain(BUSY)
+    // the turn ends: the box is offered again for the same tag, the notice with it
+    t.state.set('cardBusy', false)
+    expect([...buttons(at(false)).keys()]).toContain('✍  Click to sign and send')
+    expect(texts(at(false)).join(' ')).toContain(BUSY)
+    // and a second press signs again: a new record line and a new note, then exactly the go in the prompt box
+    await pressSign(t.$, LABEL, t.log)
+    expect(t.files.get(SIGNED_FILE)?.trim().split('\n')).toHaveLength(2)
+    expect(t.appends).toHaveLength(2)
+    await t.advance(SIGN_FILL_MS)
+    expect(t.fills).toEqual([`Send package ${LABEL}`])
+    const after = t.state.get('cardMarks') as MmCardMarks
+    expect(after.signed[LABEL]?.filled).toBe('filled')
+    expect(after.notice).toBeUndefined()
   })
 
   test('the package changes while the envelope flies: nothing goes in the box', async () => {

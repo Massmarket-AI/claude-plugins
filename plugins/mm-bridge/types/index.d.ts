@@ -371,8 +371,11 @@ export type MmCardMarks = {
   pageOpen?: boolean
   /** (0.7.33) A press reading the package again: which tag, and since when. */
   checking?: { label: string; at: number }
-  /** (0.7.33) What the last press found when it recorded nothing: the card changed, or a read or record failed. */
-  notice?: { packageId: string; kind: 'changed' | 'retry' }
+  /**
+   * (0.7.33) What the last press found when it recorded nothing: the card changed, or a read or record failed. (0.7.40) Or `busy`: the
+   * thread started a turn while the envelope flew, so the words never went in the prompt box and the signature was dropped.
+   */
+  notice?: { packageId: string; kind: 'changed' | 'retry' | 'busy' }
 }
 
 /**

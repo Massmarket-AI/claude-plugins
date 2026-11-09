@@ -944,9 +944,16 @@ export async function pressSign($: EngineInterface, label: string, log: SignLog)
   await $.clock.after(SIGN_FILL_MS, async () => {
     const { value: now } = await $.state.get(CARD)
     const latest = await marksOf($)
-    // the package or its page changed, or the pane moved to another package, while the envelope flew: nothing goes in the box.
-    // (0.7.40) Nor when the thread has started a turn since (a change sent from the card, say): the package may be changing.
-    const holds = !now || now.tree?.label !== label || now.pageSha !== pageSha || Boolean(holdOf(now)) || (await busyOf($))
+    // the package or its page changed, or the pane moved to another package, while the envelope flew: nothing goes in the box
+    const holds = !now || now.tree?.label !== label || now.pageSha !== pageSha || Boolean(holdOf(now))
+    // (0.7.40) nor when the thread has started a turn since (a change sent from the card, say). The signature is dropped, so nothing stands
+    // for this tag and the box comes back by its usual holds once the turn ends; the record line already written stays, and a new press
+    // writes a new one. The card says why.
+    if (!holds && (await busyOf($))) {
+      const { [label]: _dropped, ...signed } = latest.signed
+      await $.state.set(CARD_MARKS, { ...latest, signed, notice: { packageId, kind: 'busy' } })
+      return
+    }
     const filled = holds ? 'stale' : await fillWords($, `Send package ${label}`)
     const mine = latest.signed[label]
     if (mine) await $.state.set(CARD_MARKS, { ...latest, signed: { ...latest.signed, [label]: { ...mine, filled } } })
@@ -1302,6 +1309,7 @@ export function holdText(hold: string, card: MmCard, label: string): string {
 const NOTICE = {
   changed: 'The package changed, so nothing was signed. Read it again, then sign.',
   retry: 'That did not go through, so nothing was signed. Try again, or ask your thread to print the page.',
+  busy: 'Your thread started working while you signed, so nothing went in your prompt box. Sign again once it finishes.',
 } as const
 
 /**
