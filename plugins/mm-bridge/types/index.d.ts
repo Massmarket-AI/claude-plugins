@@ -390,11 +390,12 @@ export type MmCardChecked = Record<string, number>
 export type MmCardAsked = { packageId: string; label: string; toolUseId: string; at: number }
 
 /**
- * (0.7.40) What the card's Changes field last said, for the tag it was submitted on: the words went into the thread (`sent`), read like the
- * go and were not sent (`go`), or did not reach the thread and were put in the prompt box (`filled`), or could not be because the box holds
- * a draft (`draft`) or could not be filled (`none`). Drawn for that tag alone.
+ * (0.7.40) What the card's Changes field last said, for the tag it was submitted on: the words went into the thread (`sent`; `busy` when the
+ * thread was working, so it reads them once it finishes), read like the go and were not sent (`go`), came for a tag the card has since moved
+ * on from (`changed`, said under the new tag), or did not reach the thread and were put in the prompt box (`filled`), or could not be because
+ * the box holds a draft (`draft`) or could not be filled (`none`). Drawn for that tag alone.
  */
-export type MmCardFeedback = { label: string; said: 'sent' | 'go' | 'filled' | 'draft' | 'none' }
+export type MmCardFeedback = { label: string; said: 'sent' | 'busy' | 'go' | 'changed' | 'filled' | 'draft' | 'none' }
 
 declare module 'claude-code' {
   interface PluginState {

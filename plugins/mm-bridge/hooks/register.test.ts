@@ -13352,7 +13352,8 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
           expect((await lines(u)).join('\n'), surface).toContain(WAITING)
           expect((await lines(u)).join('\n'), surface).not.toContain(NOT_CHECKED)
           expect((await buttons(u)).find(([k]) => k === `mm-card-check:${LABEL}`)?.[1], surface).toBe('Check this package')
-          expect(await tool($, `card ${PKG}`), surface).toBe(READY)
+          // (0.7.40) the on-screen words only for a pane the desktop drew: the terminal's gets the words that say they can ask for the page
+          expect(await tool($, `card ${PKG}`), surface).toBe(surface === 'desktop' ? READY : OFF_SCREEN)
           expect(await hasBox(u), surface).toBe(false)
           await endTurn($)
           expect(await hasBox(u), surface).toBe(true)
@@ -13763,6 +13764,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
     const hasBox = async (u: Drawing) => (await buttons(u)).some(([k]) => k === `mm-card-sign-btn:${LABEL}`)
     const SEALED = `Sealed: "Send package ${LABEL}" is in your prompt box. Press Enter to send it.`
     const recorded = (w: { written: Array<{ path: string; text: string }> }) => w.written.findLast(f => f.path.endsWith('/.claude/mm-hooks/card-signed.jsonl'))
+    const ROW_GONE_TEXT = 'This card is not held here right now. Open this client in the side pane, or ask your thread to show the package again.'
 
     test('both ready answers start with the sentence the send gate parses, for this tag, and say the card is in the thread', async ($, on) => {
       for (const said of [READY, OFF_SCREEN]) expect(CARD_READY.exec(said)?.[1]).toBe(LABEL)
@@ -13918,7 +13920,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
         plugin: 'mm-bridge', surface: 'desktop', component: 'ToolUse', requestId: 'toolu_other',
         props: { tool_use_id: 'toolu_other', tool: 'mcp__mm-bridge__mm', input: { args: `card ${other}` }, isRunning: false, isErrored: false, isInterrupted: false, output: said } as never,
       })
-      expect(await lines(r)).toEqual(['This card is no longer held here. Ask your thread to show the package again.'])
+      expect(await lines(r)).toEqual(['This card is not held here right now. Open this client in the side pane, or ask your thread to show the package again.'])
       await r.unmount()
       await u.unmount()
     })
@@ -13930,6 +13932,10 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       const sub = String(((await $.tool.call({ tool: 'mcp__mm-bridge__mm', args: `card ${PKG}`, agentId: 'agent_1' } as never)) as { result?: unknown }).result ?? '')
       expect(sub).toBe(READY)
       expect(asked()).toBeUndefined()
+      // (0.7.40) no live call on record: a ready row says the card is not held here, never that it is shown below
+      const subRow = await row($, 'toolu_sub', sub)
+      expect(await lines(subRow)).toEqual([ROW_GONE_TEXT])
+      await subRow.unmount()
       const said = await tool($, `card ${PKG}`)
       const live = asked()
       expect(live?.label).toBe(LABEL)
@@ -14058,6 +14064,11 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await r.input({ key: `mm-card-feedback:${LABEL}`, text: 'and add the Saturday hours' })
       for (let i = 0; i < 200 && !w.prompts.length; i++) await new Promise(res => setTimeout(res, 2))
       expect(w.prompts.map(p => p.text)).toEqual([`Feedback on Package ${LABEL} from Test Signer: and add the Saturday hours`])
+      // (0.7.40) the thread was working: the card says it reads this when it finishes, and that Stop is the way to stop a send
+      const busySaid = 'Your thread is busy, so it reads this when it finishes. A send already under way is not stopped by this: press Stop for that.'
+      for (let i = 0; i < 200 && !(await lines(r)).join('\n').includes(busySaid); i++) await new Promise(res => setTimeout(res, 2))
+      expect((await lines(r)).join('\n')).toContain(busySaid)
+      expect((await lines(u)).join('\n')).toContain(busySaid)
       expect(recorded(w)).toBeUndefined()
       await r.unmount()
       await u.unmount()
@@ -14121,6 +14132,63 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       const other = await group([call('toolu_read', 'Read'), call('toolu_elsewhere')], 'g2')
       expect(seen.at(-1)?.isExpanded).toBe(false)
       for (const m of [holding, other, u]) await m.unmount()
+    })
+
+    test('where the pane draws no card (its client part emptied), the row draws one dim line, and a box already on screen signs nothing', async ($, on) => {
+      const w = world(on, own)
+      const asked = watchAsked(on)
+      // the client part as `/mm link` to a client on no list leaves it: emptied, with the card still held
+      let emptied = false
+      on('state.get', { plugin: 'mm-bridge' }, async (_$, e, next) => {
+        const got = (await next(e)) as { value: { value?: unknown } }
+        if (!emptied || e.key !== 'view') return got as never
+        return { value: { ...got.value, value: { text: '', heading: '' } } } as never
+      })
+      const notices: unknown[] = []
+      on('state.set', { plugin: 'mm-bridge' }, async (_$, e, next) => {
+        if (e.key === 'cardMarks') notices.push((e.value as { notice?: unknown } | null)?.notice)
+        return next(e)
+      })
+      const u = await shown($)
+      const said = await tool($, `card ${PKG}`)
+      const r = await row($, String(asked()?.toolUseId), said)
+      await endTurn($)
+      expect(await hasBox(r)).toBe(true)
+      emptied = true
+      // a press on the box drawn before: no record, no note, no words, and the box says to try again
+      await r.press({ key: `mm-card-sign-btn:${LABEL}` })
+      await w.clock.advance(3_100)
+      for (let i = 0; i < 50; i++) await new Promise(res => setTimeout(res, 1))
+      expect(recorded(w)).toBeUndefined()
+      expect(w.appended.filter(t => t.includes(SIGNED_START))).toEqual([])
+      expect(w.fills).toEqual([])
+      // refused by the pane's own test, with the box's own try-again notice, and never a check of the page begun
+      expect(notices.at(-1)).toEqual({ packageId: PKG, kind: 'retry' })
+      // drawn again, the row is the line, with no box to press, as the pane has no card
+      await r.unmount()
+      const again = await row($, String(asked()?.toolUseId), said)
+      expect(await lines(again)).toEqual([ROW_GONE_TEXT])
+      expect(await buttons(again)).toEqual([])
+      expect((await lines(u)).join('\n')).not.toContain('Hi! Is the new booking link live yet?')
+      for (const m of [again, u]) await m.unmount()
+    })
+
+    test('once the row is signed there is no Changes field in the row or the pane, and nothing in its place', async ($, on) => {
+      const w = world(on, own)
+      const asked = watchAsked(on)
+      const u = await shown($)
+      const said = await tool($, `card ${PKG}`)
+      const r = await row($, String(asked()?.toolUseId), said)
+      await endTurn($)
+      expect((await r.findAll({ type: 'Input' })).map(i => i.key)).toEqual([`mm-card-feedback:${LABEL}`])
+      await r.press({ key: `mm-card-sign-btn:${LABEL}` })
+      for (let i = 0; i < 200 && !w.appended.some(t => t.includes(SIGNED_START)); i++) await new Promise(res => setTimeout(res, 2))
+      await w.clock.advance(3_100)
+      expect(w.fills).toEqual([`Send package ${LABEL}`])
+      expect((await lines(r)).join('\n')).toContain(SEALED)
+      expect(await r.findAll({ type: 'Input' })).toEqual([])
+      expect(await u.findAll({ type: 'Input' })).toEqual([])
+      for (const m of [r, u]) await m.unmount()
     })
   })
 })

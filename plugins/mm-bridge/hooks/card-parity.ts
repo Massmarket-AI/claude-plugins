@@ -179,6 +179,16 @@ interface Card {
   frame: Set<string>
 }
 
+/**
+ * (0.7.40) The card's own lines, where a state line can stand: every paragraph but a body, a quote or a draft the go sends (`BODY_CLASS`,
+ * `SEND_BODY`), so that words a client or a teammate wrote never read as the card's state. `canChange` reads it.
+ */
+export function frameLines(tree: MmCardTree): Set<string> {
+  const frame = new Set<string>()
+  for (const leaf of leavesOf(tree.nodes)) if (!leaf.isBody && !SEND_BODY.test(leaf.c)) frame.add(squash(leaf.text))
+  return frame
+}
+
 function readCard(tree: MmCardTree): Card {
   const root: MmCardNode[] = []
   const sections = new Map<string, MmCardNode>()

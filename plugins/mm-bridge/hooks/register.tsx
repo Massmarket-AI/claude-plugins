@@ -3671,7 +3671,7 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
 // (0.7.26) The reply-package card: prepared on arrival, drawn natively above the page (card.tsx).
 import { teamFrom, teamHeadingNow, teamLines, teamText, withMoves } from './team'
 import type { TeamNow, TeamSeen } from './team'
-import { agentListReadable, askedOf, busyOf, cardHooks, cardOf, cardVerdict, checkMissOf, checkedOf, clearCard, currentOf, drawCard, feedbackOf, isOnScreen, marksOf, noteAsked, noteDrawn, notePending, noteVersion, onWindows, prepareCard, pressAsk, pressCheck, pressFeedback, pressSign, refreshCard, resetCard, showKept, togglePage, turnBegan, turnEnded, turnMark, type Els, type PageRead } from './card'
+import { agentListReadable, askedOf, busyOf, cardDrawable, cardHooks, cardOf, cardVerdict, checkMissOf, checkedOf, clearCard, currentOf, drawCard, feedbackOf, isOnScreen, marksOf, noteAsked, noteDrawn, notePending, noteVersion, onWindows, prepareCard, pressAsk, pressCheck, pressFeedback, pressSign, refreshCard, resetCard, showKept, togglePage, turnBegan, turnEnded, turnMark, type Els, type PageRead } from './card'
 import { holderName } from './queue'
 
 /**
@@ -3743,6 +3743,8 @@ async function signPressed($: EngineInterface, label: string): Promise<void> {
       await foldPage($, read.markdown)
       return read
     },
+    // (0.7.40) the pane's own test of whether it draws the card: a box the pane does not show signs nothing, from the pane or the row
+    held: async () => cardDrawable((await clientPart($)).text, await cardOf($)),
   })
 }
 
@@ -3765,7 +3767,8 @@ async function drawLiveCard($: EngineInterface, els: Els, card: MmCard): Promise
     onCheck: label => void pressCheck($, label),
     onAsk: words => void pressAsk($, words),
     onPage: () => void togglePage($),
-    onFeedback: (label, words) => void pressFeedback($, label, words),
+    // the field's own card: the package and the tag it was drawn for, which `pressFeedback` holds against the card as it is then
+    onFeedback: (label, words) => void pressFeedback($, { packageId: card.packageId, label }, words),
   })
 }
 
@@ -3797,9 +3800,18 @@ function rowText(out: unknown, depth = 0): string {
 /** (0.7.40) The lines a ready row draws in place of the card, word for word. */
 export const ROW_REPLACED = (label: string, now: string): string => `Package ${label} was replaced by Package ${now}. Read and sign the newer card below.`
 export const ROW_AGAIN = (label: string): string => `Shown again below. Package ${label}.`
-export const ROW_GONE = 'This card is no longer held here. Ask your thread to show the package again.'
-/** (0.7.40) The draw failures of a row already noted this session: one line each in bridge-notices.log. */
+export const ROW_GONE = 'This card is not held here right now. Open this client in the side pane, or ask your thread to show the package again.'
+/** (0.7.40) The draw failures of a row already noted this session: one line each in bridge-notices.log. At most ROW_FAILURES_MAX, the oldest dropped first. */
 const rowFailures = new Set<string>()
+export const ROW_FAILURES_MAX = 200
+
+/** (0.7.40) Whether this draw failure is new: noted once, the set kept to ROW_FAILURES_MAX. */
+export function firstRowFailure(key: string): boolean {
+  if (rowFailures.has(key)) return false
+  rowFailures.add(key)
+  for (const old of [...rowFailures].slice(0, Math.max(0, rowFailures.size - ROW_FAILURES_MAX))) rowFailures.delete(old)
+  return true
+}
 /**
  * (0.7.40) The rows the `ToolUse` hook drew a tree for, by `<surface>:<tool_use_id>`: the `ToolResult` hook hides the model's answer under
  * these alone. A row is taken off again whenever its draw falls back to the engine's. At most ROWS_MAX, the oldest dropped first.
@@ -4170,7 +4182,9 @@ async function cardCommand($: EngineInterface, arg: string, ownCall: boolean): P
     // the state is set; the words are on the screen once the pane has drawn them. A pane that is not shown draws nothing to wait for.
     for (let s = 0; shown && s < CARD_DRAW_WAIT_S && !isOnScreen(packageId, card.tree); s++) await aSecond($)
     if (ownCall && turnMark() === turn) await notePending($, [label])
-    return shown && isOnScreen(packageId, card.tree) ? cardReady(label) : cardReadyOffScreen(label)
+    // (0.7.40) on screen means the pane is placed and shown and drew this card on the desktop; anywhere else the off-screen words, which
+    // say they can ask for the page
+    return shown && isOnScreen(packageId, card.tree, 'desktop') ? cardReady(label) : cardReadyOffScreen(label)
   } catch {
     return cardNotReady('the card could not be checked')
   }
@@ -9452,7 +9466,7 @@ export const register: Register = on => {
   // Directory lead's row has two, anywhere: Mark handled and Not client mail (OW refuses route and bootstrap for it).
   on('ui.render', { component: 'Pane', requestId: PANE_QUEUE }, async ($, e) => {
     // (0.7.33) nothing counts as drawn until this draw has been made (`noteDrawn` under the tree): `mm card` asks
-    noteDrawn(null)
+    noteDrawn(null, String(e.surface))
     const { Box, Button, Link, Markdown, Text } = $.ui.resolve(e)
     // (New people) a picker only where the surface draws one: the mobile app's table has no Select
     const Select = PICKER_SURFACES.has(String(e.surface)) ? ($.ui.resolve(e) as Partial<Pick<Elements['desktop'], 'Select'>>).Select : undefined
@@ -9472,7 +9486,8 @@ export const register: Register = on => {
     // (0.7.26) the reply-package card, above the page it draws (the page folds under it once the card is drawn)
     const card = await cardOf($)
     const cardMarks = await marksOf($)
-    const cardShown = Boolean(client.text && card?.packageId && card.tree)
+    // (0.7.40) one test with the row of the thread's own `mm card` call and a press on the box (`cardDrawable`)
+    const cardShown = cardDrawable(client.text, card)
     // (0.7.33) the line that says it cannot be drawn on this computer, over the part as it is
     const cardFailed = Boolean(client.text && card?.packageId && !card.tree && card.status === 'failed')
     // (0.7.40) the same drawing as the row of the thread's own `mm card` call (`drawLiveCard`)
@@ -9722,7 +9737,7 @@ export const register: Register = on => {
     )
     // (0.7.33) the tree is built: only now does this card count as drawn. ⛔ What the engine does with a tree it refuses after this
     // return (`ui.render`: "An invalid tree, or a throw while drawn, draws the engine's") this hook cannot see.
-    noteDrawn(cardShown ? card : null)
+    noteDrawn(cardShown ? card : null, String(e.surface))
     return drawn
   })
 
@@ -9732,7 +9747,8 @@ export const register: Register = on => {
   // pane's does and a press there is the pane's press. The model reads only the short answer: the card costs it nothing.
   // - The live call (`askedOf`, noted by the tool hook) draws the card while the bridge still holds that package at that tag.
   // - An earlier ready row of the same tag says it is shown again below; one of a tag since replaced names the newer one; one whose
-  //   package the bridge no longer holds says so. One dim line each, no tree, no box.
+  //   package the pane does not draw now (`cardDrawable`, the pane's own test), or with no live call on record, says so. One dim line
+  //   each, no tree, no box.
   // - Anything else is the engine's row, untouched: another tool, another command, a not-ready answer, a call still running, errored or
   //   interrupted, and every surface but the desktop's. ⛔ A draw that throws is the engine's row too, with one line in bridge-notices.log.
   // - A row that drew its own tree is listed (`drawnRows`), and the answer under it is hidden (the `ToolResult` hook); a fallback unlists it.
@@ -9756,10 +9772,14 @@ export const register: Register = on => {
       let tree: RenderElement
       const label = CARD_READY_HEAD.exec(out)?.[1]
       const asked = await askedOf($)
-      if (card.packageId !== packageId || !card.tree || !card.tree.label) tree = <Text dimColor>{ROW_GONE}</Text>
+      // (0.7.40) the pane's own test (`cardDrawable`): where the pane draws no card, the row draws none either, and so no box to press.
+      // With no live call on record (a new process), no row draws the card, so none may say it is shown below.
+      const held = cardDrawable((await clientPart($)).text, card) && card.packageId === packageId && Boolean(card.tree?.label)
+      if (!held || !card.tree) tree = <Text dimColor>{ROW_GONE}</Text>
       else if (!label) return pass()
+      else if (!asked || asked.packageId !== card.packageId) tree = <Text dimColor>{ROW_GONE}</Text>
       else if (card.tree.label !== label) tree = <Text dimColor>{ROW_REPLACED(label, card.tree.label)}</Text>
-      else if (!asked || asked.toolUseId !== (p.tool_use_id || e.requestId)) tree = <Text dimColor>{ROW_AGAIN(label)}</Text>
+      else if (asked.toolUseId !== (p.tool_use_id || e.requestId)) tree = <Text dimColor>{ROW_AGAIN(label)}</Text>
       else {
         const drawn = await drawLiveCard($, $.ui.resolve(e) as Els, card)
         // the card's own `Show the page as text` opens the page here as it does in the pane: one mark for both
@@ -9776,8 +9796,7 @@ export const register: Register = on => {
       return tree
     } catch (err) {
       const why = (err instanceof Error ? err.message : String(err)).slice(0, 160)
-      if (!rowFailures.has(`${packageId}\n${why}`)) {
-        rowFailures.add(`${packageId}\n${why}`)
+      if (firstRowFailure(`${packageId}\n${why}`)) {
         void logAuto($, `card for package ${packageId} could not be drawn in the thread: ${why.split('{')[0]?.trim() ?? ''}`)
       }
       return pass()
