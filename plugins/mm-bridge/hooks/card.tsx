@@ -59,6 +59,13 @@
  *   box, a `Changes` field sends `Feedback on Package <12> from <signer>: <words>` into the thread as the person's own prompt
  *   (`pressFeedback`). It never writes the go, a signature record or a note, and clears a go for that tag left in the prompt box: the
  *   thread revises, asks `mm card` again, and the new card is drawn under that call.
+ * - (0.7.43) The quote view. (Rob, 2026-11-09: "When pricing pages are attached in reply packets, or when PDF quotes are, we need
+ *   some sort of render of the invoice, the line items, and the hours quoted in the reply package visualization in the side panel…
+ *   It also needs to update itself if the work in the thread changes.") Under our reply, `What the quote says`: a box per quote PDF
+ *   (`rp-quote`) with its file and draft, its source and invoice lines, each table row on one line (number, words, hours, amount, the
+ *   last two kept short), a subtotal muted, and a ⚠️ check in the warning tone. OW binds the quote into `package_sha256`, so a quote
+ *   that changes is a new version: drawn again by `freshenPackage`, its box closed until the thread checks it. `quotesGap` holds the
+ *   page's section against it (card-parity.ts).
  */
 import type { BoxProps, ButtonProps, ElementConstructor, EngineInterface, InputProps, LinkProps, Register, RenderNode, SvgProps, TextProps } from 'claude-code'
 
@@ -1148,6 +1155,8 @@ export type Els = {
 type Node = RenderNode | null
 
 const has = (c: string | undefined, name: string) => ` ${c ?? ''} `.includes(` ${name} `)
+/** (0.7.43) The four cells of a quote row, as render_visual.py classes them. */
+const QUOTE_CELL = /(?:^|\s)rp-quote-(?:no|line|hours|amt)(?:\s|$)/
 
 const DC_TEXT = '#dbdee1'
 const DC_DIM = '#949ba4'
@@ -1185,8 +1194,8 @@ function runStyle(c: string | undefined, ctx: Ctx): TextProps {
   return p
 }
 
-/** A paragraph's text style, from its classes and where it sits. */
-function paraStyle(c: string | undefined, ctx: Ctx): TextProps {
+/** A paragraph's text style, from its classes and where it sits; (0.7.43) a quote's check also by the mark its words open with. */
+function paraStyle(c: string | undefined, ctx: Ctx, words = ''): TextProps {
   const p: TextProps = { wrap: 'wrap' }
   const dim = (): TextProps => (ctx.dark ? { color: DC_DIM } : { dimColor: true })
   if (has(c, 'rp-title')) Object.assign(p, { size: 'heading', weight: 'semibold' })
@@ -1207,6 +1216,19 @@ function paraStyle(c: string | undefined, ctx: Ctx): TextProps {
   if (has(c, 'rp-gap')) Object.assign(p, { dimColor: true })
   if (has(c, 'rp-banner')) {
     const tone = toneColor(ctx.parent)
+    if (tone) p.color = tone
+  }
+  // (0.7.43) the quote view: its head like a draft's title, its source lines small, each row's cells in one line
+  if (has(c, 'rp-quote-head')) Object.assign(p, { weight: 'semibold', size: 'footnote' })
+  if (has(c, 'rp-quote-src') || has(c, 'rp-quote-inv') || has(c, 'rp-quote-more')) Object.assign(p, { size: 'caption' }, dim())
+  if (has(c, 'rp-quote-tt')) Object.assign(p, { weight: 'semibold', size: 'caption' }, dim())
+  if (QUOTE_CELL.test(c ?? '')) Object.assign(p, { size: 'footnote' }, has(ctx.parent, 'rp-quote-sub') ? { ...dim(), italic: true } : {})
+  if (has(c, 'rp-quote-no')) p.dimColor = true
+  if (has(c, 'rp-quote-hours') || has(c, 'rp-quote-amt')) p.tabular = true
+  if (has(c, 'rp-quote-total')) Object.assign(p, { weight: 'semibold', size: 'footnote' })
+  if (has(c, 'rp-quote-check')) {
+    p.size = 'footnote'
+    const tone = toneColor(c) ?? (words.startsWith('⚠') ? 'warning' : words.startsWith('✅') ? 'success' : undefined)
     if (tone) p.color = tone
   }
   if (has(c, 'rp-bub-out')) p.color = '#ffffff'
@@ -1236,8 +1258,19 @@ function boxStyle(c: string | undefined, ctx: Ctx): BoxProps {
     const tone = toneColor(c)
     Object.assign(p, { borderStyle: 'round', borderColor: tone ?? 'subtle', paddingX: 1, marginY: 'xs' })
   }
+  // (0.7.43) a quote PDF is a card of its own, and each of its table rows one line of four cells
+  if (has(c, 'rp-quote')) Object.assign(p, card)
+  if (has(c, 'rp-quote-row')) Object.assign(p, { flexDirection: 'row', gap: 1, alignItems: 'flex-start' })
   void ctx
   return p
+}
+
+/** (0.7.43) A quote row's cell, in a box of its own: the number narrow, the words taking the room and wrapping, hours and amount kept short at the right. */
+function quoteCell(els: Els, c: string | undefined, text: Node): Node {
+  const { Box } = els
+  if (has(c, 'rp-quote-no')) return <Box minWidth={3} flexShrink={0}>{text}</Box>
+  if (has(c, 'rp-quote-line')) return <Box flexGrow={1} flexShrink={1}>{text}</Box>
+  return <Box minWidth={has(c, 'rp-quote-amt') ? 9 : 6} flexShrink={0} alignItems="flex-end">{text}</Box>
 }
 
 function drawRuns(els: Els, runs: readonly MmCardRun[], ctx: Ctx): Node[] {
@@ -1259,12 +1292,13 @@ function drawPara(els: Els, node: MmCardNode, ctx: Ctx): Node {
     )
   }
   const text = (
-    <Text {...paraStyle(c, ctx)}>
+    <Text {...paraStyle(c, ctx, runs.map(r => r.s).join(''))}>
       {has(c, 'rp-qa-them') ? '“' : ''}
       {drawRuns(els, runs, ctx)}
       {has(c, 'rp-qa-them') ? '”' : ''}
     </Text>
   )
+  if (QUOTE_CELL.test(c ?? '')) return quoteCell(els, c, text)
   // a bubble: ours green (blue for iMessage) with white words, theirs in an outline
   if (has(c, 'rp-bub-out')) return <Box backgroundColor={ctx.out === 'imessage' ? '#0a72e8' : '#248a3d'} borderStyle="round" borderColor={ctx.out === 'imessage' ? '#0a72e8' : '#248a3d'} paddingX={1}>{text}</Box>
   if (has(c, 'rp-bub-in')) return <Box borderStyle="round" borderColor="subtle" paddingX={1}>{text}</Box>

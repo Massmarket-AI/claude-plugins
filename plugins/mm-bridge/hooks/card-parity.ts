@@ -68,7 +68,14 @@ const SECTIONS: Record<string, string> = {
   'Other items': 'Other items',
   Links: 'Links',
   Findings: 'Findings',
+  'What the quote says': 'What the quote says',
 }
+/** (0.7.43) The four cells of a quote row: never a state line of the card, as the page's row is never one (`stateGap`). */
+const QUOTE_CELL = /\brp-quote-(?:no|line|hours|amt)\b/
+/** (0.7.43) The header of each quote table on the page: the card draws none. */
+const QUOTE_TABLE_HEAD = /^\|\s*#\s*\|\s*Line\s*\|\s*Hours\s*\|\s*Amount\s*\|$/
+/** (0.7.43) A line that carries its check's mark: the mark is part of what it says, so it is held as written. */
+const MARKED = /^(?:✅|⚠)/u
 
 /** One space for any whitespace, and no edges. Nothing else about the words changes. */
 export function squash(text: string): string {
@@ -215,7 +222,7 @@ function readCard(tree: MmCardTree): Card {
     }
   }
   const frame = new Set<string>()
-  for (const leaf of leavesOf(tree.nodes)) if (!leaf.isBody) frame.add(squash(leaf.text))
+  for (const leaf of leavesOf(tree.nodes)) if (!leaf.isBody && !QUOTE_CELL.test(leaf.c)) frame.add(squash(leaf.text))
   return { root: leavesOf(root), sections, items, frame }
 }
 
@@ -710,6 +717,66 @@ function contributionsGap(section: PageSection, node: MmCardNode | undefined): s
   return n + 1 === bys.length ? '' : `the page holds ${n + 1} additions by the team, the card ${bys.length}`
 }
 
+/**
+ * (0.7.43) "What the quote says" (Rob, 2026-11-09: "we need some sort of render of the invoice, the line items, and the hours
+ * quoted"). Its blocks one to one in order with the card's `rp-quote` boxes, each by its `####` head. Each plain line of a block is a
+ * whole line of that block's box, a ✅ or ⚠️ line with its mark; each table row one to one in order with the box's `rp-quote-row`s,
+ * its four cells each equal to the leaf the card draws for it. The counts of blocks and of rows are equal.
+ */
+function quotesGap(section: PageSection, node: MmCardNode | undefined): string {
+  if (!node) return section.blocks.some(b => b.kind !== 'blank') ? 'the page holds a section the card does not (What the quote says)' : ''
+  const boxes = findAll(node.k ?? [], 'rp-quote')
+  const outside = hayOf(leavesOf((node.k ?? []).filter(n => !/(?:^|\s)rp-quote(?:\s|$)/.test(n.c ?? ''))))
+  let n = -1
+  let rows: MmCardNode[] = []
+  let row = 0
+  let frame = new Set<string>()
+  let marked = new Set<string>()
+  const done = (): string => (n >= 0 && row !== rows.length ? `the page holds ${row} rows in quote block ${n + 1}, the card ${rows.length}` : '')
+  for (const b of section.blocks) {
+    if (b.kind === 'blank') continue
+    if (b.kind === 'fence') return lineOf(squash(b.text))
+    const raw = b.text.trim()
+    if (/^#### /.test(raw)) {
+      const gap = done()
+      if (gap) return gap
+      n += 1
+      const box = boxes[n]
+      const head = unmark(raw.slice(5))
+      if (!box) return lineOf(head)
+      const leaves = leavesOf((box.k ?? []).filter(k => !/\brp-quote-row\b/.test(k.c ?? '')))
+      if (firstOf(leaves, /\brp-quote-head\b/)?.text !== head) return lineOf(head)
+      rows = findAll(box.k ?? [], 'rp-quote-row')
+      row = 0
+      frame = new Set(leaves.map(l => squash(l.text)))
+      marked = new Set(leaves.map(l => squash(l.runs.map(runWords).join(''))))
+      continue
+    }
+    if (STRUCTURAL.some(p => p.test(raw)) || QUOTE_TABLE_HEAD.test(raw)) continue
+    if (n < 0) {
+      const gap = lineGap(outside, b.text)
+      if (gap) return gap
+      continue
+    }
+    if (/^\|/.test(raw)) {
+      const cells = cellsOf(raw)
+      const drawn = rows[row]
+      row += 1
+      if (!drawn) return `the page holds more rows in quote block ${n + 1} than the card (${unmark(cells[1] ?? '').slice(0, 40)})`
+      const leaves = leavesOf([drawn])
+      const want = ['rp-quote-no', 'rp-quote-line', 'rp-quote-hours', 'rp-quote-amt'].map(cls => firstOf(leaves, new RegExp(`\\b${cls}\\b`))?.text)
+      if (cells.length !== want.length) return lineOf(unmark(raw))
+      const at = cells.findIndex((cell, i) => cell !== want[i])
+      if (at >= 0) return lineOf(cells[at] as string)
+      continue
+    }
+    if (MARKED.test(raw) ? !marked.has(squash(raw)) : !frame.has(unmark(raw))) return lineOf(unmark(raw))
+  }
+  const gap = done()
+  if (gap) return gap
+  return n + 1 === boxes.length ? '' : `the page holds ${n + 1} quote blocks, the card ${boxes.length}`
+}
+
 /** A state line on one side and not the other. */
 function stateGap(page: readonly Block[], card: Card): string {
   const lines = new Set<string>()
@@ -764,6 +831,7 @@ export function pageGap(page: string | null, tree: MmCardTree): string {
     else if (section.head === 'Added by the team') gap = contributionsGap(section, node)
     else if (section.head === 'Links') gap = linksGap(section, node)
     else if (section.head === 'Findings') gap = findingsGap(section, node)
+    else if (section.head === 'What the quote says') gap = quotesGap(section, node)
     else if (section.head.startsWith('Follow-ups') || section.head === 'Proposed follow-ups') gap = followupsGap(section, node)
     else if (!(section.head in SECTIONS) || !node) {
       if (section.blocks.some(b => b.kind !== 'blank')) gap = `the page holds a section the card does not (${section.head.slice(0, 60)})`
