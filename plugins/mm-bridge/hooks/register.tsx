@@ -204,7 +204,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.41'
+export const VERSION = '0.7.42'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -3801,6 +3801,13 @@ function rowText(out: unknown, depth = 0): string {
 
 /** (0.7.40) The lines a ready row draws in place of the card, word for word. */
 export const ROW_REPLACED = (label: string, now: string): string => `Package ${label} was replaced by Package ${now}. Read and sign the newer card below.`
+/**
+ * (0.7.42) The same, where the thread has drawn no card of the newer version yet (its own last `mm card` answered for an older one):
+ * the package was revised since, and the side pane has drawn it again (`freshenPackage`). Rob, 2026-11-09: "If a reply package is
+ * updated by a thread after it's already been created, it should be displayed inside the thread for clicking and sending."
+ */
+export const ROW_REPLACED_PANE = (label: string, now: string): string =>
+  `Package ${label} was replaced by Package ${now}. The newer card is in the side pane, and your thread draws it here once it checks it.`
 export const ROW_AGAIN = (label: string): string => `Shown again below. Package ${label}.`
 export const ROW_GONE = 'This card is not held here right now. Open this client in the side pane, or ask your thread to show the package again.'
 /**
@@ -4299,6 +4306,8 @@ async function refreshSelf($: EngineInterface, force: boolean): Promise<string> 
   const sig = partSig(it)
   const noted = await storeGet<Record<string, string>>($, 'mm.noted', {})
   if (!force && noted[me] === sig) {
+    // (0.7.42) the same package, but perhaps not the same version of it: the part follows the newest
+    await freshenPackage($, it, true)
     // (0.7.41) a package already noted before this version still gets its line in the chat, once
     await tellWaiting($, me, it)
     return 'Up to date.'
@@ -4351,6 +4360,44 @@ async function tellWaiting($: EngineInterface, me: string, it: QueueItem): Promi
     for (const old of Object.keys(fresh).slice(0, Math.max(0, Object.keys(fresh).length - TOLD_MAX))) delete fresh[old]
   })
 }
+
+/**
+ * (0.7.42, Rob 2026-11-09: "It also needs to update itself if the work in the thread changes. It seems like it stales sometimes:
+ * the thread contains a new update and is showing it there, but it's still showing in the side panel.") The client part is drawn
+ * again only when what lists the client changes (`partSig`), and a revision of the package changes none of that: the package, how
+ * far it covers and its drafts' counts stay, so a revised package (by this thread, or by a reconcile run elsewhere) stayed drawn as
+ * it first was. The feed gives no version of a package (`updated_at` is absent on every row, measured 2026-11-09), so once for each
+ * sync this thread reads OW's page of the package its part shows (one GET of the pickup view, which records nothing at OW) and, when
+ * that version is not the one its card was drawn from, draws the part and the card again. No note to the model: the thread that
+ * revised it asks `mm card` again (client-reply-prep §9.3), and the card's box stays closed on a version the thread has not checked.
+ * Never throws: a read that fails leaves the part as it is, for the next sync. Answers whether it drew again.
+ */
+async function freshenPackage($: EngineInterface, it: QueueItem, own: boolean): Promise<boolean> {
+  try {
+    const pkg = pickupOf(it)
+    if (!pkg) return false
+    const last = await storeGet<Last | null>($, 'mm.last', null)
+    const at = Number(last?.at) || 0
+    const id = await instanceId($)
+    if (!at || versionChecked.get(id) === at) return false
+    versionChecked.set(id, at)
+    const card = await cardOf($)
+    // nothing of this package drawn here yet, or a draw under way: the usual draw is the one to wait for
+    if (card.packageId !== pkg || card.status === 'rendering' || !card.current) return false
+    const read = await readOwPage($, pkg)
+    if (!read.sha || sameVersion(card.current, read.sha) || card.tree?.package_sha256 === read.sha) return false
+    await (await beginClient($, it, own, false))()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** (0.7.42) The sync (`mm.last`'s `at`) each session last checked its package's version at (`freshenPackage`). */
+const versionChecked = new Map<string, number>()
+
+/** (0.7.42) Whether a card's version (the whole hash, or the 12-character tag its page named) is this hash. */
+export const sameVersion = (current: string, sha: string): boolean => (current.length === 64 ? current === sha : current.length === 12 && sha.startsWith(current))
 
 /** (0.7.41) The button on the band's waiting line: it opens the side pane at the client's part, as Drafts does. */
 export const WAITING_OPEN = 'Open the side pane'
@@ -8725,7 +8772,11 @@ async function drawPart($: EngineInterface, key: string, pid: string, client: bo
   }
   const it = pid && client ? listedIn(await storeGet<Last | null>($, 'mm.last', null)).find(i => i.projectId === pid) : undefined
   const sig = it ? `${pid}\n${partSig(it)}` : ''
-  if (sig === drawn) return
+  if (sig === drawn) {
+    // (0.7.42) the same package, but perhaps not the same version of it: the part follows the newest
+    if (it) await freshenPackage($, it, true)
+    return
+  }
   partsDrawn.set(id, sig)
   if (it) await showClient($, it, true)
   else if (drawn) await clearClient($)
@@ -9901,7 +9952,8 @@ export const register: Register = on => {
       if (!held || !card.tree) tree = <Text dimColor>{label && (await offTheLists($, packageId)) ? ROW_LEFT(label) : ROW_GONE}</Text>
       else if (!label) return pass()
       else if (!asked || asked.packageId !== card.packageId) tree = <Text dimColor>{ROW_GONE}</Text>
-      else if (card.tree.label !== label) tree = <Text dimColor>{ROW_REPLACED(label, card.tree.label)}</Text>
+      // (0.7.42) a newer version this thread has drawn below, or one only the side pane has drawn so far
+      else if (card.tree.label !== label) tree = <Text dimColor>{asked.label === card.tree.label ? ROW_REPLACED(label, card.tree.label) : ROW_REPLACED_PANE(label, card.tree.label)}</Text>
       else if (asked.toolUseId !== (p.tool_use_id || e.requestId)) tree = <Text dimColor>{ROW_AGAIN(label)}</Text>
       else {
         const drawn = await drawLiveCard($, $.ui.resolve(e) as Els, card, String(e.surface))

@@ -9,7 +9,7 @@ import { drawnText, pageGap } from './card-parity'
 import { CARD_PAIRS } from './card-pairs.test-helper'
 import { NEXT_LABEL as NEXT, NEXT_PAGE, NEXT_SHA, NEXT_TREE, SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
 import { ME, fakeApp, hooks, mm, pid, press } from './fake-app.test-helper'
-import { DRAW_FAILED, RESULT_HINT, ROW_AGAIN, ROW_FAILURES_MAX, ROW_GONE, ROW_LEFT, ROW_REPLACED, firstRowFailure } from './register'
+import { DRAW_FAILED, RESULT_HINT, ROW_AGAIN, ROW_FAILURES_MAX, ROW_GONE, ROW_LEFT, ROW_REPLACED, ROW_REPLACED_PANE, firstRowFailure, sameVersion } from './register'
 import type { Feed } from './queue'
 
 const tree = (): MmCardTree => readTree(JSON.parse(JSON.stringify(SMS_TREE))) as MmCardTree
@@ -2166,6 +2166,18 @@ describe('0.7.40 the row of the thread\'s own `mm card` call: everything but a r
     t.state.set('card', NO_CARD)
     expect(texts(await rowHook?.(t.$, row(), engine))).toEqual([ROW_GONE])
     expect(ROW_GONE).toBe('This card is not held here right now. Open this client in the side pane, or ask your thread to show the package again.')
+  })
+
+  test('(0.7.42) a card\'s version is the whole hash, or the 12-character tag its page named; the row\'s two replaced lines, word for word', () => {
+    const sha = `${LABEL}${'0'.repeat(52)}`
+    expect(sameVersion(sha, sha)).toBe(true)
+    expect(sameVersion(LABEL, sha)).toBe(true)
+    expect(sameVersion('f'.repeat(64), sha)).toBe(false)
+    expect(sameVersion('bbbbbbbbbbbb', sha)).toBe(false)
+    // a fragment that is neither the hash nor the tag is no version
+    expect(sameVersion(LABEL.slice(0, 6), sha)).toBe(false)
+    expect(sameVersion('', sha)).toBe(false)
+    expect(ROW_REPLACED_PANE('0'.repeat(12), LABEL)).toBe(`Package ${'0'.repeat(12)} was replaced by Package ${LABEL}. The newer card is in the side pane, and your thread draws it here once it checks it.`)
   })
 
   // (0.7.41, Rob 2026-11-09: "make it disappear from the side panel once it's sent, whether you send it in the side panel or from the chat")

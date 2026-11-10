@@ -13691,6 +13691,34 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
         await u.unmount()
       })
 
+      // (0.7.42, Rob 2026-11-09: "It also needs to update itself if the work in the thread changes. It seems like it stales sometimes")
+      test('(0.7.42) a revision nobody pressed for: the next sync draws the newer card by itself, with no new note to the model', async ($, on) => {
+        const w = world(on, own)
+        await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+        await w.clock.advance(4_000)
+        const u = await shown($)
+        expect(await tool($, `card ${PKG}`)).toBe(READY)
+        await endTurn($)
+        expect(await hasBox(u)).toBe(true)
+        const notes = w.appended.length
+        // a revision made with no press here (a reconcile run folding new mail, a PATCH): a new hash on OW's page, and nothing
+        // the feed lists for the client changes
+        w.setPickup({ markdown: NEXT_PAGE, package_sha256: NEXT_SHA })
+        w.setTree(JSON.parse(NEXT_TREE))
+        for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
+        for (let i = 0; i < 200 && !(await lines(u)).join('\n').includes(NOT_CHECKED); i++) await new Promise(r => setTimeout(r, 2))
+        expect((await lines(u)).join('\n')).toContain(NOT_CHECKED)
+        expect((await buttons(u)).find(([k]) => k === `mm-card-check:${NEXT_LABEL}`)?.[1]).toBe('Check this package')
+        expect(await hasBox(u)).toBe(false)
+        // the pane followed it; the model was told nothing new
+        expect(w.appended.length).toBe(notes)
+        // the same version on the syncs after: nothing is drawn again
+        const renders = w.renders.length
+        for (let i = 0; i < 11; i++) await w.clock.advance(60_000)
+        expect(w.renders.length).toBe(renders)
+        await u.unmount()
+      })
+
       test('a page that changes with the hash the same keeps the box open', async ($, on) => {
         const w = world(on, { ...own, pickup: pick(pair) })
         w.setTree(pair.tree)
@@ -13775,6 +13803,30 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
     const SEALED = `Sealed and sent: your go for Package ${LABEL} is in the thread, and it is sending the package now.`
     const recorded = (w: { written: Array<{ path: string; text: string }> }) => w.written.findLast(f => f.path.endsWith('/.claude/mm-hooks/card-signed.jsonl'))
     const ROW_GONE_TEXT = 'This card is not held here right now. Open this client in the side pane, or ask your thread to show the package again.'
+
+    // (0.7.42, Rob 2026-11-09: "If a reply package is updated by a thread after it's already been created, it should be displayed inside
+    // the thread for clicking and sending, and the old one should disappear from the side panel at that time.")
+    test('(0.7.42) the live row of a version since replaced, no newer row yet: it says the newer card is in the side pane; once checked, below', async ($, on) => {
+      const w = world(on, own)
+      const asked = watchAsked(on)
+      const u = await shown($)
+      const said = await tool($, `card ${PKG}`)
+      expect(said).toBe(READY)
+      const live = String(asked()?.toolUseId)
+      w.setPickup({ markdown: NEXT_PAGE, package_sha256: NEXT_SHA })
+      w.setTree(JSON.parse(NEXT_TREE))
+      await u.press({ key: `drafts:${ACME}` })
+      for (let i = 0; i < 200 && !(await buttons(u)).some(([k]) => k === `mm-card-check:${NEXT_LABEL}`); i++) await new Promise(r => setTimeout(r, 2))
+      const r = await row($, live, said)
+      expect(await lines(r)).toEqual([`Package ${LABEL} was replaced by Package ${NEXT_LABEL}. The newer card is in the side pane, and your thread draws it here once it checks it.`])
+      await r.unmount()
+      // the thread checks the newer version: its own row draws that, and the old row says it is below
+      expect(await tool($, `card ${PKG}`)).toContain(`card ready: Package ${NEXT_LABEL}.`)
+      const old = await row($, live, said)
+      expect(await lines(old)).toEqual([`Package ${LABEL} was replaced by Package ${NEXT_LABEL}. Read and sign the newer card below.`])
+      await old.unmount()
+      await u.unmount()
+    })
 
     test('both ready answers start with the sentence the send gate parses, for this tag, and say the card is in the thread', async ($, on) => {
       for (const said of [READY, OFF_SCREEN]) expect(CARD_READY.exec(said)?.[1]).toBe(LABEL)
