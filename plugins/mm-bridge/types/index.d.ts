@@ -221,7 +221,12 @@ export type MmNotice = { text: string; at: number }
  * `why` (0.7.25): in a client's own thread, the one line under the band that says why the thread is pinned or why no pin
  * is needed (`threadWhy`); absent in any other thread.
  */
-export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string }
+/**
+ * (0.7.41) `waiting`: in a client's own thread, the line that says a reply package of that client waits in the side pane, drawn
+ * above the band with its own Open button for as long as the last sync lists the package (Rob, 2026-11-09: "it's important that
+ * the chat tells them a reply package is waiting in the side panel when there is one").
+ */
+export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string; waiting?: string }
 
 /**
  * (0.6.0) One line of the pane's Tracking part. `open`: the app thread (`local_…`) a press on the line opens, on a

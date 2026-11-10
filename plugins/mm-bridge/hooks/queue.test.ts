@@ -1645,6 +1645,30 @@ describe('R6: the route calls that can close something', () => {
       'grep -rn "reply-package/no-reply" docs/',
     ]) expect(isClosingRoute(command), command).toBe(false)
   })
+  // (0.7.41, Rob 2026-11-09: "I sent the reply package, but it's still showing up in my side panel like I didn't send it.")
+  const sender = '/Users/me/Projects/massmarket-ops-control-tower/skills/client-reply-prep/scripts/send_package.py'
+  const run = `--package aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee --package-sha256 ${'f'.repeat(64)}`
+  test('(0.7.41) a run of the package sender, however a thread starts it', async () => {
+    for (const command of [
+      `python3 ${sender} ${run}`,
+      `cd /Users/me/Projects/massmarket-ops-control-tower && python3 skills/client-reply-prep/scripts/send_package.py ${run} 2>&1 | tail -20`,
+      `/usr/bin/python3 "${sender}" ${run}`,
+      `python3.14 ${sender} ${run}; echo "exit=$?"`,
+      `python3 -u ${sender} ${run} --seen-prior abc`,
+    ]) expect(isClosingRoute(command), command).toBe(true)
+  })
+  test('⛔ (0.7.41) not a dry run, a read of the script, a check of it, or a run with no hash', async () => {
+    for (const command of [
+      `python3 ${sender} ${run} --dry-run`,
+      `python3 ${sender} --dry-run ${run}`,
+      `cat ${sender}`,
+      `grep -n -- --package-sha256 ${sender}`,
+      `python3 -m py_compile ${sender}`,
+      `python3 ${sender} --package aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee`,
+      `python3 /tmp/not_send_package.py.bak ${run}`,
+      `python3 /tmp/not_send_package.py ${run}`,
+    ]) expect(isClosingRoute(command), command).toBe(false)
+  })
 })
 
 // R16 (Rob, 2026-10-13: the pane said 1d late, the thread 2d late, for the same item): whole business days COMPLETED.

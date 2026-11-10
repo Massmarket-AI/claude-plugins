@@ -9,7 +9,7 @@ import { drawnText, pageGap } from './card-parity'
 import { CARD_PAIRS } from './card-pairs.test-helper'
 import { NEXT_LABEL as NEXT, NEXT_PAGE, NEXT_SHA, NEXT_TREE, SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
 import { ME, fakeApp, hooks, mm, pid, press } from './fake-app.test-helper'
-import { DRAW_FAILED, RESULT_HINT, ROW_AGAIN, ROW_FAILURES_MAX, ROW_GONE, ROW_REPLACED, firstRowFailure } from './register'
+import { DRAW_FAILED, RESULT_HINT, ROW_AGAIN, ROW_FAILURES_MAX, ROW_GONE, ROW_LEFT, ROW_REPLACED, firstRowFailure } from './register'
 import type { Feed } from './queue'
 
 const tree = (): MmCardTree => readTree(JSON.parse(JSON.stringify(SMS_TREE))) as MmCardTree
@@ -2166,6 +2166,32 @@ describe('0.7.40 the row of the thread\'s own `mm card` call: everything but a r
     t.state.set('card', NO_CARD)
     expect(texts(await rowHook?.(t.$, row(), engine))).toEqual([ROW_GONE])
     expect(ROW_GONE).toBe('This card is not held here right now. Open this client in the side pane, or ask your thread to show the package again.')
+  })
+
+  // (0.7.41, Rob 2026-11-09: "make it disappear from the side panel once it's sent, whether you send it in the side panel or from the chat")
+  test('(0.7.41) a package the last sync lists nowhere (sent, closed, handed on): its row says so, never to open it again', async () => {
+    const t = drawing()
+    const stored: Record<string, unknown> = {}
+    ;(t.$ as unknown as Record<string, unknown>).store = { get: async (k: string) => stored[k] }
+    t.state.set('card', NO_CARD)
+    t.state.set('view', { text: '', heading: '' })
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_1' })
+    // no sync on record: the line it had
+    expect(texts(await rowHook?.(t.$, row(), engine))).toEqual([ROW_GONE])
+    // a sync that still lists the package (its client's own, or open): the line it had
+    stored['mm.last'] = { at: 1, items: [{ projectId: 'p', packageId: PKG, kind: 'ready', open: null }] }
+    expect(texts(await rowHook?.(t.$, row(), engine))).toEqual([ROW_GONE])
+    stored['mm.last'] = { at: 1, items: [{ projectId: 'p', packageId: null, kind: 'task', open: { id: PKG, state: 'held_by_other' } }] }
+    expect(texts(await rowHook?.(t.$, row(), engine))).toEqual([ROW_GONE])
+    // a sync that lists it nowhere
+    stored['mm.last'] = { at: 2, items: [{ projectId: 'q', packageId: null, kind: 'task', open: null }] }
+    const drawn = await rowHook?.(t.$, row(), engine)
+    expect(texts(drawn)).toEqual([ROW_LEFT(LABEL)])
+    expect(buttons(drawn).size).toBe(0)
+    expect(ROW_LEFT(LABEL)).toBe(`Package ${LABEL} is no longer waiting: the last sync lists nothing of it for you to send.`)
+    // a store that cannot be read: the line it had
+    ;(t.$ as unknown as Record<string, unknown>).store = { get: async () => { throw new Error('no store') } }
+    expect(texts(await rowHook?.(t.$, row(), engine))).toEqual([ROW_GONE])
   })
 
   test('where the pane draws no card (its client part shows none), the live row draws one dim line and no box: the pane\'s own test', async () => {
