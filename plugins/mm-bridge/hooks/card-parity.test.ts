@@ -27,7 +27,7 @@ describe('0.7.33 the card against the page: real pairs, from the two renderers t
     expect(pageGap(SMS_PAGE, realTree())).toBe('')
   })
 
-  for (const name of ['everything', 'source links', "rob's mail, plan not approved", "rob's mail, plan approved", 'html email', 'no reply', 'closed no reply', 'later messages', 'ticket check unreadable', 'follow-ups live', 'follow-ups switched off', 'tickets from the call', 'tickets from the call, all decided', 'tickets from the call, unread', 'tickets from the call, ticket check off', 'ticket gap under enforce, a teammate', "ticket gap under enforce, rob's machine"]) {
+  for (const name of ['everything', 'source links', "rob's mail, plan not approved", "rob's mail, plan approved", 'html email', 'no reply', 'closed no reply', 'later messages', 'ticket check unreadable', 'follow-ups live', 'follow-ups switched off', 'tickets from the call', 'tickets from the call, all decided', 'tickets from the call, unread', 'tickets from the call, ticket check off', 'ticket gap under enforce, a teammate', "ticket gap under enforce, rob's machine", 'quotes', 'quotes, revised']) {
     test(`${name}: the page and the card agree`, () => {
       const { page, tree } = pair(name)
       expect(contentPieces(page).length).toBeGreaterThan(5)
@@ -190,6 +190,128 @@ describe('0.7.33 tickets from the call', () => {
     expect(page).toContain('The tickets from the call could not be read.')
     expect(pageGap(page, tree)).toBe('')
     expect(pageGap(page, JSON.parse(JSON.stringify(tree).replace('could not be read.', 'were read.')) as MmCardTree)).toContain('the page holds a line the card does not')
+  })
+})
+
+describe('0.7.43 what the quote says: each block, line and row of the page against its own box on the card', () => {
+  const HEAD = 'What the quote says'
+  const copy = (t: MmCardTree) => JSON.parse(JSON.stringify(t)) as MmCardTree
+  /** The card's quote section, and its boxes, one a PDF. */
+  const section = (t: MmCardTree) => t.nodes.find(n => /(?:^|\s)rp-quotes(?:\s|$)/.test(n.c ?? '')) as MmCardNode
+  const boxes = (t: MmCardTree) => (section(t).k ?? []).filter(k => k.c === 'rp-quote')
+  /** The tree with its first match of `from` replaced: a replacer, so a `$` in the words is a `$`. */
+  const swap = (t: MmCardTree, from: string, to: string) => JSON.parse(JSON.stringify(t).replace(from, () => to)) as MmCardTree
+
+  test('the section stands after our reply, holds both blocks, and the page and card agree', () => {
+    const { page, tree } = pair('quotes')
+    expect(page.indexOf(`### ${HEAD}`)).toBeGreaterThan(page.indexOf('### Client reply'))
+    expect(page.indexOf(`### ${HEAD}`)).toBeLessThan(page.indexOf('### Team post'))
+    expect(page).toContain('| 1 | ZZ_row_one \\| with a bar | 8 h | $1,997 |')
+    expect(boxes(tree).length).toBe(2)
+    expect(pageGap(page, tree)).toBe('')
+  })
+
+  test('a page without quotes is as it was, and a card that has them is no gap against it', () => {
+    const quotes = pair('quotes')
+    const plain = pair('everything')
+    const at = quotes.page.indexOf(`\n### ${HEAD}\n`)
+    expect(quotes.page.slice(0, at) + quotes.page.slice(quotes.page.indexOf('\n### Team post\n'))).toBe(plain.page)
+    expect(plain.page).not.toContain(HEAD)
+    expect(pageGap(plain.page, plain.tree)).toBe('')
+    expect(pageGap(plain.page, quotes.tree)).toBe('')
+  })
+
+  test('a card without the section is not ready, as an older bridge is with any new section', () => {
+    const { page, tree } = pair('quotes')
+    const without = { ...tree, nodes: tree.nodes.filter(n => n !== section(tree)) }
+    expect(pageGap(page, without)).toBe(`the page holds a section the card does not (${HEAD})`)
+  })
+
+  test('a row the card leaves out, or one more on it, is a gap', () => {
+    const { page, tree } = pair('quotes')
+    const fewer = copy(tree)
+    const first = boxes(fewer)[0] as MmCardNode
+    first.k = (first.k ?? []).filter(k => !(k.c === 'rp-quote-row' && JSON.stringify(k).includes('ZZ_row_two')))
+    expect(pageGap(page, fewer)).toBe(MISSING('2'))
+    const last = copy(tree)
+    const box = boxes(last)[0] as MmCardNode
+    const lastRow = (box.k ?? []).filter(k => /\brp-quote-row\b/.test(k.c ?? '')).at(-1) as MmCardNode
+    box.k = [...(box.k ?? []), lastRow]
+    expect(pageGap(page, last)).toBe('the page holds 4 rows in quote block 1, the card 5')
+    const gone = copy(tree)
+    const one = boxes(gone)[0] as MmCardNode
+    one.k = (one.k ?? []).filter(k => !(k.c === 'rp-quote-row' && JSON.stringify(k).includes('ZZ_row_three')))
+    expect(pageGap(page, gone)).toBe('the page holds more rows in quote block 1 than the card (ZZ_row_three)')
+  })
+
+  test('another amount, other hours, other words or another number in a row is a gap, each cell against its own leaf', () => {
+    const { page, tree } = pair('quotes')
+    expect(pageGap(page, swap(tree, '"s":"$1,997"', '"s":"$2,497"'))).toBe(MISSING('$1,997'))
+    expect(pageGap(page, swap(tree, '"s":"2.5 h"', '"s":"3 h"'))).toBe(MISSING('2.5 h'))
+    expect(pageGap(page, swap(tree, 'ZZ_row_one | with a bar', 'ZZ_row_one with a bar'))).toBe(MISSING('ZZ_row_one | with a bar'))
+    expect(pageGap(page, swap(tree, '"s":"3"', '"s":"7"'))).toBe(MISSING('3'))
+    // an empty cell is its dash on both sides
+    expect(pageGap(page, swap(tree, '"s":"—"', '"s":"0 h"'))).toBe(MISSING('—'))
+    // a cell's words found in another cell of the row do not stand for it
+    expect(pageGap(page, swap(tree, '"s":"8 h"', '"s":"$1,997"'))).toBe(MISSING('8 h'))
+    // and the page's side: a changed amount there is a gap too
+    expect(pageGap(page.replace('| 3 | ZZ_row_three | 2.5 h | $622 |', '| 3 | ZZ_row_three | 2.5 h | $722 |'), tree)).toBe(MISSING('$722'))
+  })
+
+  test('a block whose head the card lacks, or another block, is a gap, and the counts are equal', () => {
+    const { page, tree } = pair('quotes')
+    const headless = copy(tree)
+    const second = boxes(headless)[1] as MmCardNode
+    second.k = (second.k ?? []).filter(k => k.c !== 'rp-quote-head')
+    expect(pageGap(page, headless)).toBe(MISSING('ZZ_second.pdf · on 1. ZZ_d1_title'))
+    const one = copy(tree)
+    const sec = section(one)
+    sec.k = (sec.k ?? []).filter(k => k !== boxes(one)[1])
+    expect(pageGap(page, one)).toBe(MISSING('ZZ_second.pdf · on 1. ZZ_d1_title'))
+    const three = copy(tree)
+    section(three).k = [...(section(three).k ?? []), boxes(three)[1] as MmCardNode]
+    expect(pageGap(page, three)).toBe('the page holds 2 quote blocks, the card 3')
+    expect(pageGap(page, swap(tree, 'ZZ_second.pdf', 'ZZ_other.pdf'))).toBe(MISSING('ZZ_second.pdf · on 1. ZZ_d1_title'))
+  })
+
+  test('each plain line is a whole line of its own block: the source, the invoice, a title, the rows left out, the total', () => {
+    const { page, tree } = pair('quotes')
+    for (const line of ['ZZ_quote_source_line from quote record ZZ-Q1 version 2.', 'ZZ_quote_invoice_line INV-000001.', 'Table: ZZ_table_one · Build', '4 more rows are in the PDF.', 'ZZ_quote_total 10.5 h, $2,619']) {
+      const changed = swap(tree, line, `${line} more`)
+      expect(pageGap(page, changed), line).toBe(MISSING(line))
+    }
+    // the second block's words in the first block's box do not stand for them
+    const moved = copy(tree)
+    const [a, b] = boxes(moved) as [MmCardNode, MmCardNode]
+    const src = (b.k ?? []).find(k => k.c === 'rp-quote-src') as MmCardNode
+    b.k = (b.k ?? []).filter(k => k !== src)
+    a.k = [...(a.k ?? []), src]
+    expect(pageGap(page, moved)).toBe(MISSING('ZZ_unreadable_source'))
+  })
+
+  test('a check is held with its mark: a ✅ where the page says ⚠️ is a gap, either way', () => {
+    const { page, tree } = pair('quotes')
+    expect(page).toContain('\n⚠️ ZZ_quote_check_warn\n')
+    expect(pageGap(page, swap(tree, '⚠️ ZZ_quote_check_warn', '✅ ZZ_quote_check_warn'))).toBe(MISSING('ZZ_quote_check_warn'))
+    expect(pageGap(page, swap(tree, '✅ ZZ_quote_check_ok', '⚠️ ZZ_quote_check_ok'))).toBe(MISSING('ZZ_quote_check_ok'))
+    expect(pageGap(page.replace('✅ ZZ_quote_check_ok', '⚠️ ZZ_quote_check_ok'), tree)).toBe(MISSING('ZZ_quote_check_ok'))
+  })
+
+  test('a row whose words read like a state line is no state line on either side', () => {
+    const { page, tree } = pair('quotes')
+    const said = 'Approved, ZZ_row_two'
+    expect(pageGap(page.replace('| ZZ_row_two |', `| ${said} |`), swap(tree, '"s":"ZZ_row_two"', `"s":"${said}"`))).toBe('')
+  })
+
+  test('a quote that changed is a new version: the card drawn before it is not the page after it', () => {
+    const before = pair('quotes')
+    const after = pair('quotes, revised')
+    expect(after.tree.label).not.toBe(before.tree.label)
+    expect(after.page).toContain('| 1 | ZZ_row_one \\| with a bar | 8 h | $2,497 |')
+    expect(pageGap(after.page, before.tree)).not.toBe('')
+    // and with the hash put aside, the changed amount itself is what the check finds
+    expect(pageGap(after.page.replaceAll(after.tree.label, before.tree.label), before.tree)).toBe(MISSING('$2,497'))
+    expect(pageGap(after.page, after.tree)).toBe('')
   })
 })
 

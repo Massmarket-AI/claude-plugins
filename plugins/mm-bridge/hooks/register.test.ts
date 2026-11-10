@@ -13719,6 +13719,46 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
         await u.unmount()
       })
 
+      // (0.7.43, Rob 2026-11-09, the quote view: "It also needs to update itself if the work in the thread changes.") OW binds the
+      // read's `quotes` into package_sha256, so a quote is followed as any revision is: nothing here looks at what changed
+      test('(0.7.43) only the quote changed: OW\'s new hash, and the next sync draws the new amount by itself, its box closed until checked', async ($, on) => {
+        const before = CARD_PAIRS.quotes as { page: string; tree: { package_sha256: string; label: string } }
+        const after = CARD_PAIRS['quotes, revised'] as { page: string; tree: { package_sha256: string; label: string } }
+        expect(after.tree.package_sha256).not.toBe(before.tree.package_sha256)
+        const w = world(on, { ...own, pickup: pick(before) })
+        w.setTree(before.tree)
+        await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+        await w.clock.advance(4_000)
+        const u = await shown($)
+        const box = async (label: string) => (await buttons(u)).some(([k]) => k === `mm-card-sign-btn:${label}`)
+        expect(await tool($, `card ${PKG}`)).toContain(`card ready: Package ${before.tree.label}.`)
+        await endTurn($)
+        expect(await box(before.tree.label)).toBe(true)
+        expect((await lines(u)).join('\n')).toContain('ZZ_quote_total 10.5 h, $2,619')
+        const notes = w.appended.length
+        const renders = w.renders.length
+        // the quote changed (a line's amount, so the total), and nothing the feed lists for the client did
+        w.setPickup(pick(after))
+        w.setTree(after.tree)
+        for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
+        for (let i = 0; i < 200 && !(await lines(u)).join('\n').includes('$3,119'); i++) await new Promise(r => setTimeout(r, 2))
+        const text = (await lines(u)).join('\n')
+        expect(text).toContain('ZZ_quote_total 10.5 h, $3,119')
+        expect(text).toContain('$2,497')
+        expect(text).not.toContain('ZZ_quote_total 10.5 h, $2,619')
+        expect(text).toContain(NOT_CHECKED)
+        expect(w.renders.length).toBeGreaterThan(renders)
+        expect(await box(before.tree.label)).toBe(false)
+        expect(await box(after.tree.label)).toBe(false)
+        expect((await buttons(u)).find(([k]) => k === `mm-card-check:${after.tree.label}`)?.[1]).toBe('Check this package')
+        expect(w.appended.length).toBe(notes)
+        // the thread checks the new version: ready for it, and its box opens
+        expect(await tool($, `card ${PKG}`)).toContain(`card ready: Package ${after.tree.label}.`)
+        await endTurn($)
+        expect(await box(after.tree.label)).toBe(true)
+        await u.unmount()
+      })
+
       test('a page that changes with the hash the same keeps the box open', async ($, on) => {
         const w = world(on, { ...own, pickup: pick(pair) })
         w.setTree(pair.tree)

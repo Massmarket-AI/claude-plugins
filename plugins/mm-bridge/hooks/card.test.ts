@@ -2400,3 +2400,67 @@ describe('0.7.40 the answer under a row the bridge drew is hidden, and a folded 
     expect(seen).toBe(holding)
   })
 })
+
+describe('0.7.43 the quote view: each row of a quote PDF on one line of four cells, on every surface', () => {
+  type El = { type?: unknown; props?: Record<string, unknown>; children?: unknown }
+  /** The elements directly under one, nested arrays read through. */
+  const kids = (e: El): El[] => [e.props?.children, e.children].flat(8).filter((k): k is El => !!k && typeof k === 'object' && !Array.isArray(k))
+  /** Every element of a drawing, depth first. */
+  const all = (node: unknown, out: El[] = []): El[] => {
+    if (!node || typeof node !== 'object') return out
+    if (Array.isArray(node)) {
+      for (const n of node) all(n, out)
+      return out
+    }
+    out.push(node as El)
+    all((node as El).props?.children, out)
+    all((node as El).children, out)
+    return out
+  }
+  const draw = (name: string, els: unknown = ELS) => {
+    const tree = readTree(JSON.parse(JSON.stringify(CARD_PAIRS[name]?.tree))) as MmCardTree
+    return drawCard(els as never, { card: cardOf({ packageId: tree.package_id as string, tree }), marks: { signed: {} }, checked: { [tree.label]: 0 }, busy: false, checkMiss: null, now: 0, onSign: () => undefined, onCheck: () => undefined, onAsk: () => undefined, onPage: () => undefined })
+  }
+  /** The row Boxes: a row of four Boxes, each one cell. */
+  const rowsOf = (drawn: unknown) => all(drawn).filter(e => e.type === 'Box' && e.props?.flexDirection === 'row' && kids(e).length === 4 && kids(e).every(k => k.type === 'Box'))
+
+  test('the rows draw: four cells a row, the words taking the room, hours and amount kept short at the right, a subtotal muted', () => {
+    for (const [surface, els] of [['desktop', ELS], ['terminal', { Box: 'Box', Text: 'Text' }]] as const) {
+      const drawn = draw('quotes', els)
+      const text = texts(drawn).join('\n')
+      for (const words of ['What the quote says', 'ZZ_d1_attach.pdf · on 1. ZZ_d1_title', 'Table: ZZ_table_one · Build', '4 more rows are in the PDF.', 'ZZ_quote_total 10.5 h, $2,619', 'ZZ_second.pdf · on 1. ZZ_d1_title', 'ZZ_unreadable_source'])
+        expect(text, `${surface}: ${words}`).toContain(words)
+      const rows = rowsOf(drawn)
+      expect(rows.map(r => kids(r).map(k => texts(k).join(''))), surface).toEqual([
+        ['1', 'ZZ_row_one | with a bar', '8 h', '$1,997'],
+        ['2', 'ZZ_row_two', '—', '—'],
+        ['—', 'ZZ_row_subtotal', '8 h', '$1,997'],
+        ['3', 'ZZ_row_three', '2.5 h', '$622'],
+      ])
+      const [no, line, hours, amount] = kids(rows[0] as El) as [El, El, El, El]
+      expect(no.props).toMatchObject({ minWidth: 3, flexShrink: 0 })
+      expect(line.props).toMatchObject({ flexGrow: 1, flexShrink: 1 })
+      expect(hours.props).toMatchObject({ minWidth: 6, flexShrink: 0, alignItems: 'flex-end' })
+      expect(amount.props).toMatchObject({ minWidth: 9, flexShrink: 0, alignItems: 'flex-end' })
+      expect(kids(amount)[0]?.props).toMatchObject({ tabular: true, wrap: 'wrap' })
+      expect(kids(line)[0]?.props).toMatchObject({ wrap: 'wrap' })
+      expect(kids(line)[0]?.props?.italic).toBeUndefined()
+      // the subtotal row: its words muted and slanted
+      expect(kids(kids(rows[2] as El)[1] as El)[0]?.props).toMatchObject({ italic: true, dimColor: true })
+      // a quote PDF is a card of its own
+      const box = all(drawn).find(e => e.type === 'Box' && kids(e).some(k => texts(k).join('') === 'ZZ_d1_attach.pdf · on 1. ZZ_d1_title'))
+      expect(box?.props).toMatchObject({ borderStyle: 'round', borderColor: 'subtle' })
+    }
+  })
+
+  test('a ⚠️ check in the warning tone, a ✅ one in the success tone', () => {
+    const lines = all(draw('quotes')).filter(e => e.type === 'Text')
+    expect(lines.find(e => texts(e).join('') === '⚠️ ZZ_quote_check_warn')?.props?.color).toBe('warning')
+    expect(lines.find(e => texts(e).join('') === '✅ ZZ_quote_check_ok')?.props?.color).toBe('success')
+  })
+
+  test('a card with no quote draws no quote row', () => {
+    expect(rowsOf(draw('everything'))).toEqual([])
+    expect(texts(draw('everything')).join('\n')).not.toContain('What the quote says')
+  })
+})
