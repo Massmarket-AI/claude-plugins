@@ -40,11 +40,15 @@
  * - The card on screen is the current render. (0.7.33) Plan state, the follow-up switch and rolled dates are in no hash, so
  *   `mm card` and a press each read OW's page and render again (`refreshCard`). OW with no usable hash means not ready. A
  *   fresh card that differs replaces the kept one, and a press in that state records nothing: the box says to read it again.
- * - Signing never sends. The box writes the signer's name in, records the signature for the send gate
- *   (~/.claude/mm-hooks/card-signed.jsonl, with the hash of the page it was checked against), leaves a note in the transcript
- *   (`SIGNED_NOTE`, a row a thread's own words cannot make), folds the letter into an envelope, and puts exactly `Send package <12>` in the
- *   person's prompt box, as the Start buttons fill it. The person sends it with Enter; the thread then runs the go of §9.5. A
- *   draft of theirs in the box is never written over.
+ * - One press is the go. (0.7.41, Rob, 2026-11-09, after signing a card and finding nothing had sent: "I thought clicking the
+ *   button was all I needed to do. It really should be that, or just sending this message. I don't know why we need both.") The
+ *   box writes the signer's name in, records the signature for the send gate (~/.claude/mm-hooks/card-signed.jsonl, with the hash
+ *   of the page it was checked against), leaves a note in the transcript (`SIGNED_NOTE`, a row a thread's own words cannot make),
+ *   folds the letter into an envelope, and then sends exactly `Send package <12>` into this thread as the person's own message
+ *   (`sendGo`, `$.prompt.submit` with `asUser`). The thread runs the go of §9.5 on it, and the send gate clears that run only beside
+ *   the press's own note (send-gate.js `pressGoText`). The bridge itself sends nothing to a client. Up to 0.7.40 the words went in
+ *   the prompt box and the person had to press Enter as well. They still do where the engine refuses the message: the words then
+ *   go in the box, and a draft of the person's there is never written over (nor is it touched when the go is sent).
  * - It is drawn in the thread too. (0.7.40, Rob, 2026-11-09: "I want to push that so it's the way reply packages are always shown,
  *   even inside the thread, instead of just the side panel.") The row of the thread's own `mm card` call that got `card ready` is
  *   the card itself (register.tsx, the `ToolUse` hook), drawn by the same `drawCard` from the same state with the same handlers
@@ -92,7 +96,7 @@ export const SIGN_VALID_MS = 2 * 60 * 60 * 1000
 const CHECKED_MAX = 30
 /** A press still checking the package after this has died: the box opens again. */
 const CHECKING_MS = 120_000
-/** How long the signature and the envelope take before the words go in the prompt box (the widget's 3.05 s). */
+/** How long the signature and the envelope take before the go is sent (the widget's 3.05 s). */
 export const SIGN_FILL_MS = 3_050
 /** A signature older than this is drawn still, without the animation. */
 const SIGN_ANIMATE_MS = 4_000
@@ -893,13 +897,29 @@ const isChecking = (marks: MmCardMarks, label: string, now: number) => marks.che
  * it stands now. A card that changed is replaced, nothing is recorded and the box says to read it again; a read or a record that
  * fails records nothing and the box says to try again. Then the signature goes on record and (0.7.36) its note in the transcript
  * (`appendSigned`), always in that order (the pane draws it inking in and the envelope), and when the envelope has flown, exactly
- * `Send package <12>` goes in the prompt box, if the card still holds then. A note that cannot be appended stops there, as a record
- * that cannot be written does: the record stands in its file, with no note and no words.
+ * `Send package <12>` is sent into this thread as the person's go (`sendGo`; 0.7.41, before it went in the prompt box for Enter), if
+ * the card still holds then and the thread is not working. A note that cannot be appended stops there, as a record that cannot be
+ * written does: the record stands in its file, with no note and no words.
  * One signature a tag while it stands (`standing`): once the gate would no longer take it, a new press signs again.
  * (0.7.36) A press while this thread is working, or for a version it has not finished checking, records nothing, while its turn is still
  * running too: the box is not drawn then, so this is the second line of defence for a press that was already under way.
  */
 export async function pressSign($: EngineInterface, label: string, log: SignLog): Promise<void> {
+  // (0.7.41) one press of a tag at a time: two clicks a few milliseconds apart both read the marks before either set `checking`,
+  // and each would sign and send a go
+  if (pressing.has(label)) return
+  pressing.add(label)
+  try {
+    await signOnce($, label, log)
+  } finally {
+    pressing.delete(label)
+  }
+}
+
+/** (0.7.41) The tags whose press is under way in this session, up to its record and note (the go follows on the timer). */
+const pressing = new Set<string>()
+
+async function signOnce($: EngineInterface, label: string, log: SignLog): Promise<void> {
   const { value: card } = await $.state.get(CARD)
   const marks = await marksOf($)
   const pressed = await $.clock.now()
@@ -944,7 +964,7 @@ export async function pressSign($: EngineInterface, label: string, log: SignLog)
   await $.clock.after(SIGN_FILL_MS, async () => {
     const { value: now } = await $.state.get(CARD)
     const latest = await marksOf($)
-    // the package or its page changed, or the pane moved to another package, while the envelope flew: nothing goes in the box
+    // the package or its page changed, or the pane moved to another package, while the envelope flew: nothing is sent
     const holds = !now || now.tree?.label !== label || now.pageSha !== pageSha || Boolean(holdOf(now))
     // (0.7.40) nor when the thread has started a turn since (a change sent from the card, say). The signature is dropped, so nothing stands
     // for this tag and the box comes back by its usual holds once the turn ends; the record line already written stays, and a new press
@@ -954,10 +974,43 @@ export async function pressSign($: EngineInterface, label: string, log: SignLog)
       await $.state.set(CARD_MARKS, { ...latest, signed, notice: { packageId, kind: 'busy' } })
       return
     }
-    const filled = holds ? 'stale' : await fillWords($, `Send package ${label}`)
-    const mine = latest.signed[label]
-    if (mine) await $.state.set(CARD_MARKS, { ...latest, signed: { ...latest.signed, [label]: { ...mine, filled } } })
+    const filled = holds ? 'stale' : await sendGo($, label)
+    // read again: the go's own turn may have begun while it was sent, and it writes these marks too
+    const after = await marksOf($)
+    const mine = after.signed[label]
+    if (mine) await $.state.set(CARD_MARKS, { ...after, signed: { ...after.signed, [label]: { ...mine, filled } } })
   })
+}
+
+/**
+ * (0.7.41) The go of a press, sent: exactly `Send package <12>` into this thread as the person's own message (`asUser`: the model reads it
+ * bare, as theirs; the transcript stores it under the bridge's origin, which no thread can write, and the send gate takes it as the
+ * person's go only right after the bridge's note of a press on that same package, send-gate.js `pressGoText`). Called only by a press
+ * (`pressSign`), after the record and the note, with the card still holding and the thread idle. `sent` when it entered the session.
+ * - ⛔ The prompt box is never written over: a draft of the person's stays as it is. Only the exact go of this tag left there by an older
+ *   press is cleared, so it can never be sent a second time.
+ * - A message the engine refuses (`{ drop }`) falls back to the prompt box as up to 0.7.40 (`fillWords`): `filled`, or `draft` / `none`
+ *   when the box holds other text or cannot be filled. The card then says to press Enter or what to type. One that throws may have gone
+ *   in before it failed, so the box is left alone (`unsure`) and the card says to type the go only if it does not show in the thread.
+ */
+export async function sendGo($: EngineInterface, label: string): Promise<'sent' | 'filled' | 'draft' | 'none' | 'unsure'> {
+  const words = `Send package ${label}`
+  let went = false
+  try {
+    const r = (await $.prompt.submit({ text: words, asUser: true })) as { drop?: unknown } | undefined
+    went = !(r && typeof r === 'object' && r.drop !== undefined)
+  } catch {
+    // (review of 0.7.41) a submit that throws may have gone in before it failed: words in the box then invite a second go
+    return 'unsure'
+  }
+  if (!went) return fillWords($, words)
+  try {
+    const box = await $.prompt.read()
+    if (String(box?.text ?? '').trim() === words) await $.prompt.fill({ text: '', mode: 'replace' })
+  } catch {
+    // a box that cannot be read or filled is left as it is
+  }
+  return 'sent'
 }
 
 /** A press on one of the card's own buttons (Read the whole transcript, Fix these first): its words in the prompt box. */
@@ -1306,10 +1359,13 @@ export function holdText(hold: string, card: MmCard, label: string): string {
 }
 
 /** What the box says when a press recorded nothing. */
+/** (0.7.41) What the box says under its button: one press is the whole go. */
+export const SIGN_CAPTION = (label: string): string => `One press signs and sends: "Send package ${label}" goes to your thread as your go, and it sends the package.`
+
 const NOTICE = {
   changed: 'The package changed, so nothing was signed. Read it again, then sign.',
   retry: 'That did not go through, so nothing was signed. Try again, or ask your thread to print the page.',
-  busy: 'Your thread started working while you signed, so nothing went in your prompt box. Sign again once it finishes.',
+  busy: 'Your thread started working while you signed, so nothing was sent. Sign again once it finishes.',
 } as const
 
 /**
@@ -1400,20 +1456,24 @@ export function drawCard(els: Els, d: CardDraw): Node {
     if (signed) {
       const still = d.now - signed.at > SIGN_ANIMATE_MS
       const said =
-        signed.filled === 'filled'
-          ? `Sealed: "Send package ${s.label}" is in your prompt box. Press Enter to send it.`
-          : signed.filled === 'draft'
-            ? `Sealed. Your prompt box holds a draft, so type: Send package ${s.label}`
-            : signed.filled === 'stale'
-              ? 'The package changed while signing, so nothing went in the prompt box. Read the new package and sign again.'
-              : signed.filled === 'none'
-                ? `Sealed. Type this in the thread: Send package ${s.label}`
-                : 'Signing…'
+        signed.filled === 'sent'
+          ? `Sealed and sent: your go for Package ${s.label} is in the thread, and it is sending the package now.`
+          : signed.filled === 'filled'
+            ? `Sealed, but the go did not reach your thread, so "Send package ${s.label}" is in your prompt box. Press Enter to send it.`
+            : signed.filled === 'draft'
+              ? `Sealed, but the go did not reach your thread and your prompt box holds a draft, so type: Send package ${s.label}`
+              : signed.filled === 'stale'
+                ? 'The package changed while signing, so nothing was sent. Read the new package and sign again.'
+                : signed.filled === 'none'
+                  ? `Sealed, but the go did not reach your thread. Type this in the thread: Send package ${s.label}`
+                  : signed.filled === 'unsure'
+                    ? `Sealed. If "Send package ${s.label}" does not show in your thread, type it there.`
+                    : 'Signing…'
       return (
         <Box key={`mm-card-signed:${s.label}`} flexDirection="column">
           {Svg ? <Svg key={`mm-card-sig:${s.label}:${still ? 'still' : 'ink'}`} source={signatureSvg(signed.signer, still)} alt={`Signed by ${signed.signer}`} isInteractive /> : null}
           <Text size="caption" dimColor>{`Signed by ${signed.signer} · ${etTime(signed.at)} · Package ${s.label}`}</Text>
-          <Text color={signed.filled === 'filled' ? 'success' : signed.filled === 'stale' ? 'warning' : undefined}>{said}</Text>
+          <Text color={signed.filled === 'sent' ? 'success' : signed.filled === 'stale' || signed.filled === 'filled' || signed.filled === 'draft' || signed.filled === 'none' || signed.filled === 'unsure' ? 'warning' : undefined}>{said}</Text>
         </Box>
       )
     }
@@ -1438,7 +1498,7 @@ export function drawCard(els: Els, d: CardDraw): Node {
         {notice ? <Text color="warning">{notice}</Text> : null}
         {Button ? <Button key={`mm-card-sign-btn:${s.label}`} label="✍  Click to sign and send" variant="primary" onPress={() => d.onSign(s.label)} /> : <Text>{`Type in the thread: Send package ${s.label}`}</Text>}
         <Text size="caption" dimColor>{`${s.signer} · your signature is the go for exactly this package, ${s.label}`}</Text>
-        <Text size="caption" dimColor>{fieldDrawn ? `Signing puts "Send package ${s.label}" in your prompt box; Enter sends it. Changes go in the Changes box above or the chat box.` : `Signing puts "Send package ${s.label}" in your prompt box; Enter sends it. Changes go in the chat box.`}</Text>
+        <Text size="caption" dimColor>{fieldDrawn ? `${SIGN_CAPTION(s.label)} Changes go in the Changes box above or the chat box.` : `${SIGN_CAPTION(s.label)} Changes go in the chat box.`}</Text>
       </Box>
     )
   }

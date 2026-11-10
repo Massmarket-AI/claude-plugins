@@ -204,7 +204,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.40'
+export const VERSION = '0.7.41'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -3803,6 +3803,26 @@ function rowText(out: unknown, depth = 0): string {
 export const ROW_REPLACED = (label: string, now: string): string => `Package ${label} was replaced by Package ${now}. Read and sign the newer card below.`
 export const ROW_AGAIN = (label: string): string => `Shown again below. Package ${label}.`
 export const ROW_GONE = 'This card is not held here right now. Open this client in the side pane, or ask your thread to show the package again.'
+/**
+ * (0.7.41) The row of a package the last sync lists nowhere any more: sent, closed or handed on. Before 0.7.41 the row said
+ * ROW_GONE, which asks the person to open the package again (Rob, 2026-11-09: "make it disappear from the side panel once it's
+ * sent, whether you send it in the side panel or from the chat").
+ */
+export const ROW_LEFT = (label: string): string => `Package ${label} is no longer waiting: the last sync lists nothing of it for you to send.`
+
+/**
+ * (0.7.41) Whether a sync is on record and lists the package nowhere: not as a client's package, nor as one held or open. A store
+ * that cannot be read answers no, so the row keeps the line it had (ROW_GONE).
+ */
+async function offTheLists($: EngineInterface, packageId: string): Promise<boolean> {
+  try {
+    const last = await storeGet<Last | null>($, 'mm.last', null)
+    if (!last || !Array.isArray(last.items)) return false
+    return !listedIn(last).some(i => pickupOf(i) === packageId || (i.open ?? null)?.id === packageId || goOf(i)?.packageId === packageId)
+  } catch {
+    return false
+  }
+}
 /** (0.7.40) The draw failures of a row already noted this session: one line each in bridge-notices.log. At most ROW_FAILURES_MAX, the oldest dropped first. */
 const rowFailures = new Set<string>()
 export const ROW_FAILURES_MAX = 200
@@ -4260,14 +4280,29 @@ async function refreshSelf($: EngineInterface, force: boolean): Promise<string> 
   const last = await storeGet<Last | null>($, 'mm.last', null)
   const it = listedIn(last).find(i => i.projectId === pid)
   if (!it) {
-    // A client on none of the lists (one /mm link may name): asked for by the person, the pane's client part
-    // is emptied, so it does not go on showing the client this thread was before.
-    if (force) await $.state.set(VIEW, { text: '', heading: '' })
+    // A client on none of the lists (one /mm link may name): the pane's client part is emptied, so it does not go on showing
+    // what it showed before. (0.7.41, Rob 2026-11-09: "Probably should also make it disappear from the side panel once it's
+    // sent, whether you send it in the side panel or from the chat.") On the timer too, not only when the person asks: a
+    // package sent, closed or handed on leaves the lists at the next sync, and its page and card leave the pane with it.
+    // Before 0.7.41 the timer left them drawn, so a package sent from the chat still showed as unsent. Only a sync on record
+    // lists anything: a failed sync throws before this runs, and keeps the list it had.
+    if (force || (await clientPart($)).text || (await cardOf($)).packageId) await clearClient($)
+    // the note to Claude comes again if the client is listed again
+    const noted = await storeGet<Record<string, string>>($, 'mm.noted', {})
+    if (noted[me] !== undefined) {
+      await patchStore<Record<string, string>>($, 'mm.noted', {}, fresh => {
+        delete fresh[me]
+      })
+    }
     return 'Nothing needs you on this client right now.'
   }
   const sig = partSig(it)
   const noted = await storeGet<Record<string, string>>($, 'mm.noted', {})
-  if (!force && noted[me] === sig) return 'Up to date.'
+  if (!force && noted[me] === sig) {
+    // (0.7.41) a package already noted before this version still gets its line in the chat, once
+    await tellWaiting($, me, it)
+    return 'Up to date.'
+  }
   const now = await $.clock.now()
   // asked for by the person, the pane opens at once and its client part is read after (S2); the timer draws
   // the part only once it has read it
@@ -4285,8 +4320,46 @@ async function refreshSelf($: EngineInterface, force: boolean): Promise<string> 
       fresh[me] = sig
     })
   }
+  await tellWaiting($, me, it)
   return `Showing ${it.client} in the side pane.`
 }
+
+/**
+ * (0.7.41) The line the person sees in the chat when a reply package of this thread's client waits in the side pane (Rob,
+ * 2026-11-09: "And it's important that the chat tells them a reply package is waiting in the side panel when there is one.").
+ * The note above reaches the model, and says no reply is needed, so the person was never told. This is a notice instead: a
+ * `system` row of `session.append`, which the person sees and the model never reads, so it starts no turn and costs none. Once
+ * for each package in each thread (`mm.told`); the band above the prompt says it too, for as long as the package waits
+ * (`waitingLine`). ⛔ The person's own link only, as the note: a thread that linked itself gets nothing in its transcript.
+ * ⛔ The send gate reads user and assistant rows alone, so this line can never count as a go or a printed page.
+ */
+async function tellWaiting($: EngineInterface, me: string, it: QueueItem): Promise<void> {
+  const pkg = pickupOf(it)
+  if (!pkg) return
+  const told = await storeGet<Record<string, string>>($, 'mm.told', {})
+  if (told[me] === pkg) return
+  try {
+    const r = (await $.session.append({ message: { type: 'system', content: [{ type: 'text', text: waitingLine(it.client) }] } })) as { deny?: unknown } | undefined
+    if (r && typeof r === 'object' && r.deny !== undefined) return
+  } catch {
+    // the band still says it; the next pass tries again
+    return
+  }
+  await patchStore<Record<string, string>>($, 'mm.told', {}, fresh => {
+    fresh[me] = pkg
+    // the newest TOLD_MAX threads are kept
+    for (const old of Object.keys(fresh).slice(0, Math.max(0, Object.keys(fresh).length - TOLD_MAX))) delete fresh[old]
+  })
+}
+
+/** (0.7.41) The button on the band's waiting line: it opens the side pane at the client's part, as Drafts does. */
+export const WAITING_OPEN = 'Open the side pane'
+
+/** (0.7.41) The most threads `mm.told` keeps. */
+const TOLD_MAX = 200
+
+/** (0.7.41) What the chat and the band say while a reply package of the client waits in the side pane. */
+export const waitingLine = (client: string): string => `A reply package for ${shownText(cleanName(client), 60) || 'this client'} is waiting in the side pane. Open it there to read and sign it.`
 
 /** (R9) A client of the last sync with no thread of any kind (an older version's record: Start with no thread to act on). */
 function isFresh(last: Last, projectId: string): boolean {
@@ -4366,7 +4439,11 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
   const missing = needingThreads(last, links, now).length + awayOffList(last, links).length
   // In a waiting client's thread the line carries the button that opens its part of the pane.
   const mine = me ? ownerOf(me, links) : undefined
-  const band: MmBand = mine && items.some(i => i.projectId === mine) ? { text, drafts: true, at: last.at, missing } : { text, at: last.at, missing }
+  const own = mine ? items.find(i => i.projectId === mine) : undefined
+  // (0.7.41) and, while a reply package of that client waits in the side pane, the line that says so (`waitingLine`): it goes
+  // when the last sync no longer lists the package (sent, closed or handed on), as the package leaves the pane
+  const waiting = own && pickupOf(own) ? waitingLine(own.client) : ''
+  const band: MmBand = own ? { text, drafts: true, at: last.at, missing, ...(waiting ? { waiting } : {}) } : { text, at: last.at, missing }
   // (0.7.25) and, in a client's own thread, why it is pinned or why no pin is needed
   const why = mine && me ? await whyHere($, last, mine, me, now) : ''
   return why ? { ...band, why } : band
@@ -4391,7 +4468,7 @@ async function refreshBand($: EngineInterface): Promise<void> {
     const band = await bandLine($)
     const { value: was } = await $.state.get(BAND)
     // (0.5.4) the sync it was drawn from is kept with it, so a thread can tell it is behind the store (`catchUp`)
-    if ((was?.text ?? '') !== band.text || Boolean(was?.drafts) !== Boolean(band.drafts) || was?.at !== band.at || (was?.missing ?? 0) !== (band.missing ?? 0) || (was?.why ?? '') !== (band.why ?? '')) await $.state.set(BAND, band)
+    if ((was?.text ?? '') !== band.text || Boolean(was?.drafts) !== Boolean(band.drafts) || was?.at !== band.at || (was?.missing ?? 0) !== (band.missing ?? 0) || (was?.why ?? '') !== (band.why ?? '') || (was?.waiting ?? '') !== (band.waiting ?? '')) await $.state.set(BAND, band)
   } catch {
     // the band is a convenience: it never breaks a sync or a command
   }
@@ -9431,13 +9508,25 @@ export const register: Register = on => {
         ) : (
           <Button key="mm-start-missing" label={startMissingLabel(0)} dimColor onPress={() => void pressStartAll($)} />
         )}
-        {band.drafts ? <Button key="mm-open-drafts" label="Drafts" onPress={() => void openDrafts($)} /> : null}
+        {/* (0.7.41) while a package waits, its own line carries the button that opens the pane */}
+        {band.drafts && !band.waiting ? <Button key="mm-open-drafts" label="Drafts" onPress={() => void openDrafts($)} /> : null}
+      </Box>
+    )
+    // (0.7.41) in a client's own thread, while a reply package of that client waits in the side pane: a line that says so, first
+    const waitingText = row && typeof band?.waiting === 'string' && band.waiting ? band.waiting : ''
+    const waiting = !waitingText ? null : !Button ? (
+      <Text key="mm-waiting" bold>{waitingText}</Text>
+    ) : (
+      <Box key="mm-waiting" flexDirection="row" gap={1}>
+        <Text bold>{waitingText}</Text>
+        <Button key="mm-open-waiting" label={WAITING_OPEN} variant="primary" onPress={() => void openDrafts($)} />
       </Box>
     )
     // (0.7.25) in a client's own thread, why it is pinned or why no pin is needed, on its own line above the band
     const why = row && typeof band?.why === 'string' && band.why ? <Text key="mm-why">{band.why}</Text> : null
-    const line = row && why ? (
+    const line = row && (why || waiting) ? (
       <Box flexDirection="column">
+        {waiting}
         {why}
         {row}
       </Box>
@@ -9809,7 +9898,7 @@ export const register: Register = on => {
       // (0.7.40) the pane's own test (`cardDrawable`): where the pane draws no card, the row draws none either, and so no box to press.
       // With no live call on record (a new process), no row draws the card, so none may say it is shown below.
       const held = cardDrawable((await clientPart($)).text, card) && card.packageId === packageId && Boolean(card.tree?.label)
-      if (!held || !card.tree) tree = <Text dimColor>{ROW_GONE}</Text>
+      if (!held || !card.tree) tree = <Text dimColor>{label && (await offTheLists($, packageId)) ? ROW_LEFT(label) : ROW_GONE}</Text>
       else if (!label) return pass()
       else if (!asked || asked.packageId !== card.packageId) tree = <Text dimColor>{ROW_GONE}</Text>
       else if (card.tree.label !== label) tree = <Text dimColor>{ROW_REPLACED(label, card.tree.label)}</Text>

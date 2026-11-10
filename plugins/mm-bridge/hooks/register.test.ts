@@ -485,10 +485,12 @@ function world(on: On, opts: WorldOptions = {}) {
     box.text = e.mode === 'append' ? box.text + e.text : e.text
     return { isFilled: true }
   })
-  /** What the bridge added to this thread's transcript. */
+  /** What the bridge added to this thread's transcript for the model to read (user rows). */
   const appended: string[] = []
+  /** (0.7.41) The notices it added: rows the person sees in the chat and the model never reads (`system` rows). */
+  const notices: string[] = []
   on('session.append', (_$, e, next) => {
-    appended.push(JSON.stringify(e.message))
+    ;(e.message.type === 'system' ? notices : appended).push(JSON.stringify(e.message))
     return next(e)
   })
 
@@ -501,7 +503,7 @@ function world(on: On, opts: WorldOptions = {}) {
   /** The chips this session asked the app for. */
   const minted = () => calls.filter(c => c.tool === 'spawn_task')
   return {
-    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, ran, renders, shell, box, fills, resolves, statuses, closes, scopePosts, pinPosts,
+    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, notices, ran, renders, shell, box, fills, resolves, statuses, closes, scopePosts, pinPosts,
     /** The app calls that change a thread: a rename, a pin, a message, a chip. (Reading this session's own usage, and withdrawing a chip, change none.) */
     writes: () => calls.filter(c => !['get_session', 'list_sessions', 'get_usage', 'dismiss_task'].includes(c.tool)).map(c => [c.tool, c.args.session_id ?? '', c.args.title ?? c.args.pinned ?? ''].join(' | ')),
     /** The chips this session asked the app to withdraw, by their ids. */
@@ -2456,10 +2458,11 @@ describe('F9: a thread that linked itself gets the pin and the name, and no note
     expect(w.fetched.filter(u => u.includes('/reply-package')).length).toBe(1)
     // no message; the timer's own chips: (R4) for the two clients with no thread, and (0.5.4, C1) this thread's client's
     expect(w.acted()).toEqual([CEDAR_AUTO_CHIP, ACME_HERE_CHIP, BOLT_AUTO_CHIP])
-    // the band is the way in: it names this thread's client and carries the Drafts button (0.5.14: after Start missing threads)
+    // the band is the way in: it names this thread's client and carries the button that opens its part (0.5.14: Drafts, after
+    // Start missing threads; (0.7.41) with a reply package waiting, the waiting line's own button, first, in its place)
     const band = await $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'AbovePrompt', props: BAND_PROPS })
-    expect(await buttons(band)).toEqual([['mm-start-missing', 'Start missing threads (2)'], ['mm-open-drafts', 'Drafts']])
-    await band.press({ key: 'mm-open-drafts' })
+    expect(await buttons(band)).toEqual([['mm-open-waiting', 'Open the side pane'], ['mm-start-missing', 'Start missing threads (2)']])
+    await band.press({ key: 'mm-open-waiting' })
     expect(w.opened.at(-1)).toEqual({ id: 'mm-queue', title: 'Acme Roofing' })
     expect(w.opened.length).toBe(3)
     await band.unmount()
@@ -3436,11 +3439,13 @@ describe('the band above the prompt: what needs the person, from any thread', ()
     // (0.5.4, C3) the no-thread chips are in this thread, Acme's: the band names a thread of the bridge's by its client
     // (0.7.25) and above it, in Acme's own thread, why the thread is pinned
     expect(await drawn($)).toEqual({
+      // (0.7.41) first, the line that says Acme's reply package waits in the side pane, with its button in Drafts' place
       texts: [
+        'A reply package for Acme Roofing is waiting in the side pane. Open it there to read and sign it.',
         'Pinned for you, due Tue 8 AM (21h left): the reply to Acme Roofing is drafted and yours to send.',
         `Needs you: 1 pinned · 2 with no thread: Cedar Dental, Bolt Staffing. ${chipIn('Cedar Dental', '4 PM', 'Acme Roofing')} ${chipIn('Bolt Staffing', 'Tue 9 AM', 'Acme Roofing')}`,
       ],
-      buttons: [['mm-start-missing', 'Start missing threads (2)'], ['mm-open-drafts', 'Drafts']],
+      buttons: [['mm-open-waiting', 'Open the side pane'], ['mm-start-missing', 'Start missing threads (2)']],
     })
   })
 
@@ -8105,7 +8110,8 @@ describe('(0.5.17) a press\'s refresh asks OW once more when the feed answered 5
     plan.push(...answers)
     const before = closeouts(w)
     const band = await bandOf($)
-    await band.press({ key: 'mm-open-drafts' })
+    // (0.7.41) Acme's package waits: the waiting line's button opens the pane, as Drafts did
+    await band.press({ key: 'mm-open-waiting' })
     await band.unmount()
     const ui = await pane($)
     const shown = await lines(ui)
@@ -12998,7 +13004,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
   })
 
   for (const surface of SURFACES) {
-    test(`in the client's own thread (${surface}): the box opens at the end of the turn that got \`mm card\`'s ready, with no page printed, and a signature is recorded and puts exactly the go in the prompt box`, async ($, on) => {
+    test(`in the client's own thread (${surface}): the box opens at the end of the turn that got \`mm card\`'s ready, with no page printed, and a signature is recorded and (0.7.41) sends exactly the go into the thread as the person's own message`, async ($, on) => {
       const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } }, renderer: 'tree', pickup: PICKUP })
       await mm($, '')
       const u = await mount($, surface)
@@ -13024,10 +13030,13 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       const signedNote = SIGNED(String(record.page_sha256).slice(0, 12))
       expect(w.appended.filter(t => t.includes(SIGNED_START)).map(t => JSON.parse(t)), surface).toEqual([{ type: 'user', role: 'user', isMeta: true, content: [{ type: 'text', text: signedNote }] }])
       expect(w.fills, surface).toEqual([])
-      await w.clock.advance(3_100)
-      expect(w.fills, surface).toEqual([`Send package ${LABEL}`])
       expect(w.prompts, surface).toEqual([])
-      expect((await lines(u)).join('\n'), surface).toContain(`Sealed: "Send package ${LABEL}" is in your prompt box. Press Enter to send it.`)
+      await w.clock.advance(3_100)
+      // (0.7.41) one press is the go: the words go into the thread under the bridge's origin, as the person's own, and nothing in the prompt box
+      for (let i = 0; i < 200 && !w.prompts.length; i++) await new Promise(r => setTimeout(r, 2))
+      expect(w.prompts, surface).toEqual([{ text: `Send package ${LABEL}`, origin: { kind: 'plugin', name: 'mm-bridge', asUser: true } }])
+      expect(w.fills, surface).toEqual([])
+      expect((await lines(u)).join('\n'), surface).toContain(`Sealed and sent: your go for Package ${LABEL} is in the thread, and it is sending the package now.`)
       await u.unmount()
     })
   }
@@ -13544,8 +13553,9 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
         for (let i = 0; i < 200 && !w.appended.some(t => t.includes(SIGNED_START)); i++) await new Promise(r => setTimeout(r, 2))
         expect(w.written.filter(f => f.path.endsWith('/.claude/mm-hooks/card-signed.jsonl')).length).toBe(1)
         await w.clock.advance(3_100)
-        expect(w.fills).toEqual([`Send package ${LABEL}`])
-        expect(w.prompts).toEqual([])
+        for (let i = 0; i < 200 && !w.prompts.length; i++) await new Promise(r => setTimeout(r, 2))
+        expect(w.prompts).toEqual([{ text: `Send package ${LABEL}`, origin: { kind: 'plugin', name: 'mm-bridge', asUser: true } }])
+        expect(w.fills).toEqual([])
         await u.unmount()
       })
 
@@ -13762,7 +13772,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
         props: { tool_use_id: toolUseId, tool: 'mcp__mm-bridge__mm', input: { args: `card ${PKG}` }, isRunning: false, isErrored: false, isInterrupted: false, output } as never,
       })
     const hasBox = async (u: Drawing) => (await buttons(u)).some(([k]) => k === `mm-card-sign-btn:${LABEL}`)
-    const SEALED = `Sealed: "Send package ${LABEL}" is in your prompt box. Press Enter to send it.`
+    const SEALED = `Sealed and sent: your go for Package ${LABEL} is in the thread, and it is sending the package now.`
     const recorded = (w: { written: Array<{ path: string; text: string }> }) => w.written.findLast(f => f.path.endsWith('/.claude/mm-hooks/card-signed.jsonl'))
     const ROW_GONE_TEXT = 'This card is not held here right now. Open this client in the side pane, or ask your thread to show the package again.'
 
@@ -13832,16 +13842,19 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       expect(m?.[1]).toBe(LABEL)
       expect(m?.[2]).toBe(String(record.page_sha256).slice(0, 12))
       expect(w.fills).toEqual([])
-      await w.clock.advance(3_100)
-      expect(w.fills).toEqual([`Send package ${LABEL}`])
       expect(w.prompts).toEqual([])
+      await w.clock.advance(3_100)
+      for (let i = 0; i < 200 && !w.prompts.length; i++) await new Promise(res => setTimeout(res, 2))
+      expect(w.prompts).toEqual([{ text: `Send package ${LABEL}`, origin: { kind: 'plugin', name: 'mm-bridge', asUser: true } }])
+      expect(w.fills).toEqual([])
+      for (let i = 0; i < 200 && !(await lines(r)).join('\n').includes(SEALED); i++) await new Promise(res => setTimeout(res, 2))
       expect((await lines(r)).join('\n')).toContain(SEALED)
       expect((await lines(u)).join('\n')).toContain(SEALED)
-      // a press in the pane now writes nothing more: one signature for both
+      // a press in the pane now writes nothing more: one signature for both, one go
       await u.press({ key: `mm-card-sign-btn:${LABEL}` }).catch(() => undefined)
       await w.clock.advance(3_100)
       expect(w.appended.filter(t => t.includes(SIGNED_START))).toHaveLength(1)
-      expect(w.fills).toEqual([`Send package ${LABEL}`])
+      expect(w.prompts).toEqual([{ text: `Send package ${LABEL}`, origin: { kind: 'plugin', name: 'mm-bridge', asUser: true } }])
       await r.unmount()
       await u.unmount()
     })
@@ -13920,7 +13933,8 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
         plugin: 'mm-bridge', surface: 'desktop', component: 'ToolUse', requestId: 'toolu_other',
         props: { tool_use_id: 'toolu_other', tool: 'mcp__mm-bridge__mm', input: { args: `card ${other}` }, isRunning: false, isErrored: false, isInterrupted: false, output: said } as never,
       })
-      expect(await lines(r)).toEqual(['This card is not held here right now. Open this client in the side pane, or ask your thread to show the package again.'])
+      // (0.7.41) the last sync lists that package nowhere: no longer waiting, never "open it again"
+      expect(await lines(r)).toEqual([`Package ${LABEL} is no longer waiting: the last sync lists nothing of it for you to send.`])
       await r.unmount()
       await u.unmount()
     })
@@ -14183,12 +14197,12 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       const said = (await lines(t)).join('\n')
       expect(said).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
       expect(await t.findAll({ type: 'Input' })).toEqual([])
-      expect(said).toContain(`Signing puts "Send package ${LABEL}" in your prompt box; Enter sends it. Changes go in the chat box.`)
+      expect(said).toContain(`One press signs and sends: "Send package ${LABEL}" goes to your thread as your go, and it sends the package. Changes go in the chat box.`)
       expect(said).not.toContain('Changes box')
       await t.unmount()
     })
 
-    test('a turn that starts while the envelope flies puts nothing in the prompt box and drops the signature: the box closes, says why, and comes back for a second press once the turn ends', async ($, on) => {
+    test('a turn that starts while the envelope flies sends nothing and drops the signature: the box closes, says why, and comes back for a second press once the turn ends', async ($, on) => {
       const w = world(on, own)
       const asked = watchAsked(on)
       const u = await shown($)
@@ -14203,7 +14217,8 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await $.turn.start({ text: 'make it shorter', turnId: 't-change' })
       await w.clock.advance(3_100)
       expect(w.fills).toEqual([])
-      const BUSY = 'Your thread started working while you signed, so nothing went in your prompt box. Sign again once it finishes.'
+      expect(w.prompts.filter(p => p.text.startsWith('Send package'))).toEqual([])
+      const BUSY = 'Your thread started working while you signed, so nothing was sent. Sign again once it finishes.'
       for (let i = 0; i < 200 && !(await lines(r)).join('\n').includes(BUSY); i++) await new Promise(res => setTimeout(res, 2))
       expect((await lines(r)).join('\n')).toContain(BUSY)
       expect((await lines(u)).join('\n')).toContain(BUSY)
@@ -14220,7 +14235,9 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       expect(w.appended.filter(t => t.includes(SIGNED_START))).toHaveLength(2)
       expect(w.written.filter(f => f.path.endsWith('/.claude/mm-hooks/card-signed.jsonl'))).toHaveLength(2)
       await w.clock.advance(3_100)
-      expect(w.fills).toEqual([`Send package ${LABEL}`])
+      for (let i = 0; i < 200 && !w.prompts.some(p => p.text.startsWith('Send package')); i++) await new Promise(res => setTimeout(res, 2))
+      expect(w.prompts.filter(p => p.text.startsWith('Send package'))).toEqual([{ text: `Send package ${LABEL}`, origin: { kind: 'plugin', name: 'mm-bridge', asUser: true } }])
+      expect(w.fills).toEqual([])
       for (let i = 0; i < 200 && !(await lines(r)).join('\n').includes(SEALED); i++) await new Promise(res => setTimeout(res, 2))
       expect((await lines(r)).join('\n')).toContain(SEALED)
       for (const m of [r, u]) await m.unmount()
@@ -14237,7 +14254,9 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await r.press({ key: `mm-card-sign-btn:${LABEL}` })
       for (let i = 0; i < 200 && !w.appended.some(t => t.includes(SIGNED_START)); i++) await new Promise(res => setTimeout(res, 2))
       await w.clock.advance(3_100)
-      expect(w.fills).toEqual([`Send package ${LABEL}`])
+      for (let i = 0; i < 200 && !(await lines(r)).join('\n').includes(SEALED); i++) await new Promise(res => setTimeout(res, 2))
+      expect(w.prompts).toEqual([{ text: `Send package ${LABEL}`, origin: { kind: 'plugin', name: 'mm-bridge', asUser: true } }])
+      expect(w.fills).toEqual([])
       expect((await lines(r)).join('\n')).toContain(SEALED)
       expect(await r.findAll({ type: 'Input' })).toEqual([])
       expect(await u.findAll({ type: 'Input' })).toEqual([])
@@ -14601,5 +14620,103 @@ describe('0.7.38 (Rob 2026-11-07: "Any Reply package should appear above the tea
     await mm($, '')
     expect((await lines(ui))).toContain('Needs you now (3)')
     await ui.unmount()
+  })
+})
+
+// ======================================================================== 0.7.41: a sent package leaves the pane, and the chat says one waits
+// Rob, 2026-11-09, in a client's thread: "I sent the reply package, but it's still showing up in my side panel like I didn't send
+// it... Probably should also make it disappear from the side panel once it's sent, whether you send it in the side panel or from
+// the chat." And: "it's important that the chat tells them a reply package is waiting in the side panel when there is one."
+describe('(0.7.41) a sent package leaves the side pane, and the chat says while one waits', () => {
+  const WAITING = 'A reply package for Acme Roofing is waiting in the side pane. Open it there to read and sign it.'
+  const NOTICE = JSON.stringify({ type: 'system', content: [{ type: 'text', text: WAITING }] })
+  const partText = async ($: Engine) => {
+    const view = await $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'Pane', requestId: 'mm-view', props: { ...PANE, title: 'Acme Roofing' } })
+    const text = (await view.find({ type: 'Markdown' }))?.text ?? ''
+    await view.unmount()
+    return text
+  }
+  const bandTexts = async ($: Engine) => {
+    const band = await bandOf($)
+    const out = { texts: await lines(band), buttons: await buttons(band) }
+    await band.unmount()
+    return out
+  }
+  const bash = ($: Engine, command: string) => $.tool.call({ tool: 'Bash', command } as never) as Promise<{ result?: unknown; deny?: string; isError?: boolean }>
+  const SEND = `cd /Users/me/Projects/massmarket-ops-control-tower && python3 skills/client-reply-prep/scripts/send_package.py --package ${PKG} --package-sha256 ${'f'.repeat(64)} 2>&1 | tail -20`
+
+  test('a package waiting in this thread\'s pane: one line in the chat that the model never reads, and the band says it while it waits', async ($, on) => {
+    const w = world(on, { store: { 'mm.links': { [ACME]: SELF } } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    // the note to the model, as before, and the notice for the person: a system row, which never reaches the model
+    expect(w.appended.length).toBe(1)
+    expect(w.appended[0]).toContain('[Massmarket bridge, no reply needed] Acme Roofing Pat: ')
+    expect(w.notices).toEqual([NOTICE])
+    expect(w.stored['mm.told']).toEqual({ [SELF]: PKG })
+    // the band: the waiting line first, with its own button where Drafts was
+    const band = await bandTexts($)
+    expect(band.texts[0]).toBe(WAITING)
+    expect(band.buttons).toEqual([['mm-open-waiting', 'Open the side pane'], ['mm-start-missing', 'Start missing threads (2)']])
+    const b = await bandOf($)
+    const opened = w.opened.length
+    await b.press({ key: 'mm-open-waiting' })
+    expect(w.opened.length).toBe(opened + 1)
+    expect(w.opened.at(-1)).toEqual({ id: 'mm-queue', title: 'Acme Roofing' })
+    await b.unmount()
+    // later syncs of the same package say nothing more in the chat
+    for (let i = 0; i < 12; i++) await w.clock.advance(60_000)
+    expect(w.notices).toEqual([NOTICE])
+  })
+
+  test('the package sent from the chat: the next sync takes its page, its card and the band\'s line away (until 0.7.41 they stayed)', async ($, on) => {
+    const w = world(on, { store: { 'mm.links': { [ACME]: SELF } } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    expect(await partText($)).toBe('## Acme Roofing\n\n1. What the client sent')
+    expect(w.stored['mm.noted']).toMatchObject({ [SELF]: `pkg:${PKG}:${ago(3)}` })
+    // OW records the package sent: the feed lists it no more
+    w.setFeed(feed({ drafts: [] }))
+    for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
+    expect(await partText($)).toBe('')
+    const ui = await pane($)
+    expect(await lines(ui)).not.toContain('This thread: Acme Roofing')
+    await ui.unmount()
+    const band = await bandTexts($)
+    expect(band.texts).not.toContain(WAITING)
+    expect(band.buttons.map(x => x[0])).not.toContain('mm-open-waiting')
+    // the note to the model comes again only if the client is listed again
+    expect((w.stored['mm.noted'] as Record<string, string>)[SELF]).toBeUndefined()
+    // and a second sync with nothing listed writes nothing more
+    const appended = w.appended.length
+    for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
+    expect(w.appended.length).toBe(appended)
+    expect(w.notices).toEqual([NOTICE])
+  })
+
+  test('a run of send_package.py in the thread reads the feed again a second later, as the reply-draft routes do', async ($, on) => {
+    const w = world(on, { store: { 'mm.links': { [ACME]: SELF } } })
+    await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+    await w.clock.advance(4_000)
+    const before = closeouts(w)
+    w.setFeed(feed({ drafts: [] }))
+    await bash($, SEND)
+    expect(w.shell).toEqual([SEND])
+    await w.clock.advance(1_000)
+    expect(closeouts(w)).toBe(before + 1)
+    expect(await partText($)).toBe('')
+    // a dry run sends nothing and reads nothing again
+    await bash($, `${SEND} --dry-run`)
+    await w.clock.advance(1_000)
+    expect(closeouts(w)).toBe(before + 1)
+  })
+
+  test('⛔ a thread that linked itself gets no line in the chat, as it gets no note', async ($, on) => {
+    const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), self: thread(SELF, 'My roof thread', 1), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } } })
+    await mm($, '')
+    expect(w.stored['mm.links']).toEqual({ [ACME]: SELF })
+    for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
+    expect(w.appended).toEqual([])
+    expect(w.notices).toEqual([])
   })
 })

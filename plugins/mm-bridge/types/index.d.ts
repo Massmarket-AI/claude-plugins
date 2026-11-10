@@ -221,7 +221,12 @@ export type MmNotice = { text: string; at: number }
  * `why` (0.7.25): in a client's own thread, the one line under the band that says why the thread is pinned or why no pin
  * is needed (`threadWhy`); absent in any other thread.
  */
-export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string }
+/**
+ * (0.7.41) `waiting`: in a client's own thread, the line that says a reply package of that client waits in the side pane, drawn
+ * above the band with its own Open button for as long as the last sync lists the package (Rob, 2026-11-09: "it's important that
+ * the chat tells them a reply package is waiting in the side panel when there is one").
+ */
+export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string; waiting?: string }
 
 /**
  * (0.6.0) One line of the pane's Tracking part. `open`: the app thread (`local_…`) a press on the line opens, on a
@@ -362,8 +367,13 @@ export type MmCard = {
   at: number
 }
 
-/** (0.7.26) A signature given in this thread's pane: the tag signed, by whom, when, (0.7.33) the hash of the page it read, and what became of the words. */
-export type MmCardSigned = { label: string; signer: string; at: number; pageSha?: string; filled?: 'filled' | 'draft' | 'none' | 'stale' }
+/**
+ * (0.7.26) A signature given in this thread's pane: the tag signed, by whom, when, (0.7.33) the hash of the page it read, and what became of the words.
+ * (0.7.41) `sent`: the go went into the thread as the person's message (`sendGo`). `filled`, `draft`, `none`: it did not, and the words went in the
+ * prompt box, or could not (a draft there, a box that cannot be filled). `unsure`: the send failed in a way that may have gone in, so the box was
+ * left alone. `stale`: the package changed while signing, so nothing was sent.
+ */
+export type MmCardSigned = { label: string; signer: string; at: number; pageSha?: string; filled?: 'sent' | 'filled' | 'draft' | 'none' | 'unsure' | 'stale' }
 
 /** (0.7.26) What this thread did with cards: each signature given here by tag, and whether the page as text is open under the card. */
 export type MmCardMarks = {
@@ -373,7 +383,7 @@ export type MmCardMarks = {
   checking?: { label: string; at: number }
   /**
    * (0.7.33) What the last press found when it recorded nothing: the card changed, or a read or record failed. (0.7.40) Or `busy`: the
-   * thread started a turn while the envelope flew, so the words never went in the prompt box and the signature was dropped.
+   * thread started a turn while the envelope flew, so the go was never sent and the signature was dropped.
    */
   notice?: { packageId: string; kind: 'changed' | 'retry' | 'busy' }
 }

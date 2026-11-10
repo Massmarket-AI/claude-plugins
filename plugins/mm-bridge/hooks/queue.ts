@@ -3211,14 +3211,24 @@ const VIA_HELPER = new RegExp(String.raw`\bmm-api\.mjs["']?\s+ext\s+${WRITE}\s+[
 /** And as the route itself is called: a write to `.../api/ext/reply-draft/sent`. */
 const VIA_URL = new RegExp(String.raw`\/api\/ext${CLOSING_ROUTE}`)
 const WRITE_WORD = new RegExp(String.raw`\b${WRITE}\b`)
+/**
+ * (0.7.41) And the package sender, run by python with the hash the person was shown: `python3 .../send_package.py --package <id>
+ * --package-sha256 <hash>`, the way every go is sent (client-reply-prep §9.5). Its routes are inside the script, so the command
+ * names none of them, and before 0.7.41 a package sent this way stayed in the pane until the next five-minute sync (Rob,
+ * 2026-11-09: "I sent the reply package, but it's still showing up in my side panel like I didn't send it."). A dry run sends
+ * nothing and is not it; nor is a command that only reads the script (`cat`, `grep`).
+ */
+const VIA_PACKAGE_SENDER = /\bpython3?(?:\.\d+)?["']?\s+(?:-\S+\s+)*["']?(?:[^\s"'|;&]*\/)?send_package\.py["']?\s[^\n]*--package-sha256\b/
+const DRY_RUN = /(?:^|\s)--dry-run\b/
 
 /**
- * Whether a shell command is a call to one of those routes. ⛔ This is all the bridge ever looks at of a
- * command: it answers yes or no, and nothing of the command is kept, logged or passed on.
+ * Whether a shell command is a call to one of those routes, or (0.7.41) a run of the package sender. ⛔ This is all the bridge
+ * ever looks at of a command: it answers yes or no, and nothing of the command is kept, logged or passed on.
  * The route is matched, never a loose word: `revise`, `claim-send`, `rob-ok`, `release` and a GET are not it.
  */
 export function isClosingRoute(command: unknown): boolean {
-  return typeof command === 'string' && command.length <= 200_000 && (VIA_HELPER.test(command) || (VIA_URL.test(command) && WRITE_WORD.test(command)))
+  if (typeof command !== 'string' || command.length > 200_000) return false
+  return VIA_HELPER.test(command) || (VIA_URL.test(command) && WRITE_WORD.test(command)) || (VIA_PACKAGE_SENDER.test(command) && !DRY_RUN.test(command))
 }
 
 /** The name 0.5.1 gave it (a reply draft was sent or discarded); the same test now. */

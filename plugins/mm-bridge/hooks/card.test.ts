@@ -9,7 +9,7 @@ import { drawnText, pageGap } from './card-parity'
 import { CARD_PAIRS } from './card-pairs.test-helper'
 import { NEXT_LABEL as NEXT, NEXT_PAGE, NEXT_SHA, NEXT_TREE, SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
 import { ME, fakeApp, hooks, mm, pid, press } from './fake-app.test-helper'
-import { DRAW_FAILED, RESULT_HINT, ROW_AGAIN, ROW_FAILURES_MAX, ROW_GONE, ROW_REPLACED, firstRowFailure } from './register'
+import { DRAW_FAILED, RESULT_HINT, ROW_AGAIN, ROW_FAILURES_MAX, ROW_GONE, ROW_LEFT, ROW_REPLACED, firstRowFailure } from './register'
 import type { Feed } from './queue'
 
 const tree = (): MmCardTree => readTree(JSON.parse(JSON.stringify(SMS_TREE))) as MmCardTree
@@ -74,6 +74,8 @@ function thread(box = '') {
   const timers: Array<{ at: number; fn: () => unknown }> = []
   let time = 1_000_000
   const fills: string[] = []
+  /** (0.7.41) What went into the thread as the person's own message: a press's go. */
+  const gos: string[] = []
   const files = new Map<string, string>()
   const ran: string[][] = []
   const notes: string[] = []
@@ -81,7 +83,9 @@ function thread(box = '') {
   const appends: unknown[] = []
   const order: string[] = []
   /** What the page read gives a press, what the renderer draws on this computer, and how an append goes. */
-  const now = { page: { markdown: SMS_PAGE as string | null, sha: SHA as string | null }, render: JSON.stringify(SMS_TREE), session: TRANSCRIPT, os: undefined as string | undefined, append: 'stores' as 'stores' | 'throws' | 'denied', agents: [] as Array<{ id: string; status: string; teammateId?: string }> | 'throws', held: true as boolean | (() => boolean) }
+  const now = { page: { markdown: SMS_PAGE as string | null, sha: SHA as string | null }, render: JSON.stringify(SMS_TREE), session: TRANSCRIPT, os: undefined as string | undefined, append: 'stores' as 'stores' | 'throws' | 'denied', agents: [] as Array<{ id: string; status: string; teammateId?: string }> | 'throws', held: true as boolean | (() => boolean), submit: 'enters' as 'enters' | 'drop' | 'throws' }
+  /** (0.7.41) Every submit with its options, as the press made it. */
+  const submits: Array<Record<string, unknown>> = []
   const $ = {
     session: {
       id: async () => now.session,
@@ -132,7 +136,16 @@ function thread(box = '') {
       fill: async (input: { text: string }) => {
         fills.push(input.text)
         order.push('words')
+        if (/^Send package [0-9a-f]{12}$/.test(box.trim())) box = input.text
         return { isFilled: true, text: input.text, cursor: input.text.length }
+      },
+      submit: async (input: { text: string }) => {
+        submits.push({ ...input })
+        if (now.submit === 'throws') throw new Error('the session could not take a prompt')
+        if (now.submit === 'drop') return { drop: 'a Stop hook stands' }
+        gos.push(input.text)
+        order.push('go')
+        return { text: input.text }
       },
     },
     process: {
@@ -146,6 +159,9 @@ function thread(box = '') {
     $: $ as never,
     state,
     fills,
+    gos,
+    submits,
+    box: () => box,
     files,
     ran,
     notes,
@@ -268,7 +284,7 @@ describe('0.7.26 when the pane offers the signature box', () => {
     expect([...buttons(drawn).keys()]).toContain('Fix these first ↗')
   })
 
-  test('drawn: the client\'s text, our reply, the checks and the box, with the words it puts in the prompt box', () => {
+  test('drawn: the client\'s text, our reply, the checks and the box, with the go one press sends', () => {
     const drawn = drawChecked({ card: cardOf(), marks: marks(), now: 0, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined })
     const all = texts(drawn).join('\n')
     expect(all).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
@@ -276,7 +292,7 @@ describe('0.7.26 when the pane offers the signature box', () => {
     expect(all).toContain('Is the new booking link live yet?')
     expect(all).toContain(`One go sends 1 item. Package ${LABEL}.`)
     // (0.7.40) no Changes field in this drawing (no Input, no handler), so the caption names the chat box alone
-    expect(all).toContain(`Signing puts "Send package ${LABEL}" in your prompt box; Enter sends it. Changes go in the chat box.`)
+    expect(all).toContain(`One press signs and sends: "Send package ${LABEL}" goes to your thread as your go, and it sends the package. Changes go in the chat box.`)
     expect([...buttons(drawn).keys()]).toContain('✍  Click to sign and send')
   })
 
@@ -287,8 +303,8 @@ describe('0.7.26 when the pane offers the signature box', () => {
   })
 })
 
-describe('0.7.26 signing: the name, the envelope, then exactly the go in the prompt box, never a send', () => {
-  test('a press records the signature; when the envelope has flown, "Send package <12>" is in the prompt box, once', async () => {
+describe('0.7.26 signing: the name, the envelope, then (0.7.41) exactly the go sent into the thread, never a client send', () => {
+  test('(0.7.41) a press records the signature; when the envelope has flown, "Send package <12>" goes into the thread as the person\'s own message, once, with nothing in the prompt box', async () => {
     const t = thread()
     t.state.set('card', cardOf())
     t.state.set('cardMarks', { signed: {} })
@@ -296,32 +312,83 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     const signed = (t.state.get('cardMarks') as { signed: Record<string, { signer: string; filled?: string }> }).signed[LABEL]
     expect(signed?.signer).toBe('Test Signer')
     expect(signed?.filled).toBeUndefined()
-    expect(t.fills).toEqual([])
+    expect(t.gos).toEqual([])
     await t.advance(SIGN_FILL_MS - 1)
-    expect(t.fills).toEqual([])
+    expect(t.gos).toEqual([])
     await t.advance(1)
-    expect(t.fills).toEqual([`Send package ${LABEL}`])
-    expect((t.state.get('cardMarks') as { signed: Record<string, { filled?: string }> }).signed[LABEL]?.filled).toBe('filled')
+    // exactly the go, as the person's own words (the model reads it bare), and no Enter: nothing is put in the prompt box
+    expect(t.submits).toEqual([{ text: `Send package ${LABEL}`, asUser: true }])
+    expect(t.gos).toEqual([`Send package ${LABEL}`])
+    expect(t.fills).toEqual([])
+    // record, note, then the go: always in that order
+    expect(t.order).toEqual(['record', 'note', 'go'])
+    expect((t.state.get('cardMarks') as { signed: Record<string, { filled?: string }> }).signed[LABEL]?.filled).toBe('sent')
+    const drawn = texts(drawChecked({ card: t.state.get('card') as MmCard, marks: t.state.get('cardMarks') as never, now: 1_000_000 + 10_000, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined })).join(' ')
+    expect(drawn).toContain(`Sealed and sent: your go for Package ${LABEL} is in the thread, and it is sending the package now.`)
+    expect(drawn).not.toContain('Press Enter')
     // a second press does nothing
     await pressSign(t.$, LABEL, t.log)
     await t.advance(SIGN_FILL_MS)
-    expect(t.fills).toEqual([`Send package ${LABEL}`])
+    expect(t.gos).toEqual([`Send package ${LABEL}`])
   })
 
-  test('a draft of the person\'s in the box is never written over: the pane says what to type', async () => {
+  test('(0.7.41) a message the engine refuses falls back to the prompt box as before (Press Enter, or what to type over a draft); one that throws leaves the box alone', async () => {
+    for (const [how, box, filled, said] of [
+      ['drop', '', 'filled', `Sealed, but the go did not reach your thread, so "Send package ${LABEL}" is in your prompt box. Press Enter to send it.`],
+      ['drop', 'a note I was writing', 'draft', `Sealed, but the go did not reach your thread and your prompt box holds a draft, so type: Send package ${LABEL}`],
+      // (review of 0.7.41) a throw may have gone in before it failed: nothing in the box, and type it only if it does not show
+      ['throws', '', 'unsure', `Sealed. If "Send package ${LABEL}" does not show in your thread, type it there.`],
+    ] as const) {
+      const t = thread(box)
+      t.now.submit = how
+      t.state.set('card', cardOf())
+      t.state.set('cardMarks', { signed: {} })
+      await pressSign(t.$, LABEL, t.log)
+      await t.advance(SIGN_FILL_MS)
+      expect(t.gos, how).toEqual([])
+      expect(t.fills, how).toEqual(filled === 'filled' ? [`Send package ${LABEL}`] : [])
+      const m = t.state.get('cardMarks') as MmCardMarks
+      expect(m.signed[LABEL]?.filled, how).toBe(filled)
+      expect(texts(drawChecked({ card: t.state.get('card') as MmCard, marks: m, now: 1_000_000 + 10_000, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined })).join(' '), how).toContain(said)
+    }
+  })
+
+  test('(0.7.41) two clicks a few milliseconds apart are one press: one record, one note, one go', async () => {
+    const t = thread()
+    t.state.set('card', cardOf())
+    t.state.set('cardMarks', { signed: {} })
+    await Promise.all([pressSign(t.$, LABEL, t.log), pressSign(t.$, LABEL, t.log)])
+    await t.advance(SIGN_FILL_MS)
+    expect(t.files.get(SIGNED_FILE)?.trim().split('\n')).toHaveLength(1)
+    expect(t.appends).toHaveLength(1)
+    expect(t.gos).toEqual([`Send package ${LABEL}`])
+  })
+
+  test('(0.7.41) the exact go an older press left in the prompt box is cleared once the go is sent, so it can never be sent twice', async () => {
+    const t = thread(`Send package ${LABEL}`)
+    t.state.set('card', cardOf())
+    t.state.set('cardMarks', { signed: {} })
+    await pressSign(t.$, LABEL, t.log)
+    await t.advance(SIGN_FILL_MS)
+    expect(t.gos).toEqual([`Send package ${LABEL}`])
+    expect(t.fills).toEqual([''])
+    expect(t.box()).toBe('')
+  })
+
+  test('(0.7.41) a draft of the person\'s in the box is never written over or touched: the go is sent beside it', async () => {
     const t = thread('a note I was writing')
     t.state.set('card', cardOf())
     t.state.set('cardMarks', { signed: {} })
     await pressSign(t.$, LABEL, t.log)
     await t.advance(SIGN_FILL_MS)
+    expect(t.gos).toEqual([`Send package ${LABEL}`])
     expect(t.fills).toEqual([])
+    expect(t.box()).toBe('a note I was writing')
     const m = t.state.get('cardMarks') as { signed: Record<string, { filled?: string }> }
-    expect(m.signed[LABEL]?.filled).toBe('draft')
-    const drawn = drawChecked({ card: t.state.get('card') as MmCard, marks: m as never, now: 1_000_000 + 10_000, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined })
-    expect(texts(drawn).join(' ')).toContain(`Sealed. Your prompt box holds a draft, so type: Send package ${LABEL}`)
+    expect(m.signed[LABEL]?.filled).toBe('sent')
   })
 
-  test('(0.7.40) the thread starts a turn while the envelope flies: nothing goes in the box, the signature is dropped, and the box comes back for a new one once the turn ends', async () => {
+  test('(0.7.40) the thread starts a turn while the envelope flies: nothing is sent, the signature is dropped, and the box comes back for a new one once the turn ends', async () => {
     const t = thread()
     t.state.set('card', cardOf())
     t.state.set('cardMarks', { signed: {} })
@@ -333,11 +400,12 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     t.state.set('cardBusy', true)
     await t.advance(SIGN_FILL_MS)
     expect(t.fills).toEqual([])
+    expect(t.submits).toEqual([])
     const m = t.state.get('cardMarks') as MmCardMarks
     // nothing stands for the tag: the signature is dropped, never left as a stale one that holds the box shut
     expect(m.signed).toEqual({})
     expect(m.notice).toEqual({ packageId: SMS_TREE.package_id, kind: 'busy' })
-    const BUSY = 'Your thread started working while you signed, so nothing went in your prompt box. Sign again once it finishes.'
+    const BUSY = 'Your thread started working while you signed, so nothing was sent. Sign again once it finishes.'
     const at = (busy: boolean) =>
       drawCard(ELS, { card: t.state.get('card') as MmCard, marks: t.state.get('cardMarks') as MmCardMarks, checked: { [LABEL]: 0 }, busy, checkMiss: null, now: 1_000_000 + SIGN_FILL_MS, onSign: () => undefined, onCheck: () => undefined, onAsk: () => undefined, onPage: () => undefined })
     // while the thread works: the box is closed, and the card says why
@@ -347,18 +415,19 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     t.state.set('cardBusy', false)
     expect([...buttons(at(false)).keys()]).toContain('✍  Click to sign and send')
     expect(texts(at(false)).join(' ')).toContain(BUSY)
-    // and a second press signs again: a new record line and a new note, then exactly the go in the prompt box
+    // and a second press signs again: a new record line and a new note, then exactly the go, sent
     await pressSign(t.$, LABEL, t.log)
     expect(t.files.get(SIGNED_FILE)?.trim().split('\n')).toHaveLength(2)
     expect(t.appends).toHaveLength(2)
     await t.advance(SIGN_FILL_MS)
-    expect(t.fills).toEqual([`Send package ${LABEL}`])
+    expect(t.gos).toEqual([`Send package ${LABEL}`])
+    expect(t.fills).toEqual([])
     const after = t.state.get('cardMarks') as MmCardMarks
-    expect(after.signed[LABEL]?.filled).toBe('filled')
+    expect(after.signed[LABEL]?.filled).toBe('sent')
     expect(after.notice).toBeUndefined()
   })
 
-  test('the package changes while the envelope flies: nothing goes in the box', async () => {
+  test('the package changes while the envelope flies: nothing is sent', async () => {
     const t = thread()
     t.state.set('card', cardOf())
     t.state.set('cardMarks', { signed: {} })
@@ -366,6 +435,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     t.state.set('card', cardOf({ current: OTHER }))
     await t.advance(SIGN_FILL_MS)
     expect(t.fills).toEqual([])
+    expect(t.submits).toEqual([])
     expect((t.state.get('cardMarks') as { signed: Record<string, { filled?: string }> }).signed[LABEL]?.filled).toBe('stale')
   })
 
@@ -377,6 +447,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     await pressSign(t.$, LABEL, t.log)
     await t.advance(SIGN_FILL_MS)
     expect(t.fills).toEqual([])
+    expect(t.gos).toEqual([])
     expect(t.files.size).toBe(0)
     expect(t.appends).toEqual([])
     const m = t.state.get('cardMarks') as MmCardMarks
@@ -411,6 +482,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
       await pressSign(t.$, LABEL, t.log)
       await t.advance(SIGN_FILL_MS)
       expect(t.fills).toEqual([])
+      expect(t.gos).toEqual([])
       expect((t.state.get('cardMarks') as { signed: Record<string, unknown> }).signed).toEqual({})
       expect(t.files.size).toBe(0)
     }
@@ -450,7 +522,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     expect(t.notes).toEqual([])
     // and the person's words are exactly the go the gate clears, nothing more
     await t.advance(SIGN_FILL_MS)
-    expect(t.fills).toEqual([`Send package ${SHA.slice(0, 12)}`])
+    expect(t.gos).toEqual([`Send package ${SHA.slice(0, 12)}`])
   })
 
   test('(0.7.33) the file keeps the newest 200 records, and what is already in it', async () => {
@@ -494,6 +566,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     expect(t.notes).toEqual([`card signature for package ${SMS_TREE.package_id} not recorded: EACCES: no write here`])
     await t.advance(SIGN_FILL_MS)
     expect(t.fills).toEqual([])
+    expect(t.gos).toEqual([])
     const marks = t.state.get('cardMarks') as MmCardMarks
     expect(marks.signed).toEqual({})
     expect(marks.notice?.kind).toBe('retry')
@@ -514,6 +587,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     expect(t.files.get(SIGNED_FILE)).toBe(before)
     await t.advance(SIGN_FILL_MS)
     expect(t.fills).toEqual([])
+    expect(t.gos).toEqual([])
     expect((t.state.get('cardMarks') as MmCardMarks).notice?.kind).toBe('retry')
     expect(t.notes.join('\n')).toContain('EIO')
   })
@@ -556,7 +630,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     t.state.set('card', cardOf())
     await pressSign(t.$, LABEL, t.log)
     await t.advance(SIGN_FILL_MS)
-    expect(t.fills.length).toBe(1)
+    expect(t.gos.length).toBe(1)
     const draw = (now: number) => texts(drawChecked({ card: t.state.get('card') as MmCard, marks: t.state.get('cardMarks') as MmCardMarks, now, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined })).join(' ')
     const signedAt = (t.state.get('cardMarks') as MmCardMarks).signed[LABEL]?.at as number
     expect(draw(signedAt + SIGN_VALID_MS - 1)).toContain('Sealed')
@@ -569,7 +643,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
     await pressSign(t.$, LABEL, t.log)
     expect((t.files.get(SIGNED_FILE) ?? '').split('\n').filter(Boolean).length).toBe(2)
     await t.advance(SIGN_FILL_MS)
-    expect(t.fills.length).toBe(2)
+    expect(t.gos.length).toBe(2)
   })
 
   describe('(0.7.33) a signature is for the page it read, not only the hash', () => {
@@ -600,7 +674,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
 
     test('press, plan approval adds a Cc with the hash the same, a refresh: unsigned, the box back, and a press writes a record the gate takes', async () => {
       const t = await signed()
-      expect(t.fills).toEqual([`Send package ${label}`])
+      expect(t.gos).toEqual([`Send package ${label}`])
       expect(drawn(t)).toContain('Sealed')
       expect(lines(t).length).toBe(1)
       expect(lines(t)[0]?.page_sha256).toBe(await sha256Hex(before.page))
@@ -627,7 +701,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
       expect(fresh.package_sha256).toBe(sha)
       expect(fresh.label).toBe(label)
       await t.advance(SIGN_FILL_MS)
-      expect(t.fills).toEqual([`Send package ${label}`, `Send package ${label}`])
+      expect(t.gos).toEqual([`Send package ${label}`, `Send package ${label}`])
       expect(drawn(t)).toContain('Sealed')
     })
 
@@ -650,6 +724,7 @@ describe('0.7.26 signing: the name, the envelope, then exactly the go in the pro
       await refreshCard(t.$, { packageId: before.tree.package_id, signer: 'Test Signer', home: HOME, note: async () => undefined }, t.now.page)
       await t.advance(SIGN_FILL_MS)
       expect(t.fills).toEqual([])
+      expect(t.gos).toEqual([])
       expect(drawn(t)).toContain('[✍  Click to sign and send]')
     })
 
@@ -925,6 +1000,7 @@ describe('0.7.33 the card on screen is the current render: read at `mm card` and
     expect(t.files.size).toBe(0)
     await t.advance(SIGN_FILL_MS)
     expect(t.fills).toEqual([])
+    expect(t.gos).toEqual([])
     const marks = t.state.get('cardMarks') as MmCardMarks
     expect(marks.signed).toEqual({})
     expect(marks.notice).toEqual({ packageId: after.id, kind: 'changed' })
@@ -1211,6 +1287,7 @@ describe('0.7.36 the box waits for the thread: it opens once this thread has fin
     expect(t.files.size).toBe(0)
     await t.advance(SIGN_FILL_MS)
     expect(t.fills).toEqual([])
+    expect(t.gos).toEqual([])
     expect((t.state.get('cardMarks') as MmCardMarks | undefined)?.signed ?? {}).toEqual({})
     // ready at t1, more tool calls, a press at t2 while the turn runs: refused the same way
     await turnBegan(t.$)
@@ -1221,6 +1298,7 @@ describe('0.7.36 the box waits for the thread: it opens once this thread has fin
     expect(t.appends).toEqual([])
     await t.advance(SIGN_FILL_MS)
     expect(t.fills).toEqual([])
+    expect(t.gos).toEqual([])
     expect((t.state.get('cardMarks') as MmCardMarks | undefined)?.signed ?? {}).toEqual({})
     // the turn ends: the same press now signs, and the words go in
     await turnEnded(t.$, true)
@@ -1228,7 +1306,7 @@ describe('0.7.36 the box waits for the thread: it opens once this thread has fin
     await pressSign(t.$, LABEL, t.log)
     expect((t.files.get(SIGNED_FILE) ?? '').split('\n').filter(Boolean).length).toBe(1)
     await t.advance(SIGN_FILL_MS)
-    expect(t.fills).toEqual([`Send package ${LABEL}`])
+    expect(t.gos).toEqual([`Send package ${LABEL}`])
   })
 
   test('a new hash closes the box until the thread answers for that version; a press on it records nothing', async () => {
@@ -1356,7 +1434,7 @@ describe('0.7.36 the box waits for the thread: it opens once this thread has fin
       return t
     }
 
-    test('its words with the page the record signed, as a user row of one text block, written once, and always record, note, then words', async () => {
+    test('its words with the page the record signed, as a user row of one text block, written once, and always record, note, then (0.7.41) the go', async () => {
       expect(SIGNED_NOTE('3f1c9a7e5b2d', 'abcdefabcdef')).toBe('[Massmarket bridge, no reply needed] Card signed in the side pane: Package 3f1c9a7e5b2d, page abcdefabcdef. Nothing has been sent.')
       const t = await ready()
       await pressSign(t.$, LABEL, t.log)
@@ -1365,22 +1443,23 @@ describe('0.7.36 the box waits for the thread: it opens once this thread has fin
       expect(t.appends).toEqual([{ message: { type: 'user', content: [{ type: 'text', text: `[Massmarket bridge, no reply needed] Card signed in the side pane: Package ${LABEL}, page ${page12}. Nothing has been sent.` }] } }])
       expect(t.order).toEqual(['record', 'note'])
       await t.advance(SIGN_FILL_MS)
-      expect(t.order).toEqual(['record', 'note', 'words'])
+      expect(t.order).toEqual(['record', 'note', 'go'])
       // a second press while the signature stands writes neither
       await pressSign(t.$, LABEL, t.log)
       await t.advance(SIGN_FILL_MS)
       expect(t.appends.length).toBe(1)
-      expect(t.order).toEqual(['record', 'note', 'words'])
+      expect(t.order).toEqual(['record', 'note', 'go'])
     })
 
     for (const how of ['throws', 'denied'] as const) {
-      test(`an append that ${how === 'throws' ? 'the engine refuses' : 'a plugin above answers with a deny'}: no words in the box, the box says to try again, and the record stands with no note`, async () => {
+      test(`an append that ${how === 'throws' ? 'the engine refuses' : 'a plugin above answers with a deny'}: no go sent and no words in the box, the box says to try again, and the record stands with no note`, async () => {
         const t = await ready()
         t.now.append = how
         await pressSign(t.$, LABEL, t.log)
         await t.advance(SIGN_FILL_MS)
         expect(t.order).toEqual(['record'])
         expect(t.fills).toEqual([])
+        expect(t.submits).toEqual([])
         expect(t.appends).toEqual([])
         const marks = t.state.get('cardMarks') as MmCardMarks
         expect(marks.signed).toEqual({})
@@ -1389,11 +1468,11 @@ describe('0.7.36 the box waits for the thread: it opens once this thread has fin
         expect(t.notes.join('\n')).not.toContain('Nothing has been sent')
         const said = texts(draw(t.state.get('card') as MmCard, await checkedOf(t.$), { marks })).join(' ')
         expect(said).toContain('That did not go through, so nothing was signed. Try again, or ask your thread to print the page.')
-        // it goes through on the next press: a record and a note of its own, then the words
+        // it goes through on the next press: a record and a note of its own, then the go
         t.now.append = 'stores'
         await pressSign(t.$, LABEL, t.log)
         await t.advance(SIGN_FILL_MS)
-        expect(t.order).toEqual(['record', 'record', 'note', 'words'])
+        expect(t.order).toEqual(['record', 'record', 'note', 'go'])
         expect(t.appends.length).toBe(1)
       })
     }
@@ -1407,6 +1486,7 @@ describe('0.7.36 the box waits for the thread: it opens once this thread has fin
       await t.advance(SIGN_FILL_MS)
       expect(t.appends).toEqual([])
       expect(t.fills).toEqual([])
+      expect(t.submits).toEqual([])
     })
 
     test('nothing reaches the transcript when the press is refused for want of a check, or for a card that moved', async () => {
@@ -1599,6 +1679,7 @@ describe('0.7.36 the box waits for the thread: it opens once this thread has fin
     expect(t.files.size).toBe(0)
     await t.advance(SIGN_FILL_MS)
     expect(t.fills).toEqual([])
+    expect(t.gos).toEqual([])
     expect((t.state.get('cardMarks') as MmCardMarks).notice?.kind).toBe('changed')
     // and the box is closed on the new version, saying why
     const said = texts(draw(t.state.get('card') as MmCard, await checkedOf(t.$), { marks: t.state.get('cardMarks') as MmCardMarks })).join('\n')
@@ -1654,7 +1735,7 @@ describe('0.7.40 the Changes field: the person\'s words go into the thread, neve
     expect(fields).toHaveLength(1)
     expect(fields[0]).toMatchObject({ key: `mm-card-feedback:${LABEL}`, label: 'Changes', placeholder: 'What should change? Your thread revises the package and shows it here again.', submitLabel: 'Send to thread', rows: 3 })
     expect([FEEDBACK_LABEL, FEEDBACK_PLACEHOLDER, FEEDBACK_SUBMIT]).toEqual(['Changes', 'What should change? Your thread revises the package and shows it here again.', 'Send to thread'])
-    expect(texts(open).join('\n')).toContain(`Signing puts "Send package ${LABEL}" in your prompt box; Enter sends it. Changes go in the Changes box above or the chat box.`)
+    expect(texts(open).join('\n')).toContain(`One press signs and sends: "Send package ${LABEL}" goes to your thread as your go, and it sends the package. Changes go in the Changes box above or the chat box.`)
     expect(texts(open).join('\n')).not.toContain('Changes go in the chat box as usual.')
     // above the box: the field comes before the sign button in the drawing
     const order = JSON.stringify(open)
@@ -1678,9 +1759,9 @@ describe('0.7.40 the Changes field: the person\'s words go into the thread, neve
 
   test('while a signature for this tag stands (a go is armed) there is no field and nothing in its place; once it no longer stands the field is back', () => {
     const signedAt = 1_000_000 - 60_000
-    const mark = { label: LABEL, signer: 'Test Signer', at: signedAt, pageSha: 'p'.repeat(64), filled: 'filled' as const }
+    const mark = { label: LABEL, signer: 'Test Signer', at: signedAt, pageSha: 'p'.repeat(64), filled: 'sent' as const }
     const sealed = draw(cardOf({ pageSha: 'p'.repeat(64) }), { marks: { signed: { [LABEL]: mark } }, feedback: { label: LABEL, said: 'sent' } })
-    expect(texts(sealed).join('\n')).toContain(`Sealed: "Send package ${LABEL}" is in your prompt box.`)
+    expect(texts(sealed).join('\n')).toContain(`Sealed and sent: your go for Package ${LABEL} is in the thread`)
     expect(inputs(sealed)).toEqual([])
     expect(JSON.stringify(sealed)).not.toContain('mm-card-changes:')
     expect(texts(sealed).join('\n')).not.toContain(FEEDBACK_SAID.sent)
@@ -1763,7 +1844,7 @@ describe('0.7.40 the Changes field: the person\'s words go into the thread, neve
   test('where no field is drawn (a surface with no Input, as mobile), the caption under the box does not name the Changes box', () => {
     const noInput = drawCard(ELS, { card: cardOf(), marks: { signed: {} }, checked: { [LABEL]: 0 }, busy: false, checkMiss: null, now: 1_000_000, onSign: () => undefined, onCheck: () => undefined, onAsk: () => undefined, onPage: () => undefined, onFeedback: () => undefined })
     const said = texts(noInput).join('\n')
-    expect(said).toContain(`Signing puts "Send package ${LABEL}" in your prompt box; Enter sends it. Changes go in the chat box.`)
+    expect(said).toContain(`One press signs and sends: "Send package ${LABEL}" goes to your thread as your go, and it sends the package. Changes go in the chat box.`)
     expect(said).not.toContain('Changes box')
     expect(texts(draw(cardOf(), { onFeedback: undefined })).join('\n')).not.toContain('Changes box')
     // with the field above it, the caption names it
@@ -1776,7 +1857,7 @@ describe('0.7.40 the Changes field: the person\'s words go into the thread, neve
       const d = draw(cardOf(), { surface })
       expect(inputs(d), String(surface)).toEqual([])
       const said = texts(d).join('\n')
-      expect(said, String(surface)).toContain(`Signing puts "Send package ${LABEL}" in your prompt box; Enter sends it. Changes go in the chat box.`)
+      expect(said, String(surface)).toContain(`One press signs and sends: "Send package ${LABEL}" goes to your thread as your go, and it sends the package. Changes go in the chat box.`)
       expect(said, String(surface)).not.toContain('Changes box')
       // the line a submit left still shows there
       expect(texts(draw(cardOf(), { surface, feedback: { label: LABEL, said: 'sent' } })).join('\n'), String(surface)).toContain(FEEDBACK_SAID.sent)
@@ -1832,6 +1913,7 @@ describe('0.7.40 the Changes field: the person\'s words go into the thread, neve
     expect((await marksOf(t.$)).signed).toEqual({})
     await t.advance(SIGN_FILL_MS)
     expect(t.fills).toEqual([])
+    expect(t.gos).toEqual([])
   })
 
   test('empty words do nothing at all', async () => {
@@ -2084,6 +2166,32 @@ describe('0.7.40 the row of the thread\'s own `mm card` call: everything but a r
     t.state.set('card', NO_CARD)
     expect(texts(await rowHook?.(t.$, row(), engine))).toEqual([ROW_GONE])
     expect(ROW_GONE).toBe('This card is not held here right now. Open this client in the side pane, or ask your thread to show the package again.')
+  })
+
+  // (0.7.41, Rob 2026-11-09: "make it disappear from the side panel once it's sent, whether you send it in the side panel or from the chat")
+  test('(0.7.41) a package the last sync lists nowhere (sent, closed, handed on): its row says so, never to open it again', async () => {
+    const t = drawing()
+    const stored: Record<string, unknown> = {}
+    ;(t.$ as unknown as Record<string, unknown>).store = { get: async (k: string) => stored[k] }
+    t.state.set('card', NO_CARD)
+    t.state.set('view', { text: '', heading: '' })
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_1' })
+    // no sync on record: the line it had
+    expect(texts(await rowHook?.(t.$, row(), engine))).toEqual([ROW_GONE])
+    // a sync that still lists the package (its client's own, or open): the line it had
+    stored['mm.last'] = { at: 1, items: [{ projectId: 'p', packageId: PKG, kind: 'ready', open: null }] }
+    expect(texts(await rowHook?.(t.$, row(), engine))).toEqual([ROW_GONE])
+    stored['mm.last'] = { at: 1, items: [{ projectId: 'p', packageId: null, kind: 'task', open: { id: PKG, state: 'held_by_other' } }] }
+    expect(texts(await rowHook?.(t.$, row(), engine))).toEqual([ROW_GONE])
+    // a sync that lists it nowhere
+    stored['mm.last'] = { at: 2, items: [{ projectId: 'q', packageId: null, kind: 'task', open: null }] }
+    const drawn = await rowHook?.(t.$, row(), engine)
+    expect(texts(drawn)).toEqual([ROW_LEFT(LABEL)])
+    expect(buttons(drawn).size).toBe(0)
+    expect(ROW_LEFT(LABEL)).toBe(`Package ${LABEL} is no longer waiting: the last sync lists nothing of it for you to send.`)
+    // a store that cannot be read: the line it had
+    ;(t.$ as unknown as Record<string, unknown>).store = { get: async () => { throw new Error('no store') } }
+    expect(texts(await rowHook?.(t.$, row(), engine))).toEqual([ROW_GONE])
   })
 
   test('where the pane draws no card (its client part shows none), the live row draws one dim line and no box: the pane\'s own test', async () => {
