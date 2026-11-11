@@ -13111,7 +13111,10 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       const u = await shown($)
       expect(await tool($, `card ${PKG}`)).toBe(notReady(`the page holds a line the card does not (${LINE.slice(0, 60)})`))
       expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn'))).toBe(false)
-      expect((await lines(u)).join('\n')).toContain('This view does not match the stored drafts, so signing is off here. Go by the page printed in the thread.')
+      // (0.7.46) the card is the version as it stands: the pane says why it cannot stand in for the page, never that it is an older view
+      const said = (await lines(u)).join('\n')
+      expect(said).toContain(`This card is the package as it stands now, but it cannot stand in for the page: the page holds a line the card does not (${LINE.slice(0, 60)}). Signing is off here. Go by the page printed in the thread.`)
+      expect(said).not.toContain('does not match the stored drafts')
       expect(w.written.filter(f => f.path.endsWith('bridge-notices.log')).map(f => f.text).join('\n')).not.toContain('A line only OW prints')
       await u.unmount()
     })
@@ -13748,6 +13751,35 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
         // the pane followed it; the model was told nothing new
         expect(w.appended.length).toBe(notes)
         // the same version on the syncs after: nothing is drawn again
+        const renders = w.renders.length
+        for (let i = 0; i < 11; i++) await w.clock.advance(60_000)
+        expect(w.renders.length).toBe(renders)
+        await u.unmount()
+      })
+
+      // (0.7.46) a read where OW gave no usable hash left the card with no version known, and no sync ever drew it again
+      test('(0.7.46) a card left with no version known: the next sync with a hash draws it again, and nothing is drawn after that', async ($, on) => {
+        const w = world(on, own)
+        await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
+        await w.clock.advance(4_000)
+        const u = await shown($)
+        expect(await tool($, `card ${PKG}`)).toBe(READY)
+        await endTurn($)
+        expect(await hasBox(u)).toBe(true)
+        w.setPickup({ ...PICKUP, package_sha256: null })
+        expect(await tool($, `card ${PKG}`)).toBe(notReady('OW gave no usable hash for this package'))
+        await endTurn($)
+        expect((await lines(u)).join('\n')).toContain('the package is now unknown')
+        expect(await hasBox(u)).toBe(false)
+        const notes = w.appended.length
+        // OW gives the hash again, of the very version the card holds
+        w.setPickup(PICKUP)
+        for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
+        for (let i = 0; i < 200 && (await lines(u)).join('\n').includes('the package is now unknown'); i++) await new Promise(r => setTimeout(r, 2))
+        expect((await lines(u)).join('\n')).not.toContain('the package is now unknown')
+        expect(await hasBox(u)).toBe(true)
+        expect(w.appended.length).toBe(notes)
+        // the version is known again: the syncs after draw nothing
         const renders = w.renders.length
         for (let i = 0; i < 11; i++) await w.clock.advance(60_000)
         expect(w.renders.length).toBe(renders)
