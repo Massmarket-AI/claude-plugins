@@ -4100,10 +4100,14 @@ async function owe($: EngineInterface): Promise<void> {
   armShown($)
 }
 
-/** (0.7.48) A surface drew this thread: on record, and a card still owed is checked SHOWN_WAIT_MS from now. Never throws. */
+/**
+ * (0.7.48) A surface drew this thread: on record, and a card still owed is checked SHOWN_WAIT_MS from now. A card owed for a call that is
+ * no longer this session's live one (a newer `mm card` replaced it) is owed no more. Never throws.
+ */
 async function noteThreadDrawn($: EngineInterface): Promise<void> {
   try {
     threadDrawnAt = await $.clock.now()
+    if (owedCard && (await askedOf($))?.toolUseId !== owedCard.toolUseId) owedCard = null
     armShown($)
   } catch {
     // the next draw notes it
@@ -4115,7 +4119,7 @@ function armShown($: EngineInterface): void {
   if (!it || it.armed) return
   it.armed = true
   try {
-    void Promise.resolve($.clock.after(SHOWN_WAIT_MS, () => checkShown($, it))).catch(() => {
+    void Promise.resolve($.clock.after(SHOWN_WAIT_MS, () => void checkShown($, it).catch(() => {}))).catch(() => {
       it.armed = false
     })
   } catch {
@@ -4123,11 +4127,11 @@ function armShown($: EngineInterface): void {
   }
 }
 
-/** (0.7.48) The check: the line took the card, or nobody has drawn the thread since the answer (checked again at the next draw), or tell. */
-function checkShown($: EngineInterface, it: NonNullable<typeof owedCard>): void {
+/** (0.7.48) The check: the line took the card or a newer call replaced it, or nobody has drawn the thread since the answer (checked again at the next draw), or tell. */
+async function checkShown($: EngineInterface, it: NonNullable<typeof owedCard>): Promise<void> {
   if (owedCard !== it) return
   it.armed = false
-  if (lineOfCall.has(it.toolUseId)) {
+  if (lineOfCall.has(it.toolUseId) || (await askedOf($))?.toolUseId !== it.toolUseId) {
     owedCard = null
     return
   }
