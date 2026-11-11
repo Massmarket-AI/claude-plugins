@@ -9485,14 +9485,14 @@ describe('(0.7.15) a ticket on an `assign_by` clock: chipped, pinned and named a
   })
   const pmFeed = (rows = [ownerRow()]) => ({ member: ME, role: 'pm', mail: [], drafts: [], tickets: { due_today: rows } })
 
-  test('no thread yet: its chip asks for an owner, and its kickoff says to assign one in OW by the clock; nothing is sent', async ($, on) => {
+  test('no thread yet: its chip asks for an owner, and its kickoff says to assign one from Claude Code by the clock; nothing is sent', async ($, on) => {
     const w = world(on, { feed: pmFeed(), threads: [] })
     await tickOnce($, w)
     for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
     expect(chipTitles(w)).toEqual(['Acme Roofing: assign an owner'])
     const prompt = String(w.minted().at(-1)?.args.prompt)
     expect(prompt.startsWith(`[mm-link ${ACME}] Acme Roofing Pat (OW project ${ACME}) has 1 ticket(s) of mine that need an owner, the first by Mon, Oct 12 1 PM ET.`)).toBe(true)
-    expect(prompt).toContain('The time on each is when it needs an owner in OW, not when the work is due.')
+    expect(prompt).toContain('The time on each is when it needs an owner, not when the work is due.')
     expect(prompt).toContain(`1. Build the booking page (ticket ${TID}) · owner needed by Mon, Oct 12 1 PM ET`)
     expect(prompt).not.toContain('committed task')
     expect(sends(w)).toEqual([])
@@ -9504,7 +9504,7 @@ describe('(0.7.15) a ticket on an `assign_by` clock: chipped, pinned and named a
     expect(w.threads.get(SELF)).toMatchObject({ title: '🔴 2h left · Acme Roofing · assign an owner', pinned: true })
     const ui = await pane($)
     const md = String((await ui.find({ type: 'Markdown' }))?.text)
-    expect(md).toContain('### Needs an owner: assign one in OW, or take it and give the ETA\n\n- Build the booking page (ticket 0000a551) · owner needed by ')
+    expect(md).toContain('### Needs an owner: name one in Claude Code, or take it and give the ETA\n\n- Build the booking page (ticket 0000a551) · owner needed by ')
     expect(md).not.toContain('Due (dates we committed to)')
     expect(sends(w)).toEqual([])
     await ui.unmount()

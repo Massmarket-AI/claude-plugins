@@ -2406,10 +2406,10 @@ describe('0.7.40 the answer under a row the bridge drew is hidden, and a folded 
   })
 })
 
-// (0.7.47, Rob 2026-11-11: "when these reply packages show up in the thread, I shouldn't have to scroll up and down. The window I'm
+// (0.7.48, Rob 2026-11-11: "when these reply packages show up in the thread, I shouldn't have to scroll up and down. The window I'm
 // looking at: the reply package end should be the height of the reply package.") The desktop draws a call's row in a frame of at most 70%
 // of the window that scrolls inside; a reply's text row has none. So the thread's own line after the live call draws the card.
-describe('0.7.47 the card at its whole height: drawn under the thread\'s own line after the live call', () => {
+describe('0.7.48 the card at its whole height: drawn under the thread\'s own line after the live call', () => {
   type Hook = ($: unknown, e: Record<string, unknown>, next: (e: unknown) => unknown) => Promise<unknown>
   const lineHook = hooks['ui.render:{"component":"AssistantMessage"}'] as Hook
   const rowHook = hooks['ui.render:{"component":"ToolUse"}'] as Hook
@@ -2550,7 +2550,7 @@ describe('0.7.47 the card at its whole height: drawn under the thread\'s own lin
   })
 })
 
-describe('0.7.47 the card is seen, or the page is printed: checked under the thread\'s line once the turn ends', () => {
+describe('0.7.48 the card is seen, or the page is printed: checked under the thread\'s line once the turn ends', () => {
   type Hook = ($: unknown, e: Record<string, unknown>, next: (e: unknown) => unknown) => Promise<unknown>
   const lineHook = hooks['ui.render:{"component":"AssistantMessage"}'] as Hook
   const bandHook = hooks['ui.render:{"component":"AbovePrompt"}'] as Hook
