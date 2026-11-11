@@ -226,7 +226,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 // whose thread in the profile left he pinned himself and did not finish (`recordLooksFinished`): see "(1)" in `reconcile`.
 // And the switch line rides on the first prompt after a switch, by the account the session runs in (`awayNote`).
 //
-// ⛔ (0.7.45, Rob 2026-11-11: "In the little panel that shows up above the command bar I'm typing in right now, it always has a
+// ⛔ (0.7.47, Rob 2026-11-11: "In the little panel that shows up above the command bar I'm typing in right now, it always has a
 // thing that says "Open the side panel." But the side panel is almost always open automatically as soon as the bridge connects.
 // We don't need to have something cluttering up that space telling us to open the side panel, or that button there. I don't
 // think.") THE BAND OFFERS THE SIDE PANE ONLY WHERE IT WILL NOT OPEN BY ITSELF. In a client's own thread the waiting line
@@ -239,7 +239,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.45'
+export const VERSION = '0.7.47'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -4529,10 +4529,14 @@ async function freshenPackage($: EngineInterface, it: QueueItem, own: boolean): 
     if (!at || versionChecked.get(id) === at) return false
     versionChecked.set(id, at)
     const card = await cardOf($)
-    // nothing of this package drawn here yet, or a draw under way: the usual draw is the one to wait for
-    if (card.packageId !== pkg || card.status === 'rendering' || !card.current) return false
+    // nothing of this package drawn here yet, or a draw under way: the usual draw is the one to wait for. (0.7.46) A part with no card
+    // drawn and no version known (a page OW gave without a hash) is left as before: no read on each sync for a card there is not.
+    if (card.packageId !== pkg || card.status === 'rendering' || (!card.current && !card.tree)) return false
     const read = await readOwPage($, pkg)
-    if (!read.sha || sameVersion(card.current, read.sha) || card.tree?.package_sha256 === read.sha) return false
+    if (!read.sha) return false
+    // (0.7.46) a card left with no version known (a read where OW gave no usable hash) is drawn again once OW gives one, even of the
+    // version it holds: until 0.7.46 it was passed over here for good, and read "the package is now unknown. Drawing it again…"
+    if (card.current && (sameVersion(card.current, read.sha) || card.tree?.package_sha256 === read.sha)) return false
     await (await beginClient($, it, own, false))()
     return true
   } catch {
@@ -4564,12 +4568,12 @@ function isFresh(last: Last, projectId: string): boolean {
 /**
  * The one line above the prompt, in every desktop thread (Rob, 2026-10-12: "How do we open this panel up
  * in other threads where it's not already open?"): what needs the person, by R9. In a thread that is a waiting
- * client's, its second button opens that client's part of the pane ((0.7.45) only while the person's close of the pane for
+ * client's, its second button opens that client's part of the pane ((0.7.47) only while the person's close of the pane for
  * that client stands: otherwise the pane opens by itself, and the band offers no way to it). (0.5.14) Its first button is
  * always Start missing threads (`missing`: how many clients need a new thread now, 0 for All threads started). '' draws
  * nothing: no sync on record yet, the bridge paused, a terminal session, or no tracker token on this computer.
  * ⛔ From what is stored only: the last sync, the links, the chips, this thread's id as the timer already learnt it,
- *    and (0.7.45) this session's own record. No feed call, no app call, no sync.
+ *    and (0.7.47) this session's own record. No feed call, no app call, no sync.
  */
 async function bandLine($: EngineInterface): Promise<MmBand> {
   const nothing: MmBand = { text: '' }
@@ -4635,7 +4639,7 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
   // In a waiting client's thread the line carries the button that opens its part of the pane.
   const mine = me ? ownerOf(me, links) : undefined
   const own = mine ? items.find(i => i.projectId === mine) : undefined
-  // ⛔ (0.7.45, Rob 2026-11-11: "We don't need to have something cluttering up that space telling us to open the side panel")
+  // ⛔ (0.7.47, Rob 2026-11-11: "We don't need to have something cluttering up that space telling us to open the side panel")
   // only while the person's close of the pane for this client stands (`MmSession.closed`): the one case where the pane does not
   // open by itself (`opensBySelf`). Otherwise neither Drafts nor the waiting line and its button is drawn.
   const closedHere = own !== undefined && (await sessOf($)).closed === own.projectId
@@ -9661,7 +9665,7 @@ async function awayNote($: EngineInterface, text: string, origin: string | undef
 }
 
 /**
- * (0.6.0) The person closed the pane: it is not opened by itself again for the same project in this session. (0.7.45) And
+ * (0.6.0) The person closed the pane: it is not opened by itself again for the same project in this session. (0.7.47) And
  * the band is drawn again: in that client's own thread it now offers the pane (`bandLine`). A redraw that fails is let go.
  */
 async function rememberClose($: EngineInterface): Promise<void> {
@@ -9670,7 +9674,7 @@ async function rememberClose($: EngineInterface): Promise<void> {
 }
 
 /**
- * (0.7.45) Every open of the pane by the bridge (the band's buttons, /mm, /mm view, a row's Drafts, `mm card`, Track to, by
+ * (0.7.47) Every open of the pane by the bridge (the band's buttons, /mm, /mm view, a row's Drafts, `mm card`, Track to, by
  * itself): the open as before, its answer handed back untouched, and then `paneOpened`. An open that throws ends nothing.
  * (A `ui.open` hook of the bridge's own does not see the bridge's opens from a press or a timer, so the opens call it here.)
  */
@@ -9681,7 +9685,7 @@ async function openPane($: EngineInterface, title: string): ReturnType<EngineInt
 }
 
 /**
- * (0.7.45) The pane opened again: the person's close no longer stands (as `autoPane` always cleared it), and the band, which
+ * (0.7.47) The pane opened again: the person's close no longer stands (as `autoPane` always cleared it), and the band, which
  * offered the pane only while it did, is drawn again without that. Never throws.
  */
 async function paneOpened($: EngineInterface): Promise<void> {
