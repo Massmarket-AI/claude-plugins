@@ -573,7 +573,7 @@ export const ETA_ASK_TEXT = '⏳ NO ETA — give one in Claude Code'
 export const ASSIGN_BY_BASIS = 'assign_by'
 
 /** (0.7.15, owner asks) What a ticket on an `assign_by` clock says, the bridge's own words: OW prints none. */
-export const ASSIGN_ASK_TEXT = 'Needs an owner: assign one in OW, or take it and give the ETA'
+export const ASSIGN_ASK_TEXT = 'Needs an owner: name one in Claude Code, or take it and give the ETA'
 
 /**
  * (0.5.28, internal asks; Rob, 2026-10-23: "there should be massmarket internal thread in bridge as well") Massmarket's
@@ -2953,7 +2953,7 @@ export function noteText(it: QueueItem, member: string): string {
   // (0.7.15, owner asks) and the tickets to give an owner: which, and that the date is for the owner, not the delivery
   const own = assignAsksOf(it).filter(a => isUuid(a?.id))
   const one = own.length === 1
-  const owners = own.length ? ` ${own.length} ticket${one ? '' : 's'} of ${holderName(member)}'s need${one ? 's' : ''} an owner (ticket ${own.map(a => a.id.slice(0, 8)).join(', ')}): a team post handed ${one ? 'it' : 'them'} over to be assigned in OW by ${one ? 'its due time' : 'their due times'}, which ${one ? 'is not a delivery date' : 'are not delivery dates'}. A ticket ${holderName(member)} takes instead needs an ETA, recorded as task-chip-flow §5.3 says, with task_fingerprint "ticket:<id>".` : ''
+  const owners = own.length ? ` ${own.length} ticket${one ? '' : 's'} of ${holderName(member)}'s need${one ? 's' : ''} an owner (ticket ${own.map(a => a.id.slice(0, 8)).join(', ')}): a team post handed ${one ? 'it' : 'them'} over to be assigned (POST /api/ext/ticket-status with an assignee) by ${one ? 'its due time' : 'their due times'}, which ${one ? 'is not a delivery date' : 'are not delivery dates'}. A ticket ${holderName(member)} takes instead needs an ETA, recorded as task-chip-flow §5.3 says, with task_fingerprint "ticket:<id>".` : ''
   // (0.7.4, for the founder) and his teammates' late internal tickets: whose, never his to do
   const late = lateSentence(matesOf(it))
   const mates = late ? ` ${late} (late); the side pane lists them. They are the teammate's to answer, not ${holderName(member)}'s.` : ''
