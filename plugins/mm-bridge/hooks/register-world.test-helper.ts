@@ -33,6 +33,12 @@ export const ago = (hours: number) => new Date(NOW - hours * HOUR).toISOString()
  * on the bridge's own work for each simulated minute, not on the test: about 1-3 s on an M-series Mac, and up to
  * about 2.6 times that on GitHub's runners, past the kit's 5 s default (CI, 2026-10-23). These tests alone get
  * 30 s; every other test keeps the default.
+ *
+ * (2026-11-11) Since register.test.ts was split, its files run at once, and on a busy runner they share fewer than
+ * 2 free cores: every test there ran 2.2 to 3.1 times slower than on a free one (PR #97), and tests of ten minutes
+ * to two hours of the clock passed 5 s. So every test that took over 1 s on CI's slowest green run of the single
+ * file (43080447597 attempt 2) has 30 s too, 35 more. Give it to a new test that runs the timers for ten minutes or
+ * more, or takes over 1 s on CI. The timeout guards against a test that hangs; no test asserts it.
  */
 export const LONG = { timeoutMs: 30_000 }
 

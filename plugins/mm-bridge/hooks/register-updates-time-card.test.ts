@@ -78,7 +78,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     await w.clock.advance(56_000)
   }
 
-  test('Update\'s own message goes once, by itself, into the client\'s linked thread, (review of PR #15, F3) 10 minutes after this bridge first saw it; never twice; something new goes once more, 10 minutes after it is first seen', async ($, on) => {
+  test('Update\'s own message goes once, by itself, into the client\'s linked thread, (review of PR #15, F3) 10 minutes after this bridge first saw it; never twice; something new goes once more, 10 minutes after it is first seen', LONG, async ($, on) => {
     const w = linkedWorld(on)
     await tickOnce($, w)
     // the first sync is when this bridge first saw it: nothing yet, nor at the sync six minutes on
@@ -434,7 +434,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     ['a client with no thread (its thread is started, never updated)', { feed: acmeOnly() }],
   ]
   for (const [name, opts] of skipped) {
-    test(`⛔ never ${name}`, async ($, on) => {
+    test(`⛔ never ${name}`, LONG, async ($, on) => {
       const w = world(on, opts)
       await tickOnce($, w)
       await after(w, 30)
@@ -467,7 +467,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
   // ⛔ (review of PR #15, F2, the reviewer's P3) the person relinks the thread while the update asks the app for it and
   // reads the feed: the links are read again right before the send, and nothing goes into a thread that is no longer
   // the client's
-  test('⛔ (review of PR #15, F2) [P3] the thread is made another client\'s while the update reads the app and the feed: nothing is sent into it, on record as not sent', async ($, on) => {
+  test('⛔ (review of PR #15, F2) [P3] the thread is made another client\'s while the update reads the app and the feed: nothing is sent into it, on record as not sent', LONG, async ($, on) => {
     let armed = true
     const w = linkedWorld(on, {
       during: (call, stored) => {
@@ -561,7 +561,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(records(w)).toEqual([])
   })
 
-  test('⛔ another session\'s claim since: that session sends it, this one does not; a claim that lapsed is taken again at the next sync, and it goes once', async ($, on) => {
+  test('⛔ another session\'s claim since: that session sends it, this one does not; a claim that lapsed is taken again at the next sync, and it goes once', LONG, async ($, on) => {
     const w = linkedWorld(on)
     await tickOnce($, w)
     await toClaim(w)
@@ -660,7 +660,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(notices(w)).toContain(`not updated Acme Roofing (${ACME}) sig`)
   })
 
-  test('the hour\'s cap: twelve in the last hour on this computer; past it nothing goes (logged once), and it goes once the hour has passed', async ($, on) => {
+  test('the hour\'s cap: twelve in the last hour on this computer; past it nothing goes (logged once), and it goes once the hour has passed', LONG, async ($, on) => {
     const earlier = (count: number, startMin: number, stepMin: number, ok: boolean | null = true): Rec[] =>
       Array.from({ length: count }, (_, i) => ({ at: NOW - (startMin + i * stepMin) * 60_000, pid: `99999999-9999-4999-8999-${String(i).padStart(12, '0')}`, client: `Client ${i}`, sig: '00000000', sid: `local_x${i}`, by: 'local_y', ok, reason: 'x' }))
     // (0.5.13, Rob 10-15: "12 updates an hour") the hour: twelve in the last hour, 4 to 15 minutes ago
@@ -677,7 +677,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(sends(hour).map(c => c.args.session_id)).toEqual(['local_a'])
   })
 
-  test('the day\'s cap: forty in the last day, none of them in the last hour: nothing goes', async ($, on) => {
+  test('the day\'s cap: forty in the last day, none of them in the last hour: nothing goes', LONG, async ($, on) => {
     const earlier = (count: number, ok: boolean | null): Rec[] =>
       Array.from({ length: count }, (_, i) => ({ at: NOW - (2 * 60 + i * 10) * 60_000, pid: `99999999-9999-4999-8999-${String(i).padStart(12, '0')}`, client: `Client ${i}`, sig: '00000000', sid: `local_x${i}`, by: 'local_y', ok, reason: 'x' }))
     const day = linkedWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autoupdates': earlier(40, true) } })
@@ -734,7 +734,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(sends(w).length).toBe(1)
   })
 
-  test('a send the thread does not take: recorded and logged with why, and not tried again for the same thing', async ($, on) => {
+  test('a send the thread does not take: recorded and logged with why, and not tried again for the same thing', LONG, async ($, on) => {
     const w = linkedWorld(on, { sendFails: 'that session did not accept it (messages from other sessions can require approval there, or be turned off)' })
     await tickOnce($, w)
     await seenTen(w)
@@ -782,7 +782,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(sends(w).map(c => [c.args.session_id, c.args.message])).toEqual([['local_a', ACME_UPDATE]])
   })
 
-  test('⛔ (review of PR #15, F5) case 1, a package the person holds, mid-reply in its thread: nothing goes while they are in it', async ($, on) => {
+  test('⛔ (review of PR #15, F5) case 1, a package the person holds, mid-reply in its thread: nothing goes while they are in it', LONG, async ($, on) => {
     const held = feed({ drafts: [packageFor(ACME, 'Acme Roofing — Pat', heldBy(ME))], mail: [], tickets: {}, threads: [] })
     const w = linkedWorld(on, { feed: held, threads: [thread('local_a', 'Roof quote', 0)] })
     await tickOnce($, w)
@@ -805,7 +805,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     ['old', 'the time-tracking hook on this computer is older than 0.11.5 and would count it as the person\'s time'],
     ['missing', 'the time-tracking hook on this computer could not be read'],
   ] as const) {
-    test(`⛔ (review of PR #15, F4) a time-tracking hook that ${hook === 'old' ? 'counts every turn as the person\'s (0.11.4 and before)' : 'cannot be read'}: nothing is sent by itself, logged once; read again at most every 10 minutes`, async ($, on) => {
+    test(`⛔ (review of PR #15, F4) a time-tracking hook that ${hook === 'old' ? 'counts every turn as the person\'s (0.11.4 and before)' : 'cannot be read'}: nothing is sent by itself, logged once; read again at most every 10 minutes`, LONG, async ($, on) => {
       const w = linkedWorld(on, { hook })
       await tickOnce($, w)
       await after(w, 40)
@@ -839,7 +839,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(w.stored['mm.marked']).toEqual({ [SELF]: ACME })
   })
 
-  test('/mm auto off: nothing is sent; /mm auto on: sent 10 minutes after the first sync that sees it, once', async ($, on) => {
+  test('/mm auto off: nothing is sent; /mm auto on: sent 10 minutes after the first sync that sees it, once', LONG, async ($, on) => {
     const w = linkedWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autostart': { on: false } } })
     await tickOnce($, w)
     await after(w, 30)
@@ -1222,7 +1222,7 @@ describe('0.6.0: the time numbers are read sparingly', () => {
     expect(w.fetched.filter(u => u.includes('/client-time')).length).toBe(2)
   })
 
-  test('the thread that polls reads the projects of this computer\'s threads in one call after each sync', async ($, on) => {
+  test('the thread that polls reads the projects of this computer\'s threads in one call after each sync', LONG, async ($, on) => {
     const w = world(on, { skillMap: skillsOk, clientTime: timeOk(), threads: [thread('local_b', 'Staffing plan', 3)], store: { 'mm.links': { [ACME]: SELF, [BOLT]: 'local_b' } } })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
@@ -1238,7 +1238,7 @@ describe('0.6.0: the time numbers are read sparingly', () => {
 })
 
 describe('0.6.0 (OW contract 2026-10-25): today on every read, the week at most every 30 minutes, at most 15 projects', () => {
-  test('a project\'s first read asks for today and the week; the syncs after it today alone, until its week is 30 minutes old', async ($, on) => {
+  test('a project\'s first read asks for today and the week; the syncs after it today alone, until its week is 30 minutes old', LONG, async ($, on) => {
     const w = world(on, { skillMap: skillsOk, clientTime: timeOk(), store: { 'mm.links': { [ACME]: SELF } } })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
@@ -1770,7 +1770,7 @@ describe('0.7.0: the thread asks too, once, and only where a person works on a c
     expect(w.prompts.map(p => p.text)).toEqual(['keep going'])
   })
 
-  test('never with MM_UNATTENDED=1', async ($, on) => {
+  test('never with MM_UNATTENDED=1', LONG, async ($, on) => {
     const w = linedWorld(on, linesOk({ line: UNMATCHED }), { env: { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', HOME: '/home/someone', MM_UNATTENDED: '1' } })
     await started($, w)
     for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
@@ -2258,7 +2258,7 @@ describe('0.7.6 (Rob, 10-27: "always pin the most recent thread from that client
     ['linked when it was archived', {}],
     ['let go by an older version (10-23: "archived = let go"), and opened with its marker', { 'mm.links': {}, 'mm.marked': { [ROAD_SID]: ROAD }, 'mm.markedAt': { [ROAD_SID]: NOW - 13 * 24 * HOUR } }],
   ] as Array<[string, Record<string, unknown>]>) {
-    test(`[Road Dog] its own archived thread (${how}) is unarchived, linked, pinned and named, and its update goes in by itself; no Start is offered`, async ($, on) => {
+    test(`[Road Dog] its own archived thread (${how}) is unarchived, linked, pinned and named, and its update goes in by itself; no Start is offered`, LONG, async ($, on) => {
       const w = roadWorld(on, { store })
       await tickOnce($, w)
       expect(unarchives(w)).toEqual([ROAD_SID])
@@ -4856,7 +4856,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       })
 
       // (0.7.42, Rob 2026-11-09: "It also needs to update itself if the work in the thread changes. It seems like it stales sometimes")
-      test('(0.7.42) a revision nobody pressed for: the next sync draws the newer card by itself, with no new note to the model', async ($, on) => {
+      test('(0.7.42) a revision nobody pressed for: the next sync draws the newer card by itself, with no new note to the model', LONG, async ($, on) => {
         const w = world(on, own)
         await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
         await w.clock.advance(4_000)
@@ -4884,7 +4884,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       })
 
       // (0.7.46) a read where OW gave no usable hash left the card with no version known, and no sync ever drew it again
-      test('(0.7.46) a card left with no version known: the next sync with a hash draws it again, and nothing is drawn after that', async ($, on) => {
+      test('(0.7.46) a card left with no version known: the next sync with a hash draws it again, and nothing is drawn after that', LONG, async ($, on) => {
         const w = world(on, own)
         await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
         await w.clock.advance(4_000)
@@ -5744,7 +5744,7 @@ describe('0.7.34: Team now, Needs you now that folds, the pin marks and the no-t
       expect(sessionCalls(w).map(c => String(c.args.prompt))).toEqual([expect.stringContaining(`[mm-link ${ACME}]`)])
     })
 
-    test('a client whose mail has no package yet: no card for 2 hours from the message, so its thread opens with the reply ready; then its card', async ($, on) => {
+    test('a client whose mail has no package yet: no card for 2 hours from the message, so its thread opens with the reply ready; then its card', LONG, async ($, on) => {
       const message = { message_id_key: 'bolt-1', received_at: new Date(NOW - 30 * 60_000).toISOString(), reply_due_at: new Date(NOW + 20 * HOUR).toISOString(), sender: 'client@example.com', subject: 'Question', snippet: 'hello', project_id: BOLT, project_name: 'Bolt Staffing (Sam)', reply_status: 'unanswered', project_owner_email: ME }
       const w = world(on, { tools: 'start', feed: feed({ drafts: [], tickets: {}, mail: [message] }), threads: [] })
       await tickOnce($, w)

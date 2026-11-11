@@ -751,7 +751,7 @@ describe('B1: Claude cannot start or update a thread (the mm tool, and a /mm tha
     expect(w.acted().map(c => c.tool)).toEqual(['send_message', 'spawn_task', 'spawn_task', 'send_message', 'send_message'])
   })
 
-  test('[K1] after a press, thirty minutes of timer ticks send nothing more', async ($, on) => {
+  test('[K1] after a press, thirty minutes of timer ticks send nothing more', LONG, async ($, on) => {
     const w = acmeThread(on)
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
@@ -771,7 +771,7 @@ describe('B1: Claude cannot start or update a thread (the mm tool, and a /mm tha
 })
 
 describe('B2: one client\'s kickoff never goes into another client\'s thread', () => {
-  test('[C1] [2.6] one app thread with a session for one client 200 hours ago and one for another today links to neither by itself, and neither row offers it; the person\'s /mm link makes it one client\'s, and then it is never the other\'s', async ($, on) => {
+  test('[C1] [2.6] one app thread with a session for one client 200 hours ago and one for another today links to neither by itself, and neither row offers it; the person\'s /mm link makes it one client\'s, and then it is never the other\'s', LONG, async ($, on) => {
     const w = world(on, {
       feed: feed({ threads: [declared(ACME, 'cli-old', 200), declared(BOLT, 'cli-new', 1)] }),
       self: thread(SELF, 'One reused thread', 1),
@@ -1174,7 +1174,7 @@ describe('F4: no thread list, no target; nothing dropped on an odd answer', () =
     expect(w.stored['mm.acted']).toBeUndefined()
   })
 
-  test('[2.8] a person whose only open thread is this one: the empty list is a list of one, and this thread links, pins and names itself and shows its row actions', async ($, on) => {
+  test('[2.8] a person whose only open thread is this one: the empty list is a list of one, and this thread links, pins and names itself and shows its row actions', LONG, async ($, on) => {
     const kept = {
       // a link, a pin record and a title for a thread the app says it does not have: an empty list drops none of them
       'mm.links': { [BOLT]: 'local_old' },
@@ -1737,7 +1737,7 @@ describe('F9: a thread that linked itself gets the pin and the name, and no note
   // (0.6.0, Rob 2026-10-25: "there's always a side panel if there's any work being done for a client") The pane now
   // opens by itself in every thread of a client, this one too, with its client part read from the pickup VIEW (a read
   // OW records nothing for). What still waits for the person's act: the note for Claude.
-  test('[P1] the timer in a thread that linked itself opens its client\'s pane once, by itself, and adds nothing to its transcript', async ($, on) => {
+  test('[P1] the timer in a thread that linked itself opens its client\'s pane once, by itself, and adds nothing to its transcript', LONG, async ($, on) => {
     const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }) })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
@@ -2004,7 +2004,7 @@ describe('starts a program: the system\'s opener takes the person to the thread'
   /** Acme's thread as the app lists it, with the link the app gives for it. */
   const acmeLinked = (on: On, over: WorldOptions = {}, link: unknown = LINK_A) =>
     acmeWorld(on, { threads: [{ ...thread('local_a', 'Roof quote', 30), link } as never, thread('local_x', 'Unrelated notes', 5)], ...over })
-  const LONG = `Sent to Acme Roofing's thread: open "${ACME_SHOWN}" under Pinned.`
+  const SENT_LINE = `Sent to Acme Roofing's thread: open "${ACME_SHOWN}" under Pinned.`
   const SHORT = 'Sent to Acme Roofing\'s thread.'
   const WHERE = `Open "${ACME_SHOWN}" under Pinned.`
 
@@ -2051,7 +2051,7 @@ describe('starts a program: the system\'s opener takes the person to the thread'
       await mm($, '')
       const ui = await pane($)
       await ui.press({ key: `update:${ACME}` })
-      expect(await lines(ui)).toContain(LONG)
+      expect(await lines(ui)).toContain(SENT_LINE)
       expect(w.toasts).toEqual([SHORT])
       // the message went all the same, and the thread has it
       expect(await buttonsOf(ui, ACME)).toEqual(['Open thread', 'Drafts'])
@@ -2083,7 +2083,7 @@ describe('starts a program: the system\'s opener takes the person to the thread'
       await mm($, '')
       const ui = await pane($)
       await ui.press({ key: `update:${ACME}` })
-      expect(await lines(ui)).toContain(LONG)
+      expect(await lines(ui)).toContain(SENT_LINE)
       await ui.press({ key: `open:${ACME}` })
       expect(await lines(ui)).toContain(WHERE)
       expect(w.ran).toEqual([])
@@ -2091,7 +2091,7 @@ describe('starts a program: the system\'s opener takes the person to the thread'
     })
   }
 
-  test('⛔ only the person: not Claude\'s tool, not the timer, not a sync, not the band, not Drafts, not Start', async ($, on) => {
+  test('⛔ only the person: not Claude\'s tool, not the timer, not a sync, not the band, not Drafts, not Start', LONG, async ($, on) => {
     const w = acmeLinked(on, { env: ENV.mac, opener: 'works' })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
@@ -2637,7 +2637,7 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
     expect(w.acted()).toEqual([BOLT_AUTO_UPDATE('local_b'), BOLT_PREP_UPDATE('local_b')])
   })
 
-  test('a chip whose client was linked to a thread when it was minted is withdrawn only once the client is linked to another', async ($, on) => {
+  test('a chip whose client was linked to a thread when it was minted is withdrawn only once the client is linked to another', LONG, async ($, on) => {
     // Acme's long thread minted the chip: Acme was linked to that thread then, and still is
     const w = world(on, {
       threads: [thread('local_a', 'Roof quote', 30)],
@@ -2667,7 +2667,7 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
     expect((w.stored['mm.chips'] as Array<{ taskId: string }>).map(c => c.taskId)).toEqual([chipId(2)])
   })
 
-  test('a withdrawal that fails, of a chip this session minted, is tried on five ticks, then the chip is forgotten', async ($, on) => {
+  test('a withdrawal that fails, of a chip this session minted, is tried on five ticks, then the chip is forgotten', LONG, async ($, on) => {
     const w = world(on, { dismissFails: true, feed: feed({ drafts: [], mail: [] }) })
     /** The chip's record, if it is still on record. */
     const own = () => (w.stored['mm.chips'] as Array<{ taskId: string; tries?: number }>).filter(c => c.taskId === chipId(1))
@@ -2999,7 +2999,7 @@ describe('F10: a reply package someone picked up stays in the panel, with who ho
   const WITH_TITLE = '🟡 with J Smith · Bolt Staffing · reply · 2 new'
   const HELD_VIEW = '> **You picked this up** (Mon 10 AM). 1 draft not sent yet.\n\n## Acme Roofing\n\n1. What the client sent'
 
-  test('a package I picked up: my thread keeps its pin and its pickup view, and the note says the drafts are being worked', async ($, on) => {
+  test('a package I picked up: my thread keeps its pin and its pickup view, and the note says the drafts are being worked', LONG, async ($, on) => {
     const w = world(on, { feed: feed({ drafts: [picked(ACME, 'Acme Roofing — Pat', ME)] }), store: { 'mm.links': { [ACME]: SELF } } })
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
@@ -3830,7 +3830,7 @@ describe('(t2) 0.5.14: a pin taken off by hand stays off only while the item is 
     expect(off(w)).toEqual([])
   })
 
-  test('the 10-16 case: a record an older version made (no `seen`), its pin taken off the evening before: (0.7.18) pinned again at once, the reply an hour from due', async ($, on) => {
+  test('the 10-16 case: a record an older version made (no `seen`), its pin taken off the evening before: (0.7.18) pinned again at once, the reply an hour from due', LONG, async ($, on) => {
     // Bolt wrote 15 hours ago, the pin came off 13 hours ago (Sunday 10 PM ET), nothing new since; due at noon
     const w = world(on, {
       feed: boltFeed(DUE, 15),
@@ -6459,7 +6459,7 @@ describe('0.5.12: Start all (Rob, 10-15: no clicks at all); (0.5.25) its press p
     await ui.unmount()
   })
 
-  test('⛔ nothing starts by itself: with the button offered, half an hour of ticks and syncs start nothing and fill nothing', async ($, on) => {
+  test('⛔ nothing starts by itself: with the button offered, half an hour of ticks and syncs start nothing and fill nothing', LONG, async ($, on) => {
     const w = world(on, { tools: 'start', store: { 'mm.autostart': { on: false } } })
     await tickOnce($, w)
     for (let i = 0; i < 30; i++) await w.clock.advance(60_000)
@@ -6572,7 +6572,7 @@ describe('(0.5.17) a press\'s refresh asks OW once more when the feed answered 5
   })
 
   for (const status of [401, 404]) {
-    test(`a ${status} is not tried again: one read, and the refresh fails as before`, async ($, on) => {
+    test(`a ${status} is not tried again: one read, and the refresh fails as before`, LONG, async ($, on) => {
       const { reads, shown, error } = await pressDrafts($, on, [status, 200])
       expect(reads).toBe(1)
       expect(shown).toContain(REFRESH_FAILED)
@@ -6633,7 +6633,7 @@ describe('0.5.23 (Rob, 10-21: "change auto-starts to update the older thread"): 
   const oldWorld = (on: On, more: WorldOptions = {}) =>
     world(on, { tools: 'start', feed: acmeOnly(), threads: [thread('local_old', 'Roof quote', OLD_H)], ...more, store: { 'mm.links': { [ACME]: 'local_old' }, ...(more.store ?? {}) } })
 
-  test('a linked thread older than 7 business days: Update\'s own message goes into it by itself, under the same wait; no thread is started and no card is made; (0.7.6) the log says it as for any thread', async ($, on) => {
+  test('a linked thread older than 7 business days: Update\'s own message goes into it by itself, under the same wait; no thread is started and no card is made; (0.7.6) the log says it as for any thread', LONG, async ($, on) => {
     const w = oldWorld(on)
     await tickOnce($, w)
     // (0.7.6) the row says Update (until 0.7.6, Start); (0.7.5) its one line does not call it a client with no thread
@@ -6699,7 +6699,7 @@ describe('0.5.23 (Rob, 10-21: "change auto-starts to update the older thread"): 
   /** The first message of a thread start_session opened, as the app wraps it. */
   const wrapped = (args: { prompt: string; background: string }) => `Background (from the session that started this one):\n${args.background}\n\nTask:\n${args.prompt}`
 
-  test('(0.5.25) a client with no thread: no card by itself and no thread started; its row waits for the person\'s Start', async ($, on) => {
+  test('(0.5.25) a client with no thread: no card by itself and no thread started; its row waits for the person\'s Start', LONG, async ($, on) => {
     const w = world(on, { tools: 'start', feed: feed({ drafts: [], mail: [] }) })
     await tickOnce($, w)
     await w.clock.advance(3_000)
@@ -6833,7 +6833,7 @@ describe('0.5.23 (the 14 refused starts of 10-19 and 10-20): a link lasts until 
 
   // ---- fix 1: keep links
 
-  test('a linked thread of the other profile ("not found" here, its record open in the other profile\'s folder): link, pin record and name are kept; its row offers Start and says why; nothing is started, sent or carded by itself', async ($, on) => {
+  test('a linked thread of the other profile ("not found" here, its record open in the other profile\'s folder): link, pin record and name are kept; its row offers Start and says why; nothing is started, sent or carded by itself', LONG, async ($, on) => {
     const w = awayWorld(on)
     await tickOnce($, w)
     const ui = await pane($)
@@ -6858,7 +6858,7 @@ describe('0.5.23 (the 14 refused starts of 10-19 and 10-20): a link lasts until 
     expect(w.written.filter(f => f.path.includes('claude-code-sessions'))).toEqual([])
   })
 
-  test('back in the other profile (the thread is in the app\'s list again): the link was there all along, and the update goes into that thread by itself', async ($, on) => {
+  test('back in the other profile (the thread is in the app\'s list again): the link was there all along, and the update goes into that thread by itself', LONG, async ($, on) => {
     const w = awayWorld(on)
     await tickOnce($, w)
     await after(w, 20)
@@ -6873,7 +6873,7 @@ describe('0.5.23 (the 14 refused starts of 10-19 and 10-20): a link lasts until 
     expect(w.stored['mm.links']).toEqual({ [ACME]: 'local_p2' })
   })
 
-  test('the same where this thread\'s own record cannot be read: a "not found" whose record is open counts as the other profile\'s, after the app is asked', async ($, on) => {
+  test('the same where this thread\'s own record cannot be read: a "not found" whose record is open counts as the other profile\'s, after the app is asked', LONG, async ($, on) => {
     const w = awayWorld(on, { files: rec(OTHER, 'local_p2') })
     await tickOnce($, w)
     expect(askedById(w, 'local_p2').length).toBeGreaterThan(0)
@@ -7036,7 +7036,7 @@ describe('0.5.23 (the 14 refused starts of 10-19 and 10-20): a link lasts until 
     expect(w.stored['mm.links']).toEqual({})
   })
 
-  test('the newest marked thread is in the other profile, and none is here: taken back, kept as that profile\'s (its row offers Start here), and nothing is started or sent by itself', async ($, on) => {
+  test('the newest marked thread is in the other profile, and none is here: taken back, kept as that profile\'s (its row offers Start here), and nothing is started or sent by itself', LONG, async ($, on) => {
     // (0.7.11) with an older marked thread HERE as well (local_m1, until 0.7.11 part of this test), that one is linked
     // instead: a client's own thread in the profile in use comes first (the 0.7.11 tests)
     const w = world(on, {
@@ -7060,7 +7060,7 @@ describe('0.5.23 (the 14 refused starts of 10-19 and 10-20): a link lasts until 
     expect(sends(w)).toEqual([])
   })
 
-  test('⛔ only the marker counts: a thread whose title looks like the client is never taken back (its row offers it, as before) and nothing is done by itself', async ($, on) => {
+  test('⛔ only the marker counts: a thread whose title looks like the client is never taken back (its row offers it, as before) and nothing is done by itself', LONG, async ($, on) => {
     const w = world(on, { tools: 'start', feed: acmeOnly(), threads: [thread('local_t', 'Acme Roofing: reply to the client', 20)] })
     await tickOnce($, w)
     await after(w, 30)
