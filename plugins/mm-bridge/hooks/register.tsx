@@ -4065,12 +4065,12 @@ function tellDrawFailed($: EngineInterface, label: string, text: string = DRAW_F
 }
 
 /**
- * (0.7.48) The card is seen, or the page is printed (Builds thread, 2026-11-11, from Game Day Men's Health: `mm card` answered `card ready`
+ * (0.7.48) The card is seen, or the page is printed (Builds thread, 2026-11-11, from a client's thread: `mm card` answered `card ready`
  * at about 4:55 and 5:10 PM ET, "and Rob saw no card at all, so he was asked for a go on text he had not seen"; "A thread must never be told
  * 'Do not print the page' while nothing is on screen."). The answer comes before the thread's line, so it cannot wait for the line's draw.
  * So the line is checked after it: once the turn that got the ready answer ends (`owe`), the line under it must have taken the card
  * (`lineOfCall`) within SHOWN_WAIT_MS of a surface drawing the thread. ⛔ The call's own row does not count: the app can fold it out of
- * sight and report no error (Game Day, with no draw failure in bridge-notices.log). A surface has drawn the thread once its band or one of
+ * sight and report no error (that thread logged no draw failure in bridge-notices.log). A surface has drawn the thread once its band or one of
  * its reply rows has been drawn since the answer (`noteThreadDrawn`); one that draws it and finds no card under the line tells the thread
  * (CARD_NOT_SHOWN), which prints the page. A thread nobody has on screen is checked again when one draws it. Framed as the bridge's,
  * never the person's; it changes no record, no note and no prompt box.
