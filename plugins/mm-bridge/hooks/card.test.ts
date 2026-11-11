@@ -247,7 +247,12 @@ describe('0.7.26 when the pane offers the signature box', () => {
     expect(holdOf(cardOf({ tree: drift }))).toBe('drift')
     expect(holdText('stale', cardOf({ current: OTHER }), LABEL)).toBe(`This card was drawn from package ${LABEL}; the package is now ffffffffffff. Drawing it again…`)
     expect(holdText('not-own', cardOf(), LABEL)).toBe("Sign in Example Dental's own thread. This card is here to read.")
-    expect(holdText('page', cardOf(), LABEL)).toBe('This view does not match the stored drafts, so signing is off here. Go by the page printed in the thread.')
+    expect(holdText('drift', cardOf(), LABEL)).toBe('This view does not match the stored drafts, so signing is off here. Go by the page printed in the thread.')
+    // (0.7.46) a page gap is only ever on the version as it stands: it says so and names the gap, never the drift words
+    expect(holdText('page', cardOf({ gap: 'the page holds a line the card does not (x)' }), LABEL)).toBe(
+      'This card is the package as it stands now, but it cannot stand in for the page: the page holds a line the card does not (x). Signing is off here. Go by the page printed in the thread.',
+    )
+    expect(holdText('page', cardOf({ gap: 'the page holds a line the card does not (x)' }), LABEL)).not.toContain('stored drafts')
   })
 
   test('(0.7.33) no page need be printed here: the box opens on a fresh card of the thread\'s own client', () => {

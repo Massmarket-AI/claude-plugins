@@ -229,7 +229,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.44'
+export const VERSION = '0.7.46'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -4519,10 +4519,14 @@ async function freshenPackage($: EngineInterface, it: QueueItem, own: boolean): 
     if (!at || versionChecked.get(id) === at) return false
     versionChecked.set(id, at)
     const card = await cardOf($)
-    // nothing of this package drawn here yet, or a draw under way: the usual draw is the one to wait for
-    if (card.packageId !== pkg || card.status === 'rendering' || !card.current) return false
+    // nothing of this package drawn here yet, or a draw under way: the usual draw is the one to wait for. (0.7.46) A part with no card
+    // drawn and no version known (a page OW gave without a hash) is left as before: no read on each sync for a card there is not.
+    if (card.packageId !== pkg || card.status === 'rendering' || (!card.current && !card.tree)) return false
     const read = await readOwPage($, pkg)
-    if (!read.sha || sameVersion(card.current, read.sha) || card.tree?.package_sha256 === read.sha) return false
+    if (!read.sha) return false
+    // (0.7.46) a card left with no version known (a read where OW gave no usable hash) is drawn again once OW gives one, even of the
+    // version it holds: until 0.7.46 it was passed over here for good, and read "the package is now unknown. Drawing it again…"
+    if (card.current && (sameVersion(card.current, read.sha) || card.tree?.package_sha256 === read.sha)) return false
     await (await beginClient($, it, own, false))()
     return true
   } catch {
