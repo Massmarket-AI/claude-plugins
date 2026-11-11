@@ -43,7 +43,32 @@ const TZ = 'America/New_York'
  * (0.7.28) `scheduled`: the app said this thread is a scheduled task's run (`get_session`'s `scheduledTaskId`; its list does not
  * say). `byId`: this is its answer by id, so a thread without `scheduled` is known not to be one.
  */
-export type AppThread = { sessionId: string; title?: string; pinned?: boolean; isArchived?: boolean; lastActivityAt?: string; link?: string; cwd?: string; scheduled?: boolean; byId?: boolean }
+/**
+ * (0.7.44, Rob 2026-11-10: "when I pin a thread, it pins everything that's its child into the pinned section too")
+ * `parentSessionId` and `detached`: `get_session`'s word for a thread another session started (`detached` true once it was
+ * moved to top level); `startedBy`: the app's list's word for the same, on a linked session's row.
+ */
+export type AppThread = {
+  sessionId: string
+  title?: string
+  pinned?: boolean
+  isArchived?: boolean
+  lastActivityAt?: string
+  link?: string
+  cwd?: string
+  scheduled?: boolean
+  byId?: boolean
+  parentSessionId?: string
+  detached?: boolean
+  startedBy?: string
+}
+
+/**
+ * (0.7.44) Whether the app's answer for a thread says it is a child of another thread, still nested under it: it names the
+ * thread that started it (`parentSessionId` by `get_session`, `startedBy` by the list) and it was not moved to top level.
+ */
+export const isChildThread = (t: Pick<AppThread, 'parentSessionId' | 'startedBy' | 'detached'> | null | undefined): boolean =>
+  Boolean(t && (t.parentSessionId || t.startedBy) && t.detached !== true)
 
 /**
  * Claude Code session id → the app thread it runs in, as each session records about itself. `at` is when the
@@ -1266,6 +1291,87 @@ export function startFillSaid(words: string, all: boolean, how: 'filled' | 'draf
   return `Type "${words}" and send it: ${then}`
 }
 
+// ---------------------------------------------------------------- (0.7.44) client threads are top-level threads
+
+/**
+ * ⛔ (0.7.44, Rob 2026-11-10: "I'd prefer it if each client was started in its own project rather than just a child of
+ * another thread ... when I pin a thread, it pins everything that's its child into the pinned section too"; "we always want
+ * it to be parent threads. If needed, the threads can detach themselves and reattach their children properly") The step every
+ * prompt a new client thread opens with carries, as its second paragraph (`withTopLevelStep`), and every update into a
+ * client thread the app shows as a child (`isChildThread`). The bridge cannot detach another thread (the app lets only the
+ * thread that started it, or the thread itself, do it), so the thread detaches itself. Verbatim.
+ */
+export const TOP_LEVEL_STEP = `Before anything else on this turn: call mcp__ccd_session_mgmt__get_session with "self". If it shows a parentSessionId and detached is false, call mcp__ccd_session_mgmt__detach_session with "self", so this client's thread is a top-level thread (Rob, 2026-11-10: "when I pin a thread, it pins everything that's its child into the pinned section too"). Detach only this thread, never a thread it starts: those stay under it. If the app refuses, go on without a word about it.`
+
+/**
+ * (0.7.44) The prompt with TOP_LEVEL_STEP as its own paragraph right after its first (the text up to the first blank line,
+ * the one that opens with the client's [mm-link] marker), so the marker stays the first characters. A prompt that carries the
+ * step already is given back as it is: it is never there twice. ⛔ Applied only where a prompt is finally built: every
+ * signature and record is made from the text without it (`withoutTopLevelStep`), never from this.
+ */
+export function withTopLevelStep(text: string): string {
+  if (text.includes(TOP_LEVEL_STEP)) return text
+  const cut = text.indexOf('\n\n')
+  return cut < 0 ? `${text}\n\n${TOP_LEVEL_STEP}` : `${text.slice(0, cut)}\n\n${TOP_LEVEL_STEP}${text.slice(cut)}`
+}
+
+/** (0.7.44) The prompt without the paragraph `withTopLevelStep` put in: what the bridge compares with a kickoff. */
+export function withoutTopLevelStep(text: string): string {
+  const at = text.indexOf(`\n\n${TOP_LEVEL_STEP}`)
+  return at < 0 ? text : `${text.slice(0, at)}${text.slice(at + 2 + TOP_LEVEL_STEP.length)}`
+}
+
+/**
+ * ⛔ (0.7.44, Rob 2026-11-10: "The bridge should probably know when it pins a client thread to make sure it's top level. It
+ * can automatically do that every time." Then: "It connects to a thread.") The one housekeeping message the bridge sends a
+ * client thread it links or pins that the app shows as a child, and a child under a pinned client thread that is not that
+ * client's own work (`topLevelPass`). No [mm-link] marker: it is never a kickoff or an update, and it writes no record of what
+ * the thread has. Verbatim.
+ */
+export const DETACH_SELF_NOTE = `[mm-bridge] Housekeeping only: call mcp__ccd_session_mgmt__get_session with "self". If it shows a parentSessionId and detached is false, call mcp__ccd_session_mgmt__detach_session with "self". Do nothing else on this turn and answer in one line. (Rob, 2026-11-10: "The bridge should probably know when it pins a client thread to make sure it's top level. It can automatically do that every time.")`
+
+/**
+ * (0.7.44) The profile-switch routine's test of a finished thread (control tower `skills/profile-switch/switch-plan.py`,
+ * `unfinished()`): what a status line says is still left open, and what says nothing is.
+ */
+const LEFT_OPEN = /\brecommends?\b|\bstill (?:not|to\b|needs?|open|undone|unsent|unanswered)|\bnot (?:yet )?(?:done|sent|merged|applied|checked|answered|approved|decided)|\b(?:waits?|waiting) (?:on|for) (?:you|rob|your)|\byour (?:go|call|decision|answer|ok)\b|\bfor you to\b|\byou (?:send|decide|pick|choose)\b/i
+const NOTHING_LEFT = /\bnothing (?:waits?|waiting|needed|open|left|pending)|\bno (?:action|reply) needed/i
+
+/**
+ * ⛔ (0.7.44, Rob 2026-11-10: "if it looks like I finished what I was working on there, you can unpin them") Whether the
+ * app's own record of a thread says its work is finished, from the record alone (never its transcript), as the switch routine
+ * judges it: archived is finished; a turn cut short, one waiting on the person, a prompt of the person's after its last turn,
+ * a `blocked` or `review_ready` summary, an action or an answer it needs, or a `completed` one whose words leave something
+ * open (and do not say nothing is) is not; `completed` with none of those is. Anything else (no summary, another status) is
+ * not finished: the person's own pin stays.
+ */
+export function recordLooksFinished(record: unknown): boolean {
+  if (!record || typeof record !== 'object') return false
+  const r = record as {
+    isArchived?: unknown
+    lastTurnCutShort?: unknown
+    interruptedAwaitingPerson?: unknown
+    latestUserFrameAt?: unknown
+    lastTurnEdgeAt?: unknown
+    postTurnSummary?: { status_category?: unknown; status_detail?: unknown; needs_action?: unknown } | null
+    turnWrapUp?: { needsUser?: unknown } | null
+  }
+  if (r.isArchived === true) return true
+  if (r.lastTurnCutShort || r.interruptedAwaitingPerson) return false
+  if ((Number(r.latestUserFrameAt) || 0) > (Number(r.lastTurnEdgeAt) || 0) + 5000) return false
+  const summary = r.postTurnSummary && typeof r.postTurnSummary === 'object' ? r.postTurnSummary : undefined
+  const status = summary?.status_category
+  if (status === 'blocked' || status === 'review_ready') return false
+  // (as switch-plan.py's `(x or "").strip()`: an empty, null or false value is blank)
+  const blank = (v: unknown): boolean => !v || String(v).trim() === ''
+  if (!blank(summary?.needs_action)) return false
+  const wrap = r.turnWrapUp && typeof r.turnWrapUp === 'object' ? r.turnWrapUp : undefined
+  if (!blank(wrap?.needsUser)) return false
+  if (status !== 'completed') return false
+  const detail = typeof summary?.status_detail === 'string' ? summary.status_detail : ''
+  return !(LEFT_OPEN.test(detail) && !NOTHING_LEFT.test(detail))
+}
+
 /** (0.5.25) One thread for the model to start: the client, and start_session's arguments exactly as the bridge would pass them. */
 export type Kickoff = { client: string; args: Record<string, unknown> }
 
@@ -1291,8 +1397,9 @@ export function kickoffsAnswer(
 ): string {
   const out: string[] = []
   if (kicks.length) {
+    // (0.7.44, Rob 2026-11-10: "we always want it to be parent threads") each new thread is detached to top level right after it starts
     out.push(
-      `Only if the person asked for this in their own message on this turn: start ${kicks.length === 1 ? 'this thread' : `these ${kicks.length} threads`} with one start_session call each, one after another, passing "arguments" exactly as given. The [mm-link] marker at the start of each prompt links the new thread to its client: send nothing else into it. On any other turn, start nothing and tell the person to press Start in the pane.`,
+      `Only if the person asked for this in their own message on this turn: start ${kicks.length === 1 ? 'this thread' : `these ${kicks.length} threads`} with one start_session call each, one after another, passing "arguments" exactly as given. Right after each start_session returns, call mcp__ccd_session_mgmt__detach_session with the new thread's local_ id, before the next start, so every client thread is a top-level thread and never a child of this one (Rob, 2026-11-10: "we always want it to be parent threads"). If the app refuses a detach, say so in one line and go on. The [mm-link] marker at the start of each prompt links the new thread to its client: send nothing else into it. On any other turn, start nothing and tell the person to press Start in the pane.`,
     )
     out.push(JSON.stringify(kicks.map(k => ({ client: k.client, arguments: k.args }))))
   }
@@ -1416,7 +1523,8 @@ export function switchPromptLine(list: readonly AwayClient[], since: number, now
   const clients = list.length
     ? `${list.length} client${list.length === 1 ? ' that needs you has its' : 's that need you have their'} thread in the other profile: ${awayNames(list, now)}`
     : 'no client that needs you has its thread in the other profile'
-  return `[mm-bridge] You switched Claude profiles (this one since ${clockText(since, now)} ET). Standing rule (Rob, 2026-10-30): before anything else on this turn, load the profile-switch skill and run its "Automatic switch routine" with --at ${since}. It unpins every thread pinned here before the switch, starts and pins only the threads left unfinished in the 24 hours before it (one session for threads that belong together), and starts the client threads that need you with the mm tool's kickoffs (${clients}). Then answer the message above. Where start_session or that skill is not available, start nothing and say so in one line.`
+  // (0.7.44, Rob 2026-11-10: "It's better if it's a fresh project thread") and every thread it starts is detached to top level
+  return `[mm-bridge] You switched Claude profiles (this one since ${clockText(since, now)} ET). Standing rule (Rob, 2026-10-30): before anything else on this turn, load the profile-switch skill and run its "Automatic switch routine" with --at ${since}. It unpins every thread pinned here before the switch, starts and pins only the threads left unfinished in the 24 hours before it (one session for threads that belong together), and starts the client threads that need you with the mm tool's kickoffs (${clients}). Every thread it or the mm tool's kickoffs starts is detached to top level right after start_session (detach_session), so a pinned thread carries only its own work (Rob, 2026-11-10: "It's better if it's a fresh project thread so that anything it generates that also needs to be finished before I unpin it is underneath it in the pinned section."). Then answer the message above. Where start_session or that skill is not available, start nothing and say so in one line.`
 }
 
 /** (0.7.11) A Claude Code session id as a record names it: a uuid. */
