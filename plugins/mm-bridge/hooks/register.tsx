@@ -25,6 +25,7 @@ import {
   ARCHIVED_REASON, KICKOFF_PENDING_MS,
   lookupOrder, pinReport,
   awayHandoverText, awayPromptLine, awaySorted, carryKickoff, switchPromptLine, transcriptPath,
+  DETACH_SELF_NOTE, isChildThread, recordLooksFinished, withTopLevelStep, withoutTopLevelStep,
 } from './threads'
 import type { RowPin, AppThread, AwayClient, Fold, Kickoff, LookupSeen, Pairs, PinReport, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
 import {
@@ -200,6 +201,30 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 // taken it (`updateThread`, `takenOver`). ⛔ Nothing that guards a send moved: a press acts on the thread its
 // row showed or on none, B3, a thread taken over and the second-send guards are asked before the send as
 // before, and every write is made over a fresh copy and checked again.
+//
+// ⛔ (0.7.44, Rob 2026-11-10: "I'd prefer it if each client was started in its own project rather than just a child of
+// another thread. The reason is that when I pin a thread, it pins everything that's its child into the pinned section too,
+// which makes it hard to read and makes a lot of irrelevant stuff get stuck up there. Same with internal work when it's
+// categorized into a thread or consolidated into a thread. It's better if it's a fresh project thread so that anything it
+// generates that also needs to be finished before I unpin it is underneath it in the pinned section." And: "Same with when
+// the bridge starts client threads... we always want it to be parent threads. If needed, the threads can detach themselves
+// and reattach their children properly, so this works without me having to do anything." And: "You can update the skills in
+// the bridge so this happens automatically going forward.") CLIENT THREADS ARE TOP-LEVEL THREADS. The bridge cannot detach
+// another thread (the app lets only the thread that started it, or the thread itself, do it), so the thread detaches itself:
+// every prompt a new client thread opens with (each `kickoffs` argument, a chip, a Start card) carries TOP_LEVEL_STEP as its
+// second paragraph (`withTopLevelStep`), `kickoffs` tells the model to detach each thread right after start_session, and an
+// update into a client thread the app shows as a child (`isChildThread`) carries the step too. ⛔ No signature moves: each
+// is made from what it was made from before (`signatureOf` from the item, a prompt compared without the step).
+// (0.7.44, Rob 2026-11-10: "The bridge should probably know when it pins a client thread to make sure it's top level. It can
+// automatically do that every time." Then: "It connects to a thread.") A client thread the bridge links or pins that the app
+// shows as a child, and a child under a pinned client thread that is not that client's own work, is sent DETACH_SELF_NOTE
+// once (`topLevelPass`), under the guards an update by itself has.
+// ⛔ (0.7.44, Rob 2026-11-10, of the client threads still pinned after a switch: "they can be updated, and we can keep them...
+// but they should at least all be parents. The bridge should update them if they still need to be pinned, and if they don't
+// need me, they should be unpinned." Then: "Unless I had them pinned in the profile I'm switching from." Then: "if it looks
+// like I finished what I was working on there, you can unpin them.") A switch's handover keeps the pin of a client thread
+// whose thread in the profile left he pinned himself and did not finish (`recordLooksFinished`): see "(1)" in `reconcile`.
+// And the switch line rides on the first prompt after a switch, by the account the session runs in (`awayNote`).
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
@@ -272,6 +297,8 @@ const RECORD_MAX_AGE_MS = 30 * DAY_MS
 const RECORD_FILE = /^(local_[A-Za-z0-9_-]{1,100})\.json$/
 /** The most record files opened in one sync. */
 const RECORDS_PER_SYNC = 40
+/** (0.7.44) The most record files a switch's handover opens, apart from RECORDS_PER_SYNC: one per client thread here, at most. */
+const HANDOVER_RECORDS = 40
 const SESSION_ID = /^[A-Za-z0-9_-]{1,100}$/
 // (0.5.23) AUTO_MISSES and MISS_GAP_MS are gone: a link the bridge made by itself is no longer undone because the
 // feed's threads (the last 14 days) stop listing its thread. Its record keeps `miss` (always 0) for older versions.
@@ -507,7 +534,12 @@ type Mcp = { content?: Array<{ type: string; text?: string }>; isError?: boolean
  * A thread's pin as the bridge last left it. (0.7.18, B) `again`: the person took the pin off while its client still needed
  * them, and the bridge pinned it again; its name says so (` · still needs you`) until nothing of the client pins it.
  */
-type Pin = { projectId: string; client: string; byUs: boolean; internal?: true; again?: true }
+/**
+ * (0.7.44, Rob 2026-11-10: "Unless I had them pinned in the profile I'm switching from.") `carried`: a switch's handover kept the
+ * person's pin on this thread, because they pinned the client's thread in the profile they left (that thread's id) and did not
+ * finish it; `at`, when. The record is the person's (`byUs: false`).
+ */
+type Pin = { projectId: string; client: string; byUs: boolean; internal?: true; again?: true; carried?: string; at?: number }
 /** (0.7.28) One `set_pinned` the app refused: which thread, whose, which way, and in its own words. */
 type PinRefused = { thread: string; client?: string; pinned: boolean; why: string }
 /** (0.7.33) One `set_session_title` the app refused: which thread, whose, and in its own words. */
@@ -955,6 +987,11 @@ function asThread(raw: unknown): AppThread | null {
     ...(isFolder(t.cwd) ? { cwd: t.cwd } : {}),
     // (0.7.28) a scheduled task's run: never a client's thread
     ...(scheduledRun(t) ? { scheduled: true } : {}),
+    // (0.7.44, Rob 2026-11-10: "we always want it to be parent threads") the thread that started it, and whether it was moved to
+    // top level: kept only when well-formed (`isChildThread`)
+    ...(typeof t.parentSessionId === 'string' && THREAD_ID.test(t.parentSessionId) ? { parentSessionId: t.parentSessionId } : {}),
+    ...(typeof t.startedBy === 'string' && THREAD_ID.test(t.startedBy) ? { startedBy: t.startedBy } : {}),
+    ...(typeof t.detached === 'boolean' ? { detached: t.detached } : {}),
   }
 }
 
@@ -1601,9 +1638,14 @@ async function listRecords($: EngineInterface, now: number): Promise<Map<string,
  * name its transcript on this computer for the thread that carries the client on here (`transcriptPath`). Nothing else
  * in a record is read, and none of it leaves this computer.
  */
-type RecordSaid = { archived: boolean; dir: string; starred?: boolean; cli?: string; cwd?: string }
-async function recordOf($: EngineInterface, files: ReadonlyMap<string, readonly RecordFile[]>, sid: string, budget: { left: number }): Promise<RecordSaid | undefined> {
+// (0.7.44, Rob 2026-11-10: "if it looks like I finished what I was working on there, you can unpin them") And `finished`: whether
+// its work is finished by the record's own status fields (`recordLooksFinished`), computed as it is read; the fields themselves
+// are never kept.
+// (0.7.44) `dir`: only a file in that folder of records (one profile's) is read.
+type RecordSaid = { archived: boolean; dir: string; starred?: boolean; cli?: string; cwd?: string; finished: boolean }
+async function recordOf($: EngineInterface, files: ReadonlyMap<string, readonly RecordFile[]>, sid: string, budget: { left: number }, dir?: string): Promise<RecordSaid | undefined> {
   for (const file of files.get(sid) ?? []) {
+    if (dir !== undefined && file.dir !== dir) continue
     if (budget.left <= 0) return undefined
     budget.left--
     try {
@@ -1615,6 +1657,7 @@ async function recordOf($: EngineInterface, files: ReadonlyMap<string, readonly 
           ...(record.isStarred === true ? { starred: true } : {}),
           ...(typeof record.cliSessionId === 'string' && SESSION_ID.test(record.cliSessionId) ? { cli: record.cliSessionId } : {}),
           ...(typeof record.cwd === 'string' && record.cwd.length <= 1000 ? { cwd: record.cwd } : {}),
+          finished: recordLooksFinished(record),
         }
       }
     } catch {
@@ -1661,10 +1704,22 @@ function recordReader(
    * the thread's is opened): undefined when it has none there, or this profile's folder cannot be told.
    */
   hereAt: (sid: string) => Promise<number | undefined>
+  /**
+   * ⛔ (0.7.44) A switch's handover: what a thread's record in one folder of records (the profile left) says, and when that
+   * record was written, from a budget of its own (HANDOVER_RECORDS), so the sync's other reads never starve it. Undefined
+   * when there is no such record, it cannot be read, or that budget is spent.
+   */
+  inFolder: (sid: string, dir: string) => Promise<{ said: RecordSaid; m: number } | undefined>
+  /** (0.7.44) Whether a thread has a record in this folder of records, by the listing alone (no file opened), and when it was written. */
+  listedIn: (sid: string, dir: string) => Promise<number | undefined>
+  /** (0.7.44) What a thread's record says, wherever it is (`topLevelPass`), within the sync's files. */
+  read: (sid: string) => Promise<RecordSaid | undefined>
 } {
   let files: Promise<Map<string, RecordFile[]> | null> | undefined
   let mine: Promise<string | undefined> | undefined
   const budget = { left: RECORDS_PER_SYNC }
+  /** (0.7.44) The handover's own reads. */
+  const handover = { left: HANDOVER_RECORDS }
   /** (0.7.11) What each record opened in this sync said. */
   const opened = new Map<string, RecordSaid>()
   const read = async (all: ReadonlyMap<string, readonly RecordFile[]>, sid: string): Promise<RecordSaid | undefined> => {
@@ -1712,6 +1767,20 @@ function recordReader(
       if (!all?.get(sid)?.length) return undefined
       const own = await ownDir()
       return own === undefined ? undefined : all.get(sid)?.find(f => f.dir === own)?.mtimeMs
+    },
+    inFolder: async (sid, dir) => {
+      const all = await list()
+      const file = all?.get(sid)?.find(f => f.dir === dir)
+      if (!all || !file) return undefined
+      const said = await recordOf($, all, sid, handover, dir)
+      return said ? { said, m: file.mtimeMs } : undefined
+    },
+    listedIn: async (sid, dir) => (await list())?.get(sid)?.find(f => f.dir === dir)?.mtimeMs,
+    read: async sid => {
+      const had = opened.get(sid)
+      if (had) return had
+      const all = await list()
+      return all ? read(all, sid) : undefined
     },
   }
 }
@@ -2657,9 +2726,49 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   const switchHere = own !== undefined && profileSeen?.dir === own && typeof switchedFrom === 'string' && switchedFrom !== '' && Number.isFinite(switchSince)
   const handedOver = switchHere ? await storeGet<{ since?: unknown; at?: unknown } | null>($, 'mm.switchPins', null) : null
   const handOver = switchHere && (handedOver && typeof handedOver === 'object' && handedOver.since !== undefined ? Number(handedOver.since) !== switchSince : now - switchSince < SWITCH_PINS_UPGRADE_MS)
+  // ⛔ (0.7.44, Rob 2026-11-10, of the client threads still pinned after a switch: "The bridge should update them if they still
+  // need to be pinned, and if they don't need me, they should be unpinned." Then: "Unless I had them pinned in the profile I'm
+  // switching from." Then: "if it looks like I finished what I was working on there, you can unpin them.") A CARRIED PIN. The
+  // client's thread in the profile left (`from`) is its link there (`mm.profileLinks`), else the thread whose pin record names
+  // the client and whose app record is in that profile's folder (the newest, by its record's time, else its file's). When that
+  // thread's record says he pinned it there (`isStarred`), the pin was not the bridge's, and its work is not finished
+  // (`recordLooksFinished`), the client's thread here keeps its pin, as his (`byUs: false`, `carried`), and is pinned if it is
+  // not; its `mm.unpinned` entry is dropped as for every handed-over thread, and the rest of this pass takes off no pin of it.
+  // Otherwise, or when that record cannot be read in this pass (its own budget, HANDOVER_RECORDS), (1) as before.
+  /** (0.7.44) The client threads here a handover carried the person's pin to: thread → the client's thread in the profile left. */
+  const carriedNow = new Map<string, string>()
   if (handOver) {
+    const leftLinks = await storeGet<Record<string, Record<string, string>>>($, 'mm.profileLinks', {})
+    const leftDir = switchedFrom as string
+    const leftMine: Readonly<Record<string, string>> = leftLinks && typeof leftLinks === 'object' && leftLinks[leftDir] && typeof leftLinks[leftDir] === 'object' ? leftLinks[leftDir] : {}
+    /** (0.7.44) The client's thread in the profile left, or undefined. */
+    const leftThread = async (pid: string, sid: string): Promise<string | undefined> => {
+      const linked = leftMine[pid]
+      if (typeof linked === 'string' && THREAD_ID.test(linked) && linked !== sid) return linked
+      let best: { sid: string; at: number } | undefined
+      for (const [x, p] of Object.entries(pins)) {
+        if (x === sid || !THREAD_ID.test(x) || !p || typeof p !== 'object' || p.projectId !== pid) continue
+        const m = await records.listedIn(x, leftDir)
+        if (m === undefined) continue
+        const at = Number(p.at) || m
+        if (!best || at > best.at) best = { sid: x, at }
+      }
+      return best?.sid
+    }
     for (const { pid, sid, s } of clientThreadsHere()) {
       if (sid in unpinned) freed.push(sid)
+      const left = await leftThread(pid, sid)
+      const mineHere = pinFor(pid, sid, false)
+      if (left && mineHere) {
+        const rec = await records.inFolder(left, leftDir)
+        if (!rec) await logAuto($, `profile switch: ${cleanName(mineHere.client)} (${pid}) could not read the record of its thread ${left} in the profile you left: its pin is the bridge's`)
+        else if (rec.said.starred === true && pins[left]?.byUs !== true && !rec.said.finished) {
+          handed[sid] = { ...mineHere, carried: left, at: now }
+          carriedNow.set(sid, left)
+          await logAuto($, `profile switch: ${cleanName(mineHere.client)} (${pid}) stays pinned: you pinned its thread ${left} in the profile you left and it is not finished`)
+          continue
+        }
+      }
       const record = s.pinned ? pinFor(pid, sid, true) : pins[sid]?.byUs ? pinFor(pid, sid, false) : undefined
       if (record && !sameValue(pins[sid], record)) handed[sid] = record
     }
@@ -3021,6 +3130,25 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     delete pins[sid]
   }
 
+  /**
+   * (0.7.44) A record of the person's for a thread a handover carried keeps what it carried (`Pin.carried`), however the pass
+   * below makes it again; a record of ours never does.
+   */
+  const keepCarried = (sid: string, record: Pin): Pin => {
+    const had = pins[sid]
+    return !record.byUs && had?.carried && had.projectId === record.projectId ? { ...record, carried: had.carried, ...(typeof had.at === 'number' ? { at: had.at } : {}) } : record
+  }
+  // ⛔ (0.7.44, Rob 2026-11-10: "Unless I had them pinned in the profile I'm switching from.") A thread a handover carried that is
+  // not pinned here yet is pinned now, its record kept the person's (no record of ours is written for it first).
+  for (const sid of carriedNow.keys()) {
+    const s = live.get(sid)
+    if (!s || s.pinned || writes >= MAX_WRITES) continue
+    if (await isRun(sid)) continue
+    if (!(await setPin(sid, true))) continue
+    s.pinned = true
+    writes++
+  }
+
   /** (0.7.23) The threads this pass wanted pinned and had no writes left for: the pin report's `write_cap`. */
   const outOfWrites = new Set<string>()
   for (const [sid, it] of want) {
@@ -3034,7 +3162,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     // ours. (Recorded as ours any earlier, a rename that failed would read later as the person's unpin.)
     // (0.7.18, B) pinned again over the person's unpin while the client still needs them: on record (`again`), and named so
     const back = again.has(sid) || (pins[sid]?.again === true && pins[sid]?.projectId === it.projectId)
-    const record = (byUs: boolean): Pin => ({ ...pinOf(it, byUs), ...(back ? { again: true as const } : {}) })
+    // (0.7.44) a record of the person's keeps what a handover carried (`keepCarried`)
+    const record = (byUs: boolean): Pin => keepCarried(sid, { ...pinOf(it, byUs), ...(back ? { again: true as const } : {}) })
     await recordPin(sid, record(s.pinned ? (pins[sid]?.byUs ?? false) : false))
     const title = pinTitle(it, now, back)
     // (0.7.33) a name the app refused does not stand in the way of the pin. A run the refusal let go has no pin to get.
@@ -3064,7 +3193,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     if (!s || writes >= MAX_WRITES) continue
     // (0.7.28) the first time the bridge names this thread for this client: not if it is a scheduled task's run
     if (!s.pinned && pins[sid]?.projectId !== n.it.projectId && (await isRun(sid))) continue
-    if (((n.unpin === 'ours' && pins[sid]?.byUs) || n.unpin === 'any') && s.pinned) {
+    // (0.7.44) a thread a handover carried keeps its pin on that pass
+    if (((n.unpin === 'ours' && pins[sid]?.byUs) || (n.unpin === 'any' && !carriedNow.has(sid))) && s.pinned) {
       // (0.7.28) refused: its record stays as it is, so the next sync tries again
       if (!(await setPin(sid, false))) continue
       s.pinned = false
@@ -3072,7 +3202,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     }
     // (0.7.33) refused: named at a later sync. A run the refusal let go has no record to get.
     if (s.title !== n.title && !(await rename(s, n.title)) && !live.has(sid)) continue
-    pins[sid] = pinOf(n.it, false)
+    pins[sid] = keepCarried(sid, pinOf(n.it, false))
   }
 
   // A thread we were tracking that no longer needs the person: unpinned, and its name says so.
@@ -3103,7 +3233,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       // thread gets its own name back, not a tick
       const inside = internalPin(pin)
       // ⛔ (0.7.12) a client the cut alone cleared (`pastCut`): only our own pin comes off; the person's stays
-      if ((pin.byUs || (clear && !inside && !pastCut.has(pin.projectId))) && s.pinned) {
+      // ⛔ (0.7.44) and so does a thread a handover carried, on that pass: its clear is acted on all the same (`mm.cleared`)
+      if ((pin.byUs || (clear && !inside && !pastCut.has(pin.projectId) && !carriedNow.has(sid))) && s.pinned) {
         // (0.7.28) refused: its record is kept, as for a sync with no writes left, and the next sync finishes it
         if (!(await setPin(sid, false))) continue
         s.pinned = false
@@ -3155,7 +3286,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     if (!s || internal.has(pid) || INTERNAL_PROJECTS.has(pid) || internalPin(was.pins[sid])) continue
     // ⛔ (0.7.12) a thread pinned with no pin record of ours, whose client the cut alone cleared (`pastCut`): the pin is
     // the person's, and it stays. (Our own pin there came off in the loop above, from its record.)
-    if (s.pinned && !pastCut.has(pid)) {
+    // (0.7.44) nor a thread a handover carried, on that pass
+    if (s.pinned && !pastCut.has(pid) && !carriedNow.has(sid)) {
       if (writes >= MAX_WRITES) continue
       // (0.7.28) refused: not recorded as cleared, so the next sync tries again
       if (!(await setPin(sid, false))) continue
@@ -3531,7 +3663,12 @@ async function showQueue(
 }
 
 async function sync($: EngineInterface): Promise<Last> {
-  return (await reconcile($, await fetchFeed($))).last
+  return (await syncPass($)).last
+}
+
+/** (0.7.44) A sync, and the pass it made: what `topLevelPass` reads the app's threads from. */
+async function syncPass($: EngineInterface): Promise<Pass> {
+  return reconcile($, await fetchFeed($))
 }
 
 /**
@@ -4781,6 +4918,8 @@ async function renewLease($: EngineInterface): Promise<void> {
 async function tick($: EngineInterface): Promise<void> {
   /** (fix round 1, L12) The sync this tick ran failed: the time of the sync on record it was to replace. */
   let failed: { at: number | null } | null = null
+  /** (0.7.44) The pass this tick's own sync made, when it made one: `topLevelPass` follows it. */
+  let synced: Pass | null = null
   try {
     if ((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) !== 'claude-desktop') return
     // (0.5.4) first, before anything that waits on the app: a band and a list drawn from an older sync than the
@@ -4815,7 +4954,7 @@ async function tick($: EngineInterface): Promise<void> {
       const asked = Number(await storeGet<number>($, 'mm.ask', 0)) || 0
       if (!last || now - last.at >= SYNC_MS || asked > last.at || took || olderSync(last)) {
         try {
-          await sync($)
+          synced = await syncPass($)
         } catch (err) {
           failed = { at: last?.at ?? null }
           throw err
@@ -4833,6 +4972,9 @@ async function tick($: EngineInterface): Promise<void> {
     // (0.5.11, Rob 10-15) in every running thread, once for each sync on record: the clients' threads to update by
     // themselves (the thread that synced, at once; every other, on its next tick)
     await autoUpdates($).catch(err => noteFailure($, 'auto update', err))
+    // (0.7.44, Rob 2026-11-10: "The bridge should probably know when it pins a client thread to make sure it's top level") after
+    // the sync this thread made, and the updates it chose from it: the housekeeping notes (`topLevelPass`)
+    if (synced) await topLevelPass($, synced).catch(err => noteFailure($, 'top level', err))
     await refreshSelf($, false)
     // (0.6.0) this thread's Tracking part, status line and band line, from the store; the pane opens for a new project
     await drawTrack($, 'tick')
@@ -5087,7 +5229,11 @@ type Minted = { made: true } | { made: false; why: 'no-answer' } | { made: false
  * come later, the chip is recorded then, so that this thread can withdraw it like any other.
  * ⛔ One mint per thread, client and signature at a time (`minting`).
  */
-async function mintChip($: EngineInterface, m: MintSpec): Promise<Minted> {
+async function mintChip($: EngineInterface, spec: MintSpec): Promise<Minted> {
+  // ⛔ (0.7.44, Rob 2026-11-10: "we always want it to be parent threads") the thread a chip or a card starts detaches itself
+  // first: the step is its prompt's second paragraph, in the chip's record too, so the thread that opens with it is known by
+  // it (`linkFromMarker`). The signature is the item's, as before.
+  const m: MintSpec = { ...spec, prompt: withTopLevelStep(spec.prompt) }
   const key = `${m.it.projectId}\n${m.me}\n${m.signature}`
   minting.add(key)
   let call: Promise<Mcp>
@@ -5705,7 +5851,11 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
       const fresh = await freshNote($, sid, found, cur)
       // (0.7.14) the follow-up that asks for prep is case 6 sent by itself, with no "New since" line: nothing new came
       const text = kickoffText(cur, prep ? { auto: true } : { update: true, auto: true, wait })
-      const r = await sendInto($, cur.client, pid, false, sid, fresh ? `${text}\n\n${fresh}` : text, true)
+      const body = fresh ? `${text}\n\n${fresh}` : text
+      // ⛔ (0.7.44, Rob 2026-11-10: "If needed, the threads can detach themselves") a thread the app showed as a child just now
+      // (`found`, its answer by id) detaches itself first: the step is the update's second paragraph. Nothing it is on record by
+      // changes: what it carried is `signature`, the item's, as before.
+      const r = await sendInto($, cur.client, pid, false, sid, isChildThread(found) ? withTopLevelStep(body) : body, true)
       why = r === null ? null : typeof r === 'object' ? 'a message to this client was already going out' : r
     } catch (err) {
       why = errorText(err)
@@ -5725,6 +5875,8 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
     }
     // (0.7.6) the client's marker, first in what went, on record for the thread: it stays the client's own (`markUpdated`)
     await markUpdated($, pid, sid, at).catch(err => noteFailure($, 'auto update: the marker', err))
+    // (0.7.44) asked to detach itself: the housekeeping note is not sent to it as well (`topLevelPass`)
+    if (isChildThread(found)) await noteDetachAsked($, sid, at).catch(err => noteFailure($, 'auto update: the top-level ask', err))
     settleLater($, `${sid}#auto`, async () => {
       if (!(await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]) await putSent($, pid, has)
     })
@@ -5766,6 +5918,162 @@ async function freshNote($: EngineInterface, sid: string, found: AppThread, it: 
   } catch {
     // no transcript where it should be: the update goes without it
     return ''
+  }
+}
+
+// ---------------------------------------------------------------- (0.7.44) client threads are top-level threads
+
+/** (0.7.44) How long a thread asked to detach itself waits before it is asked again, while the app still shows it a child. Real days. */
+const DETACH_AGAIN_MS = 7 * DAY_MS
+/** (0.7.44) The most housekeeping notes one sync sends (`topLevelPass`), items 6 and 7 together: the rest wait for the next sync. */
+const TOP_LEVEL_PER_SYNC = 3
+
+/**
+ * (0.7.44, Rob 2026-11-10: "If needed, the threads can detach themselves") Whether the bridge's freshest view of a thread says it
+ * is a child (`isChildThread`): the app's answer by id when that is what the pass holds; a list row that says so is asked about
+ * by id just before (`lookup`, within APP_WAIT_MS). No view, or no answer: not a child.
+ */
+async function childNow($: EngineInterface, view: AppThread | undefined): Promise<boolean> {
+  if (!view || !isChildThread(view)) return false
+  if (view.byId) return true
+  const found = await lookup($, view.sessionId)
+  return typeof found === 'object' && isChildThread(found)
+}
+
+/** (0.7.44) A thread was asked to detach itself now (`mm.detachAsked`, thread → when), by the note or an update that carried the step. */
+async function noteDetachAsked($: EngineInterface, sid: string, at: number): Promise<void> {
+  await patchStore<Record<string, number>>($, 'mm.detachAsked', {}, fresh => {
+    delete fresh[sid]
+    fresh[sid] = at
+    capped(fresh)
+  })
+}
+
+/** (0.7.44) Threads the app, asked by id, showed at top level (or with no parent), by the session that asked (`instanceId`): not asked about again there. */
+const topLevelNow = new Map<string, Set<string>>()
+
+/** (0.7.44) Whether a thread may be asked to detach itself now: never asked, or asked DETACH_AGAIN_MS ago or more. */
+const mayAskDetach = (asked: Readonly<Record<string, number>>, sid: string, now: number): boolean => {
+  const at = Number(asked && typeof asked === 'object' ? asked[sid] : undefined)
+  return !Number.isFinite(at) || now - at >= DETACH_AGAIN_MS
+}
+
+/**
+ * ⛔ (0.7.44, Rob 2026-11-10: "The bridge should probably know when it pins a client thread to make sure it's top level. It can
+ * automatically do that every time." Then: "It connects to a thread.") After each sync this thread makes (and the updates it
+ * chose from it), the housekeeping note (DETACH_SELF_NOTE) goes to:
+ *   (6) a client thread the bridge links (the client's link) or pins (a pin record naming the client, the pin on now) that the
+ *       pass's view of the app shows as a child (`isChildThread`): one linked or pinned before this version as well;
+ *   (7) a child of a client thread pinned now (the app's list says that thread started it: `startedBy`) that is not that client's
+ *       own work: linked to another client, or on another project (`mm.current`: another client's, or the internal-ops project),
+ *       or with neither, finished by its app record (`recordLooksFinished`). One linked to, or on, the pinned thread's own client
+ *       stays under it, and so does one that is not finished.
+ * ⛔ The guards of an update by itself: in the desktop app, auto on and not paused, a time-tracking hook that counts the turn as
+ * automatic, never this thread, never a thread the pass could not see; an update claimed or going out for its client carries the
+ * step itself (`autoUpdate`), so no note then. Just before each, the app is asked for the thread by id (`lookup`): open here (not
+ * archived, not another profile's), not a scheduled run (nor one on record, `mm.scheduled`), a parent named and `detached`
+ * false (one the app shows at top level is not asked about again in this session: `topLevelNow`), and not used in the last
+ * AUTO_IDLE_MS; no answer, nothing. ⛔ Once per thread (`mm.detachAsked`, written over a fresh copy before the send, so two
+ * threads never both ask), and again only after DETACH_AGAIN_MS while the app still shows it a child. At most
+ * TOP_LEVEL_PER_SYNC in a sync. Each is logged. ⛔ Nothing else is written: no link, pin, name or record of what the thread has
+ * (`mm.sent`), and the note has no [mm-link] marker, so no bridge reads it as a kickoff or an update.
+ */
+async function topLevelPass($: EngineInterface, pass: Pass): Promise<void> {
+  if (!pass.listed || pass.stored) return
+  if ((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) !== 'claude-desktop') return
+  if (!(await autoStartOn($)) || (await $.store.get('mm.paused'))) return
+  const me = await knownSelf($)
+  if (!me) return
+  const now = await $.clock.now()
+  if (!(await hookCountsAuto($, now)).ok) return
+  const id = await instanceId($)
+  const top = topLevelNow.get(id) ?? new Set<string>()
+  topLevelNow.set(id, top)
+  const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+  const pins = await storeGet<Record<string, Pin>>($, 'mm.pins', {})
+  const asked = await storeGet<Record<string, number>>($, 'mm.detachAsked', {})
+  const runs = await storeGet<Record<string, number>>($, 'mm.scheduled', {})
+  const listed = listedIn(pass.last)
+  const names = new Map(listed.map(i => [i.projectId, cleanName(i.client)] as const))
+  const nameOf = (pid: string | undefined, sid: string): string => (pid ? names.get(pid) : undefined) || cleanName(pins[sid]?.client) || pid || 'no client'
+  /** The internal-ops project, as the last sync's list flags it, or the known ones. */
+  const internalIds = new Set([...INTERNAL_PROJECTS, ...listed.filter(i => i.internal === true).map(i => i.projectId)])
+  type Ask = { sid: string; pid?: string | undefined; client: string; line: string }
+  const asks: Ask[] = []
+  const chosen = new Set<string>()
+  const may = (sid: string): boolean =>
+    THREAD_ID.test(sid) && sid !== me && !chosen.has(sid) && !top.has(sid) && !pass.unseen.has(sid) && !Object.hasOwn(runs, sid) && mayAskDetach(asked, sid, now)
+  // (6) the client threads it links (its link of the client) or pins (a pin record naming the client, the pin on now)
+  const ofClients = new Map<string, { pid: string; linked: boolean }>()
+  for (const [pid, sid] of Object.entries(links)) if (ownerOf(sid, links) === pid) ofClients.set(sid, { pid, linked: true })
+  for (const [sid, p] of Object.entries(pins)) {
+    if (ofClients.has(sid) || !p || !isUuid(p.projectId) || ownerOf(sid, links) !== undefined) continue
+    ofClients.set(sid, { pid: p.projectId, linked: false })
+  }
+  for (const [sid, { pid, linked }] of ofClients) {
+    const s = pass.live.get(sid)
+    if (!s || s.isArchived || s.scheduled || !isChildThread(s) || (!linked && !s.pinned) || !may(sid)) continue
+    chosen.add(sid)
+    const client = nameOf(pid, sid)
+    asks.push({ sid, pid, client, line: `top level: asked ${sid} (${client}) to detach itself (${s.pinned ? 'pinned' : 'linked'})` })
+  }
+  // (7) the children under a pinned client thread that are not that client's own work
+  const all = await currents($)
+  const records = recordReader($, now, me)
+  for (const [parent, { pid }] of ofClients) {
+    const p = pass.live.get(parent)
+    if (!p || !p.pinned || p.isArchived) continue
+    for (const c of pass.live.values()) {
+      const sid = c.sessionId
+      if (c.startedBy !== parent || c.isArchived || c.scheduled || !may(sid)) continue
+      const other = ownerOf(sid, links)
+      const cur = Object.hasOwn(all, sid) ? all[sid] : undefined
+      const on = cur && typeof cur === 'object' && isUuid(cur.pid) ? cur.pid : undefined
+      let why: string | undefined
+      if (other !== undefined && other !== pid) why = 'linked to another client'
+      else if (on !== undefined && on !== pid) why = internalIds.has(on) ? 'on the internal-ops project' : "on another client's project"
+      else if (other === undefined && on === undefined && (await records.read(sid))?.finished === true) why = 'finished'
+      if (!why) continue
+      chosen.add(sid)
+      asks.push({ sid, pid: other, client: nameOf(other, sid), line: `top level: asked ${sid} to leave pinned ${parent} (${nameOf(pid, parent)}): ${why}` })
+    }
+  }
+  if (!asks.length) return
+  const claims = await storeGet<Record<string, UpdateClaim>>($, 'mm.updating', {})
+  /** An update claimed or going out for this client: it carries the step itself where the thread needs it. */
+  const updating = (pid: string | undefined): boolean => Boolean(pid) && (sending.has(pid as string) || Object.entries(claims).some(([k, c]) => k.startsWith(`${pid}\n`) && Number(c?.until) > now))
+  let sent = 0
+  for (const a of asks) {
+    if (sent >= TOP_LEVEL_PER_SYNC) break
+    if (updating(a.pid)) continue
+    // the app, just before: open here, no scheduled run, a child still, and not in use now
+    const found = await lookup($, a.sid)
+    if (typeof found !== 'object' || found.isArchived || found.scheduled) continue
+    if (typeof found.parentSessionId !== 'string' || found.detached !== false) {
+      if (found.detached === true || !found.parentSessionId) top.add(a.sid)
+      continue
+    }
+    const active = found.lastActivityAt ? Date.parse(found.lastActivityAt) : NaN
+    if (Number.isFinite(active) && now - active < AUTO_IDLE_MS) continue
+    // ⛔ on record first, over a fresh copy: two threads never both ask it, and a failed ask waits as an answered one does
+    let mine = false
+    await patchStore<Record<string, number>>($, 'mm.detachAsked', {}, fresh => {
+      if (!mayAskDetach(fresh, a.sid, now)) return false
+      delete fresh[a.sid]
+      fresh[a.sid] = now
+      capped(fresh)
+      mine = true
+    })
+    if (!mine) continue
+    sent++
+    let why: string | null
+    try {
+      const r = await sendInto($, a.client, a.pid ?? `top-level:${a.sid}`, false, a.sid, DETACH_SELF_NOTE, true)
+      why = r === null ? null : typeof r === 'object' ? 'a message to it was already going out' : r
+    } catch (err) {
+      why = errorText(err)
+    }
+    await logAuto($, why === null ? a.line : `${a.line}; not sent: ${short(why, 160)}`)
   }
 }
 
@@ -6090,6 +6398,9 @@ async function kickoffs($: EngineInterface, arg: string): Promise<string> {
       const handover = away ? awayHandoverText(it.projectName, away) : ''
       prompt = handover ? `${body}\n\n${handover}` : body
     } else prompt = carryKickoff(w.pid, client, away as AwayClient)
+    // ⛔ (0.7.44, Rob 2026-11-10: "we always want it to be parent threads") the new thread detaches itself first: the step is its
+    // prompt's second paragraph, in the record too, so the thread that opens with this prompt is known by it (`handedFor`)
+    prompt = withTopLevelStep(prompt)
     const title = it ? startTitle(it) : chipTitle(`${client}: from the other profile`)
     await handOut($, { projectId: w.pid, signature, prompt, threadId: me ?? '', at: now }).catch(err => noteFailure($, 'kickoffs: the record', err))
     kicks.push({ client, args: { initiation: 'user_asked', title, prompt, context: 'fresh', background: START_BACKGROUND, use_worktree: false, wake_when_done: false, ...(cwd ? { cwd } : {}) } })
@@ -6938,7 +7249,11 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
   if (here && how.typed) return { said: `You are already in ${it.client}'s thread. Press Update thread on its row in the pane to pick it up here.` }
 
   const failed = (why: string): Answer => ({ said: `Could not send to ${it.client}'s thread: ${why}` })
-  const text = kickoffText(cur, { update: true })
+  // ⛔ (0.7.44, Rob 2026-11-10: "If needed, the threads can detach themselves") a thread the app shows as a child detaches itself
+  // first (`childNow`: the step is the update's second paragraph). What it is on record by is `signature`, the item's, as before.
+  const child = await childNow($, pass.live.get(target.sid))
+  const said = kickoffText(cur, { update: true })
+  const text = child ? withTopLevelStep(said) : said
   // ⛔ (0.5.11, review of PR #15, F2) The links read again right before the send: the press read them before the feed,
   // and the person may have moved one since. The thread is another client's now, or the client's link is not what the
   // press read (other than linked now to this very thread): nothing is sent.
@@ -6987,6 +7302,8 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
   // own package as new once it had been quiet 10 minutes.
   const given: Sent = { sid, sig: signature, at, ...(asksForPrep(cur) ? { prep: true as const } : {}) }
   await step('what the thread now has', () => putSent($, pid, given))
+  // (0.7.44) asked to detach itself: the housekeeping note is not sent to it as well (`topLevelPass`)
+  if (child) await step('the top-level ask', () => noteDetachAsked($, sid, at))
   // (0.7.6) the client's marker the message carried, on record for the thread: it stays the client's own (`markUpdated`)
   await step('the marker', () => markUpdated($, pid, sid, at))
   await step('the unlink record', () => forgetUnlink($, sid))
@@ -7936,7 +8253,8 @@ async function linkFromMarker($: EngineInterface, text: string, origin: string |
   // What this thread has: the kickoff it opened with. From the chip, what the chip carried; with no chip
   // on record, only when its prompt is exactly the kickoff that would be sent now.
   const it = listedIn(last).find(i => i.projectId === projectId)
-  const sig = chip ? chip.signature : it && kickoffText(it) === prompt.trim() ? signatureOf(it) : undefined
+  // (0.7.44) compared without the top-level step a new thread's prompt carries (`withoutTopLevelStep`): what it has is the same
+  const sig = chip ? chip.signature : it && kickoffText(it) === withoutTopLevelStep(prompt).trim() ? signatureOf(it) : undefined
   // ⛔ (0.7.9) and, when that kickoff asked the thread to build the package (case 6: it carried what the client has now,
   // and the client has mail and no package), that it did (`Sent.prep`): the package the new thread then builds is its
   // own work, never sent to it as new (as `updateThread` records a press)
@@ -9222,6 +9540,19 @@ async function countPrompt($: EngineInterface, text: string, origin: string | un
   if (patch.single && s.opened !== undefined) await Promise.resolve($.ui.close({ id: PANE_QUEUE })).catch(() => {})
 }
 
+/** (0.7.44) How long after an account switch the sync's record of the profile switch (`mm.profile.since`) is the same switch. Real hours. */
+const SWITCH_SAME_MS = 6 * 3_600_000
+
+/**
+ * (0.7.44) The account this session runs in, `<account>/<org>`, from the two uuids the app puts in its environment; either
+ * missing: none (the switch is known by `mm.profile` alone, as before). ⛔ Kept nowhere but `mm.account`, and never logged.
+ */
+async function accountKey($: EngineInterface): Promise<string | undefined> {
+  const account = String((await $.env.get('CLAUDE_CODE_ACCOUNT_UUID')) ?? '').trim()
+  const org = String((await $.env.get('CLAUDE_CODE_ORGANIZATION_UUID')) ?? '').trim()
+  return account && org ? `${account}/${org}` : undefined
+}
+
 /**
  * (0.7.11, Rob 2026-10-30: "switching profiles all the time. It needs to be able to detect and adapt to that.") The one
  * line the first prompt the person types after a switch of Claude profiles carries for Claude (`awayPromptLine`): the
@@ -9235,6 +9566,13 @@ async function countPrompt($: EngineInterface, text: string, origin: string | un
  * sync saw another profile before this one: `mm.profile.from`), in a thread that has start_session: the first prompt
  * the person types carries the switch routine's line instead (`switchPromptLine`), once a switch (`mm.awayTold.routine`),
  * with or without away clients. The bridge still starts nothing: Claude runs the routine on the person's own turn.
+ * ⛔ (0.7.44, Rob 2026-11-10; on 11-10 the line rode on his SECOND message, the poller not having synced when he typed his
+ * first) The switch is also known by the account the session runs in (`accountKey`), which the app sets before the first
+ * prompt: the first prompt the person types in another account than the one on record (`mm.account`) carries the switch
+ * line at once, under the same conditions. No record yet (the first run after the upgrade): it is written, no line from it.
+ * ⛔ One routine line per real switch: a profile switch the sync records at most SWITCH_SAME_MS after an account switch
+ * whose routine line was told (`mm.awayTold.account` is that switch's `since`) is the same switch, and its line is not told
+ * again (`sameSwitch`).
  */
 async function awayNote($: EngineInterface, text: string, origin: string | undefined): Promise<string | undefined> {
   if (!origin || !PERSON_ORIGINS.has(origin)) return undefined
@@ -9248,14 +9586,50 @@ async function awayNote($: EngineInterface, text: string, origin: string | undef
   const profile = await storeGet<{ since?: unknown; from?: unknown } | null>($, 'mm.profile', null)
   const since = Number(profile?.since) || 0
   const routine = typeof profile?.from === 'string' && profile.from !== '' && since > 0 && (await sessionTools($)).start
-  if (!list.length && !routine) return undefined
-  const keys = list.map(a => `${a.projectId} ${a.sid}`)
   const now = await $.clock.now()
+  // (0.7.44) the account this prompt runs in, against the one on record: a switch is claimed only by a prompt that can
+  // carry its line (a thread with start_session); a thread without one leaves it for the next that has one
+  const key = await accountKey($)
+  let switched = false
+  let acct: number | undefined
+  if (key) {
+    const start = (await sessionTools($)).start
+    const rec = await patchStore<{ key?: unknown; since?: unknown; from?: unknown }>($, 'mm.account', {}, fresh => {
+      if (fresh.key === key) return false
+      const old = typeof fresh.key === 'string' && fresh.key !== '' ? fresh.key : undefined
+      if (old && !start) return false
+      fresh.key = key
+      fresh.since = now
+      if (old) {
+        fresh.from = old
+        switched = true
+      } else delete fresh.from
+    })
+    const at = Number(rec.since)
+    if (rec.key === key && typeof rec.from === 'string' && rec.from !== '' && Number.isFinite(at) && at > 0) acct = at
+  }
+  if (!list.length && !routine && !switched) return undefined
+  const keys = list.map(a => `${a.projectId} ${a.sid}`)
+  /** The profile switch on record is the account switch whose routine line was told (see above). */
+  const sameSwitch = (told: { account?: unknown; routine?: unknown }): boolean =>
+    acct !== undefined && told.account === acct && told.routine === true && since >= acct && since - acct <= SWITCH_SAME_MS
   let fresh = false
   let first = false
-  await patchStore<{ since?: unknown; keys?: unknown; at?: unknown; routine?: unknown }>($, 'mm.awayTold', {}, told => {
+  await patchStore<{ since?: unknown; keys?: unknown; at?: unknown; routine?: unknown; account?: unknown }>($, 'mm.awayTold', {}, told => {
+    if (switched) {
+      // (0.7.44) the account switch this prompt saw: its routine line now, for the profile switch on record too
+      const had = told.since === since && Array.isArray(told.keys) ? told.keys.filter((k): k is string => typeof k === 'string') : []
+      told.since = since
+      told.keys = [...new Set([...had, ...keys])].slice(-REMEMBER_MAX)
+      told.at = now
+      told.routine = true
+      told.account = acct
+      first = true
+      fresh = true
+      return
+    }
     // a new switch: none of its away clients has been named yet, and its routine has not run
-    const same = told.since === since
+    const same = told.since === since || sameSwitch(told)
     const had = same && Array.isArray(told.keys) ? told.keys.filter((k): k is string => typeof k === 'string') : []
     const ran = same && told.routine === true
     if (keys.every(k => had.includes(k)) && (ran || !routine)) return false
@@ -9269,7 +9643,7 @@ async function awayNote($: EngineInterface, text: string, origin: string | undef
     fresh = true
   })
   if (!fresh) return undefined
-  if (first) return switchPromptLine(list, since, now)
+  if (first) return switchPromptLine(list, switched ? now : since, now)
   // the person asks for them already: their own words start them on this turn
   if (text.toLowerCase().includes(START_ALL_WORDS.toLowerCase())) return undefined
   return awayPromptLine(list, now)
