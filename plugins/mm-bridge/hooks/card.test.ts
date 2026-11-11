@@ -9,7 +9,7 @@ import { drawnText, pageGap } from './card-parity'
 import { CARD_PAIRS } from './card-pairs.test-helper'
 import { NEXT_LABEL as NEXT, NEXT_PAGE, NEXT_SHA, NEXT_TREE, SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
 import { ME, fakeApp, hooks, mm, pid, press } from './fake-app.test-helper'
-import { DRAW_FAILED, RESULT_HINT, RESULT_HINT_BELOW, ROW_AGAIN, ROW_BELOW, ROW_FAILURES_MAX, ROW_GONE, ROW_LEFT, ROW_REPLACED, ROW_REPLACED_PANE, firstRowFailure, sameVersion } from './register'
+import { CARD_NOT_SHOWN, DRAW_FAILED, RESULT_HINT, RESULT_HINT_BELOW, ROW_AGAIN, ROW_BELOW, ROW_FAILURES_MAX, ROW_GONE, ROW_LEFT, ROW_REPLACED, ROW_REPLACED_PANE, SHOWN_WAIT_MS, firstRowFailure, resetShown, sameVersion } from './register'
 import type { Feed } from './queue'
 
 const tree = (): MmCardTree => readTree(JSON.parse(JSON.stringify(SMS_TREE))) as MmCardTree
@@ -2547,6 +2547,164 @@ describe('0.7.47 the card at its whole height: drawn under the thread\'s own lin
     const last = kids(drawn).at(-1) as { type?: unknown; props?: { text?: unknown } }
     expect(last.type).toBe('Markdown')
     expect(last.props?.text).toBe('## The whole page')
+  })
+})
+
+describe('0.7.47 the card is seen, or the page is printed: checked under the thread\'s line once the turn ends', () => {
+  type Hook = ($: unknown, e: Record<string, unknown>, next: (e: unknown) => unknown) => Promise<unknown>
+  const lineHook = hooks['ui.render:{"component":"AssistantMessage"}'] as Hook
+  const bandHook = hooks['ui.render:{"component":"AbovePrompt"}'] as Hook
+  const startHook = hooks['turn.start'] as Hook
+  const endHook = hooks['turn.complete'] as Hook
+  const PKG = SMS_TREE.package_id as string
+  const ENGINE = { engine: 'drawing' }
+  const engine = () => ENGINE
+  const pass = async (e: unknown) => e
+  /** A tag of this block's own for each test: the tags told are kept for the session, once a tag. */
+  const tag = (n: number) => `abcdef${String(n).padStart(6, '0')}`
+  const watching = (label: string) => {
+    resetShown()
+    const t = thread()
+    const asks: string[] = []
+    ;(t.$ as unknown as Record<string, unknown>).ui = {
+      resolve: () => ({ Box: 'Box', Text: 'Text', Button: 'Button', Link: 'Link', Svg: 'Svg', Input: 'Input', Markdown: 'Markdown' }),
+      invalidate: () => undefined,
+    }
+    ;(t.$ as unknown as { prompt: Record<string, unknown> }).prompt.submit = async (input: { text: string }) => {
+      asks.push(input.text)
+      return { text: input.text }
+    }
+    t.state.set('card', cardOf({ tree: { ...tree(), label } }))
+    t.state.set('cardChecked', { [label]: 0 })
+    t.state.set('view', { text: '## Example Dental · reply package', heading: '' })
+    return { ...t, asks }
+  }
+  const line = (id: string, text: string, surface = 'desktop') => ({ surface, component: 'AssistantMessage', requestId: id, props: { text, isFirstOfReply: true } })
+  const band = (surface = 'desktop') => ({ surface, component: 'AbovePrompt', props: { hasSurvey: false } })
+  const begin = (t: { $: unknown }) => startHook(t.$, { turnId: 't1' }, pass)
+  const end = (t: { $: unknown }, over: Record<string, unknown> = {}) => endHook(t.$, { answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer', ...over }, pass)
+  const settle = async () => {
+    for (let i = 0; i < 50; i++) await Promise.resolve()
+  }
+
+  test('the words the thread is told, word for word', () => {
+    expect(CARD_NOT_SHOWN(tag(0))).toBe(`[Massmarket bridge] The card for Package ${tag(0)} is not drawn under your line in this thread. Print the whole page now, as client-reply-prep §9.3 says for a card that is not ready.`)
+    expect(SHOWN_WAIT_MS).toBe(6_000)
+  })
+
+  test('the line took the card: nothing is told', async () => {
+    const label = tag(1)
+    const t = watching(label)
+    await begin(t)
+    await t.advance(1_000)
+    await noteAsked(t.$, { packageId: PKG, label, toolUseId: 'toolu_s1' })
+    await t.advance(1_000)
+    expect(texts(await lineHook(t.$, line('msg_s1', `The card is below. Package ${label}.`), engine)).join('\n')).toContain('One go sends 1 item. Package ')
+    await end(t)
+    await t.advance(SHOWN_WAIT_MS * 3)
+    await settle()
+    expect(t.asks).toEqual([])
+  })
+
+  test('the thread is drawn and no card is under its line: told once, SHOWN_WAIT_MS after the turn ends, and never again for that tag', async () => {
+    const label = tag(2)
+    const t = watching(label)
+    await begin(t)
+    await t.advance(1_000)
+    await noteAsked(t.$, { packageId: PKG, label, toolUseId: 'toolu_s2' })
+    await t.advance(1_000)
+    // the thread's line names no tag (or another, or not as the answer said): the engine's row, and the card stays in the call's row alone
+    expect(await lineHook(t.$, line('msg_s2', `The card is below; the go comes from its box. Package \`${label}\`.`), engine)).toBe(ENGINE)
+    await end(t)
+    await t.advance(SHOWN_WAIT_MS - 1)
+    await settle()
+    expect(t.asks).toEqual([])
+    await t.advance(1)
+    await settle()
+    expect(t.asks).toEqual([CARD_NOT_SHOWN(label)])
+    // a later turn, a later draw: once a tag
+    await begin(t)
+    await end(t)
+    await bandHook(t.$, band(), engine)
+    await t.advance(SHOWN_WAIT_MS * 2)
+    await settle()
+    expect(t.asks).toHaveLength(1)
+  })
+
+  test('a thread drawn on another surface only (the card is drawn on the desktop alone): told', async () => {
+    const label = tag(3)
+    const t = watching(label)
+    await begin(t)
+    await t.advance(1_000)
+    await noteAsked(t.$, { packageId: PKG, label, toolUseId: 'toolu_s3' })
+    await t.advance(1_000)
+    expect(await lineHook(t.$, line('msg_s3', `The card is below. Package ${label}.`, 'mobile'), engine)).toBe(ENGINE)
+    await end(t)
+    await t.advance(SHOWN_WAIT_MS)
+    await settle()
+    expect(t.asks).toEqual([CARD_NOT_SHOWN(label)])
+  })
+
+  test('a thread nobody has on screen is checked when a surface draws it: the line taking the card then is enough, a band alone is not', async () => {
+    // the line is drawn once the thread is opened, and takes the card
+    const first = tag(4)
+    const t = watching(first)
+    await begin(t)
+    await t.advance(1_000)
+    await noteAsked(t.$, { packageId: PKG, label: first, toolUseId: 'toolu_s4' })
+    await end(t)
+    await t.advance(SHOWN_WAIT_MS * 5)
+    await settle()
+    expect(t.asks).toEqual([])
+    await bandHook(t.$, band(), engine)
+    expect(texts(await lineHook(t.$, line('msg_s4', `The card is below. Package ${first}.`), engine)).join('\n')).toContain('One go sends 1 item. Package ')
+    await t.advance(SHOWN_WAIT_MS)
+    await settle()
+    expect(t.asks).toEqual([])
+    // opened, and the line does not take it
+    const second = tag(5)
+    const u = watching(second)
+    await begin(u)
+    await u.advance(1_000)
+    await noteAsked(u.$, { packageId: PKG, label: second, toolUseId: 'toolu_s5' })
+    await end(u)
+    await u.advance(SHOWN_WAIT_MS * 5)
+    await settle()
+    expect(u.asks).toEqual([])
+    await bandHook(u.$, band(), engine)
+    await u.advance(SHOWN_WAIT_MS)
+    await settle()
+    expect(u.asks).toEqual([CARD_NOT_SHOWN(second)])
+  })
+
+  test('nothing is owed for a turn that did not end with an answer, a sub-agent\'s turn, or a ready answer from an earlier turn', async () => {
+    const label = tag(6)
+    const t = watching(label)
+    await begin(t)
+    await t.advance(1_000)
+    await noteAsked(t.$, { packageId: PKG, label, toolUseId: 'toolu_s6' })
+    await end(t, { reason: 'aborted', isAborted: true })
+    await end(t, { agentId: 'agent_1' })
+    await bandHook(t.$, band(), engine)
+    await t.advance(SHOWN_WAIT_MS * 2)
+    await settle()
+    expect(t.asks).toEqual([])
+    // the next turn ends: the ready answer was the turn before's
+    await begin(t)
+    await t.advance(1_000)
+    await end(t)
+    await bandHook(t.$, band(), engine)
+    await t.advance(SHOWN_WAIT_MS * 2)
+    await settle()
+    expect(t.asks).toEqual([])
+    // and a new process, which has seen no turn begin, owes nothing either
+    resetShown()
+    await noteAsked(t.$, { packageId: PKG, label, toolUseId: 'toolu_s6b' })
+    await end(t)
+    await bandHook(t.$, band(), engine)
+    await t.advance(SHOWN_WAIT_MS * 2)
+    await settle()
+    expect(t.asks).toEqual([])
   })
 })
 

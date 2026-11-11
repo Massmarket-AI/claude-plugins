@@ -4048,17 +4048,99 @@ export const DRAW_FAILED = (label: string): string =>
 /** (0.7.40) The tags the thread was told of (`DRAW_FAILED`): once a tag a session, so it can never repeat or loop. */
 const drawFailTold = new Set<string>()
 
-/** (0.7.40) Tell the thread, once for this tag in this session, that the live card could not be drawn: it then prints the page. */
-function tellDrawFailed($: EngineInterface, label: string): void {
+/**
+ * (0.7.40) Tell the thread, once for this tag in this session, that the live card could not be drawn: it then prints the page. (0.7.47) Or,
+ * in the same words' place and on the same once-a-tag record, that it is not drawn under the thread's line (CARD_NOT_SHOWN).
+ */
+function tellDrawFailed($: EngineInterface, label: string, text: string = DRAW_FAILED(label)): void {
   if (!/^[0-9a-f]{12}$/.test(label) || drawFailTold.has(label)) return
   drawFailTold.add(label)
   void (async () => {
     try {
-      await $.prompt.submit({ text: DRAW_FAILED(label) })
+      await $.prompt.submit({ text })
     } catch {
       // the row is the engine's, and its answer shows: the person can still ask for the page
     }
   })()
+}
+
+/**
+ * (0.7.47) The card is seen, or the page is printed (Builds thread, 2026-11-11, from Game Day Men's Health: `mm card` answered `card ready`
+ * at about 4:55 and 5:10 PM ET, "and Rob saw no card at all, so he was asked for a go on text he had not seen"; "A thread must never be told
+ * 'Do not print the page' while nothing is on screen."). The answer comes before the thread's line, so it cannot wait for the line's draw.
+ * So the line is checked after it: once the turn that got the ready answer ends (`owe`), the line under it must have taken the card
+ * (`lineOfCall`) within SHOWN_WAIT_MS of a surface drawing the thread. ⛔ The call's own row does not count: the app can fold it out of
+ * sight and report no error (Game Day, with no draw failure in bridge-notices.log). A surface has drawn the thread once its band or one of
+ * its reply rows has been drawn since the answer (`noteThreadDrawn`); one that draws it and finds no card under the line tells the thread
+ * (CARD_NOT_SHOWN), which prints the page. A thread nobody has on screen is checked again when one draws it. Framed as the bridge's,
+ * never the person's; it changes no record, no note and no prompt box.
+ */
+export const CARD_NOT_SHOWN = (label: string): string =>
+  `[Massmarket bridge] The card for Package ${label} is not drawn under your line in this thread. Print the whole page now, as client-reply-prep §9.3 says for a card that is not ready.`
+/** (0.7.47) How long after the thread is drawn the line has to have taken the card. */
+export const SHOWN_WAIT_MS = 6_000
+/** (0.7.47) The ready answer whose card is still to be seen under the thread's line, from when it answered (`since`). One at a time. */
+let owedCard: { toolUseId: string; label: string; since: number; armed: boolean } | null = null
+/** (0.7.47) When a surface last drew this thread: its band, or one of its reply rows. */
+let threadDrawnAt = 0
+/** (0.7.47) When this thread's current turn of the main conversation began; null until one has in this process. */
+let turnBeganAt: number | null = null
+
+/** (0.7.47) The turn under way began now. */
+async function noteTurnBegan($: EngineInterface): Promise<void> {
+  turnBeganAt = await $.clock.now()
+}
+
+/** (0.7.47) A turn of the main conversation ended with an answer: the ready answer it got, if any, is owed to the screen. */
+async function owe($: EngineInterface): Promise<void> {
+  const asked = await askedOf($)
+  if (!asked || turnBeganAt === null || asked.at < turnBeganAt) return
+  if (lineOfCall.has(asked.toolUseId) || drawFailTold.has(asked.label)) return
+  owedCard = { toolUseId: asked.toolUseId, label: asked.label, since: asked.at, armed: false }
+  armShown($)
+}
+
+/** (0.7.47) A surface drew this thread: on record, and a card still owed is checked SHOWN_WAIT_MS from now. Never throws. */
+async function noteThreadDrawn($: EngineInterface): Promise<void> {
+  try {
+    threadDrawnAt = await $.clock.now()
+    armShown($)
+  } catch {
+    // the next draw notes it
+  }
+}
+
+function armShown($: EngineInterface): void {
+  const it = owedCard
+  if (!it || it.armed) return
+  it.armed = true
+  try {
+    void Promise.resolve($.clock.after(SHOWN_WAIT_MS, () => checkShown($, it))).catch(() => {
+      it.armed = false
+    })
+  } catch {
+    it.armed = false
+  }
+}
+
+/** (0.7.47) The check: the line took the card, or nobody has drawn the thread since the answer (checked again at the next draw), or tell. */
+function checkShown($: EngineInterface, it: NonNullable<typeof owedCard>): void {
+  if (owedCard !== it) return
+  it.armed = false
+  if (lineOfCall.has(it.toolUseId)) {
+    owedCard = null
+    return
+  }
+  if (threadDrawnAt < it.since) return
+  owedCard = null
+  tellDrawFailed($, it.label, CARD_NOT_SHOWN(it.label))
+}
+
+/** (0.7.47) For tests: the module's record of the turn, the screen and the owed card, as a new process has it. */
+export function resetShown(): void {
+  owedCard = null
+  threadDrawnAt = 0
+  turnBeganAt = null
 }
 
 /** (0.7.40) This row fell back to the engine's: unlisted, and a row that was listed asks for one redraw, so its answer shows again. */
@@ -9787,6 +9869,8 @@ export const register: Register = on => {
     if ((e as { agentId?: unknown }).agentId) return done
     // (0.7.36) the thread has stopped, unless a background sub-agent is at work: what this turn got `card ready` for, or printed the page of, is checked now, and the signature box opens
     await turnEnded($, e.reason === 'answer').catch(() => {})
+    // (0.7.47) a card this turn got `card ready` for is owed to the screen: under the thread's line, or the thread prints the page (`owe`)
+    if (e.reason === 'answer') await owe($).catch(() => {})
     void (async () => {
       await terminalTime($)
       await drawTrack($, 'turn')
@@ -9850,7 +9934,10 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     try {
       // (0.7.36) the thread is working: no signature box until this turn ends (`turnBegan`)
-      if (!(e as { agentId?: unknown }).agentId) await turnBegan($)
+      if (!(e as { agentId?: unknown }).agentId) {
+        await turnBegan($)
+        await noteTurnBegan($)
+      }
       const id = await instanceId($)
       const paused = mintPause.get(id)
       if (paused?.atTurn) {
@@ -9951,6 +10038,8 @@ export const register: Register = on => {
   // (0.7.1) Hour bank is Prepaid hours, drawn when the client has prepaid hours left (`offersPrepaid`), and the words
   // end ` (<Client> is set to always ask first)` for a client OW sets so.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    // (0.7.47) a surface is drawing this thread: a card owed to the screen is checked (`noteThreadDrawn`)
+    await noteThreadDrawn($)
     const { value: band } = await $.state.get(BAND)
     const { value: nudge } = await $.state.get(NUDGE)
     const { value: lineAsk } = await $.state.get(LINE)
@@ -10425,6 +10514,8 @@ export const register: Register = on => {
   // the pane draws its card (`cardDrawable`). Any other reply row, any other surface, and a draw that throws: the engine's row, untouched,
   // and a row that had taken the card gives it back, so the call's row draws it again. Reads only, as every render hook here.
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    // (0.7.47) a surface is drawing this thread, any surface: a card owed to the screen is checked (`noteThreadDrawn`)
+    await noteThreadDrawn($)
     if (e.surface !== 'desktop') return next(e)
     const text = String((e.props as { text?: unknown }).text ?? '')
     if (!PACKAGE_TAG.test(text)) return next(e)
