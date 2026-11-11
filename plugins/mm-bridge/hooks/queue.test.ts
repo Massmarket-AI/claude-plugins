@@ -2720,7 +2720,7 @@ describe('(0.7.15) an `assign_by` commitment asks for an owner by its clock, nev
     return it
   }
 
-  test('its row, name, pane, note and kickoff ask H9 to assign an owner in OW by the clock (or take it and give the ETA); it pins on that clock', async () => {
+  test('its row, name, pane, note and kickoff ask H9 to assign an owner from Claude Code by the clock (or take it and give the ETA); it pins on that clock', async () => {
     const it = one(h9Feed({ due_soon: [handed(1)] }))
     expect(it).toMatchObject({ projectId: CLIENT, kind: 'task', tasks: 1, dueAt: CLOCK, taskTitles: [] })
     expect(assignAsksOf(it)).toEqual([{ id: tid(1), title: 'Build 1', assignBy: CLOCK }])
@@ -2738,18 +2738,18 @@ describe('(0.7.15) an `assign_by` commitment asks for an owner by its clock, nev
     const md = clientMarkdown(it, wed)
     expect(md).toBe(['## Acme Legal', '🔴 2h left · Acme Legal · assign an owner', '', `### ${ASSIGN_ASK_TEXT}`, '', `- Build 1 (ticket 00000001) · owner needed by ${clockText(CLOCK, wed)}`].join('\n'))
     expect(md).not.toContain('committed')
-    // the kickoff: an owner by the clock, assigned in OW; an ETA through §5.3 only for one taken
+    // the kickoff: an owner by the clock, assigned through /ticket-status; an ETA through §5.3 only for one taken
     expect(kickoffText(it)).toBe(
       [
         `[mm-link ${CLIENT}] Acme Legal (OW project ${CLIENT}) has 1 ticket(s) of mine that need an owner, the first by Wed, Oct 28 5 PM ET. Load the client's project skill first, then ask me who should own each ticket below and wait for me. Send nothing without my go.`,
         '',
-        'My tickets that need an owner: a team post handed them to me to assign. The time on each is when it needs an owner in OW, not when the work is due. For each, ask me who will own it, and I assign them in OW. If I take one myself, ask me when it will be delivered and record it as task-chip-flow §5.3 says: POST /api/ext/eta-commit with task_fingerprint "ticket:<its id>". Do not draft a client email for these.',
+        'My tickets that need an owner: a team post handed them to me to assign. The time on each is when it needs an owner, not when the work is due. For each, ask me who will own it, then assign it from here: POST /api/ext/ticket-status with {"ticket_id":"<its id>","assignee":"<the name or email I give>","reason":"<why>"} (mm-api.mjs ext POST /ticket-status; never the OW dashboard). If I take one myself, ask me when it will be delivered and record it as task-chip-flow §5.3 says: POST /api/ext/eta-commit with task_fingerprint "ticket:<its id>". Do not draft a client email for these.',
         `1. Build 1 (ticket ${tid(1)}) · owner needed by Wed, Oct 28 5 PM ET`,
       ].join('\n'),
     )
     expect(kickoffText(it)).not.toContain('committed task')
     expect(noteText(it, H9)).toBe(
-      `0 client messages waiting on our reply and 1 ticket that needs an owner; no client message is waiting, so there is no reply to prepare. 1 ticket of Has9's needs an owner (ticket 00000001): a team post handed it over to be assigned in OW by its due time, which is not a delivery date. A ticket Has9 takes instead needs an ETA, recorded as task-chip-flow §5.3 says, with task_fingerprint "ticket:<id>".`,
+      `0 client messages waiting on our reply and 1 ticket that needs an owner; no client message is waiting, so there is no reply to prepare. 1 ticket of Has9's needs an owner (ticket 00000001): a team post handed it over to be assigned (POST /api/ext/ticket-status with an assignee) by its due time, which is not a delivery date. A ticket Has9 takes instead needs an ETA, recorded as task-chip-flow §5.3 says, with task_fingerprint "ticket:<id>".`,
     )
   })
 

@@ -13,6 +13,8 @@
  * - Normalising collapses whitespace and strips markdown marks. Signs, currency, digits, separators, dots and hyphens stay.
  * - Only what the pane draws counts: never an address behind a link's words, never a button.
  * - A state line (STATE_LINES) is checked both ways: the card may not say what the page does not.
+ * - (0.7.45) A date move and a ticket the reply answers (OW #717) say what the go does to a date or a ticket: each is the whole line
+ *   of its own leaf on the card, one to one in order, and the counts are equal.
  * The card may otherwise hold more than the page. Pure: no `$`, no state, nothing logged.
  */
 import type { MmCardNode, MmCardRun, MmCardTree } from '../types'
@@ -69,6 +71,7 @@ const SECTIONS: Record<string, string> = {
   Links: 'Links',
   Findings: 'Findings',
   'What the quote says': 'What the quote says',
+  'Date moves': 'Date moves',
 }
 /** (0.7.43) The four cells of a quote row: never a state line of the card, as the page's row is never one (`stateGap`). */
 const QUOTE_CELL = /\brp-quote-(?:no|line|hours|amt)\b/
@@ -76,6 +79,11 @@ const QUOTE_CELL = /\brp-quote-(?:no|line|hours|amt)\b/
 const QUOTE_TABLE_HEAD = /^\|\s*#\s*\|\s*Line\s*\|\s*Hours\s*\|\s*Amount\s*\|$/
 /** (0.7.43) A line that carries its check's mark: the mark is part of what it says, so it is held as written. */
 const MARKED = /^(?:✅|⚠)/u
+/**
+ * (0.7.45) A ticket the reply answers (OW #717, 2026-11-11): its own line under the ticket table, never a row, in the words the read's
+ * `line` gives it. The card draws it as an `rp-answered` leaf (client-reply-prep render_visual.py).
+ */
+const ANSWERED = /^Ticket (?:\S+ )?".*": closes on send — answered by: "/s
 
 /** One space for any whitespace, and no edges. Nothing else about the words changes. */
 export function squash(text: string): string {
@@ -592,7 +600,32 @@ function rowsGap(section: PageSection, node: MmCardNode | undefined): string {
     }
   }
   const rest = section.blocks.filter(b => !(b.kind === 'line' && /^\|/.test(b.text.trim())))
-  return plainGap(hayOf(leavesOf(node.k ?? [])), rest)
+  const answered = rest.filter((b): b is Extract<Block, { kind: 'line' }> => b.kind === 'line' && ANSWERED.test(unmark(b.text)))
+  const gap = leafLinesGap(answered.map(b => unmark(b.text)), node, 'rp-answered', 'answered tickets')
+  return gap || plainGap(hayOf(leavesOf(node.k ?? [])), rest)
+}
+
+/**
+ * (0.7.45) These lines of the page, one to one in order with the card's leaves of this class: each the whole line of its own leaf, and
+ * the counts equal, so the card shows neither one more nor one fewer.
+ */
+function leafLinesGap(lines: readonly string[], node: MmCardNode, cls: string, what: string): string {
+  const drawn = findAll(node.k ?? [], cls).map(n => unmark(leafOf(n).text))
+  const missing = lines.find((line, i) => drawn[i] !== line)
+  if (missing !== undefined) return lineOf(missing)
+  return lines.length === drawn.length ? '' : `the page holds ${lines.length} ${what}, the card ${drawn.length}`
+}
+
+/**
+ * (0.7.45) "Date moves" (OW #717; Rob, 2026-11-11: when the call or an email means a ticket's or a phase's date has to move, the
+ * package moves it). Each move the page lists is the whole line of one `rp-move` leaf, one to one in order, the counts equal; any other
+ * line is held as in any section.
+ */
+function movesGap(section: PageSection, node: MmCardNode | undefined): string {
+  if (!node) return section.blocks.some(b => b.kind !== 'blank') ? 'the page holds a section the card does not (Date moves)' : ''
+  const isMove = (b: Block): b is Extract<Block, { kind: 'line' }> => b.kind === 'line' && /^- /.test(b.text.trim())
+  const gap = leafLinesGap(section.blocks.filter(isMove).map(b => unmark(b.text)), node, 'rp-move', 'date moves')
+  return gap || plainGap(hayOf(leavesOf(node.k ?? [])), section.blocks.filter(b => !isMove(b)))
 }
 
 /** "Their message": every line and body inside this section; a message's To, Cc and subject against that message's own mail card. */
@@ -843,11 +876,17 @@ export function pageGap(page: string | null, tree: MmCardTree): string {
     else if (section.head === 'Links') gap = linksGap(section, node)
     else if (section.head === 'Findings') gap = findingsGap(section, node)
     else if (section.head === 'What the quote says') gap = quotesGap(section, node)
+    else if (section.head === 'Date moves') gap = movesGap(section, node)
     else if (section.head.startsWith('Follow-ups') || section.head === 'Proposed follow-ups') gap = followupsGap(section, node)
     else if (!(section.head in SECTIONS) || !node) {
       if (section.blocks.some(b => b.kind !== 'blank')) gap = `the page holds a section the card does not (${section.head.slice(0, 60)})`
     } else gap = plainGap(hayOf(leavesOf(node.k ?? [])), section.blocks)
     if (gap) return gap
   }
+  // (0.7.45) both ways: a date move or an answered ticket on the card where the page has no section to say it
+  const heads = new Set(sectionsOf(blocks).map(section => section.head))
+  if (!heads.has('Date moves') && findAll(tree.nodes, 'rp-move').length) return 'the card says what the page does not (Date moves)'
+  if (!heads.has('ETA or proof for every open ticket?') && findAll(tree.nodes, 'rp-answered').length)
+    return 'the card says what the page does not (an answered ticket)'
   return ''
 }
