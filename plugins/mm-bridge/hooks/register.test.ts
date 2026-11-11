@@ -3401,7 +3401,9 @@ describe('chips: one per client, in the thread where the person pressed, cleaned
 describe('the band above the prompt: what needs the person, from any thread', () => {
   /**
    * The band as it is drawn: its texts and its buttons. Where the bridge draws nothing it hands the band on
-   * to the engine, and in a test nothing is beneath it to draw: that is "nothing drawn".
+   * to the engine (`next(e)`), and what the test kit puts beneath it has changed: up to CLI 2.1.317 nothing is
+   * beneath, and the kit refuses the mount, naming the event; from 2.1.321 the kit's own bottom answers
+   * `ui.render` with the node Claude Code draws, which holds no text and no button. Either is "nothing drawn".
    */
   const drawn = async ($: Engine, props: typeof BAND_PROPS = BAND_PROPS) => {
     let band: Awaited<ReturnType<typeof bandOf>>
@@ -3414,6 +3416,27 @@ describe('the band above the prompt: what needs the person, from any thread', ()
     const out = { texts: await lines(band), buttons: await buttons(band) }
     await band.unmount()
     return out
+  }
+  /**
+   * Whether the bridge hands the band on, on this surface, with nothing of its own in it: the mount refused for
+   * want of anything beneath (CLI 2.1.317 and before), or (2.1.321 on) a drawing that is what is beneath alone,
+   * with no text and no button the bridge added.
+   */
+  const handsOn = async ($: Engine, surface: 'terminal' | 'desktop'): Promise<boolean> => {
+    let band: Awaited<ReturnType<typeof bandOf>>
+    try {
+      band = await $.ui.mount({ plugin: 'mm-bridge', surface, component: 'AbovePrompt', props: BAND_PROPS })
+    } catch (err) {
+      if (String(err).includes('no implementation for ui.render')) return true
+      throw err
+    }
+    try {
+      // `keepsBeneath` is new in 2.1.321's kit; an older kit mounts here only what the bridge drew itself
+      const kept = await (band as unknown as { keepsBeneath?: () => Promise<boolean> }).keepsBeneath?.()
+      return kept === true && (await lines(band)).length === 0 && (await buttons(band)).length === 0
+    } finally {
+      await band.unmount()
+    }
   }
   const started = async ($: Engine, w: { clock: { advance: (ms: number) => Promise<void> } }) => {
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
@@ -3561,8 +3584,8 @@ describe('the band above the prompt: what needs the person, from any thread', ()
     await w.clock.advance(4_000)
     await mm($, '')
     for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
-    // on the terminal surface, and on the desktop one: the bridge hands the band on, and nothing is beneath it
-    await expect($.ui.mount({ plugin: 'mm-bridge', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })).rejects.toThrow('no implementation for ui.render')
+    // on the terminal surface, and on the desktop one: the bridge hands the band on, and adds nothing of its own
+    for (const surface of ['terminal', 'desktop'] as const) expect(await handsOn($, surface)).toBe(true)
     expect(await drawn($)).toEqual({ texts: [], buttons: [] })
   })
 
@@ -13242,23 +13265,35 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await u.unmount()
     })
 
-    test('the draw report comes after the draw: a draw that throws leaves nothing on record as drawn, so `mm card` never says it is on screen', async ($, on) => {
+    test('the draw report comes after the draw: a draw stopped before the card leaves nothing on record as drawn, so `mm card` never says it is on screen', async ($, on) => {
       world(on, own)
-      // a signature the drawing cannot write: the hook throws where it builds the card, with the card itself the same
-      let poison = false
-      let pageSha: unknown
+      // The pane's draw is held where it reads the signature record, before it builds the card, for as long as `mm card` waits
+      // for it. A draw that throws there stops at the same point; the test held it instead because CLI 2.1.321's kit fails any
+      // test in which a plugin's ui.render hook throws (2.1.317's failed only on the test's own hooks).
+      let hold: Promise<void> | undefined
+      let release = () => {}
+      let reached = () => {}
+      const atHold = new Promise<void>(resolve => { reached = resolve })
       on('state.get', { plugin: 'mm-bridge' }, async (_$, e, next) => {
-        const got = (await next(e)) as { value: { value?: { pageSha?: unknown } } }
-        if (e.key === 'card' && got.value.value?.pageSha) pageSha = got.value.value.pageSha
-        if (!poison || e.key !== 'cardMarks') return got as never
-        return { value: { ...got.value, value: { signed: { [LABEL]: { label: LABEL, signer: 12345, at: NOW, pageSha } } } } } as never
+        if (hold && e.key === 'cardMarks') {
+          reached()
+          await hold
+        }
+        return next(e)
       })
       const u = await shown($)
       expect(await tool($, `card ${PKG}`)).toBe(READY)
-      poison = true
-      await lines(u).catch(() => undefined)
+      hold = new Promise(resolve => { release = resolve })
+      // the pane draws again as the screen reads it, and that draw is held: `mm card` asked meanwhile waits for it, then gives up
+      const drawing = lines(u)
+      await atHold
       expect(await tool($, `card ${PKG}`)).toBe(OFF_SCREEN)
-      await u.unmount().catch(() => undefined)
+      hold = undefined
+      release()
+      // once the draw is made, it is on record, and `mm card` says so
+      expect((await drawing).length).toBeGreaterThan(0)
+      expect(await tool($, `card ${PKG}`)).toBe(READY)
+      await u.unmount()
     })
 
     test('(0.7.36) the pane not placed, as in a thread running in the background: ready, it says the card is waiting, and the pane is still opened', async ($, on) => {
