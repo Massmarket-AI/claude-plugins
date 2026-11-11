@@ -90,9 +90,17 @@ export function squash(text: string): string {
   return text.replace(/\s+/g, ' ').trim()
 }
 
+/**
+ * (0.7.46) A line without markdown's inline marks and the page's status icons, its leading list or quote mark kept: what a quoted cell
+ * of the page's tables holds of a line (`cellsOf` reads the quotes first, so `unmark` never reaches a mark inside them).
+ */
+function unmarkInline(line: string): string {
+  return squash(line.replace(/\*\*/g, '').replace(/`/g, '').replace(/[✅⛔]|⚠️?/gu, ' '))
+}
+
 /** A line of the page, or of the card's frame, without markdown's marks and the page's status icons. */
 function unmark(line: string): string {
-  let s = squash(line.replace(/\*\*/g, '').replace(/`/g, '').replace(/[✅⛔]|⚠️?/gu, ' '))
+  let s = unmarkInline(line)
   s = s.replace(/^(?:>\s?)*(?:#{1,6} |- )?/, '')
   if (s.length > 1 && s.startsWith('_') && s.endsWith('_')) s = s.slice(1, -1)
   return s.trim()
@@ -582,7 +590,10 @@ function rowsGap(section: PageSection, node: MmCardNode | undefined): string {
       const bare = QUOTED.exec(cell)?.[1] ?? cell
       let held: boolean
       if (them && c === 0) held = unmark(them.text) === cell
-      else if (us && c === 1) held = unmark(us.text) === bare
+      // (0.7.46) or the leaf with its own leading mark kept, as the quotes kept it (`unmarkInline`): a row quoting a bullet line of our
+      // reply, `"- Setup by step…"`, against a leaf `unmark` read as `Setup by step…`, was a gap on every package that had one (NFE,
+      // 2026-11-11). The mark is held, never dropped: `">2 weeks"` against a leaf `2 weeks` is still a gap.
+      else if (us && c === 1) held = unmark(us.text) === bare || unmarkInline(us.text) === bare
       else if (!them && c === 0 && title) held = joined.includes(` ${cell} `) && cell.endsWith(unmark(title.text))
       else held = joined.includes(` ${cell} `) || joined.includes(` ${bare} `)
       if (!held) return lineOf(cell)

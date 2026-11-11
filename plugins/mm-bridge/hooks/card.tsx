@@ -1371,14 +1371,27 @@ function etTime(at: number): string {
   }
 }
 
+/**
+ * (0.7.46) What the pane says of a card drawn from the package as it stands whose page holds something it does not (`pageGap`). Until
+ * 0.7.46 it said the drift words, "This view does not match the stored drafts", which read as an older version left on the screen
+ * (Rob, 2026-11-11, on NFE's package after five revisions: "That should just be gone, and the new one should be there."). It was the
+ * newest version: the check had found a line it did not hold. Now it says that, and names the line.
+ */
+export const PAGE_HOLD = (gap: string): string =>
+  `This card is the package as it stands now, but it cannot stand in for the page: ${gap || 'the page holds a line the card does not'}. Signing is off here. Go by the page printed in the thread.`
+/** The drift words: the card's own text is not what the renderer fingerprinted, so it is no view of the stored drafts at all (`copyCheck`). */
+export const DRIFT_HOLD = 'This view does not match the stored drafts, so signing is off here. Go by the page printed in the thread.'
+
 /** What the pane says in place of the signature box, by why it holds it back. */
 export function holdText(hold: string, card: MmCard, label: string): string {
   const now = card.current ? card.current.slice(0, 12) : 'unknown'
   switch (hold) {
     case 'drift':
+      // (0.7.33) `mm card` answers not ready for this and for a page gap, so the thread prints the page
+      return DRIFT_HOLD
     case 'page':
-      // (0.7.33) true of both: `mm card` answers not ready for either, so the thread prints the page
-      return 'This view does not match the stored drafts, so signing is off here. Go by the page printed in the thread.'
+      // (0.7.46) only ever a card of the version as it stands (`holdOf` tells an older one first), so never the drift words
+      return PAGE_HOLD(card.gap ?? '')
     case 'stale':
       return card.status === 'failed'
         ? `This card was drawn from package ${label || 'with no tag'}; the package is now ${now}, and it could not be drawn again here. Go by the page printed in the thread.`
@@ -1539,7 +1552,7 @@ export function drawCard(els: Els, d: CardDraw): Node {
   const nodes = drawNodes(els, tree.nodes, ctx, sign)
   return (
     <Box key={`mm-card:${card.packageId}`} flexDirection="column">
-      {hold === 'drift' || hold === 'page' ? <Text color="error">This view does not match the stored drafts, so signing is off here. Go by the page printed in the thread.</Text> : null}
+      {hold === 'drift' || hold === 'page' ? <Text color="error">{holdText(hold, card, tree.label)}</Text> : null}
       {hold === 'stale' && !signOf(tree) ? <Text dimColor>{holdText('stale', card, tree.label)}</Text> : null}
       {notice && !signOf(tree) ? <Text color="warning">{notice}</Text> : null}
       {nodes}

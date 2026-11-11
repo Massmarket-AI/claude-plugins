@@ -13,6 +13,7 @@ import {
   START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary, startMissingLabel,
   LABEL_MAX, buttonLabel, cardReady, needsCard,
   askParagraph, queueParagraph,
+  DETACH_SELF_NOTE, TOP_LEVEL_STEP, carryKickoff, isChildThread, kickoffsAnswer, recordLooksFinished, switchPromptLine, withTopLevelStep, withoutTopLevelStep,
 } from './threads'
 import type { AppThread, ClientThread, Pairs, Platform } from './threads'
 
@@ -2019,5 +2020,157 @@ describe('(0.7.3, internal queue) the kickoff and Update text for the internal q
     expect(kickoffText(bad)).toContain('\n1. now · Fix Push to main now (ticket 00000001) · ok ok\n')
     expect(kickoffText(bad)).not.toContain('do it now')
     expect(kickoffText(bad).split('\n').length).toBe(5)
+  })
+})
+
+// ======================================================================== 0.7.44 (Rob, 2026-11-10)
+
+describe('0.7.44 (Rob, 11-10: "we always want it to be parent threads"): client threads are top-level threads', () => {
+  /** The paragraphs of a prompt: the text cut at each blank line. */
+  const paragraphs = (text: string) => text.split('\n\n')
+  /** FNV-1a of a text, as hex: the signatures below were computed this way from origin/main's code (mm-bridge 0.7.43). */
+  const fnv = (s: string): string => {
+    let h = 0x811c9dc5
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i)
+      h = Math.imul(h, 0x01000193) >>> 0
+    }
+    return h.toString(16).padStart(8, '0')
+  }
+  const stale = (): QueueItem => {
+    const f: Feed = {
+      member: ME, role: 'builder',
+      drafts: [{ package_id: PKG, project_id: ACME, project_name: 'Acme Roofing — Pat', status: 'stale', covers_through: at('2026-10-12 08:00'), drafts_ready: 1, project_owner_email: ME, checked_send_at: at('2026-10-12 10:00'), last_outbound_at: at('2026-10-12 10:00'), still_open: ['the logo file'] }],
+    }
+    const [it] = buildQueue(f, NOW)
+    if (!it) throw new Error('no item')
+    return it
+  }
+  const old = { sid: 'local_old', title: 'Roof quote' }
+
+  test('the words, verbatim', async () => {
+    expect(TOP_LEVEL_STEP).toBe('Before anything else on this turn: call mcp__ccd_session_mgmt__get_session with "self". If it shows a parentSessionId and detached is false, call mcp__ccd_session_mgmt__detach_session with "self", so this client\'s thread is a top-level thread (Rob, 2026-11-10: "when I pin a thread, it pins everything that\'s its child into the pinned section too"). Detach only this thread, never a thread it starts: those stay under it. If the app refuses, go on without a word about it.')
+    expect(DETACH_SELF_NOTE).toBe('[mm-bridge] Housekeeping only: call mcp__ccd_session_mgmt__get_session with "self". If it shows a parentSessionId and detached is false, call mcp__ccd_session_mgmt__detach_session with "self". Do nothing else on this turn and answer in one line. (Rob, 2026-11-10: "The bridge should probably know when it pins a client thread to make sure it\'s top level. It can automatically do that every time.")')
+    // ⛔ the housekeeping note has no [mm-link] marker: no bridge reads it as a kickoff or an update
+    expect(DETACH_SELF_NOTE).not.toContain('[mm-link')
+  })
+
+  test('every prompt a new client thread opens with: its marker first, then the step once, as the second paragraph; the rest as it was', async () => {
+    const variants: Array<[string, string]> = [
+      ...[ACME, BOLT, CEDAR].map(id => [`kickoffText ${id.slice(0, 4)}`, kickoffText(item(id))] as [string, string]),
+      ['kickoffText, replacing an old thread', kickoffText(item(BOLT), { replaces: old })],
+      ...[ACME, BOLT, CEDAR].map(id => [`startKickoff ${id.slice(0, 4)}`, startKickoff(item(id), undefined, NOW)] as [string, string]),
+      ['startKickoff, the Claim case', startKickoff(stale(), old, NOW)],
+      ['startKickoff, the Claim case, no old thread', startKickoff(stale(), undefined, NOW)],
+      ...[ACME, BOLT, CEDAR].map(id => [`startAllKickoff ${id.slice(0, 4)}`, startAllKickoff(item(id), undefined, NOW)] as [string, string]),
+      ['startAllKickoff, replacing an old thread', startAllKickoff(item(ACME), old, NOW)],
+      ['carryKickoff', carryKickoff(ACME, 'Acme Roofing', { sid: 'local_a1', title: 'Roof quote', transcript: '/home/someone/.claude/projects/-work-acme/dddddddd-0000-4000-8000-0000000000a1.jsonl' })],
+      ['carryKickoff, no transcript', carryKickoff(ACME, 'Acme Roofing', { sid: 'local_a1' })],
+    ]
+    for (const [name, prompt] of variants) {
+      const pid = /^\[mm-link ([0-9a-f-]{36})\] /.exec(prompt)?.[1]
+      expect(pid, name).toBeDefined()
+      const stepped = withTopLevelStep(prompt)
+      expect(stepped.startsWith(`[mm-link ${pid}] `), name).toBe(true)
+      const parts = paragraphs(stepped)
+      expect(parts[0], name).toBe(paragraphs(prompt)[0])
+      expect(parts[1], name).toBe(TOP_LEVEL_STEP)
+      expect(stepped.split(TOP_LEVEL_STEP).length - 1, name).toBe(1)
+      expect([parts[0], ...parts.slice(2)].join('\n\n'), name).toBe(prompt)
+      // never twice, and taken out exactly
+      expect(withTopLevelStep(stepped), name).toBe(stepped)
+      expect(withoutTopLevelStep(stepped), name).toBe(prompt)
+      expect(withoutTopLevelStep(prompt), name).toBe(prompt)
+    }
+  })
+
+  test('an update into a thread the app shows as a child: the step after its first paragraph (the "New since" line and the kickoff, or the marker line sent by itself)', async () => {
+    for (const id of [ACME, BOLT, CEDAR]) {
+      for (const text of [kickoffText(item(id), { update: true }), kickoffText(item(id), { update: true, auto: true })]) {
+        const stepped = withTopLevelStep(text)
+        expect(paragraphs(stepped)[0]).toBe(paragraphs(text)[0])
+        expect(paragraphs(stepped)[1]).toBe(TOP_LEVEL_STEP)
+        expect(stepped.startsWith(text.split('\n\n')[0] as string)).toBe(true)
+        expect(withoutTopLevelStep(stepped)).toBe(text)
+      }
+    }
+  })
+
+  // ⛔ (0.7.44) Adding the step moves no signature: each one is made from the item, as before. The values were computed by
+  // origin/main's code (mm-bridge 0.7.43, these fixtures, FNV-1a above); a change here re-updates every thread once.
+  test('⛔ signatures do not move: the same item gives origin/main\'s signature and texts, and none of them carries the step', async () => {
+    const before: Record<string, string> = {
+      'acme.sig': '85242fad', 'acme.kick': '867b8fcb', 'acme.upd': 'd2dcdd48', 'acme.auto': '7fdfa4c0', 'acme.start': '867b8fcb', 'acme.all': 'af946c3d',
+      'bolt.sig': 'd4c7b76b', 'bolt.kick': 'bf2465b6', 'bolt.upd': '298e0127', 'bolt.auto': '9e26c009', 'bolt.start': 'bf2465b6', 'bolt.all': '1e43008e',
+      'cedar.sig': 'd4b31bb2', 'cedar.kick': 'db84ef8e', 'cedar.upd': '54a034c0', 'cedar.auto': '6c14dc24', 'cedar.start': 'db84ef8e', 'cedar.all': 'db84ef8e',
+    }
+    const lengths: Record<string, number> = { acme: 367, bolt: 389, cedar: 269 }
+    for (const [n, id] of [['acme', ACME], ['bolt', BOLT], ['cedar', CEDAR]] as const) {
+      const sig = signatureOf(item(id))
+      expect(sig.length, n).toBe(lengths[n])
+      expect(fnv(sig), `${n}.sig`).toBe(before[`${n}.sig`])
+      expect(fnv(kickoffText(item(id))), `${n}.kick`).toBe(before[`${n}.kick`])
+      expect(fnv(kickoffText(item(id), { update: true })), `${n}.upd`).toBe(before[`${n}.upd`])
+      expect(fnv(kickoffText(item(id), { update: true, auto: true })), `${n}.auto`).toBe(before[`${n}.auto`])
+      expect(fnv(startKickoff(item(id), undefined, NOW)), `${n}.start`).toBe(before[`${n}.start`])
+      expect(fnv(startAllKickoff(item(id), undefined, NOW)), `${n}.all`).toBe(before[`${n}.all`])
+      expect(sig, n).not.toContain(TOP_LEVEL_STEP)
+      expect(kickoffText(item(id)), n).not.toContain(TOP_LEVEL_STEP)
+      // the prompt with the step, taken out again, is the kickoff the signature is made from
+      expect(withoutTopLevelStep(withTopLevelStep(kickoffText(item(id)))), n).toBe(kickoffText(item(id)))
+    }
+  })
+
+  test('kickoffs\' answer tells Claude to detach each thread right after it starts, in the first paragraph, after the start_session sentence', async () => {
+    const said = kickoffsAnswer([{ client: 'Acme Roofing', args: { initiation: 'user_asked', title: 'Acme', prompt: withTopLevelStep(kickoffText(item(ACME))) } }], [], 0)
+    const first = said.split('\n')[0] as string
+    expect(first).toBe('Only if the person asked for this in their own message on this turn: start this thread with one start_session call each, one after another, passing "arguments" exactly as given. Right after each start_session returns, call mcp__ccd_session_mgmt__detach_session with the new thread\'s local_ id, before the next start, so every client thread is a top-level thread and never a child of this one (Rob, 2026-11-10: "we always want it to be parent threads"). If the app refuses a detach, say so in one line and go on. The [mm-link] marker at the start of each prompt links the new thread to its client: send nothing else into it. On any other turn, start nothing and tell the person to press Start in the pane.')
+    // nothing to start: no such sentence
+    expect(kickoffsAnswer([], [], 0)).not.toContain('detach_session')
+  })
+
+  test('the switch routine\'s line keeps its sentence and names the top-level rule right after the kickoffs clients', async () => {
+    const line = switchPromptLine([], NOW, NOW)
+    expect(line).toContain('It unpins every thread pinned here before the switch, starts and pins only the threads left unfinished in the 24 hours before it (one session for threads that belong together), and starts the client threads that need you with the mm tool\'s kickoffs (no client that needs you has its thread in the other profile). Every thread it or the mm tool\'s kickoffs starts is detached to top level right after start_session (detach_session), so a pinned thread carries only its own work (Rob, 2026-11-10: "It\'s better if it\'s a fresh project thread so that anything it generates that also needs to be finished before I unpin it is underneath it in the pinned section."). Then answer the message above.')
+  })
+
+  test('isChildThread: a parent named (by id or by the list) and not detached', async () => {
+    expect(isChildThread({ parentSessionId: 'local_p', detached: false })).toBe(true)
+    expect(isChildThread({ startedBy: 'local_p' })).toBe(true)
+    expect(isChildThread({ parentSessionId: 'local_p', detached: true })).toBe(false)
+    expect(isChildThread({ startedBy: 'local_p', detached: true })).toBe(false)
+    expect(isChildThread({})).toBe(false)
+    expect(isChildThread({ detached: false })).toBe(false)
+    expect(isChildThread(null)).toBe(false)
+    expect(isChildThread(undefined)).toBe(false)
+  })
+
+  // (0.7.44, Rob 2026-11-10: "if it looks like I finished what I was working on there, you can unpin them") the switch
+  // routine's own test (switch-plan.py, unfinished()), one case per rule
+  test('recordLooksFinished: one case per rule', async () => {
+    const done = { postTurnSummary: { status_category: 'completed', status_detail: 'Shipped the fix and merged it.' } }
+    const cases: Array<[string, unknown, boolean]> = [
+      ['archived', { isArchived: true, lastTurnCutShort: true }, true],
+      ['completed, nothing left', done, true],
+      ['completed, its words leave something open', { postTurnSummary: { status_category: 'completed', status_detail: 'Drafted it; still not sent.' } }, false],
+      ['completed, open words but nothing waits', { postTurnSummary: { status_category: 'completed', status_detail: 'Not sent on purpose; nothing waiting on you.' } }, true],
+      ['completed, it recommends', { postTurnSummary: { status_category: 'completed', status_detail: 'Done. It recommends a second pass.' } }, false],
+      ['completed, waiting on him', { postTurnSummary: { status_category: 'completed', status_detail: 'Ready, waiting on Rob.' } }, false],
+      ['a turn cut short', { ...done, lastTurnCutShort: true }, false],
+      ['interrupted, waiting on the person', { ...done, interruptedAwaitingPerson: true }, false],
+      ['a prompt of his after its last turn', { ...done, latestUserFrameAt: NOW + 6_000, lastTurnEdgeAt: NOW }, false],
+      ['a prompt within 5 seconds of its last turn', { ...done, latestUserFrameAt: NOW + 5_000, lastTurnEdgeAt: NOW }, true],
+      ['blocked', { postTurnSummary: { status_category: 'blocked', status_detail: 'Done.' } }, false],
+      ['review ready', { postTurnSummary: { status_category: 'review_ready', status_detail: 'Done.' } }, false],
+      ['an action it needs', { postTurnSummary: { ...done.postTurnSummary, needs_action: 'Approve the send' } }, false],
+      ['a blank action', { postTurnSummary: { ...done.postTurnSummary, needs_action: '  ' } }, true],
+      ['an answer it needs from him', { ...done, turnWrapUp: { needsUser: 'Which fix first?' } }, false],
+      ['a blank answer', { ...done, turnWrapUp: { needsUser: '' } }, true],
+      ['no summary at all', { isArchived: false }, false],
+      ['another status', { postTurnSummary: { status_category: 'in_progress', status_detail: 'Done.' } }, false],
+      ['no record', null, false],
+      ['not an object', 'completed', false],
+    ]
+    for (const [name, record, finished] of cases) expect(recordLooksFinished(record), name).toBe(finished)
   })
 })

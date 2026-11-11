@@ -618,6 +618,27 @@ describe('0.7.33 the normalising and the frame', () => {
     expect(pageGap(page.replace('"Yes"', '"No"'), cardOf(sec('Every question answered?', q(1))))).toBe(MISSING('"No"'))
   })
 
+  // (0.7.46) NFE, 2026-11-11: rows 8 to 22 of a 24-row check each quoted a bullet line of our reply, and the card was held off for it
+  test('a row quoting a bullet line of our reply is the same row on the card, and other words in it are still a gap', () => {
+    const row = (us: string) => ({ c: 'rp-q', k: [para('Q1'), { c: 'rp-grow', k: [para('Could you break the hours down by step?', 'rp-qa rp-qa-them'), para(us, 'rp-qa rp-qa-us')] }] })
+    const table = (cell: string) => `### Every question answered?\n| # | They asked | Our reply says | |\n|---|---|---|---|\n| 1 | Could you break the hours down by step? | ${cell} | ✅ |`
+    for (const mark of ['- ', '> ']) {
+      const us = `${mark}Setup by step, and a price for just the key and test lead`
+      expect(pageGap(table(`"${us}"`), cardOf(sec('Every question answered?', row(us))))).toBe('')
+      expect(pageGap(table(`"${us}"`), cardOf(sec('Every question answered?', row(`${mark}Setup by step, and a price for the whole build`))))).toBe(MISSING(`"${us}"`))
+    }
+    // a plain quote is held exactly as before
+    expect(pageGap(table('"Yes, we can split it."'), cardOf(sec('Every question answered?', row('Yes, we can split it.'))))).toBe('')
+    expect(pageGap(table('"Yes, we can split it."'), cardOf(sec('Every question answered?', row('No, we cannot split it.'))))).toBe(MISSING('"Yes, we can split it."'))
+    // the mark is held, never dropped (review round 1): the page saying more than the leaf, or a mark the leaf lacks, is still a gap
+    expect(pageGap(table('">2 weeks"'), cardOf(sec('Every question answered?', row('2 weeks'))))).toBe(MISSING('">2 weeks"'))
+    expect(pageGap(table('">2 weeks"'), cardOf(sec('Every question answered?', row('>2 weeks'))))).toBe('')
+    expect(pageGap(table('"- 5 hours"'), cardOf(sec('Every question answered?', row('5 hours'))))).toBe(MISSING('"- 5 hours"'))
+    // a row with no reply leaf: the quoted words are looked for as the page wrote them, mark and all, as before
+    const bare = { c: 'rp-q', k: [para('Q1'), { c: 'rp-grow', k: [para('Yes or no: can you split it?', 'rp-qa rp-qa-them')] }] }
+    expect(pageGap(table('"- Yes"').replace('Could you break the hours down by step?', 'Yes or no: can you split it?'), cardOf(sec('Every question answered?', bare)))).toBe(MISSING('"- Yes"'))
+  })
+
   test('the page\'s heading is the card\'s client and hash', () => {
     const { page, tree } = pair('everything')
     expect(pageGap(page.replace(`Package \`${tree.label}\`.`, 'Package `aaaaaaaaaaaa`.'), tree)).not.toBe('')
