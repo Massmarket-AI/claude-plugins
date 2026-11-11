@@ -15,7 +15,11 @@
 //   - never into a folder a profile loads with Developer mode off: Chrome turns an unpacked extension off
 //     when it reloads there (measured 2026-10-23, Chrome 153), and the tracker would stop.
 //   - every carried file is checked against its sha256 in extension.json first; one mismatch and nothing is
-//     written anywhere.
+//     written anywhere. Since mm-hooks 1.0.25 a text file that git checked out with CRLF line endings (Git for
+//     Windows ships core.autocrlf=true, and Claude Code clones this marketplace with the member's git) is turned
+//     back into LF and accepted only if THOSE bytes match the sha256; the LF bytes are what gets written, so the
+//     bytes written are always exactly the published ones (measured 2026-11-12: on Windows 33 of the 43 carried
+//     files came down CRLF, every check failed, and the tracker never updated there).
 //   - new files first, manifest.json LAST, so the extension only sees the new version once every other file is
 //     in place. A file that is not in the carried list is never deleted.
 // What it never does: touch the token, the consent or any setting (they live in Chrome's storage, not in the
@@ -202,10 +206,24 @@ function safeRel(rel) {
   return rel.split("/").every((seg) => seg && seg !== "." && seg !== "..");
 }
 
+/** `bytes` with every CRLF turned into LF, or null when it holds no CRLF. A lone CR is kept. */
+function crlfToLf(bytes) {
+  if (bytes.indexOf("\r\n") === -1) return null;
+  const out = Buffer.allocUnsafe(bytes.length);
+  let n = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] === 0x0d && bytes[i + 1] === 0x0a) continue;
+    out[n++] = bytes[i];
+  }
+  return out.subarray(0, n);
+}
+
 /**
  * The build this release carries, every file checked against extension.json. Throws on anything wrong: a
  * missing or unsafe entry, a sha256 mismatch, no manifest, a manifest whose version is not extension.json's,
  * or a key that is not the tracker's id. Files come back in write order, manifest.json last.
+ * A file whose bytes miss the sha256 but whose CRLF-to-LF form matches it is a git checkout with
+ * core.autocrlf=true: it comes back as the LF bytes (the published ones), and `crlfRestored` counts them.
  */
 function loadCarried(root) {
   const meta = readJson(path.join(root, "extension.json"), 1 << 20);
@@ -213,10 +231,17 @@ function loadCarried(root) {
     throw new Error("extension.json is missing or malformed");
   }
   const files = [];
+  let crlfRestored = 0;
   for (const [rel, want] of Object.entries(meta.files)) {
     if (!safeRel(rel)) throw new Error("unsafe path in extension.json");
-    const bytes = fs.readFileSync(path.join(root, "extension", ...rel.split("/")));
-    if (typeof want !== "string" || sha256(bytes) !== want) throw new Error("sha256 mismatch: " + rel);
+    let bytes = fs.readFileSync(path.join(root, "extension", ...rel.split("/")));
+    if (typeof want !== "string") throw new Error("sha256 mismatch: " + rel);
+    if (sha256(bytes) !== want) {
+      const lf = crlfToLf(bytes);
+      if (!lf || sha256(lf) !== want) throw new Error("sha256 mismatch: " + rel);
+      bytes = lf;
+      crlfRestored++;
+    }
     files.push({ rel, bytes });
   }
   const manifestFile = files.find((f) => f.rel === "manifest.json");
@@ -224,7 +249,7 @@ function loadCarried(root) {
   const manifest = JSON.parse(manifestFile.bytes.toString("utf8"));
   if (manifest.version !== meta.version) throw new Error("the carried manifest is not extension.json's version");
   if (typeof manifest.key !== "string" || extensionIdFromKey(manifest.key) !== EXT_ID) throw new Error("the carried manifest is not the tracker's key");
-  return { version: meta.version, key: manifest.key, files: files.filter((f) => f !== manifestFile).concat(manifestFile) };
+  return { version: meta.version, key: manifest.key, files: files.filter((f) => f !== manifestFile).concat(manifestFile), crlfRestored };
 }
 
 function sleep(ms) {
@@ -357,6 +382,8 @@ function run({ platform = process.platform, env = process.env, home = os.homedir
     return done();
   }
   status.carried = carried.version;
+  // how many carried files were checked out with CRLF and written as their published LF bytes
+  if (carried.crlfRestored) status.carried_crlf_restored = carried.crlfRestored;
   status.folders = Array.from(folders, ([folder, seen]) => {
     if (seen.developerModeOff.length) return { id: sha256(folder).slice(0, 12), action: "skipped-developer-mode-off" };
     try {
