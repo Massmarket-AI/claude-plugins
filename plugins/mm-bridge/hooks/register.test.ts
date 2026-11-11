@@ -2467,7 +2467,7 @@ describe('F9: a thread that linked itself gets the pin and the name, and no note
     expect(w.fetched.filter(u => u.includes('/reply-package')).length).toBe(1)
     // no message; the timer's own chips: (R4) for the two clients with no thread, and (0.5.4, C1) this thread's client's
     expect(w.acted()).toEqual([CEDAR_AUTO_CHIP, ACME_HERE_CHIP, BOLT_AUTO_CHIP])
-    // the band names this thread's client; (0.7.48) with the pane open by itself it carries no button that opens it (0.5.14 to
+    // the band names this thread's client; (0.7.49) with the pane open by itself it carries no button that opens it (0.5.14 to
     // 0.7.44: Drafts after Start missing threads, and from 0.7.41 the waiting line's Open the side pane in its place)
     const band = await $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'AbovePrompt', props: BAND_PROPS })
     expect(await buttons(band)).toEqual([['mm-start-missing', 'Start missing threads (2)']])
@@ -2514,7 +2514,7 @@ describe('F9: a thread that linked itself gets the pin and the name, and no note
 
 const bandOf = ($: Engine, props: typeof BAND_PROPS = BAND_PROPS) => $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'AbovePrompt', props })
 /**
- * (0.7.48) The person's close of the side pane drawn for `pid`, which the test kit cannot raise (its `$` has no `ui.close`, and a
+ * (0.7.49) The person's close of the side pane drawn for `pid`, which the test kit cannot raise (its `$` has no `ui.close`, and a
  * close's origin is the engine's to stamp): this session's record reads as `rememberClose` leaves it (`afterPersonClose`: the
  * project the pane was drawn for) from `close()` on, until the bridge next writes the record, which keeps it (`setSess` writes
  * the record as it read it) unless that write ends the close, as an open of the pane does.
@@ -3483,9 +3483,9 @@ describe('the band above the prompt: what needs the person, from any thread', ()
     })
   })
 
-  // ⛔ (0.7.48, Rob 2026-11-11: "We don't need to have something cluttering up that space telling us to open the side panel, or
+  // ⛔ (0.7.49, Rob 2026-11-11: "We don't need to have something cluttering up that space telling us to open the side panel, or
   // that button there.") The pane opens by itself as the bridge connects: the band offers it only where the person closed it.
-  test('in a waiting client\'s thread: which client and what is due; (0.7.48) the pane opened by itself, so nothing on the band opens it (until 0.7.44: the waiting line and Open the side pane)', async ($, on) => {
+  test('in a waiting client\'s thread: which client and what is due; (0.7.49) the pane opened by itself, so nothing on the band opens it (until 0.7.44: the waiting line and Open the side pane)', async ($, on) => {
     const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }) })
     await started($, w)
     expect(w.opened.at(-1)).toEqual({ id: 'mm-queue', title: 'Acme Roofing' })
@@ -3500,7 +3500,7 @@ describe('the band above the prompt: what needs the person, from any thread', ()
     })
   })
 
-  describe('(0.7.48) the band offers the side pane only while the person\'s close of it for the thread\'s client stands', () => {
+  describe('(0.7.49) the band offers the side pane only while the person\'s close of it for the thread\'s client stands', () => {
     const WAITING = 'A reply package for Acme Roofing is waiting in the side pane. Open it there to read and sign it.'
     const NOTICE = JSON.stringify({ type: 'system', content: [{ type: 'text', text: WAITING }] })
 
@@ -8228,7 +8228,7 @@ describe('(0.5.17) a press\'s refresh asks OW once more when the feed answered 5
     const w = world(on, { store: { 'mm.links': { [ACME]: SELF } }, feedRead: () => plan.shift() })
     const person = personClose(on, ACME)
     await tickOnce($, w)
-    // (0.7.48) the band offers the pane only once the person has closed it (the next sync draws it so)
+    // (0.7.49) the band offers the pane only once the person has closed it (the next sync draws it so)
     person.close()
     await w.clock.advance(61_000)
     plan.push(...answers)
@@ -9574,14 +9574,14 @@ describe('(0.7.15) a ticket on an `assign_by` clock: chipped, pinned and named a
   })
   const pmFeed = (rows = [ownerRow()]) => ({ member: ME, role: 'pm', mail: [], drafts: [], tickets: { due_today: rows } })
 
-  test('no thread yet: its chip asks for an owner, and its kickoff says to assign one in OW by the clock; nothing is sent', async ($, on) => {
+  test('no thread yet: its chip asks for an owner, and its kickoff says to assign one from Claude Code by the clock; nothing is sent', async ($, on) => {
     const w = world(on, { feed: pmFeed(), threads: [] })
     await tickOnce($, w)
     for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
     expect(chipTitles(w)).toEqual(['Acme Roofing: assign an owner'])
     const prompt = String(w.minted().at(-1)?.args.prompt)
     expect(prompt.startsWith(`[mm-link ${ACME}] Acme Roofing Pat (OW project ${ACME}) has 1 ticket(s) of mine that need an owner, the first by Mon, Oct 12 1 PM ET.`)).toBe(true)
-    expect(prompt).toContain('The time on each is when it needs an owner in OW, not when the work is due.')
+    expect(prompt).toContain('The time on each is when it needs an owner, not when the work is due.')
     expect(prompt).toContain(`1. Build the booking page (ticket ${TID}) · owner needed by Mon, Oct 12 1 PM ET`)
     expect(prompt).not.toContain('committed task')
     expect(sends(w)).toEqual([])
@@ -9593,7 +9593,7 @@ describe('(0.7.15) a ticket on an `assign_by` clock: chipped, pinned and named a
     expect(w.threads.get(SELF)).toMatchObject({ title: '🔴 2h left · Acme Roofing · assign an owner', pinned: true })
     const ui = await pane($)
     const md = String((await ui.find({ type: 'Markdown' }))?.text)
-    expect(md).toContain('### Needs an owner: assign one in OW, or take it and give the ETA\n\n- Build the booking page (ticket 0000a551) · owner needed by ')
+    expect(md).toContain('### Needs an owner: name one in Claude Code, or take it and give the ETA\n\n- Build the booking page (ticket 0000a551) · owner needed by ')
     expect(md).not.toContain('Due (dates we committed to)')
     expect(sends(w)).toEqual([])
     await ui.unmount()
@@ -14906,7 +14906,7 @@ describe('(0.7.41) a sent package leaves the side pane, and the chat says while 
   const bash = ($: Engine, command: string) => $.tool.call({ tool: 'Bash', command } as never) as Promise<{ result?: unknown; deny?: string; isError?: boolean }>
   const SEND = `cd /Users/me/Projects/massmarket-ops-control-tower && python3 skills/client-reply-prep/scripts/send_package.py --package ${PKG} --package-sha256 ${'f'.repeat(64)} 2>&1 | tail -20`
 
-  test('a package waiting in this thread\'s pane: one line in the chat that the model never reads, and the band says it while it waits (0.7.48: once the person closed the pane)', async ($, on) => {
+  test('a package waiting in this thread\'s pane: one line in the chat that the model never reads, and the band says it while it waits (0.7.49: once the person closed the pane)', async ($, on) => {
     const w = world(on, { store: { 'mm.links': { [ACME]: SELF } } })
     const person = personClose(on, ACME)
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
@@ -14916,7 +14916,7 @@ describe('(0.7.41) a sent package leaves the side pane, and the chat says while 
     expect(w.appended[0]).toContain('[Massmarket bridge, no reply needed] Acme Roofing Pat: ')
     expect(w.notices).toEqual([NOTICE])
     expect(w.stored['mm.told']).toEqual({ [SELF]: PKG })
-    // (0.7.48) the pane opened by itself: the band does not say it
+    // (0.7.49) the pane opened by itself: the band does not say it
     expect((await bandTexts($)).texts).not.toContain(WAITING)
     // the person closes the pane: from the next sync, the band's waiting line first, with its own button where Drafts was
     person.close()
@@ -14941,7 +14941,7 @@ describe('(0.7.41) a sent package leaves the side pane, and the chat says while 
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
     expect(await partText($)).toBe('## Acme Roofing\n\n1. What the client sent')
-    // (0.7.48) the band says the package waits where the person closed the pane
+    // (0.7.49) the band says the package waits where the person closed the pane
     person.close()
     await w.clock.advance(60_000)
     expect((await bandTexts($)).texts[0]).toBe(WAITING)
