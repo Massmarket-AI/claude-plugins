@@ -1,11 +1,12 @@
-// TESTS ONLY: the world the three register-*.test.ts files share, moved out of register.test.ts on 2026-11-11. That one
+// TESTS ONLY: the world the two register-*.test.ts files share, moved out of register.test.ts on 2026-11-11. That one
 // file took 360 to 600 s on CI's macOS runner, and the test kit kills a file at 600 s: it failed about half of the CI
 // runs on 2026-11-11.
 //
-// Three files, balanced on CI's own per-test times (about 165 s each), because the runner has 3 cores: the files run at
-// once, one to a core, so no test runs slower than it did. More files than cores would share a core, and the tests that
-// take 3 to 4 s there would pass the kit's 5 s default. Add a test to the file its topic belongs to and keep the three
-// about even; a fourth file pays only on a runner with more cores.
+// Two files, balanced on CI's own per-test times, and not more. The files run at once. On a free 3-core runner, two
+// files halve the time (about 180 s each). A busy runner can have fewer than 2 cores free (PR #97's second CI run).
+// There a third file makes no file shorter, since the cores are the limit, and the files share them: split three ways,
+// every test ran about three times slower, and a timer-heavy test passed the kit's 5 s default. Add a test to the file
+// its topic belongs to, and keep the two about even.
 //
 // Never imported by the hooks module (hooks.json loads register.tsx alone).
 

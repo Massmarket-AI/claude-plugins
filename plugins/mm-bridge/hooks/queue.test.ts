@@ -1230,8 +1230,8 @@ describe('the list\'s floor: everything still open since Wed Oct 14 stays on the
   })
 
   test('an item overdue since Fri Oct 16 pins (its act-by time is past); nine such clients all pin, as there is no pin cap since 0.5.2 (R1)', async () => {
-    // MAX_PINS (8) caps nothing since 0.5.2 (Rob, 2026-10-13: "A pin means needs you"); register-links.test.ts pins
-    // nine threads
+    // MAX_PINS (8) caps nothing since 0.5.2 (Rob, 2026-10-13: "A pin means needs you"); register-links-starts.test.ts
+    // pins nine threads
     const nine = Array.from({ length: 9 }, (_, i) => `4444444${i}-4444-4444-4444-444444444444`)
     const f = feed({ mail: nine.map((pid, i) => mailAt(pid, `Client ${i}`, `2026-10-16 ${String(8 + i).padStart(2, '0')}:00`)) })
     const q = buildQueue(f, NOV2)
