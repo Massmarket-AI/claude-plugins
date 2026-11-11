@@ -70,10 +70,18 @@ const SECTIONS: Record<string, string> = {
   Findings: 'Findings',
   'What the quote says': 'What the quote says',
 }
-/** (0.7.43) The four cells of a quote row: never a state line of the card, as the page's row is never one (`stateGap`). */
-const QUOTE_CELL = /\brp-quote-(?:no|line|hours|amt)\b/
-/** (0.7.43) The header of each quote table on the page: the card draws none. */
+/**
+ * (0.7.43) The four cells of a quote row, and (0.7.47) a cell of a table OW read from the PDF and a word of its header: never a state
+ * line of the card, as the page's row is never one (`stateGap`).
+ */
+const QUOTE_CELL = /\brp-quote-(?:no|line|hours|amt|cell|colhead)\b/
+/** (0.7.43) The header of a quote record's or worksheet's table on the page: the card draws none for it. */
 const QUOTE_TABLE_HEAD = /^\|\s*#\s*\|\s*Line\s*\|\s*Hours\s*\|\s*Amount\s*\|$/
+/** (0.7.47) The rule the page prints under a table's header, `|---|…|`: what tells a table's header line from its rows. */
+const TABLE_RULE = /^\|(?:\s*:?-{3,}:?\s*\|)+$/
+/** (0.7.47) A table's row on the card, and the header of a table OW read from the PDF (client-reply-prep render_visual.py). */
+const QUOTE_ROW = /(?:^|\s)rp-quote-row(?:\s|$)/
+const QUOTE_COLS = /(?:^|\s)rp-quote-cols(?:\s|$)/
 /** (0.7.43) A line that carries its check's mark: the mark is part of what it says, so it is held as written. */
 const MARKED = /^(?:✅|⚠)/u
 
@@ -728,23 +736,58 @@ function contributionsGap(section: PageSection, node: MmCardNode | undefined): s
   return n + 1 === bys.length ? '' : `the page holds ${n + 1} additions by the team, the card ${bys.length}`
 }
 
+/** (0.7.47) A box's table rows and the headers of its PDF tables, in the order the card draws them, not looking inside one it found. */
+function tablePartsOf(nodes: readonly MmCardNode[]): MmCardNode[] {
+  const out: MmCardNode[] = []
+  for (const n of nodes) {
+    if (QUOTE_ROW.test(n.c ?? '') || QUOTE_COLS.test(n.c ?? '')) out.push(n)
+    else if (n.k) out.push(...tablePartsOf(n.k))
+  }
+  return out
+}
+
+/** (0.7.47) The words of these leaves of a drawn row or header, in order. */
+const cellLeaves = (node: MmCardNode, cls: RegExp) => leavesOf([node]).filter(l => cls.test(l.c)).map(l => l.text)
+const FOUR_CELLS = ['rp-quote-no', 'rp-quote-line', 'rp-quote-hours', 'rp-quote-amt'].map(cls => new RegExp(`\\b${cls}\\b`))
+
+/** (0.7.47) The first cell of the page's row or header that is not the card's leaf in the same place, or '' when every one is. */
+function cellsGap(raw: string, want: readonly (string | undefined)[]): string {
+  const cells = cellsOf(raw)
+  if (cells.length !== want.length) return lineOf(unmark(raw))
+  const at = cells.findIndex((cell, i) => cell !== want[i])
+  return at < 0 ? '' : lineOf(cells[at] as string)
+}
+
 /**
  * (0.7.43) "What the quote says" (Rob, 2026-11-09: "we need some sort of render of the invoice, the line items, and the hours
  * quoted"). Its blocks one to one in order with the card's `rp-quote` boxes, each by its `####` head. Each plain line of a block is a
  * whole line of that block's box, a ✅ or ⚠️ line with its mark; each table row one to one in order with the box's `rp-quote-row`s,
- * its four cells each equal to the leaf the card draws for it. The counts of blocks and of rows are equal.
+ * each of its cells equal to the leaf the card draws in that place. The counts of blocks and of rows are equal.
+ * (0.7.47) A table OW read from the PDF's own text prints under its own header (OW #731, 2026-11-11), N cells a row. The header line,
+ * the `|` line directly above a `|---` rule, is no row: it is held cell by cell against the box's `rp-quote-cols` in the same place,
+ * one `rp-quote-colhead` a column, so a header on either side and not the other is a gap. A quote record's or worksheet's fixed
+ * `| # | Line | Hours | Amount |` header has no `rp-quote-cols` on the card and is passed over as before. A row is held against its
+ * card row's `rp-quote-cell` leaves, in order, when it has them, and against the four classes otherwise. The counts of headers are equal.
  */
 function quotesGap(section: PageSection, node: MmCardNode | undefined): string {
   if (!node) return section.blocks.some(b => b.kind !== 'blank') ? 'the page holds a section the card does not (What the quote says)' : ''
   const boxes = findAll(node.k ?? [], 'rp-quote')
   const outside = hayOf(leavesOf((node.k ?? []).filter(n => !/(?:^|\s)rp-quote(?:\s|$)/.test(n.c ?? ''))))
   let n = -1
-  let rows: MmCardNode[] = []
+  let parts: MmCardNode[] = []
+  let at = 0
   let row = 0
+  let head = 0
   let frame = new Set<string>()
   let marked = new Set<string>()
-  const done = (): string => (n >= 0 && row !== rows.length ? `the page holds ${row} rows in quote block ${n + 1}, the card ${rows.length}` : '')
-  for (const b of section.blocks) {
+  const count = (cls: RegExp) => parts.filter(p => cls.test(p.c ?? '')).length
+  const done = (): string => {
+    if (n < 0) return ''
+    if (row !== count(QUOTE_ROW)) return `the page holds ${row} rows in quote block ${n + 1}, the card ${count(QUOTE_ROW)}`
+    if (head !== count(QUOTE_COLS)) return `the page holds ${head} table headers in quote block ${n + 1}, the card ${count(QUOTE_COLS)}`
+    return ''
+  }
+  for (const [i, b] of section.blocks.entries()) {
     if (b.kind === 'blank') continue
     if (b.kind === 'fence') return lineOf(squash(b.text))
     const raw = b.text.trim()
@@ -753,35 +796,48 @@ function quotesGap(section: PageSection, node: MmCardNode | undefined): string {
       if (gap) return gap
       n += 1
       const box = boxes[n]
-      const head = unmark(raw.slice(5))
-      if (!box) return lineOf(head)
-      const leaves = leavesOf((box.k ?? []).filter(k => !/\brp-quote-row\b/.test(k.c ?? '')))
-      if (firstOf(leaves, /\brp-quote-head\b/)?.text !== head) return lineOf(head)
-      rows = findAll(box.k ?? [], 'rp-quote-row')
-      row = 0
+      const title = unmark(raw.slice(5))
+      if (!box) return lineOf(title)
+      const leaves = leavesOf((box.k ?? []).filter(k => !QUOTE_ROW.test(k.c ?? '') && !QUOTE_COLS.test(k.c ?? '')))
+      if (firstOf(leaves, /\brp-quote-head\b/)?.text !== title) return lineOf(title)
+      parts = tablePartsOf(box.k ?? [])
+      at = row = head = 0
       frame = new Set(leaves.map(l => squash(l.text)))
       marked = new Set(leaves.map(l => squash(l.runs.map(runWords).join(''))))
       continue
     }
-    if (STRUCTURAL.some(p => p.test(raw)) || QUOTE_TABLE_HEAD.test(raw)) continue
+    if (STRUCTURAL.some(p => p.test(raw))) continue
     if (n < 0) {
+      if (QUOTE_TABLE_HEAD.test(raw)) continue
       const gap = lineGap(outside, b.text)
       if (gap) return gap
       continue
     }
-    if (/^\|/.test(raw)) {
-      const cells = cellsOf(raw)
-      const drawn = rows[row]
-      row += 1
-      if (!drawn) return `the page holds more rows in quote block ${n + 1} than the card (${unmark(cells[1] ?? '').slice(0, 40)})`
-      const leaves = leavesOf([drawn])
-      const want = ['rp-quote-no', 'rp-quote-line', 'rp-quote-hours', 'rp-quote-amt'].map(cls => firstOf(leaves, new RegExp(`\\b${cls}\\b`))?.text)
-      if (cells.length !== want.length) return lineOf(unmark(raw))
-      const at = cells.findIndex((cell, i) => cell !== want[i])
-      if (at >= 0) return lineOf(cells[at] as string)
+    if (!/^\|/.test(raw)) {
+      if (MARKED.test(raw) ? !marked.has(squash(raw)) : !frame.has(unmark(raw))) return lineOf(unmark(raw))
       continue
     }
-    if (MARKED.test(raw) ? !marked.has(squash(raw)) : !frame.has(unmark(raw))) return lineOf(unmark(raw))
+    const next = section.blocks[i + 1]
+    const drawn = parts[at]
+    if (next?.kind === 'line' && TABLE_RULE.test(next.text.trim())) {
+      // a table's header: against the card's header in the same place, or passed over where the card draws none for a fixed one
+      if (!drawn || !QUOTE_COLS.test(drawn.c ?? '')) {
+        if (QUOTE_TABLE_HEAD.test(raw)) continue
+        return lineOf(unmark(raw))
+      }
+      at += 1
+      head += 1
+      const gap = cellsGap(raw, cellLeaves(drawn, /\brp-quote-colhead\b/))
+      if (gap) return gap
+      continue
+    }
+    row += 1
+    if (!drawn) return `the page holds more rows in quote block ${n + 1} than the card (${unmark(cellsOf(raw)[1] ?? '').slice(0, 40)})`
+    if (QUOTE_COLS.test(drawn.c ?? '')) return `the card holds a table header the page does not (${cellLeaves(drawn, /\brp-quote-colhead\b/).join(' | ').slice(0, 60)})`
+    at += 1
+    const own = cellLeaves(drawn, /\brp-quote-cell\b/)
+    const gap = cellsGap(raw, own.length ? own : FOUR_CELLS.map(cls => firstOf(leavesOf([drawn]), cls)?.text))
+    if (gap) return gap
   }
   const gap = done()
   if (gap) return gap

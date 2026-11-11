@@ -66,6 +66,8 @@
  *   last two kept short), a subtotal muted, and a ⚠️ check in the warning tone. OW binds the quote into `package_sha256`, so a quote
  *   that changes is a new version: drawn again by `freshenPackage`, its box closed until the thread checks it. `quotesGap` holds the
  *   page's section against it (card-parity.ts).
+ * - (0.7.47) A table OW read from the PDF's own text (OW #731) carries its own columns: its header (`rp-quote-cols`) on one line, each
+ *   row (`rp-quote-gridrow`) one line of its own cells, header and rows sharing each column's width (`gridsOf`).
  */
 import type { BoxProps, ButtonProps, ElementConstructor, EngineInterface, InputProps, LinkProps, Register, RenderNode, SvgProps, TextProps } from 'claude-code'
 
@@ -1161,7 +1163,50 @@ const QUOTE_CELL = /(?:^|\s)rp-quote-(?:no|line|hours|amt)(?:\s|$)/
 const DC_TEXT = '#dbdee1'
 const DC_DIM = '#949ba4'
 
-type Ctx = { dark: boolean; out: 'sms' | 'imessage' | null; parent: string; own: boolean; onAsk: (words: string) => void; keyOf: () => string }
+/** (0.7.47) A cell of a table OW read from the PDF, and a word of its own header (render_visual.py `quote_cols_rows`). */
+const GRID_CELL = /(?:^|\s)rp-quote-(?:cell|colhead)(?:\s|$)/
+/** (0.7.47) The columns of one such table, shared by its header and its rows: each one's width, and the one that takes the room. */
+type Grid = { widths: number[]; grow: number }
+const GRID_WIDTH_MAX = 16
+
+type Ctx = {
+  dark: boolean
+  out: 'sms' | 'imessage' | null
+  parent: string
+  own: boolean
+  onAsk: (words: string) => void
+  keyOf: () => string
+  /** (0.7.47) Inside a quote box: the grid of each table header and row in it. */
+  grids?: Map<MmCardNode, Grid>
+  /** (0.7.47) Inside a table header or row: its table's grid. */
+  grid?: Grid
+}
+
+/**
+ * (0.7.47) The grids of a quote box's tables that carry their own header: an `rp-quote-cols` and the `rp-quote-gridrow`s right after
+ * it are one table. As the HTML card lays it out (render_visual.py `quote_grid`), the column with the longest cell takes the room and
+ * wraps, and every other column is as wide as its longest cell, here up to GRID_WIDTH_MAX characters, so the header and the rows line up.
+ */
+function gridsOf(nodes: readonly MmCardNode[]): Map<MmCardNode, Grid> {
+  const out = new Map<MmCardNode, Grid>()
+  let table: MmCardNode[] = []
+  const close = () => {
+    const cols = Math.max(0, ...table.map(t => (t.k ?? []).length))
+    const longest = Array.from({ length: cols }, (_, j) => Math.max(0, ...table.map(t => [...(t.k?.[j]?.r ?? []).map(r => r.s).join('')].length)))
+    const grid = { widths: longest.map(w => Math.min(w, GRID_WIDTH_MAX)), grow: longest.indexOf(Math.max(0, ...longest)) }
+    for (const t of table) out.set(t, grid)
+    table = []
+  }
+  for (const n of nodes) {
+    if (has(n.c, 'rp-quote-cols')) {
+      close()
+      table = [n]
+    } else if (has(n.c, 'rp-quote-gridrow') && table.length) table.push(n)
+    else close()
+  }
+  close()
+  return out
+}
 
 function toneColor(c: string | undefined): string | undefined {
   if (has(c, 'rp-ok')) return 'success'
@@ -1225,6 +1270,9 @@ function paraStyle(c: string | undefined, ctx: Ctx, words = ''): TextProps {
   if (QUOTE_CELL.test(c ?? '')) Object.assign(p, { size: 'footnote' }, has(ctx.parent, 'rp-quote-sub') ? { ...dim(), italic: true } : {})
   if (has(c, 'rp-quote-no')) p.dimColor = true
   if (has(c, 'rp-quote-hours') || has(c, 'rp-quote-amt')) p.tabular = true
+  // (0.7.47) a table read from the PDF: its header words small and muted, its cells as small as the four, a subtotal muted
+  if (GRID_CELL.test(c ?? '')) Object.assign(p, { size: 'footnote', tabular: true }, has(ctx.parent, 'rp-quote-sub') ? { ...dim(), italic: true } : {})
+  if (has(c, 'rp-quote-colhead')) Object.assign(p, { weight: 'semibold' }, dim())
   if (has(c, 'rp-quote-total')) Object.assign(p, { weight: 'semibold', size: 'footnote' })
   if (has(c, 'rp-quote-check')) {
     p.size = 'footnote'
@@ -1261,6 +1309,8 @@ function boxStyle(c: string | undefined, ctx: Ctx): BoxProps {
   // (0.7.43) a quote PDF is a card of its own, and each of its table rows one line of four cells
   if (has(c, 'rp-quote')) Object.assign(p, card)
   if (has(c, 'rp-quote-row')) Object.assign(p, { flexDirection: 'row', gap: 1, alignItems: 'flex-start' })
+  // (0.7.47) and a table's own header, one line of its column names
+  if (has(c, 'rp-quote-cols')) Object.assign(p, { flexDirection: 'row', gap: 1, alignItems: 'flex-start' })
   void ctx
   return p
 }
@@ -1273,12 +1323,19 @@ function quoteCell(els: Els, c: string | undefined, text: Node): Node {
   return <Box minWidth={has(c, 'rp-quote-amt') ? 9 : 6} flexShrink={0} alignItems="flex-end">{text}</Box>
 }
 
+/** (0.7.47) A cell of a table read from the PDF, in column `j` of its grid: the column that takes the room grows and wraps, the rest keep their width. */
+function gridCell(els: Els, grid: Grid, j: number, text: Node): Node {
+  const { Box } = els
+  if (j === grid.grow) return <Box flexGrow={1} flexShrink={1}>{text}</Box>
+  return <Box minWidth={grid.widths[j] ?? 0} flexShrink={0}>{text}</Box>
+}
+
 function drawRuns(els: Els, runs: readonly MmCardRun[], ctx: Ctx): Node[] {
   const { Text } = els
   return runs.map(r => <Text {...runStyle(r.c, ctx)}>{r.s}</Text>)
 }
 
-function drawPara(els: Els, node: MmCardNode, ctx: Ctx): Node {
+function drawPara(els: Els, node: MmCardNode, ctx: Ctx, at = 0): Node {
   const { Box, Text, Link } = els
   const runs = node.r ?? []
   const c = node.c
@@ -1299,6 +1356,7 @@ function drawPara(els: Els, node: MmCardNode, ctx: Ctx): Node {
     </Text>
   )
   if (QUOTE_CELL.test(c ?? '')) return quoteCell(els, c, text)
+  if (ctx.grid && GRID_CELL.test(c ?? '')) return gridCell(els, ctx.grid, at, text)
   // a bubble: ours green (blue for iMessage) with white words, theirs in an outline
   if (has(c, 'rp-bub-out')) return <Box backgroundColor={ctx.out === 'imessage' ? '#0a72e8' : '#248a3d'} borderStyle="round" borderColor={ctx.out === 'imessage' ? '#0a72e8' : '#248a3d'} paddingX={1}>{text}</Box>
   if (has(c, 'rp-bub-in')) return <Box borderStyle="round" borderColor="subtle" paddingX={1}>{text}</Box>
@@ -1310,7 +1368,7 @@ function drawPara(els: Els, node: MmCardNode, ctx: Ctx): Node {
 
 function drawNodes(els: Els, nodes: readonly MmCardNode[], ctx: Ctx, sign: (s: { label: string; signer: string }) => Node): Node[] {
   const { Box, Text, Button } = els
-  return nodes.map(node => {
+  return nodes.map((node, at) => {
     if (node.sign) return sign(node.sign)
     if (node.btn !== undefined) {
       if (!Button || !ctx.own) return <Text dimColor>{node.btn}</Text>
@@ -1323,10 +1381,12 @@ function drawNodes(els: Els, nodes: readonly MmCardNode[], ctx: Ctx, sign: (s: {
         dark: ctx.dark || has(node.c, 'rp-dc'),
         out: has(node.c, 'rp-imessage') ? 'imessage' : has(node.c, 'rp-sms') ? 'sms' : ctx.out,
         parent: node.c ?? '',
+        grids: has(node.c, 'rp-quote') ? gridsOf(node.k) : ctx.grids,
+        grid: ctx.grids?.get(node),
       }
       return <Box {...boxStyle(node.c, inner)}>{drawNodes(els, node.k, inner, sign)}</Box>
     }
-    return drawPara(els, node, ctx)
+    return drawPara(els, node, ctx, at)
   })
 }
 
