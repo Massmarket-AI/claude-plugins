@@ -9,7 +9,7 @@ import { drawnText, pageGap } from './card-parity'
 import { CARD_PAIRS } from './card-pairs.test-helper'
 import { NEXT_LABEL as NEXT, NEXT_PAGE, NEXT_SHA, NEXT_TREE, SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
 import { ME, fakeApp, hooks, mm, pid, press } from './fake-app.test-helper'
-import { DRAW_FAILED, RESULT_HINT, ROW_AGAIN, ROW_FAILURES_MAX, ROW_GONE, ROW_LEFT, ROW_REPLACED, ROW_REPLACED_PANE, firstRowFailure, sameVersion } from './register'
+import { DRAW_FAILED, RESULT_HINT, RESULT_HINT_BELOW, ROW_AGAIN, ROW_BELOW, ROW_FAILURES_MAX, ROW_GONE, ROW_LEFT, ROW_REPLACED, ROW_REPLACED_PANE, firstRowFailure, sameVersion } from './register'
 import type { Feed } from './queue'
 
 const tree = (): MmCardTree => readTree(JSON.parse(JSON.stringify(SMS_TREE))) as MmCardTree
@@ -2403,6 +2403,150 @@ describe('0.7.40 the answer under a row the bridge drew is hidden, and a folded 
     t.state.delete('cardAsked')
     expect(await groupHook(t.$, holding, next)).toBe(ENGINE)
     expect(seen).toBe(holding)
+  })
+})
+
+// (0.7.47, Rob 2026-11-11: "when these reply packages show up in the thread, I shouldn't have to scroll up and down. The window I'm
+// looking at: the reply package end should be the height of the reply package.") The desktop draws a call's row in a frame of at most 70%
+// of the window that scrolls inside; a reply's text row has none. So the thread's own line after the live call draws the card.
+describe('0.7.47 the card at its whole height: drawn under the thread\'s own line after the live call', () => {
+  type Hook = ($: unknown, e: Record<string, unknown>, next: (e: unknown) => unknown) => Promise<unknown>
+  const lineHook = hooks['ui.render:{"component":"AssistantMessage"}'] as Hook
+  const rowHook = hooks['ui.render:{"component":"ToolUse"}'] as Hook
+  const resultHook = hooks['ui.render:{"component":"ToolResult"}'] as Hook
+  const PKG = SMS_TREE.package_id as string
+  const READY = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under the one line you print now, and in the side pane.`
+  const LINE = `The card is below: the go comes from its box, and say "print the page" if any of it doesn't show. Package ${LABEL}.`
+  const ENGINE = { engine: 'drawing' }
+  const engine = () => ENGINE
+  const drawing = () => {
+    const t = thread()
+    const invalidated: string[] = []
+    ;(t.$ as unknown as Record<string, unknown>).ui = {
+      resolve: () => ({ Box: 'Box', Text: 'Text', Button: 'Button', Link: 'Link', Svg: 'Svg', Input: 'Input', Markdown: 'Markdown' }),
+      invalidate: (event: string) => void invalidated.push(event),
+    }
+    t.state.set('card', cardOf())
+    t.state.set('view', { text: '## Example Dental · reply package', heading: '' })
+    return { ...t, invalidated }
+  }
+  const line = (id: string, text = LINE, surface = 'desktop') => ({ surface, component: 'AssistantMessage', requestId: id, props: { text, isFirstOfReply: true } })
+  const useRow = (id: string, props: Record<string, unknown> = {}) => ({
+    surface: 'desktop', component: 'ToolUse', requestId: id,
+    props: { tool_use_id: id, tool: 'mcp__mm-bridge__mm', input: { args: `card ${PKG}` }, isRunning: false, isErrored: false, isInterrupted: false, output: READY, ...props },
+  })
+  const resultRow = (id: string) => ({ surface: 'desktop', component: 'ToolResult', requestId: id, props: { tool_use_id: id, tool: 'mcp__mm-bridge__mm', output: READY, isErrored: false } })
+  /** The elements directly under a drawing's top Box. */
+  const kids = (tree: unknown): unknown[] => {
+    const o = tree as { props?: { children?: unknown }; children?: unknown }
+    return [o.props?.children, o.children].flat(4).filter(x => x !== undefined && x !== null && x !== false)
+  }
+
+  test('the hook is registered, and its two lines word for word', () => {
+    expect(typeof lineHook).toBe('function')
+    expect(ROW_BELOW(LABEL)).toBe(`The card for Package ${LABEL} is drawn in full below, under your thread's line.`)
+    expect(RESULT_HINT_BELOW).toBe(`If any part of the card below doesn't show, say "print the page" and your thread prints the whole package as text.`)
+  })
+
+  test('the line after the live call keeps its words and draws the whole card under them; the call\'s row then says where it went', async () => {
+    const t = drawing()
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_h1' })
+    // before the line is drawn, the call's row draws the card, as it always did
+    expect(texts(await rowHook(t.$, useRow('toolu_h1'), engine)).join('\n')).toContain('Hi! Is the new booking link live yet?')
+    expect(texts(await resultHook(t.$, resultRow('toolu_h1'), engine))).toEqual([RESULT_HINT])
+    const before = t.invalidated.length
+    const drawn = await lineHook(t.$, line('msg_h1'), engine)
+    // the engine's own row first (the thread's words), the card under it, one press for the go
+    expect(kids(drawn)[0]).toBe(ENGINE)
+    const all = texts(drawn).join('\n')
+    expect(all).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
+    expect(all).toContain('✍  Click to sign and send')
+    expect([...buttons(drawn).keys()]).toContain('✍  Click to sign and send')
+    expect((drawn as { props?: { flexDirection?: unknown } }).props?.flexDirection).toBe('column')
+    // taking the card asked for one redraw, so the call's row draws its line in place of the card
+    expect(t.invalidated.length).toBe(before + 1)
+    const row = await rowHook(t.$, useRow('toolu_h1'), engine)
+    expect(texts(row)).toEqual([ROW_BELOW(LABEL)])
+    expect(buttons(row).size).toBe(0)
+    expect(texts(await resultHook(t.$, resultRow('toolu_h1'), engine))).toEqual([RESULT_HINT_BELOW])
+    // drawn again, the same line draws the card again and asks for no further redraw past the call's row's own
+    const settled = t.invalidated.length
+    expect(texts(await lineHook(t.$, line('msg_h1'), engine)).join('\n')).toContain('✍  Click to sign and send')
+    expect(t.invalidated.length).toBe(settled)
+    // a later reply that names the tag too keeps its words alone: one card in the thread
+    expect(await lineHook(t.$, line('msg_h2', `Waiting on your signature. Package ${LABEL}.`), engine)).toBe(ENGINE)
+  })
+
+  test('a reply that names no tag, another tag, or comes on another surface: the engine\'s row, untouched', async () => {
+    const t = drawing()
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_h3' })
+    expect(await lineHook(t.$, line('msg_h3a', 'The checks pass. Asking for the card now.'), engine)).toBe(ENGINE)
+    expect(await lineHook(t.$, line('msg_h3b', `Package ${'0'.repeat(12)} is the older one.`), engine)).toBe(ENGINE)
+    for (const surface of ['terminal', 'mobile', 'vscode']) expect(await lineHook(t.$, line(`msg_h3c_${surface}`, LINE, surface), engine)).toBe(ENGINE)
+    // none of those took the card: the call's row still draws it
+    expect(texts(await rowHook(t.$, useRow('toolu_h3'), engine)).join('\n')).toContain('✍  Click to sign and send')
+  })
+
+  test('no live call, a card the bridge no longer holds, one the pane does not draw, or a tag since replaced: the engine\'s row', async () => {
+    const t = drawing()
+    // no live call on record
+    t.state.delete('cardAsked')
+    expect(await lineHook(t.$, line('msg_h4a'), engine)).toBe(ENGINE)
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_h4' })
+    // a live call for another package
+    await noteAsked(t.$, { packageId: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff', label: LABEL, toolUseId: 'toolu_h4x' })
+    expect(await lineHook(t.$, line('msg_h4b'), engine)).toBe(ENGINE)
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_h4' })
+    // the pane draws no card
+    t.state.set('view', { text: '', heading: '' })
+    expect(await lineHook(t.$, line('msg_h4c'), engine)).toBe(ENGINE)
+    t.state.set('view', { text: '## Example Dental · reply package', heading: '' })
+    // the bridge holds no card, or one of a newer tag
+    t.state.set('card', NO_CARD)
+    expect(await lineHook(t.$, line('msg_h4d'), engine)).toBe(ENGINE)
+    t.state.set('card', cardOf({ tree: { ...tree(), label: NEXT } }))
+    expect(await lineHook(t.$, line('msg_h4e'), engine)).toBe(ENGINE)
+  })
+
+  test('the same tag asked for again: the older line keeps its words, the line after the newer call draws the card', async () => {
+    const t = drawing()
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_h5a' })
+    expect(texts(await lineHook(t.$, line('msg_h5a'), engine)).join('\n')).toContain('✍  Click to sign and send')
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_h5b' })
+    // the older line was bound to the older call: drawn again now, it is the engine's
+    expect(await lineHook(t.$, line('msg_h5a'), engine)).toBe(ENGINE)
+    // until the newer line is drawn, the newer call's row draws the card; the older call's row says it is shown again
+    expect(texts(await rowHook(t.$, useRow('toolu_h5b'), engine)).join('\n')).toContain('✍  Click to sign and send')
+    expect(texts(await rowHook(t.$, useRow('toolu_h5a'), engine))).toEqual([ROW_AGAIN(LABEL)])
+    expect(texts(await lineHook(t.$, line('msg_h5b'), engine)).join('\n')).toContain('✍  Click to sign and send')
+    expect(texts(await rowHook(t.$, useRow('toolu_h5b'), engine))).toEqual([ROW_BELOW(LABEL)])
+  })
+
+  test('a line that cannot draw the card is the engine\'s, with one line in bridge-notices.log, and gives the card back to the call\'s row', async () => {
+    const t = drawing()
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_h6' })
+    expect(texts(await lineHook(t.$, line('msg_h6'), engine)).join('\n')).toContain('✍  Click to sign and send')
+    expect(texts(await rowHook(t.$, useRow('toolu_h6'), engine))).toEqual([ROW_BELOW(LABEL)])
+    t.state.set('card', cardOf({ tree: { ...tree(), nodes: 5 as never } }))
+    const redraws = t.invalidated.length
+    expect(await lineHook(t.$, line('msg_h6'), engine)).toBe(ENGINE)
+    for (let i = 0; i < 50; i++) await Promise.resolve()
+    expect(t.files.get(`${HOME}/.claude/mm-hooks/bridge-notices.log`) ?? '').toContain(`card for package ${PKG} could not be drawn under the thread's line: `)
+    // given back, with one redraw: the call's row draws the card again
+    expect(t.invalidated.length).toBe(redraws + 1)
+    t.state.set('card', cardOf())
+    expect(texts(await rowHook(t.$, useRow('toolu_h6'), engine)).join('\n')).toContain('✍  Click to sign and send')
+  })
+
+  test('the page as text opens under the card in the line, as it does in the pane', async () => {
+    const t = drawing()
+    await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_h7' })
+    t.state.set('view', { text: '## Example Dental · reply package', heading: '', page: '## The whole page' })
+    t.state.set('cardMarks', { signed: {}, pageOpen: true })
+    const drawn = await lineHook(t.$, line('msg_h7'), engine)
+    const last = kids(drawn).at(-1) as { type?: unknown; props?: { text?: unknown } }
+    expect(last.type).toBe('Markdown')
+    expect(last.props?.text).toBe('## The whole page')
   })
 })
 
