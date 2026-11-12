@@ -239,7 +239,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.49'
+export const VERSION = '0.7.50'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -4096,9 +4096,41 @@ let threadDrawnAt = 0
 /** (0.7.48) When this thread's current turn of the main conversation began; null until one has in this process. */
 let turnBeganAt: number | null = null
 
+/** (0.7.50) Whether a turn of the main conversation is under way in this process. */
+let turnOpen = false
+
 /** (0.7.48) The turn under way began now. */
 async function noteTurnBegan($: EngineInterface): Promise<void> {
   turnBeganAt = await $.clock.now()
+  turnOpen = true
+}
+
+/** (0.7.50) The turn under way ended, however it ended. */
+function noteTurnEnded(): void {
+  turnOpen = false
+}
+
+/**
+ * (0.7.50) The line that took the card is drawn as a summary now (Rob, 2026-11-11: "Let's finish those", the gap #98 left open). The desktop
+ * app's default view can show a summary in place of a reply line, the `isSummary` row; a card under the line is not drawn there, so the
+ * line gives the card back: the call's row draws it again, and a later line of the same tag may take it. A card given back after the turn
+ * has ended is owed to the screen again (`owe`'s check), so the thread prints the page if no line shows it within SHOWN_WAIT_MS of a
+ * screen drawing the thread; while the turn is under way, the turn's end owes it.
+ */
+async function releaseLine($: EngineInterface, row: string): Promise<void> {
+  const calls = [...lineOfCall].filter(([, line]) => line === row).map(([call]) => call)
+  if (!calls.length) return
+  for (const call of calls) lineOfCall.delete(call)
+  try {
+    $.ui.invalidate('ui.render')
+  } catch {
+    // the call's row draws the card at its next draw
+  }
+  if (turnOpen) return
+  const asked = await askedOf($)
+  if (!asked || !calls.includes(asked.toolUseId) || drawFailTold.has(asked.label)) return
+  owedCard = { toolUseId: asked.toolUseId, label: asked.label, since: asked.at, armed: false }
+  armShown($)
 }
 
 /** (0.7.48) A turn of the main conversation ended with an answer: the ready answer it got, if any, is owed to the screen. */
@@ -4155,6 +4187,7 @@ export function resetShown(): void {
   owedCard = null
   threadDrawnAt = 0
   turnBeganAt = null
+  turnOpen = false
 }
 
 /** (0.7.40) This row fell back to the engine's: unlisted, and a row that was listed asks for one redraw, so its answer shows again. */
@@ -9915,6 +9948,7 @@ export const register: Register = on => {
     const done = await next(e)
     // the main conversation's turns only: a subagent's turn says nothing of this thread's work
     if ((e as { agentId?: unknown }).agentId) return done
+    noteTurnEnded()
     // (0.7.36) the thread has stopped, unless a background sub-agent is at work: what this turn got `card ready` for, or printed the page of, is checked now, and the signature box opens
     await turnEnded($, e.reason === 'answer').catch(() => {})
     // (0.7.48) a card this turn got `card ready` for is owed to the screen: under the thread's line, or the thread prints the page (`owe`)
@@ -10566,8 +10600,12 @@ export const register: Register = on => {
     await noteThreadDrawn($)
     if (e.surface !== 'desktop') return next(e)
     const text = String((e.props as { text?: unknown }).text ?? '')
-    if (!PACKAGE_TAG.test(text)) return next(e)
     const row = `${e.surface}:${e.requestId}`
+    // (0.7.50) a summary in the line's place, or a line that no longer names a tag, draws no card: one that held the card gives it back
+    if ((e.props as { isSummary?: unknown }).isSummary === true || !PACKAGE_TAG.test(text)) {
+      await releaseLine($, row).catch(() => {})
+      return next(e)
+    }
     let took = ''
     try {
       const asked = await askedOf($)
