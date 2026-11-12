@@ -721,6 +721,26 @@ export const snapshot = (w: { stored: Record<string, unknown> }) => JSON.stringi
 // already open?"
 
 export const bandOf = ($: Engine, props: typeof BAND_PROPS = BAND_PROPS) => $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'AbovePrompt', props })
+/**
+ * (0.7.49) The person's close of the side pane drawn for `pid`, which the test kit cannot raise (its `$` has no `ui.close`, and a
+ * close's origin is the engine's to stamp): this session's record reads as `rememberClose` leaves it (`afterPersonClose`: the
+ * project the pane was drawn for) from `close()` on, until the bridge next writes the record, which keeps it (`setSess` writes
+ * the record as it read it) unless that write ends the close, as an open of the pane does.
+ */
+export const personClose = (on: On, pid: string) => {
+  let closing = false
+  on('state.get', { plugin: 'mm-bridge' }, async (_$, e, next) => {
+    const got = (await next(e)) as { value: { value?: unknown } }
+    if (!closing || e.key !== 'sess') return got as never
+    const was = got.value?.value && typeof got.value.value === 'object' ? (got.value.value as Record<string, unknown>) : {}
+    return { value: { ...got.value, value: { prompts: 0, ...was, closed: pid } } } as never
+  })
+  on('state.set', { plugin: 'mm-bridge' }, async (_$, e, next) => {
+    if (e.key === 'sess') closing = false
+    return next(e)
+  })
+  return { close: () => { closing = true } }
+}
 /** A client's buttons on the pane, by their labels. */
 export const buttonsOf = async (ui: Drawing, projectId: string): Promise<string[]> => (await buttons(ui)).filter(b => b[0].endsWith(projectId)).map(b => b[1])
 /** (0.7.5) The text the pane draws right under a row's one line: its second line where it has one, else what comes next. */

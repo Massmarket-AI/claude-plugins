@@ -21,10 +21,10 @@ import {
   NOW, HOUR, ago, LONG, ACME, BOLT, CEDAR, ME, SELF, SELF_CLI, PKG, CARD_NOT_DRAWN, thread, feed, world, sends,
   threadWrites, BAND_PROPS, PANE, mm, pane, lines, buttons, ACME_TITLE, BOLT_TITLE, CEDAR_TITLE, inOldWords, stepped,
   ACME_KICKOFF, ACME_NAMED, CEDAR_KICKOFF, CEDAR_FRESH, UPDATED, SOON, NOT_TAKEN, BOLT_AUTO_UPDATE, markerFirst,
-  ACME_SHOWN, PAIRS, declared, tool, bandOf, buttonsOf, under, acmeFeed, acmeWorld, FOUNDER, TEAMMATE_B, packageFor,
-  heldBy, mailFor, ourPin, tickOnce, closeouts, starts, proposals, cedarAlone, START_ALL, kicksIn, kickoffsOf,
-  sessionCalls, INTERNAL, skillsOk, TASK, clientTimeBody, param, byPeriods, timeOk, periodsAsked, idsAsked, HEAD,
-  TODAY_LINE, PAT_ROW, NUMBERS, LEVERAGE, NOTE_LINE, TRACKED, openTrack, trackHead, trackPart, onlyReads, skill,
+  ACME_SHOWN, PAIRS, declared, tool, bandOf, personClose, buttonsOf, under, acmeFeed, acmeWorld, FOUNDER, TEAMMATE_B,
+  packageFor, heldBy, mailFor, ourPin, tickOnce, closeouts, starts, proposals, cedarAlone, START_ALL, kicksIn,
+  kickoffsOf, sessionCalls, INTERNAL, skillsOk, TASK, clientTimeBody, param, byPeriods, timeOk, periodsAsked, idsAsked,
+  HEAD, TODAY_LINE, PAT_ROW, NUMBERS, LEVERAGE, NOTE_LINE, TRACKED, openTrack, trackHead, trackPart, onlyReads, skill,
   person, tree, L_COPY, L_ROUTER, L_SITE, L_BANK, QUOTE_LINES, PROPOSAL, ON_LINE, NEW_SCOPE, UNMATCHED, PROPOSED,
   linesBody, linesOk, linedWorld, started, notes, ASK_NOTE, bandLines, lineButtons, proof, lastStatus, settledOk,
   proposalOk, RUN_SPANISH, WHY, PROFILES_ROOT, PROFILE_A, PROFILE_B, profileRec, minutesOn, awayLine, DAYS,
@@ -4191,9 +4191,9 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
   }
 
   describe('0.7.33 `mm card <package id>`: whether the thread prints the page', () => {
-    const READY = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call, and in the side pane. Do not print the page. Print one line saying the card is above, the go comes from its box, and they can say "print the page" if any of it doesn't show, ending "Package ${LABEL}.", then wait for the person.`
+    const READY = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under the one line you print now, and in the side pane. Do not print the page. Print one line saying the card is below, the go comes from its box, and they can say "print the page" if any of it doesn't show, ending "Package ${LABEL}.", then wait for the person.`
     /** (0.7.36) Ready with the pane not on a screen. */
-    const OFF_SCREEN = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call; the side pane draws it too when this thread is open on a screen. Do not print the page. Print one line saying the card is above, the go comes from its box, and they can say "print the page" if they can't see it or any of it doesn't show, ending "Package ${LABEL}.", then wait for the person.`
+    const OFF_SCREEN = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under the one line you print now; the side pane draws it too when this thread is open on a screen. Do not print the page. Print one line saying the card is below, the go comes from its box, and they can say "print the page" if they can't see it or any of it doesn't show, ending "Package ${LABEL}.", then wait for the person.`
     const WHOLE_ID = 'card not ready: give the whole package id, not the 8-character tag, and ask again.'
     const notReady = (why: string) => `card not ready: ${why}. Print the whole page.`
     const own = { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } }, renderer: 'tree' as const, pickup: PICKUP }
@@ -4441,7 +4441,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       // global-config/hooks/send-gate.js, CARD_READY: its first capture is held against the go's 12
       const CARD_READY = /^card ready: Package ([0-9a-f]{12})\./
       for (const said of [READY, OFF_SCREEN]) expect(CARD_READY.exec(said)?.[1]).toBe(LABEL)
-      expect(READY).toBe(`card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call, and in the side pane. Do not print the page. Print one line saying the card is above, the go comes from its box, and they can say "print the page" if any of it doesn't show, ending "Package ${LABEL}.", then wait for the person.`)
+      expect(READY).toBe(`card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under the one line you print now, and in the side pane. Do not print the page. Print one line saying the card is below, the go comes from its box, and they can say "print the page" if any of it doesn't show, ending "Package ${LABEL}.", then wait for the person.`)
       expect(OFF_SCREEN.endsWith(`ending "Package ${LABEL}.", then wait for the person.`)).toBe(true)
     })
 
@@ -5005,8 +5005,8 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
   })
 
   describe('0.7.40 the card in the thread: the row of the thread\'s own `mm card` call is the whole card, with a Changes field', () => {
-    const READY = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call, and in the side pane. Do not print the page. Print one line saying the card is above, the go comes from its box, and they can say "print the page" if any of it doesn't show, ending "Package ${LABEL}.", then wait for the person.`
-    const OFF_SCREEN = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under this call; the side pane draws it too when this thread is open on a screen. Do not print the page. Print one line saying the card is above, the go comes from its box, and they can say "print the page" if they can't see it or any of it doesn't show, ending "Package ${LABEL}.", then wait for the person.`
+    const READY = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under the one line you print now, and in the side pane. Do not print the page. Print one line saying the card is below, the go comes from its box, and they can say "print the page" if any of it doesn't show, ending "Package ${LABEL}.", then wait for the person.`
+    const OFF_SCREEN = `card ready: Package ${LABEL}. The whole package is checked and drawn in this thread, under the one line you print now; the side pane draws it too when this thread is open on a screen. Do not print the page. Print one line saying the card is below, the go comes from its box, and they can say "print the page" if they can't see it or any of it doesn't show, ending "Package ${LABEL}.", then wait for the person.`
     /** The send gate's own two patterns (global-config/hooks/send-gate.js `CARD_READY` and `CARD_PRESS_NOTE`), copied here as it pins them. */
     const CARD_READY = /^card ready: Package ([0-9a-f]{12})\./
     const CARD_PRESS_NOTE = /^\[Massmarket bridge, no reply needed\] Card signed in the side pane: Package ([0-9a-f]{12}), page ([0-9a-f]{12})\. Nothing has been sent\.$/
@@ -5930,8 +5930,9 @@ describe('(0.7.41) a sent package leaves the side pane, and the chat says while 
   const bash = ($: Engine, command: string) => $.tool.call({ tool: 'Bash', command } as never) as Promise<{ result?: unknown; deny?: string; isError?: boolean }>
   const SEND = `cd /Users/me/Projects/massmarket-ops-control-tower && python3 skills/client-reply-prep/scripts/send_package.py --package ${PKG} --package-sha256 ${'f'.repeat(64)} 2>&1 | tail -20`
 
-  test('a package waiting in this thread\'s pane: one line in the chat that the model never reads, and the band says it while it waits', async ($, on) => {
+  test('a package waiting in this thread\'s pane: one line in the chat that the model never reads, and the band says it while it waits (0.7.49: once the person closed the pane)', async ($, on) => {
     const w = world(on, { store: { 'mm.links': { [ACME]: SELF } } })
+    const person = personClose(on, ACME)
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
     // the note to the model, as before, and the notice for the person: a system row, which never reaches the model
@@ -5939,7 +5940,11 @@ describe('(0.7.41) a sent package leaves the side pane, and the chat says while 
     expect(w.appended[0]).toContain('[Massmarket bridge, no reply needed] Acme Roofing Pat: ')
     expect(w.notices).toEqual([NOTICE])
     expect(w.stored['mm.told']).toEqual({ [SELF]: PKG })
-    // the band: the waiting line first, with its own button where Drafts was
+    // (0.7.49) the pane opened by itself: the band does not say it
+    expect((await bandTexts($)).texts).not.toContain(WAITING)
+    // the person closes the pane: from the next sync, the band's waiting line first, with its own button where Drafts was
+    person.close()
+    await w.clock.advance(60_000)
     const band = await bandTexts($)
     expect(band.texts[0]).toBe(WAITING)
     expect(band.buttons).toEqual([['mm-open-waiting', 'Open the side pane'], ['mm-start-missing', 'Start missing threads (2)']])
@@ -5956,9 +5961,14 @@ describe('(0.7.41) a sent package leaves the side pane, and the chat says while 
 
   test('the package sent from the chat: the next sync takes its page, its card and the band\'s line away (until 0.7.41 they stayed)', async ($, on) => {
     const w = world(on, { store: { 'mm.links': { [ACME]: SELF } } })
+    const person = personClose(on, ACME)
     await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: false })
     await w.clock.advance(4_000)
     expect(await partText($)).toBe('## Acme Roofing\n\n1. What the client sent')
+    // (0.7.49) the band says the package waits where the person closed the pane
+    person.close()
+    await w.clock.advance(60_000)
+    expect((await bandTexts($)).texts[0]).toBe(WAITING)
     expect(w.stored['mm.noted']).toMatchObject({ [SELF]: `pkg:${PKG}:${ago(3)}` })
     // OW records the package sent: the feed lists it no more
     w.setFeed(feed({ drafts: [] }))
