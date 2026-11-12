@@ -13,6 +13,8 @@
  * - Normalising collapses whitespace and strips markdown marks. Signs, currency, digits, separators, dots and hyphens stay.
  * - Only what the pane draws counts: never an address behind a link's words, never a button.
  * - A state line (STATE_LINES) is checked both ways: the card may not say what the page does not.
+ * - (0.7.45) A date move and a ticket the reply answers (OW #717) say what the go does to a date or a ticket: each is the whole line
+ *   of its own leaf on the card, one to one in order, and the counts are equal.
  * The card may otherwise hold more than the page. Pure: no `$`, no state, nothing logged.
  */
 import type { MmCardNode, MmCardRun, MmCardTree } from '../types'
@@ -69,21 +71,27 @@ const SECTIONS: Record<string, string> = {
   Links: 'Links',
   Findings: 'Findings',
   'What the quote says': 'What the quote says',
+  'Date moves': 'Date moves',
 }
 /**
- * (0.7.43) The four cells of a quote row, and (0.7.47) a cell of a table OW read from the PDF and a word of its header: never a state
+ * (0.7.43) The four cells of a quote row, and (0.7.50) a cell of a table OW read from the PDF and a word of its header: never a state
  * line of the card, as the page's row is never one (`stateGap`).
  */
 const QUOTE_CELL = /\brp-quote-(?:no|line|hours|amt|cell|colhead)\b/
 /** (0.7.43) The header of a quote record's or worksheet's table on the page: the card draws none for it. */
 const QUOTE_TABLE_HEAD = /^\|\s*#\s*\|\s*Line\s*\|\s*Hours\s*\|\s*Amount\s*\|$/
-/** (0.7.47) The rule the page prints under a table's header, `|---|…|`: what tells a table's header line from its rows. */
+/** (0.7.50) The rule the page prints under a table's header, `|---|…|`: what tells a table's header line from its rows. */
 const TABLE_RULE = /^\|(?:\s*:?-{3,}:?\s*\|)+$/
-/** (0.7.47) A table's row on the card, and the header of a table OW read from the PDF (client-reply-prep render_visual.py). */
+/** (0.7.50) A table's row on the card, and the header of a table OW read from the PDF (client-reply-prep render_visual.py). */
 const QUOTE_ROW = /(?:^|\s)rp-quote-row(?:\s|$)/
 const QUOTE_COLS = /(?:^|\s)rp-quote-cols(?:\s|$)/
 /** (0.7.43) A line that carries its check's mark: the mark is part of what it says, so it is held as written. */
 const MARKED = /^(?:✅|⚠)/u
+/**
+ * (0.7.45) A ticket the reply answers (OW #717, 2026-11-11): its own line under the ticket table, never a row, in the words the read's
+ * `line` gives it. The card draws it as an `rp-answered` leaf (client-reply-prep render_visual.py).
+ */
+const ANSWERED = /^Ticket (?:\S+ )?".*": closes on send — answered by: "/s
 
 /** One space for any whitespace, and no edges. Nothing else about the words changes. */
 export function squash(text: string): string {
@@ -600,7 +608,32 @@ function rowsGap(section: PageSection, node: MmCardNode | undefined): string {
     }
   }
   const rest = section.blocks.filter(b => !(b.kind === 'line' && /^\|/.test(b.text.trim())))
-  return plainGap(hayOf(leavesOf(node.k ?? [])), rest)
+  const answered = rest.filter((b): b is Extract<Block, { kind: 'line' }> => b.kind === 'line' && ANSWERED.test(unmark(b.text)))
+  const gap = leafLinesGap(answered.map(b => unmark(b.text)), node, 'rp-answered', 'answered tickets')
+  return gap || plainGap(hayOf(leavesOf(node.k ?? [])), rest)
+}
+
+/**
+ * (0.7.45) These lines of the page, one to one in order with the card's leaves of this class: each the whole line of its own leaf, and
+ * the counts equal, so the card shows neither one more nor one fewer.
+ */
+function leafLinesGap(lines: readonly string[], node: MmCardNode, cls: string, what: string): string {
+  const drawn = findAll(node.k ?? [], cls).map(n => unmark(leafOf(n).text))
+  const missing = lines.find((line, i) => drawn[i] !== line)
+  if (missing !== undefined) return lineOf(missing)
+  return lines.length === drawn.length ? '' : `the page holds ${lines.length} ${what}, the card ${drawn.length}`
+}
+
+/**
+ * (0.7.45) "Date moves" (OW #717; Rob, 2026-11-11: when the call or an email means a ticket's or a phase's date has to move, the
+ * package moves it). Each move the page lists is the whole line of one `rp-move` leaf, one to one in order, the counts equal; any other
+ * line is held as in any section.
+ */
+function movesGap(section: PageSection, node: MmCardNode | undefined): string {
+  if (!node) return section.blocks.some(b => b.kind !== 'blank') ? 'the page holds a section the card does not (Date moves)' : ''
+  const isMove = (b: Block): b is Extract<Block, { kind: 'line' }> => b.kind === 'line' && /^- /.test(b.text.trim())
+  const gap = leafLinesGap(section.blocks.filter(isMove).map(b => unmark(b.text)), node, 'rp-move', 'date moves')
+  return gap || plainGap(hayOf(leavesOf(node.k ?? [])), section.blocks.filter(b => !isMove(b)))
 }
 
 /** "Their message": every line and body inside this section; a message's To, Cc and subject against that message's own mail card. */
@@ -736,7 +769,7 @@ function contributionsGap(section: PageSection, node: MmCardNode | undefined): s
   return n + 1 === bys.length ? '' : `the page holds ${n + 1} additions by the team, the card ${bys.length}`
 }
 
-/** (0.7.47) A box's table rows and the headers of its PDF tables, in the order the card draws them, not looking inside one it found. */
+/** (0.7.50) A box's table rows and the headers of its PDF tables, in the order the card draws them, not looking inside one it found. */
 function tablePartsOf(nodes: readonly MmCardNode[]): MmCardNode[] {
   const out: MmCardNode[] = []
   for (const n of nodes) {
@@ -746,11 +779,11 @@ function tablePartsOf(nodes: readonly MmCardNode[]): MmCardNode[] {
   return out
 }
 
-/** (0.7.47) The words of these leaves of a drawn row or header, in order. */
+/** (0.7.50) The words of these leaves of a drawn row or header, in order. */
 const cellLeaves = (node: MmCardNode, cls: RegExp) => leavesOf([node]).filter(l => cls.test(l.c)).map(l => l.text)
 const FOUR_CELLS = ['rp-quote-no', 'rp-quote-line', 'rp-quote-hours', 'rp-quote-amt'].map(cls => new RegExp(`\\b${cls}\\b`))
 
-/** (0.7.47) The first cell of the page's row or header that is not the card's leaf in the same place, or '' when every one is. */
+/** (0.7.50) The first cell of the page's row or header that is not the card's leaf in the same place, or '' when every one is. */
 function cellsGap(raw: string, want: readonly (string | undefined)[]): string {
   const cells = cellsOf(raw)
   if (cells.length !== want.length) return lineOf(unmark(raw))
@@ -763,7 +796,7 @@ function cellsGap(raw: string, want: readonly (string | undefined)[]): string {
  * quoted"). Its blocks one to one in order with the card's `rp-quote` boxes, each by its `####` head. Each plain line of a block is a
  * whole line of that block's box, a ✅ or ⚠️ line with its mark; each table row one to one in order with the box's `rp-quote-row`s,
  * each of its cells equal to the leaf the card draws in that place. The counts of blocks and of rows are equal.
- * (0.7.47) A table OW read from the PDF's own text prints under its own header (OW #731, 2026-11-11), N cells a row. The header line,
+ * (0.7.50) A table OW read from the PDF's own text prints under its own header (OW #731, 2026-11-11), N cells a row. The header line,
  * the `|` line directly above a `|---` rule, is no row: it is held cell by cell against the box's `rp-quote-cols` in the same place,
  * one `rp-quote-colhead` a column, so a header on either side and not the other is a gap. A quote record's or worksheet's fixed
  * `| # | Line | Hours | Amount |` header has no `rp-quote-cols` on the card and is passed over as before. A row is held against its
@@ -899,11 +932,17 @@ export function pageGap(page: string | null, tree: MmCardTree): string {
     else if (section.head === 'Links') gap = linksGap(section, node)
     else if (section.head === 'Findings') gap = findingsGap(section, node)
     else if (section.head === 'What the quote says') gap = quotesGap(section, node)
+    else if (section.head === 'Date moves') gap = movesGap(section, node)
     else if (section.head.startsWith('Follow-ups') || section.head === 'Proposed follow-ups') gap = followupsGap(section, node)
     else if (!(section.head in SECTIONS) || !node) {
       if (section.blocks.some(b => b.kind !== 'blank')) gap = `the page holds a section the card does not (${section.head.slice(0, 60)})`
     } else gap = plainGap(hayOf(leavesOf(node.k ?? [])), section.blocks)
     if (gap) return gap
   }
+  // (0.7.45) both ways: a date move or an answered ticket on the card where the page has no section to say it
+  const heads = new Set(sectionsOf(blocks).map(section => section.head))
+  if (!heads.has('Date moves') && findAll(tree.nodes, 'rp-move').length) return 'the card says what the page does not (Date moves)'
+  if (!heads.has('ETA or proof for every open ticket?') && findAll(tree.nodes, 'rp-answered').length)
+    return 'the card says what the page does not (an answered ticket)'
   return ''
 }

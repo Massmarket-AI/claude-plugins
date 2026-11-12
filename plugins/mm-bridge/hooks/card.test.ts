@@ -2469,7 +2469,7 @@ describe('0.7.43 the quote view: each row of a quote PDF on one line of four cel
     expect(texts(draw('everything')).join('\n')).not.toContain('What the quote says')
   })
 
-  // (0.7.47) OW #731: a table read from the PDF draws under its own header, one cell a column, the header and rows lined up
+  // (0.7.50) OW #731: a table read from the PDF draws under its own header, one cell a column, the header and rows lined up
   test('a table read from the PDF: its header on one line, each row one line of its own cells, the columns shared', () => {
     for (const [surface, els] of [['desktop', ELS], ['terminal', { Box: 'Box', Text: 'Text' }]] as const) {
       const drawn = draw('quotes, columns', els)

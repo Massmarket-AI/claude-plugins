@@ -863,7 +863,7 @@ export function etaParagraph(it: QueueItem): string {
 /**
  * (0.7.15, owner asks; Rob, 2026-11-03: H9 "gets the build task, pinned in his bridge, with a clock to assign a
  * teammate") The paragraph a kickoff and an Update carry for the viewer's tickets on an `assign_by` clock: each is to be
- * given an owner in OW by then, never delivered by then; one the viewer takes instead gets an ETA (task-chip-flow §5.3).
+ * given an owner by then (POST /api/ext/ticket-status, `assignee`), never delivered by then; one the viewer takes instead gets an ETA (task-chip-flow §5.3).
  * '' with none. ⛔ Every id is checked again: it goes into the call Claude makes.
  */
 export function assignParagraph(it: QueueItem): string {
@@ -871,7 +871,7 @@ export function assignParagraph(it: QueueItem): string {
   if (!asks.length) return ''
   const lines = asks.map((a, i) => `${i + 1}. ${cleanText(a.title, 120) || 'Untitled ticket'} (ticket ${a.id}) · owner needed by ${dueText(a.assignBy)}`)
   return [
-    `My tickets that need an owner: a team post handed them to me to assign. The time on each is when it needs an owner in OW, not when the work is due. For each, ask me who will own it, and I assign them in OW. If I take one myself, ask me when it will be delivered and record it as task-chip-flow §5.3 says: POST /api/ext/eta-commit with task_fingerprint "ticket:<its id>". Do not draft a client email for these.`,
+    `My tickets that need an owner: a team post handed them to me to assign. The time on each is when it needs an owner, not when the work is due. For each, ask me who will own it, then assign it from here: POST /api/ext/ticket-status with {"ticket_id":"<its id>","assignee":"<the name or email I give>","reason":"<why>"} (mm-api.mjs ext POST /ticket-status; never the OW dashboard). If I take one myself, ask me when it will be delivered and record it as task-chip-flow §5.3 says: POST /api/ext/eta-commit with task_fingerprint "ticket:<its id>". Do not draft a client email for these.`,
     ...lines,
   ].join('\n')
 }
