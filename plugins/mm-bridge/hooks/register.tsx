@@ -225,6 +225,16 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 // like I finished what I was working on there, you can unpin them.") A switch's handover keeps the pin of a client thread
 // whose thread in the profile left he pinned himself and did not finish (`recordLooksFinished`): see "(1)" in `reconcile`.
 // And the switch line rides on the first prompt after a switch, by the account the session runs in (`awayNote`).
+//
+// ⛔ (0.7.49, Rob 2026-11-11: "In the little panel that shows up above the command bar I'm typing in right now, it always has a
+// thing that says "Open the side panel." But the side panel is almost always open automatically as soon as the bridge connects.
+// We don't need to have something cluttering up that space telling us to open the side panel, or that button there. I don't
+// think.") THE BAND OFFERS THE SIDE PANE ONLY WHERE IT WILL NOT OPEN BY ITSELF. In a client's own thread the waiting line
+// (`waitingLine`), its Open the side pane button and the Drafts button are drawn only while the person's close of the pane for
+// that client stands (`MmSession.closed`, which `opensBySelf` reads): the one case where the pane does not open itself again.
+// Otherwise the band draws none of the three (`bandLine`). The band is drawn again when the person closes the pane
+// (`rememberClose`) and when the pane opens again (`openPane`, every open of the bridge's, which ends the close, as `autoPane`
+// always did). The chat's one notice that a package waits (`tellWaiting`) is as it was.
 
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
@@ -4379,7 +4389,7 @@ async function showList($: EngineInterface, press: boolean): Promise<string> {
     before = undefined
     finish = await clearClient($)
   }
-  await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })
+  await openPane($, await paneTitle($))
   // after the pane is open: its client part read, and the list brought up to date, side by side
   const reading = finish()
   let last: Last
@@ -4504,7 +4514,7 @@ async function cardCommand($: EngineInterface, arg: string, ownCall: boolean): P
     if (!(await agentListReadable($))) return cardNotReady("this bridge cannot see whether the thread's background work has finished")
     const label = card.tree?.label
     if (!label) return cardNotReady('the card could not be checked')
-    const opened = await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })
+    const opened = await openPane($, await paneTitle($))
     const pane = opened.isPlaced ? (await $.ui.panes()).find(p => p.id === PANE_QUEUE) : undefined
     const shown = Boolean(pane?.isPlaced && pane.isShown)
     // the state is set; the words are on the screen once the pane has drawn them. A pane that is not shown draws nothing to wait for.
@@ -4584,7 +4594,7 @@ async function refreshSelf($: EngineInterface, force: boolean): Promise<string> 
   // asked for by the person, the pane opens at once and its client part is read after (S2); the timer draws
   // the part only once it has read it
   const finish = await beginClient($, it, true, force)
-  if (force) await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })
+  if (force) await openPane($, await paneTitle($))
   await finish()
   if (noted[me] !== sig) {
     const body = noteText(it, last?.member ?? '')
@@ -4689,11 +4699,12 @@ function isFresh(last: Last, projectId: string): boolean {
 /**
  * The one line above the prompt, in every desktop thread (Rob, 2026-10-12: "How do we open this panel up
  * in other threads where it's not already open?"): what needs the person, by R9. In a thread that is a waiting
- * client's, its second button opens that client's part of the pane. (0.5.14) Its first button is always Start missing
- * threads (`missing`: how many clients need a new thread now, 0 for All threads started). '' draws nothing: no sync on record yet,
- * the bridge paused, a terminal session, or no tracker token on this computer.
- * ⛔ From what is stored only: the last sync, the links, the chips, and this thread's id as the timer already
- *    learnt it. No feed call, no app call, no sync.
+ * client's, its second button opens that client's part of the pane ((0.7.49) only while the person's close of the pane for
+ * that client stands: otherwise the pane opens by itself, and the band offers no way to it). (0.5.14) Its first button is
+ * always Start missing threads (`missing`: how many clients need a new thread now, 0 for All threads started). '' draws
+ * nothing: no sync on record yet, the bridge paused, a terminal session, or no tracker token on this computer.
+ * ⛔ From what is stored only: the last sync, the links, the chips, this thread's id as the timer already learnt it,
+ *    and (0.7.49) this session's own record. No feed call, no app call, no sync.
  */
 async function bandLine($: EngineInterface): Promise<MmBand> {
   const nothing: MmBand = { text: '' }
@@ -4759,10 +4770,14 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
   // In a waiting client's thread the line carries the button that opens its part of the pane.
   const mine = me ? ownerOf(me, links) : undefined
   const own = mine ? items.find(i => i.projectId === mine) : undefined
+  // ⛔ (0.7.49, Rob 2026-11-11: "We don't need to have something cluttering up that space telling us to open the side panel")
+  // only while the person's close of the pane for this client stands (`MmSession.closed`): the one case where the pane does not
+  // open by itself (`opensBySelf`). Otherwise neither Drafts nor the waiting line and its button is drawn.
+  const closedHere = own !== undefined && (await sessOf($)).closed === own.projectId
   // (0.7.41) and, while a reply package of that client waits in the side pane, the line that says so (`waitingLine`): it goes
   // when the last sync no longer lists the package (sent, closed or handed on), as the package leaves the pane
-  const waiting = own && pickupOf(own) ? waitingLine(own.client) : ''
-  const band: MmBand = own ? { text, drafts: true, at: last.at, missing, ...(waiting ? { waiting } : {}) } : { text, at: last.at, missing }
+  const waiting = own && closedHere && pickupOf(own) ? waitingLine(own.client) : ''
+  const band: MmBand = own ? { text, ...(closedHere ? { drafts: true } : {}), at: last.at, missing, ...(waiting ? { waiting } : {}) } : { text, at: last.at, missing }
   // (0.7.25) and, in a client's own thread, why it is pinned or why no pin is needed
   const why = mine && me ? await whyHere($, last, mine, me, now) : ''
   return why ? { ...band, why } : band
@@ -7656,7 +7671,7 @@ async function claimThread($: EngineInterface, feed: Feed | null, it: QueueItem,
 async function showDrafts($: EngineInterface, it: QueueItem): Promise<Answer> {
   const mine = await ownIn($, [it])
   const finish = await beginClient($, it, mine !== undefined, true)
-  await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })
+  await openPane($, await paneTitle($))
   // the row pressed may be far down the list: the part just drawn is at the top
   await Promise.resolve($.ui.scroll({ to: 'start', in: PANE_QUEUE })).catch(() => {})
   return { said: '', after: finish }
@@ -9421,7 +9436,7 @@ async function autoPane($: EngineInterface, pid: string, title: string): Promise
   if (!(await tracks($)) || !opensBySelf(s, pid, (await $.env.get('MM_UNATTENDED')) === '1')) return
   await listShown($)
   try {
-    await $.ui.open({ id: PANE_QUEUE, title })
+    await openPane($, title)
   } catch {
     return
   }
@@ -9781,7 +9796,7 @@ async function pressTrack($: EngineInterface, s: MmSuggestion): Promise<void> {
     await noteForClaude($, pressNote(cleanName(s.client), s.skill))
     await $.state.set(NUDGE, { show: false, suggest: [] })
     await drawTrack($, 'press')
-    await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })
+    await openPane($, await paneTitle($))
   } catch {
     // nothing to tell: the band stays as it was
   }
@@ -9797,7 +9812,7 @@ async function pressInternal($: EngineInterface): Promise<void> {
     await noteForClaude($, INTERNAL_NOTE)
     await $.state.set(NUDGE, { show: false, suggest: [] })
     await drawTrack($, 'press')
-    await $.ui.open({ id: PANE_QUEUE, title: await paneTitle($) })
+    await openPane($, await paneTitle($))
   } catch {
     // as above
   }
@@ -9942,9 +9957,38 @@ async function awayNote($: EngineInterface, text: string, origin: string | undef
   return awayPromptLine(list, now)
 }
 
-/** (0.6.0) The person closed the pane: it is not opened by itself again for the same project in this session. */
+/**
+ * (0.6.0) The person closed the pane: it is not opened by itself again for the same project in this session. (0.7.49) And
+ * the band is drawn again: in that client's own thread it now offers the pane (`bandLine`). A redraw that fails is let go.
+ */
 async function rememberClose($: EngineInterface): Promise<void> {
   await setSess($, afterPersonClose(await sessOf($)))
+  await refreshBand($).catch(() => {})
+}
+
+/**
+ * (0.7.49) Every open of the pane by the bridge (the band's buttons, /mm, /mm view, a row's Drafts, `mm card`, Track to, by
+ * itself): the open as before, its answer handed back untouched, and then `paneOpened`. An open that throws ends nothing.
+ * (A `ui.open` hook of the bridge's own does not see the bridge's opens from a press or a timer, so the opens call it here.)
+ */
+async function openPane($: EngineInterface, title: string): ReturnType<EngineInterface['ui']['open']> {
+  const opened = await $.ui.open({ id: PANE_QUEUE, title })
+  await paneOpened($)
+  return opened
+}
+
+/**
+ * (0.7.49) The pane opened again: the person's close no longer stands (as `autoPane` always cleared it), and the band, which
+ * offered the pane only while it did, is drawn again without that. Never throws.
+ */
+async function paneOpened($: EngineInterface): Promise<void> {
+  try {
+    if ((await sessOf($)).closed === undefined) return
+    await setSess($, { closed: undefined })
+    await refreshBand($)
+  } catch {
+    // the next sync draws the band again
+  }
 }
 
 /** (0.6.0) A press on a row of `Threads today`: the system's opener takes the app's link to that thread (`openThread`). */
