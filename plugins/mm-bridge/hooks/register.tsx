@@ -1,6 +1,6 @@
 import type { Elements, EngineInterface, Register, RenderElement } from 'claude-code'
 
-import type { MmBand, MmCard, MmFolds, MmTeamNow, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTeam, MmTrack, MmTrackLine, MmView } from '../types'
+import type { MmBand, MmBrowser, MmBrowserAsk, MmBrowserChoice, MmCard, MmFolds, MmTeamNow, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTeam, MmTrack, MmTrackLine, MmView } from '../types'
 
 import {
   INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients,
@@ -229,7 +229,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.46'
+export const VERSION = '0.7.51'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -240,6 +240,8 @@ const BAND = { plugin: 'mm-bridge', key: 'band' } as const
 const FOLDS = { plugin: 'mm-bridge', key: 'folds' } as const
 /** (0.7.34) The pane's Team now, from the store (`drawTeam`). */
 const TEAMNOW = { plugin: 'mm-bridge', key: 'teamNow' } as const
+/** (0.7.51) The pane's Working manually in browser part, from the store (`drawBrowser`). */
+const BROWSER = { plugin: 'mm-bridge', key: 'browser' } as const
 /** (0.7.38) The ready reply packages this thread's pane listed last (`revealNewPackages`). */
 const SEEN_PACKAGES = { plugin: 'mm-bridge', key: 'seenPackages' } as const
 /** (New people) This thread's own presses on `New people`: the open picker, presses in flight, what OW refused. */
@@ -341,6 +343,13 @@ const ALIVE_MS = 5 * 60_000
 const TEAM_OPEN_MS = 60_000
 const TEAM_CLOSED_MS = 5 * 60_000
 const TEAM_SLACK_MS = 10_000
+/** (0.7.51) How often the lease holder reads Working manually in browser (`browserPass`): the lines are of the last 15 minutes. */
+const BROWSER_EVERY_MS = 3 * 60_000
+/** (0.7.51) A browser line older than this is not drawn, whatever the last read said (a lease holder that stopped reading). */
+const BROWSER_LINE_MS = 15 * 60_000
+/** (0.7.51) How long an answered question stays left out here, until OW's reads agree; and the most kept. */
+const BROWSER_ANSWERED_MS = 24 * 3_600_000
+const BROWSER_ANSWERED_MAX = 50
 /** (0.7.34) Team now on a pane whose OW has no such route yet. */
 const TEAM_MISSING = 'Team now is not available yet.'
 /** (0.7.34) How long a client's mail with no package holds back the chip for a client with no thread: then it comes without one. */
@@ -3807,6 +3816,8 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
 
 // (0.7.26) The reply-package card: prepared on arrival, drawn natively above the page (card.tsx).
 import { teamFrom, teamHeadingNow, teamLines, teamText, withMoves } from './team'
+import { ANSWER_INTERNAL, ANSWER_PERSONAL, ASK_HEADING, BROWSER_HEADING, CONFIRM_NOTE, PROFILE_TIP, SAVING, askText, blockLineText, confirmHeading, confirmText, parseBrowserNow, rowLineText, savedText, withoutAnswered } from './browser'
+import type { BrowserRead } from './browser'
 import type { TeamNow, TeamSeen } from './team'
 import { agentListReadable, askedOf, busyOf, cardDrawable, cardHooks, cardOf, cardVerdict, checkMissOf, checkedOf, clearCard, currentOf, drawCard, feedbackOf, isOnScreen, marksOf, noteAsked, noteDrawn, notePending, noteVersion, onWindows, prepareCard, pressAsk, pressCheck, pressFeedback, pressSign, refreshCard, resetCard, showKept, togglePage, turnBegan, turnEnded, turnMark, type Els, type PageRead } from './card'
 import { holderName } from './queue'
@@ -4964,6 +4975,8 @@ async function tick($: EngineInterface): Promise<void> {
       }
       // (0.7.34) Team now, for every thread here
       await teamPass($)
+      // (0.7.51) Working manually in browser, for every thread here
+      await browserPass($)
       // (0.5.19, Rob 10-20) Remote Control follows the pin while /mm rc is on: off, it asks the app nothing
       await rcFollowsPin($).catch(err => noteFailure($, 'remote control', err))
       // R15: the thread list's view, once on this machine
@@ -4982,6 +4995,8 @@ async function tick($: EngineInterface): Promise<void> {
     // R5: this thread's own chips: the ones no longer wanted withdrawn, the missing ones minted
     await chipsTick($).catch(() => {})
     await refreshBand($)
+    // (0.7.51) this thread's Working manually in browser part, from the store (after the chips: their order is as before 0.7.51)
+    await drawBrowser($)
     // a failed refresh's line, once a sync since has worked (L3)
     await clearRefreshFailed($)
     await beat($, { ok: true })
@@ -6876,6 +6891,7 @@ async function chipsPass($: EngineInterface): Promise<void> {
     // (0.5.4, C2/C3) the band says where each client's chip is: drawn again from the store, as chips come and go
     await refreshBand($)
     await drawTeam($)
+    await drawBrowser($)
   } catch {
     // the minute's tick withdraws it
   }
@@ -7850,7 +7866,7 @@ async function resolvePerson($: EngineInterface, id: string, action: PersonActio
 }
 
 /** Opens or closes one of the groups under the list ((0.7.21) Team · late too), in this thread's pane. The person's press: nothing is fetched, called or changed. */
-async function toggleFold($: EngineInterface, key: Fold | 'people' | 'track' | 'more' | 'team'): Promise<void> {
+async function toggleFold($: EngineInterface, key: Fold | 'people' | 'track' | 'more' | 'team' | 'confirm'): Promise<void> {
   try {
     const { value } = await $.state.get(FOLDS)
     await $.state.set(FOLDS, { ...(value ?? {}), [key]: !value?.[key] } satisfies MmFolds)
@@ -8624,6 +8640,163 @@ async function drawTeam($: EngineInterface): Promise<void> {
     await $.state.set(TEAMNOW, { ...(kept.team ? { team: kept.team } : {}), ...(kept.got ? { got: kept.got } : {}), ...(missing ? { missing: true } : {}) } satisfies MmTeamNow)
   } catch {
     // the next pass draws it
+  }
+}
+
+/**
+ * (0.7.51) What the bridge keeps of Working manually in browser (`mm.browser`): the last good read, when it was asked, while OW has
+ * no such route until when not to ask, and the questions answered on this computer (by id, when) until OW's reads agree.
+ */
+type BrowserKept = { asked?: number; got?: number; read?: BrowserRead; missingUntil?: number; answered?: Record<string, number> }
+
+/** (0.7.51) The answers on record still worth leaving out: the last BROWSER_ANSWERED_MS, at most BROWSER_ANSWERED_MAX, newest kept. */
+function answeredKept(answered: unknown, now: number): Record<string, number> {
+  const all = answered && typeof answered === 'object' && !Array.isArray(answered) ? (answered as Record<string, unknown>) : {}
+  const kept = Object.entries(all)
+    .filter((e): e is [string, number] => isUuid(e[0]) && typeof e[1] === 'number' && now - e[1] < BROWSER_ANSWERED_MS)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, BROWSER_ANSWERED_MAX)
+  return Object.fromEntries(kept)
+}
+
+/**
+ * (0.7.51, Rob approved 2026-11-11) Working manually in browser from OW (`GET /api/ext/browser-now`), into the store for every thread
+ * here: on the lease holder's tick every BROWSER_EVERY_MS, and at once (`force`) after an answer. OW decides what this token sees (a
+ * teammate: their own lines and questions; the founder: everyone's lines, never a question) and records a new stretch's question as it
+ * answers. A failure keeps the last read; a 404 or 405 (an OW without the route yet) is not asked again for PIN_REPORT_MISSING_MS, and
+ * the part is not drawn meanwhile. ⛔ Never throws into the tick, and nothing of the read is logged or noted anywhere.
+ */
+async function browserPass($: EngineInterface, force = false): Promise<void> {
+  try {
+    const now = await $.clock.now()
+    const kept = await storeGet<BrowserKept>($, 'mm.browser', {})
+    if (Number(kept.missingUntil) > now && !force) return
+    if (!force && now - (Number(kept.asked) || 0) < BROWSER_EVERY_MS - TEAM_SLACK_MS) return
+    await patchStore<BrowserKept>($, 'mm.browser', {}, b => {
+      b.asked = now
+    })
+    const asked = await within($, $.http.fetch(`${EXT}/browser-now`, { headers: await authHeaders($) }))
+    if (!asked.ok) return
+    const r = asked.value
+    if (r.status === 404 || r.status === 405) {
+      await patchStore<BrowserKept>($, 'mm.browser', {}, b => {
+        b.missingUntil = now + PIN_REPORT_MISSING_MS
+      })
+      await drawBrowser($)
+      return
+    }
+    if (r.status < 200 || r.status >= 300) return
+    const read = parseBrowserNow(JSON.parse(r.text))
+    if (!read) return
+    await patchStore<BrowserKept>($, 'mm.browser', {}, b => {
+      b.asked = now
+      b.got = now
+      b.read = read
+      b.answered = answeredKept(b.answered, now)
+      delete b.missingUntil
+    })
+    await drawBrowser($)
+  } catch {
+    // the next tick asks again; the pane keeps the last read
+  }
+}
+
+/**
+ * (0.7.51) This thread's pane catches up with the store's Working manually in browser: the last read, the questions answered here
+ * left out, lines older than BROWSER_LINE_MS dropped, and this thread's own presses kept. A redraw only when something changed.
+ */
+async function drawBrowser($: EngineInterface): Promise<void> {
+  try {
+    const kept = await storeGet<BrowserKept>($, 'mm.browser', {})
+    const now = await $.clock.now()
+    const { value: was } = await $.state.get(BROWSER)
+    const missing = Number(kept.missingUntil) > now
+    const read = !missing && kept.read && Array.isArray(kept.read.lines) ? withoutAnswered(kept.read, new Set(Object.keys(answeredKept(kept.answered, now)))) : null
+    const next: MmBrowser = {
+      ...(kept.got ? { got: kept.got } : {}),
+      ...(read?.founder ? { founder: true } : {}),
+      lines: read ? read.lines.filter(l => now - l.lastAt <= BROWSER_LINE_MS) : [],
+      question: read?.question ?? null,
+      confirm: read ? read.confirm : [],
+    }
+    // this thread's presses, for the questions still drawn only
+    const drawnIds = new Set([...(next.question ? [next.question.id] : []), ...(next.confirm ?? []).map(q => q.id)])
+    const busy = Object.fromEntries(Object.entries(was?.busy ?? {}).filter(([id]) => drawnIds.has(id)))
+    const errors = Object.fromEntries(Object.entries(was?.errors ?? {}).filter(([id]) => drawnIds.has(id)))
+    if (Object.keys(busy).length) next.busy = busy
+    if (Object.keys(errors).length) next.errors = errors
+    if (JSON.stringify(next) === JSON.stringify(was ?? null)) return
+    await $.state.set(BROWSER, next)
+  } catch {
+    // the next pass draws it
+  }
+}
+
+/** (0.7.51) This thread's presses on the browser part: one question's busy mark and error, set or cleared. */
+async function markBrowser($: EngineInterface, id: string, busy: boolean, error?: string): Promise<void> {
+  const { value } = await $.state.get(BROWSER)
+  const b = { ...(value?.busy ?? {}) }
+  const e = { ...(value?.errors ?? {}) }
+  if (busy) b[id] = true
+  else delete b[id]
+  if (error) e[id] = error
+  else delete e[id]
+  const next: MmBrowser = { ...(value ?? {}) }
+  delete next.busy
+  delete next.errors
+  await $.state.set(BROWSER, { ...next, ...(Object.keys(b).length ? { busy: b } : {}), ...(Object.keys(e).length ? { errors: e } : {}) } satisfies MmBrowser)
+}
+
+/** (0.7.51) On a question whose answer got no answer back, or failed on the way. */
+const BROWSER_NO_ANSWER = "Couldn't save: no answer. Try again in a minute."
+
+/** (0.7.51) The questions whose answer is on its way from this process: a second press on one does nothing. */
+const answering = new Set<string>()
+
+/**
+ * (0.7.51) A press on a "needs a client" question, or on a stretch of the end-of-day list: `POST /api/ext/browser-answer {question_id,
+ * answer, project_id?, from}`. On 200 the question leaves the pane here at once and in every thread's next draw (`mm.browser.answered`),
+ * the pane says what was saved (and, the first Personal of the day, the Chrome profile tip), and the part is read again. Anything else:
+ * the question says what OW answered, and stays. The person's press alone: nothing reaches a client, and nothing goes to Claude.
+ */
+async function answerBrowser($: EngineInterface, q: MmBrowserAsk, answer: 'client' | 'internal' | 'personal', choice: MmBrowserChoice | null, from: 'pane' | 'end_of_day'): Promise<void> {
+  if (!isUuid(q.id) || answering.has(q.id) || (answer === 'client') !== Boolean(choice)) return
+  answering.add(q.id)
+  try {
+    await markBrowser($, q.id, true)
+    const body = JSON.stringify({ question_id: q.id, answer, ...(choice ? { project_id: choice.projectId } : {}), from })
+    const asked = await within($, $.http.fetch(`${EXT}/browser-answer`, { method: 'POST', headers: { ...(await authHeaders($)), 'Content-Type': 'application/json' }, body }))
+    if (!asked.ok) {
+      await markBrowser($, q.id, false, BROWSER_NO_ANSWER)
+      return
+    }
+    const r = asked.value
+    if (r.status < 200 || r.status >= 300) {
+      await markBrowser($, q.id, false, `Couldn't save: ${refusalText(r)}`)
+      return
+    }
+    let learned = false
+    let tip = false
+    try {
+      const o = JSON.parse(r.text) as { learned?: unknown; suggest_profile?: unknown } | null
+      learned = o?.learned === true
+      tip = o?.suggest_profile === true
+    } catch {
+      // saved all the same: the status says so
+    }
+    const now = await $.clock.now()
+    await patchStore<BrowserKept>($, 'mm.browser', {}, b => {
+      b.answered = answeredKept({ ...(b.answered ?? {}), [q.id]: now }, now)
+    })
+    await markBrowser($, q.id, false)
+    const saved = savedText(choice ? choice.client : answer === 'internal' ? ANSWER_INTERNAL : ANSWER_PERSONAL, learned, q.site)
+    await say($, { text: tip ? `${saved} ${PROFILE_TIP}` : saved, toast: saved })
+    await drawBrowser($)
+    await browserPass($, true)
+  } catch {
+    await markBrowser($, q.id, false, BROWSER_NO_ANSWER).catch(() => {})
+  } finally {
+    answering.delete(q.id)
   }
 }
 
@@ -10030,6 +10203,16 @@ export const register: Register = on => {
     const teamOpen = folds?.teamNow ?? panel.teamNow ?? false
     const { value: teamNow } = await $.state.get(TEAMNOW)
     const teamClock = await $.clock.now()
+    // (0.7.51) Working manually in browser: the lines (each beside its client's row, else in one short block), the one open
+    // question and the end-of-day list. ⛔ Never a question in the founder's pane, whatever is stored.
+    const { value: browser } = await $.state.get(BROWSER)
+    const browserLines = Array.isArray(browser?.lines) ? browser.lines : []
+    const browserAsk = browser && !browser.founder && browser.question && isUuid(browser.question.id) ? browser.question : null
+    const browserConfirm = browser && !browser.founder && Array.isArray(browser.confirm) ? browser.confirm.filter(q => q.id !== browserAsk?.id) : []
+    const browserBusy = browser?.busy ?? {}
+    const browserErrors = browser?.errors ?? {}
+    // (0.7.51) the first drawn row of each client the browser lines name, filled once the rows drawn are known (below)
+    const browserHome = new Map<string, Row>()
     const people = queue && Array.isArray(queue.people) ? queue.people : []
     const routeTo = queue && Array.isArray(queue.routeTo) ? queue.routeTo : []
     const ui = people.length ? await peopleUi($) : {}
@@ -10063,6 +10246,16 @@ export const register: Register = on => {
         {row.pin && !row.pin.pinned && row.pin.why !== 'no_thread' ? <Text color="warning">{rowPinWords(row.pin)}</Text> : null}
         {rowDetail(row) ? <Text dimColor>{rowDetail(row)}</Text> : null}
         {row.note ? <Text dimColor>{row.note}</Text> : null}
+        {/* (0.7.51) Working manually in browser, beside the client's row: the site, the page title, and whether a thread covers it */}
+        {browserHome.get(row.projectId) === row
+          ? browserLines
+              .filter(l => l.projectId === row.projectId)
+              .map((l, n) => (
+                <Text key={`mm-browser-row:${row.projectId}:${n}`} dimColor>
+                  {rowLineText(l)}
+                </Text>
+              ))
+          : null}
         {isStillOpenRow(row) ? (row.stillOpen as string[]).map(item => <Text dimColor>{`- ${item}`}</Text>) : null}
         <Box flexDirection="row" gap={1}>
           {rowButtons(row).map(verb =>
@@ -10151,6 +10344,21 @@ export const register: Register = on => {
     const groups = hasList && queue ? foldGroups(queue) : []
     // (0.7.21, for the founder) Team · late: its button last on the line of groups, and once opened, below the other groups
     const team = hasList && queue ? teamOf(queue.team) : []
+    // (0.7.51) a browser line goes under its client's first drawn row: Needs you now while open, then the groups opened; the rest in one block
+    if (hasList && queue) {
+      const drawnRows = [...(needsOpen ? rowGroups(queue.rows).flatMap(g => g.rows.map(r => r.row)) : []), ...groups.filter(g => folds?.[g.key]).flatMap(g => g.rows.map(r => r.row))]
+      for (const r of drawnRows) if (!browserHome.has(r.projectId)) browserHome.set(r.projectId, r)
+    }
+    const browserAway = browserLines.filter(l => !browserHome.has(l.projectId))
+    const browserButtons = (q: MmBrowserAsk, from: 'pane' | 'end_of_day') => (
+      <Box flexDirection="row" flexWrap="wrap" gap={1}>
+        {q.choices.map(c => (
+          <Button key={`mm-browser:${from}:${q.id}:${c.projectId}`} label={c.client} variant="primary" onPress={() => void answerBrowser($, q, 'client', c, from)} />
+        ))}
+        <Button key={`mm-browser:${from}:${q.id}:internal`} label={ANSWER_INTERNAL} onPress={() => void answerBrowser($, q, 'internal', null, from)} />
+        <Button key={`mm-browser:${from}:${q.id}:personal`} label={ANSWER_PERSONAL} onPress={() => void answerBrowser($, q, 'personal', null, from)} />
+      </Box>
+    )
     const trackOpen = folds?.track === true
     const moreOpen = folds?.more === true
     const openTasks = new Set(Array.isArray(folds?.tasks) ? folds.tasks : [])
@@ -10187,6 +10395,15 @@ export const register: Register = on => {
             {cardShown ? null : <Markdown text={client.text} />}
           </Box>
         ) : null}
+        {/* (0.7.51) "needs a client": one tap answers it, never in the founder's pane */}
+        {browserAsk ? (
+          <Box key="mm-browser-ask" flexDirection="column" marginBottom={1}>
+            <Text bold>{ASK_HEADING}</Text>
+            <Text dimColor>{askText(browserAsk)}</Text>
+            {browserErrors[browserAsk.id] ? <Text color="error">{browserErrors[browserAsk.id]}</Text> : null}
+            {browserBusy[browserAsk.id] ? <Text dimColor>{SAVING}</Text> : browserButtons(browserAsk, 'pane')}
+          </Box>
+        ) : null}
         {/* (0.7.34, Rob 2026-11-07: "Beside saying 'Needs you now,' it can say if there are any threads not started and have a 'Start missing threads' button only.") */}
         {hasList && queue ? (
           <Box key="mm-needs-head" flexDirection="row" flexWrap="wrap" gap={1}>
@@ -10202,6 +10419,16 @@ export const register: Register = on => {
         {hasList && queue && needsOpen ? rowGroups(queue.rows).flatMap(group => group.rows.map(({ row, n, mark }) => drawRow(row, `${mark}${n}.`))) : null}
         {/* (0.7.34, Rob 2026-11-07: "a dropdown that reveals something that looks just like what we added to the bottom of the daily team photo")
             (0.7.38, Rob 2026-11-07: "Any Reply package should appear above the team member tracking") under the client part and the list */}
+        {browserAway.length ? (
+          <Box key="mm-browser" flexDirection="column" marginTop={1}>
+            <Text bold>{BROWSER_HEADING}</Text>
+            {browserAway.map((l, n) => (
+              <Text key={`mm-browser-line:${n}`} dimColor>
+                {blockLineText(l)}
+              </Text>
+            ))}
+          </Box>
+        ) : null}
         <Box key="mm-teamnow" flexDirection="column" marginTop={1}>
           <Button key="mm-teamnow-toggle" plain label={`${teamHeadingNow(teamNow?.team)}  ${teamOpen ? '▾' : '▸'}`} onPress={() => void togglePanel($, 'teamNow', teamOpen)} />
           {teamOpen && teamNow?.missing ? <Text dimColor>{TEAM_MISSING}</Text> : null}
@@ -10226,13 +10453,14 @@ export const register: Register = on => {
             {build.row.target ? <Button key="mm-build-open" label={LABEL.open} variant="primary" onPress={() => void press($, 'open', build.row)} /> : null}
           </Box>
         ) : null}
-        {hasList && (people.length || groups.length || team.length) ? (
+        {(hasList && (people.length || groups.length || team.length)) || browserConfirm.length ? (
           <Box key="mm-folds" flexDirection="row" flexWrap="wrap" gap={1} marginTop={1}>
             {people.length ? <Button key="mm-fold:people" label={`New people (${people.length})`} dimColor={folds?.people !== true} onPress={() => void toggleFold($, 'people')} /> : null}
             {groups.map(group => (
               <Button key={`mm-fold:${group.key}`} label={group.heading} dimColor={folds?.[group.key] !== true} onPress={() => void toggleFold($, group.key)} />
             ))}
             {team.length ? <Button key="mm-fold:team" label={teamHeading(team)} dimColor={folds?.team !== true} onPress={() => void toggleFold($, 'team')} /> : null}
+            {browserConfirm.length ? <Button key="mm-fold:confirm" label={confirmHeading(browserConfirm.length)} dimColor={folds?.confirm !== true} onPress={() => void toggleFold($, 'confirm')} /> : null}
           </Box>
         ) : null}
         {hasList && people.length && folds?.people ? (
@@ -10268,6 +10496,22 @@ export const register: Register = on => {
                     ))}
                   </Box>
                 ))}
+              </Box>
+            ))}
+          </Box>
+        ) : null}
+        {/* (0.7.51) the end-of-day list: from 4 PM New York, today's browser stretches with no client yet, closed until opened */}
+        {browserConfirm.length && folds?.confirm ? (
+          <Box key="mm-confirm" flexDirection="column" marginTop={1}>
+            <Text bold dimColor>
+              {confirmHeading(browserConfirm.length)}
+            </Text>
+            <Text dimColor>{CONFIRM_NOTE}</Text>
+            {browserConfirm.map(q => (
+              <Box key={`mm-confirm:${q.id}`} flexDirection="column" marginTop={1}>
+                <Text>{confirmText(q, localClock)}</Text>
+                {browserErrors[q.id] ? <Text color="error">{browserErrors[q.id]}</Text> : null}
+                {browserBusy[q.id] ? <Text dimColor>{SAVING}</Text> : browserButtons(q, 'end_of_day')}
               </Box>
             ))}
           </Box>
