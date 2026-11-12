@@ -2728,7 +2728,7 @@ describe('0.7.48 the card is seen, or the page is printed: checked under the thr
   })
 })
 
-describe('0.7.50 a line the app shows as a summary gives the card back, and the card is owed to the screen again', () => {
+describe('0.7.52 a line the app shows as a summary gives the card back, and the card is owed to the screen again', () => {
   type Hook = ($: unknown, e: Record<string, unknown>, next: (e: unknown) => unknown) => Promise<unknown>
   const lineHook = hooks['ui.render:{"component":"AssistantMessage"}'] as Hook
   const rowHook = hooks['ui.render:{"component":"ToolUse"}'] as Hook

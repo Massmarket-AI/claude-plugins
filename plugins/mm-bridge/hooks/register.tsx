@@ -239,7 +239,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.50'
+export const VERSION = '0.7.52'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -4096,7 +4096,7 @@ let threadDrawnAt = 0
 /** (0.7.48) When this thread's current turn of the main conversation began; null until one has in this process. */
 let turnBeganAt: number | null = null
 
-/** (0.7.50) Whether a turn of the main conversation is under way in this process. */
+/** (0.7.52) Whether a turn of the main conversation is under way in this process. */
 let turnOpen = false
 
 /** (0.7.48) The turn under way began now. */
@@ -4105,13 +4105,13 @@ async function noteTurnBegan($: EngineInterface): Promise<void> {
   turnOpen = true
 }
 
-/** (0.7.50) The turn under way ended, however it ended. */
+/** (0.7.52) The turn under way ended, however it ended. */
 function noteTurnEnded(): void {
   turnOpen = false
 }
 
 /**
- * (0.7.50) The line that took the card is drawn as a summary now (Rob, 2026-11-11: "Let's finish those", the gap #98 left open). The desktop
+ * (0.7.52) The line that took the card is drawn as a summary now (Rob, 2026-11-11: "Let's finish those", the gap #98 left open). The desktop
  * app's default view can show a summary in place of a reply line, the `isSummary` row; a card under the line is not drawn there, so the
  * line gives the card back: the call's row draws it again, and a later line of the same tag may take it. A card given back after the turn
  * has ended is owed to the screen again (`owe`'s check), so the thread prints the page if no line shows it within SHOWN_WAIT_MS of a
@@ -10601,7 +10601,7 @@ export const register: Register = on => {
     if (e.surface !== 'desktop') return next(e)
     const text = String((e.props as { text?: unknown }).text ?? '')
     const row = `${e.surface}:${e.requestId}`
-    // (0.7.50) a summary in the line's place, or a line that no longer names a tag, draws no card: one that held the card gives it back
+    // (0.7.52) a summary in the line's place, or a line that no longer names a tag, draws no card: one that held the card gives it back
     if ((e.props as { isSummary?: unknown }).isSummary === true || !PACKAGE_TAG.test(text)) {
       await releaseLine($, row).catch(() => {})
       return next(e)
