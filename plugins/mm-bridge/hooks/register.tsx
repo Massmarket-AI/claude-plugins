@@ -3924,6 +3924,8 @@ async function drawLiveCard($: EngineInterface, els: Els, card: MmCard, surface:
 
 /** (0.7.40) The first sentence of a ready answer, as the send gate parses it (`CARD_READY` in send-gate.js). */
 const CARD_READY_HEAD = /^card ready: Package ([0-9a-f]{12})\./
+/** (0.7.48) A reply that names a package's tag: the only reply rows the `AssistantMessage` hook reads anything for. */
+const PACKAGE_TAG = /Package [0-9a-f]{12}/
 
 /** (0.7.40) The package id a `card <package id>` command asks about, read as `runCommand` and `cardCommand` read it; null for any other command. */
 function cardAskOf(args: unknown): string | null {
@@ -3994,8 +3996,10 @@ export function firstRowFailure(key: string): boolean {
  * lines. The `ToolResult` hook draws under these alone, in place of the model's answer. A row is taken off again whenever its draw falls
  * back to the engine's. At most ROWS_MAX, the oldest dropped first.
  */
-const drawnRows = new Map<string, 'card' | 'line'>()
+const drawnRows = new Map<string, RowKind>()
 const ROWS_MAX = 500
+/** (0.7.40) What a call's row drew: the card, or a line in its place. (0.7.48) `below`: the line saying the card is drawn under the thread's line. */
+type RowKind = 'card' | 'line' | 'below'
 
 /**
  * (0.7.40) What a `ToolResult` under the live card draws in place of the model's answer (Rob, 2026-11-09: "Maybe the thread should just
@@ -4005,11 +4009,37 @@ const ROWS_MAX = 500
 export const RESULT_HINT = `If any part of the card above doesn't show, say "print the page" and your thread prints the whole package as text.`
 
 /**
+ * (0.7.48) The card at its whole height (Rob, 2026-11-11, after Package 0509148e1cb8: "when these reply packages show up in the thread, I
+ * shouldn't have to scroll up and down. The window I'm looking at: the reply package end should be the height of the reply package.").
+ * Read in the desktop app (5.1231.0, `withEngineToolRow`): a call's row, and the answer under it, draw a plugin's tree inside the app's
+ * own frame of `max-height: 70vh; overflow-y: auto`, so a card taller than 70% of the window scrolls inside it. No prop of the tree
+ * reaches that frame and the engine has no call to size it. A reply's own text row (`epitaxyEngineAssistantText`) has no frame at all.
+ * So the card is drawn under the thread's own line after the live call: the first reply row that names the call's tag (`Package <12>`,
+ * which the ready answer has the thread end its line with) takes it, and grows to the card's height. Until such a line is drawn the
+ * call's row draws the card as it always did; once one is, the call's row says where it went (ROW_BELOW) and the line under that call
+ * keeps the fail-safe (RESULT_HINT_BELOW).
+ */
+export const ROW_BELOW = (label: string): string => `The card for Package ${label} is drawn in full below, under your thread's line.`
+export const RESULT_HINT_BELOW = `If any part of the card below doesn't show, say "print the page" and your thread prints the whole package as text.`
+/** (0.7.48) By the live call's tool_use_id: the reply row (`<surface>:<requestId>`) that draws its card. At most ROWS_MAX, the oldest dropped first. */
+const lineOfCall = new Map<string, string>()
+/**
+ * (0.7.48) By reply row: the call that was live when the row first named that call's tag. A row stays with that call, so when the same tag
+ * is asked for again only the line after the newer call draws the card; an older line keeps its words alone. At most ROWS_MAX.
+ */
+const callOfLine = new Map<string, string>()
+
+/** (0.7.48) Keep a row map to ROWS_MAX, the oldest dropped first. */
+function trimRows(map: Map<string, string>): void {
+  for (const old of [...map.keys()].slice(0, Math.max(0, map.size - ROWS_MAX))) map.delete(old)
+}
+
+/**
  * (0.7.40) This row drew its own tree, the card or a line. A row new to the list, or one that drew the other kind, asks for one redraw
  * (`$.ui.invalidate`), so an answer drawn before its row was built is drawn for it too; one already listed as it is asks for none, so the
  * redraw ends there.
  */
-function noteRow($: EngineInterface, row: string, kind: 'card' | 'line'): void {
+function noteRow($: EngineInterface, row: string, kind: RowKind): void {
   if (drawnRows.get(row) === kind) return
   drawnRows.set(row, kind)
   for (const old of [...drawnRows.keys()].slice(0, Math.max(0, drawnRows.size - ROWS_MAX))) drawnRows.delete(old)
@@ -4029,17 +4059,103 @@ export const DRAW_FAILED = (label: string): string =>
 /** (0.7.40) The tags the thread was told of (`DRAW_FAILED`): once a tag a session, so it can never repeat or loop. */
 const drawFailTold = new Set<string>()
 
-/** (0.7.40) Tell the thread, once for this tag in this session, that the live card could not be drawn: it then prints the page. */
-function tellDrawFailed($: EngineInterface, label: string): void {
+/**
+ * (0.7.40) Tell the thread, once for this tag in this session, that the live card could not be drawn: it then prints the page. (0.7.48) Or,
+ * in the same words' place and on the same once-a-tag record, that it is not drawn under the thread's line (CARD_NOT_SHOWN).
+ */
+function tellDrawFailed($: EngineInterface, label: string, text: string = DRAW_FAILED(label)): void {
   if (!/^[0-9a-f]{12}$/.test(label) || drawFailTold.has(label)) return
   drawFailTold.add(label)
   void (async () => {
     try {
-      await $.prompt.submit({ text: DRAW_FAILED(label) })
+      await $.prompt.submit({ text })
     } catch {
       // the row is the engine's, and its answer shows: the person can still ask for the page
     }
   })()
+}
+
+/**
+ * (0.7.48) The card is seen, or the page is printed (Builds thread, 2026-11-11, from a client's thread: `mm card` answered `card ready`
+ * at about 4:55 and 5:10 PM ET, "and Rob saw no card at all, so he was asked for a go on text he had not seen"; "A thread must never be told
+ * 'Do not print the page' while nothing is on screen."). The answer comes before the thread's line, so it cannot wait for the line's draw.
+ * So the line is checked after it: once the turn that got the ready answer ends (`owe`), the line under it must have taken the card
+ * (`lineOfCall`) within SHOWN_WAIT_MS of a surface drawing the thread. ⛔ The call's own row does not count: the app can fold it out of
+ * sight and report no error (that thread logged no draw failure in bridge-notices.log). A surface has drawn the thread once its band or one of
+ * its reply rows has been drawn since the answer (`noteThreadDrawn`); one that draws it and finds no card under the line tells the thread
+ * (CARD_NOT_SHOWN), which prints the page. A thread nobody has on screen is checked again when one draws it. Framed as the bridge's,
+ * never the person's; it changes no record, no note and no prompt box.
+ */
+export const CARD_NOT_SHOWN = (label: string): string =>
+  `[Massmarket bridge] The card for Package ${label} is not drawn under your line in this thread. Print the whole page now, as client-reply-prep §9.3 says for a card that is not ready.`
+/** (0.7.48) How long after the thread is drawn the line has to have taken the card. */
+export const SHOWN_WAIT_MS = 6_000
+/** (0.7.48) The ready answer whose card is still to be seen under the thread's line, from when it answered (`since`). One at a time. */
+let owedCard: { toolUseId: string; label: string; since: number; armed: boolean } | null = null
+/** (0.7.48) When a surface last drew this thread: its band, or one of its reply rows. */
+let threadDrawnAt = 0
+/** (0.7.48) When this thread's current turn of the main conversation began; null until one has in this process. */
+let turnBeganAt: number | null = null
+
+/** (0.7.48) The turn under way began now. */
+async function noteTurnBegan($: EngineInterface): Promise<void> {
+  turnBeganAt = await $.clock.now()
+}
+
+/** (0.7.48) A turn of the main conversation ended with an answer: the ready answer it got, if any, is owed to the screen. */
+async function owe($: EngineInterface): Promise<void> {
+  const asked = await askedOf($)
+  if (!asked || turnBeganAt === null || asked.at < turnBeganAt) return
+  if (lineOfCall.has(asked.toolUseId) || drawFailTold.has(asked.label)) return
+  owedCard = { toolUseId: asked.toolUseId, label: asked.label, since: asked.at, armed: false }
+  armShown($)
+}
+
+/**
+ * (0.7.48) A surface drew this thread: on record, and a card still owed is checked SHOWN_WAIT_MS from now. A card owed for a call that is
+ * no longer this session's live one (a newer `mm card` replaced it) is owed no more. Never throws.
+ */
+async function noteThreadDrawn($: EngineInterface): Promise<void> {
+  try {
+    threadDrawnAt = await $.clock.now()
+    if (owedCard && (await askedOf($))?.toolUseId !== owedCard.toolUseId) owedCard = null
+    armShown($)
+  } catch {
+    // the next draw notes it
+  }
+}
+
+function armShown($: EngineInterface): void {
+  const it = owedCard
+  if (!it || it.armed) return
+  it.armed = true
+  try {
+    void Promise.resolve($.clock.after(SHOWN_WAIT_MS, () => void checkShown($, it).catch(() => {}))).catch(() => {
+      it.armed = false
+    })
+  } catch {
+    it.armed = false
+  }
+}
+
+/** (0.7.48) The check: the line took the card or a newer call replaced it, or nobody has drawn the thread since the answer (checked again at the next draw), or tell. */
+async function checkShown($: EngineInterface, it: NonNullable<typeof owedCard>): Promise<void> {
+  if (owedCard !== it) return
+  it.armed = false
+  if (lineOfCall.has(it.toolUseId) || (await askedOf($))?.toolUseId !== it.toolUseId) {
+    owedCard = null
+    return
+  }
+  if (threadDrawnAt < it.since) return
+  owedCard = null
+  tellDrawFailed($, it.label, CARD_NOT_SHOWN(it.label))
+}
+
+/** (0.7.48) For tests: the module's record of the turn, the screen and the owed card, as a new process has it. */
+export function resetShown(): void {
+  owedCard = null
+  threadDrawnAt = 0
+  turnBeganAt = null
 }
 
 /** (0.7.40) This row fell back to the engine's: unlisted, and a row that was listed asks for one redraw, so its answer shows again. */
@@ -4303,13 +4419,17 @@ function notInTime(args: unknown): string {
 const SIGNED_GO = /^Send package [0-9a-f]{12}$/
 /** (0.7.33) How many seconds `mm card` waits for the pane to draw a card it just set: a pane that is shown draws at once. */
 const CARD_DRAW_WAIT_S = 3
-/** (0.7.40) The card is drawn in this thread under the call (the `ToolUse` row), and in the side pane. ⛔ Its first sentence is the one the send gate parses. */
+/**
+ * (0.7.40) The card is drawn in this thread and in the side pane. (0.7.48) In the thread, under the one line the thread prints now, which
+ * names the tag: that reply row grows to the card's height, where the call's own row scrolls inside 70% of the window (ROW_BELOW). ⛔ Its
+ * first sentence is the one the send gate parses.
+ */
 function cardReady(label: string): string {
-  return `card ready: Package ${label}. The whole package is checked and drawn in this thread, under this call, and in the side pane. Do not print the page. Print one line saying the card is above, the go comes from its box, and they can say "print the page" if any of it doesn't show, ending "Package ${label}.", then wait for the person.`
+  return `card ready: Package ${label}. The whole package is checked and drawn in this thread, under the one line you print now, and in the side pane. Do not print the page. Print one line saying the card is below, the go comes from its box, and they can say "print the page" if any of it doesn't show, ending "Package ${label}.", then wait for the person.`
 }
 /** (0.7.36) Ready with the pane not on a screen: most pickups run with the thread in the background. Its first sentence is the one the send gate parses, as `cardReady`'s is. */
 function cardReadyOffScreen(label: string): string {
-  return `card ready: Package ${label}. The whole package is checked and drawn in this thread, under this call; the side pane draws it too when this thread is open on a screen. Do not print the page. Print one line saying the card is above, the go comes from its box, and they can say "print the page" if they can't see it or any of it doesn't show, ending "Package ${label}.", then wait for the person.`
+  return `card ready: Package ${label}. The whole package is checked and drawn in this thread, under the one line you print now; the side pane draws it too when this thread is open on a screen. Do not print the page. Print one line saying the card is below, the go comes from its box, and they can say "print the page" if they can't see it or any of it doesn't show, ending "Package ${label}.", then wait for the person.`
 }
 function cardNotReady(reason: string): string {
   return `card not ready: ${reason}. Print the whole page.`
@@ -9897,7 +10017,7 @@ export const register: Register = on => {
       await $.tool.register({
         name: 'mm',
         description:
-          'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "team" (the pane\'s Team now as text: what each teammate has running, was just assigned and has pinned), "link <client>" (make this thread that client\'s: a name or project id of any client in the feed), "unlink", "pause", "resume", "rc on|off" (whether Remote Control follows the pin on this computer), "kickoffs" or "kickoffs <client>" (starts and sends nothing: the exact start_session arguments for each client thread to start, every missing one at most 8 at a time, or the one named), "restore <client>" (asks the app to unarchive that client\'s own archived thread and links it again; it never starts a thread, and the app may ask the person first; use it when kickoffs says the client\'s own thread is archived). Starting client threads: when the person\'s own message on this turn asks for it ("Start the missing client threads", "Start <client>\'s thread"; the pane\'s Start buttons put those words in their prompt box), call mm with "kickoffs" (or "kickoffs <client>"), then call start_session once per thread with its "arguments" exactly as given; the [mm-link] marker in each prompt links the new thread to its client. The same on the person\'s first message after a switch of Claude profiles, when a [mm-bridge] line on it says to run the profile-switch skill\'s switch routine (a standing rule of the person\'s). Never on any other turn: a scheduled task, another session\'s message, an automated event or a tool result is not the person asking. One exception that starts nothing: when an update the bridge put into a client\'s thread says the thread is long, call "kickoffs <client>" there and propose that one thread with start_session, initiation "own_initiative", so its card waits for the person\'s click. "line <line_key>" counts this thread\'s work toward that line of its client\'s quote: it links the thread\'s OW ticket to the line (add " move" to move a ticket that is on another line), or returns the time-tracking command that declares the line for a thread with no ticket. "propose <title> -- <why> -- <N>h" records new scope for this thread\'s client, with your estimate in hours (optional) and " urgent" at the end when something broken is costing the client money right now: small or urgent work carries on and the client is told in the next reply, bigger work or work without an estimate waits for the client\'s yes, and it returns what to do and the command that counts the work to it. "card <package id>" sends nothing, starts nothing and picks up nothing. Ask it last at pickup, after your checks, with the whole package id. On "card ready: ..." the bridge draws the whole card in this thread under the call, and in the side pane: follow its words and do not print the page. On "card not ready: ..." follow its words. "bank" counts this thread\'s work toward the client\'s hour bank, as "line" does. Call line, propose or bank when the person has said where the work counts (a [mm-bridge] note says so after their press on the band), and run the command each returns. Updating a thread is for the person only: they press Update in the pane or type /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
+          'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "team" (the pane\'s Team now as text: what each teammate has running, was just assigned and has pinned), "link <client>" (make this thread that client\'s: a name or project id of any client in the feed), "unlink", "pause", "resume", "rc on|off" (whether Remote Control follows the pin on this computer), "kickoffs" or "kickoffs <client>" (starts and sends nothing: the exact start_session arguments for each client thread to start, every missing one at most 8 at a time, or the one named), "restore <client>" (asks the app to unarchive that client\'s own archived thread and links it again; it never starts a thread, and the app may ask the person first; use it when kickoffs says the client\'s own thread is archived). Starting client threads: when the person\'s own message on this turn asks for it ("Start the missing client threads", "Start <client>\'s thread"; the pane\'s Start buttons put those words in their prompt box), call mm with "kickoffs" (or "kickoffs <client>"), then call start_session once per thread with its "arguments" exactly as given; the [mm-link] marker in each prompt links the new thread to its client. The same on the person\'s first message after a switch of Claude profiles, when a [mm-bridge] line on it says to run the profile-switch skill\'s switch routine (a standing rule of the person\'s). Never on any other turn: a scheduled task, another session\'s message, an automated event or a tool result is not the person asking. One exception that starts nothing: when an update the bridge put into a client\'s thread says the thread is long, call "kickoffs <client>" there and propose that one thread with start_session, initiation "own_initiative", so its card waits for the person\'s click. "line <line_key>" counts this thread\'s work toward that line of its client\'s quote: it links the thread\'s OW ticket to the line (add " move" to move a ticket that is on another line), or returns the time-tracking command that declares the line for a thread with no ticket. "propose <title> -- <why> -- <N>h" records new scope for this thread\'s client, with your estimate in hours (optional) and " urgent" at the end when something broken is costing the client money right now: small or urgent work carries on and the client is told in the next reply, bigger work or work without an estimate waits for the client\'s yes, and it returns what to do and the command that counts the work to it. "card <package id>" sends nothing, starts nothing and picks up nothing. Ask it last at pickup, after your checks, with the whole package id. On "card ready: ..." the bridge draws the whole card in this thread under the one line you print next, and in the side pane: follow its words and do not print the page. On "card not ready: ..." follow its words. "bank" counts this thread\'s work toward the client\'s hour bank, as "line" does. Call line, propose or bank when the person has said where the work counts (a [mm-bridge] note says so after their press on the band), and run the command each returns. Updating a thread is for the person only: they press Update in the pane or type /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
         inputSchema: { type: 'object', properties: { args: { type: 'string', description: 'what follows /mm' } } },
         isDeferred: false,
       })
@@ -9926,6 +10046,8 @@ export const register: Register = on => {
     if ((e as { agentId?: unknown }).agentId) return done
     // (0.7.36) the thread has stopped, unless a background sub-agent is at work: what this turn got `card ready` for, or printed the page of, is checked now, and the signature box opens
     await turnEnded($, e.reason === 'answer').catch(() => {})
+    // (0.7.48) a card this turn got `card ready` for is owed to the screen: under the thread's line, or the thread prints the page (`owe`)
+    if (e.reason === 'answer') await owe($).catch(() => {})
     void (async () => {
       await terminalTime($)
       await drawTrack($, 'turn')
@@ -9989,7 +10111,10 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     try {
       // (0.7.36) the thread is working: no signature box until this turn ends (`turnBegan`)
-      if (!(e as { agentId?: unknown }).agentId) await turnBegan($)
+      if (!(e as { agentId?: unknown }).agentId) {
+        await turnBegan($)
+        await noteTurnBegan($)
+      }
       const id = await instanceId($)
       const paused = mintPause.get(id)
       if (paused?.atTurn) {
@@ -10090,6 +10215,8 @@ export const register: Register = on => {
   // (0.7.1) Hour bank is Prepaid hours, drawn when the client has prepaid hours left (`offersPrepaid`), and the words
   // end ` (<Client> is set to always ask first)` for a client OW sets so.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    // (0.7.48) a surface is drawing this thread: a card owed to the screen is checked (`noteThreadDrawn`)
+    await noteThreadDrawn($)
     const { value: band } = await $.state.get(BAND)
     const { value: nudge } = await $.state.get(NUDGE)
     const { value: lineAsk } = await $.state.get(LINE)
@@ -10565,7 +10692,7 @@ export const register: Register = on => {
       const { Box, Markdown, Text } = $.ui.resolve(e)
       const card = await cardOf($)
       let tree: RenderElement
-      let kind: 'card' | 'line' = 'line'
+      let kind: RowKind = 'line'
       const label = CARD_READY_HEAD.exec(out)?.[1]
       const asked = await askedOf($)
       // (0.7.40) the pane's own test (`cardDrawable`): where the pane draws no card, the row draws none either, and so no box to press.
@@ -10577,7 +10704,11 @@ export const register: Register = on => {
       // (0.7.42) a newer version this thread has drawn below, or one only the side pane has drawn so far
       else if (card.tree.label !== label) tree = <Text dimColor>{asked.label === card.tree.label ? ROW_REPLACED(label, card.tree.label) : ROW_REPLACED_PANE(label, card.tree.label)}</Text>
       else if (asked.toolUseId !== (p.tool_use_id || e.requestId)) tree = <Text dimColor>{ROW_AGAIN(label)}</Text>
-      else {
+      // (0.7.48) the thread's line under this call has taken the card, where it is drawn at its whole height
+      else if (lineOfCall.has(asked.toolUseId)) {
+        tree = <Text dimColor>{ROW_BELOW(label)}</Text>
+        kind = 'below'
+      } else {
         const drawn = await drawLiveCard($, $.ui.resolve(e) as Els, card, String(e.surface))
         // the card's own `Show the page as text` opens the page here as it does in the pane: one mark for both
         const page = (await marksOf($)).pageOpen ? await clientPart($) : null
@@ -10617,7 +10748,82 @@ export const register: Register = on => {
     const kind = p.tool === 'mcp__mm-bridge__mm' ? drawnRows.get(`${e.surface}:${p.tool_use_id || e.requestId}`) : undefined
     if (!kind) return next(e)
     const { Box, Text } = $.ui.resolve(e)
-    return kind === 'card' ? <Text dimColor>{RESULT_HINT}</Text> : <Box />
+    if (kind === 'card') return <Text dimColor>{RESULT_HINT}</Text>
+    // (0.7.48) the card went to the thread's line below: the fail-safe stays here, in the result's own drawing
+    if (kind === 'below') return <Text dimColor>{RESULT_HINT_BELOW}</Text>
+    return <Box />
+  })
+
+  // (0.7.48) The thread's own line after the live `mm card` call draws the card at its whole height (ROW_BELOW says why: a call's row
+  // scrolls inside 70% of the window on the desktop, a reply's text row does not). A desktop reply row that names the live call's tag
+  // (`Package <12>`) is bound to the call live when it first names it (`callOfLine`), and the first such row takes that call's card
+  // (`lineOfCall`): it keeps its own words (`next(e)`) and the card is drawn under them, by `drawLiveCard`, the same drawing, box and press
+  // as the pane and the call's row. The row draws it only while the call's own row would: the bridge holds that package at that tag and
+  // the pane draws its card (`cardDrawable`). Any other reply row, any other surface, and a draw that throws: the engine's row, untouched,
+  // and a row that had taken the card gives it back, so the call's row draws it again. Reads only, as every render hook here.
+  on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    // (0.7.48) a surface is drawing this thread, any surface: a card owed to the screen is checked (`noteThreadDrawn`)
+    await noteThreadDrawn($)
+    if (e.surface !== 'desktop') return next(e)
+    const text = String((e.props as { text?: unknown }).text ?? '')
+    if (!PACKAGE_TAG.test(text)) return next(e)
+    const row = `${e.surface}:${e.requestId}`
+    let took = ''
+    try {
+      const asked = await askedOf($)
+      if (!asked || !text.includes(`Package ${asked.label}`)) return next(e)
+      if (!callOfLine.has(row)) {
+        callOfLine.set(row, asked.toolUseId)
+        trimRows(callOfLine)
+      }
+      if (callOfLine.get(row) !== asked.toolUseId) return next(e)
+      const taken = lineOfCall.get(asked.toolUseId)
+      if (taken && taken !== row) return next(e)
+      const card = await cardOf($)
+      const held = cardDrawable((await clientPart($)).text, card) && card.packageId === asked.packageId && card.tree?.label === asked.label
+      if (!held || !card.tree) return next(e)
+      took = asked.packageId
+      const els = $.ui.resolve(e) as Els
+      const drawn = await drawLiveCard($, els, card, String(e.surface))
+      // the card's own `Show the page as text` opens the page here as it does in the pane and the call's row: one mark for all
+      const page = (await marksOf($)).pageOpen ? await clientPart($) : null
+      const pageText = page ? (page.page ?? page.text) : ''
+      const own = await next(e)
+      const { Box, Markdown } = els
+      if (!taken) {
+        lineOfCall.set(asked.toolUseId, row)
+        trimRows(lineOfCall)
+        // the call's row draws its line in place of the card now
+        try {
+          $.ui.invalidate('ui.render')
+        } catch {
+          // it does at its next draw
+        }
+      }
+      return (
+        <Box key={`mm-card-line:${asked.packageId}`} flexDirection="column" gap={1}>
+          {own}
+          {drawn}
+          {pageText ? <Markdown text={pageText} /> : null}
+        </Box>
+      )
+    } catch (err) {
+      if (took) {
+        const why = (err instanceof Error ? err.message : String(err)).slice(0, 160)
+        if (firstRowFailure(`line\n${took}\n${why}`)) void logAuto($, `card for package ${took} could not be drawn under the thread's line: ${why.split('{')[0]?.trim() ?? ''}`)
+        // the call's row draws the card again
+        for (const [call, line] of lineOfCall) {
+          if (line !== row) continue
+          lineOfCall.delete(call)
+          try {
+            $.ui.invalidate('ui.render')
+          } catch {
+            // it does at its next draw
+          }
+        }
+      }
+      return next(e)
+    }
   })
 
   // (0.7.40) A run of calls the desktop folds into one count line holds its `ToolUse` rows unseen: a group that holds the live `mm card`

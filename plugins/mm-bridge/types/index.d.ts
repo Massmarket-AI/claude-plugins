@@ -425,6 +425,8 @@ export type MmCardChecked = Record<string, number>
 /**
  * (0.7.40) The live `mm card` call: the main thread's own call (no `agentId`) whose answer was the last `card ready: Package <12>.`,
  * by its `tool_use_id`. That call's row in the thread draws the whole card; any earlier ready row draws one line. A later ready replaces it.
+ * (0.7.48) Once the thread's own line after that call is drawn (the first reply row naming its tag), the card is drawn under that line at
+ * its whole height and the call's row draws one line saying so: on the desktop a call's row scrolls inside 70% of the window.
  */
 export type MmCardAsked = { packageId: string; label: string; toolUseId: string; at: number }
 
