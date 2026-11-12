@@ -189,6 +189,32 @@ export type MmFolds = {
   more?: boolean
   /** (0.7.5) The tasks of the time list opened to their threads, by key (`MmTrackLine.toggle`). */
   tasks?: string[]
+  /** (0.7.53) The end-of-day list of browser stretches with no client yet, closed until opened. */
+  confirm?: boolean
+}
+
+/**
+ * (0.7.53, Rob approved 2026-11-11) "Working manually in browser": a person's active browser minutes on a client in the last 15 minutes,
+ * as OW's `GET /api/ext/browser-now` answers them (the latest page's site and title). `noThread`: no Claude Code thread of that person
+ * declared to that client in those minutes. `member`: the person's first name, in the founder's view only; `me`: the viewer's own line.
+ */
+export type MmBrowserLine = { projectId: string; client: string; site: string; title: string; lastAt: number; minutes: number; noThread: boolean; member: string | null; me: boolean }
+/** (0.7.53) A choice on a "needs a client" question: a likely client. */
+export type MmBrowserChoice = { projectId: string; client: string }
+/** (0.7.53) A stretch of browser minutes with no client: the open question, or one on the end-of-day list. */
+export type MmBrowserAsk = { id: string; from: number; to: number; minutes: number; site: string; title: string; choices: MmBrowserChoice[] }
+/**
+ * (0.7.53) The pane's browser part, from the store (`drawBrowser`): OW's last read with the answered questions left out, when it was
+ * read, and this thread's presses (`busy` by question, what OW refused in `errors`).
+ */
+export type MmBrowser = {
+  got?: number
+  founder?: boolean
+  lines?: MmBrowserLine[]
+  question?: MmBrowserAsk | null
+  confirm?: MmBrowserAsk[]
+  busy?: Record<string, boolean>
+  errors?: Record<string, string>
 }
 
 /** (0.7.34) One row of a person's pins on `Team now`, as the daily photo has it. */
@@ -426,6 +452,8 @@ declare module 'claude-code' {
       band: MmBand
       folds: MmFolds
       teamNow: MmTeamNow
+      /** (0.7.53) Working manually in browser: the lines, the open question and the end-of-day list. */
+      browser: MmBrowser
       people: MmPeople
       track: MmTrack
       sess: MmSession
