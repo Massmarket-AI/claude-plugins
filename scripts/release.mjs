@@ -76,9 +76,10 @@ for (const p of PLUGINS) {
   // --first-parent: "last set" is the commit on main that brought the version in. A pull request's later commits
   // landed in that same merge, so they shipped under that version. Without it, 1087d18 (round 2 of mm-bridge
   // 0.7.33) read as unreleased, and every hook-only release bumped the bridge too.
-  // A change to test files alone reaches nobody, so it is not a release.
+  // A change to test files alone reaches nobody, so it is not a release. Test files are *.test.* and the helpers only
+  // tests import, *.test-helper.* (the hooks module never loads one).
   const versionCommit = git('log', '-1', '--first-parent', '--format=%H', '--', `${dir}/.claude-plugin/plugin.json`).trim()
-  const shipped = [dir, ':(exclude,glob)**/*.test.*']
+  const shipped = [dir, ':(exclude,glob)**/*.test.*', ':(exclude,glob)**/*.test-helper.*']
   const committedSince = versionCommit ? git('diff', '--name-only', versionCommit, 'HEAD', '--', ...shipped).trim() !== '' : true
   const changed = git('status', '--porcelain', '--', ...shipped).trim() !== '' || committedSince
   if (!changed) continue
