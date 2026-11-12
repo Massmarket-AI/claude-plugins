@@ -3,7 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { MmCard, MmCardMarks, MmCardTree } from '../types'
 import {
   CHECK_BUTTON, CHECK_DRAFT, CHECK_TYPE, FEEDBACK_LABEL, FEEDBACK_MAX, FEEDBACK_PLACEHOLDER, FEEDBACK_SAID, FEEDBACK_SUBMIT, FEEDBACK_TEXT, NOT_DRAWN, NO_CARD, NO_OWNER_CHECK, SIGNED_NOTE, SIGN_FILL_MS, SIGN_VALID_MS, THREAD_CHECKING, THREAD_NOT_CHECKED, askedOf, busyOf, canChange, cardDrawable, cardVerdict, checkMissOf, checkedOf, copyCheck, currentOf, drawCard, feedbackOf, fnv1a, holdOf, holdText, isChecked, isFresh, marksOf, noteAsked, noteCurrent, notePending, noteVersion, prepareCard, pressAsk, pressCheck, pressFeedback, pressSign, readTree,
-  printedTags, refreshCard, sha256Hex, signOf, signatureLine, signatureSvg, standing, turnBegan, turnEnded, turnMark, type CardDraw,
+  drawHref, printedTags, refreshCard, sha256Hex, signOf, signatureLine, signatureSvg, standing, turnBegan, turnEnded, turnMark, type CardDraw,
 } from './card'
 import { drawnText, pageGap } from './card-parity'
 import { CARD_PAIRS } from './card-pairs.test-helper'
@@ -894,10 +894,30 @@ describe('0.7.33 the card\'s links: the real source, never the Onboarding Wizard
       return links(drawChecked({ card: cardOf({ packageId: tree.package_id as string, tree }), marks: { signed: {} }, now: 0, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined }))
     }
     const got = draw('source links')
-    expect(got).toContainEqual(['Open email', 'https://mail.google.com/mail/u/support@letaidothehardwork.com/#all/zz'])
+    // (0.7.49) the mailbox's `@` is written `%40`: the desktop app draws a link holding a raw `@` as plain text
+    expect(got).toContainEqual(['Open email', 'https://mail.google.com/mail/u/support%40letaidothehardwork.com/#all/zz'])
+    expect(got.filter(([, href]) => href.includes('@'))).toEqual([])
     expect(got).toContainEqual(['Fireflies', 'https://app.fireflies.ai/view/zz'])
     expect(draw('everything').filter(([label]) => ['Open email', 'Fireflies', 'HighLevel'].includes(label))).toEqual([])
     expect(got.filter(([, href]) => href.includes('onboarding-wizard'))).toEqual([])
+  })
+
+  test('(0.7.49) an address the card draws: an `@` after the host is `%40`; a user name before the host, or no address, is no link', () => {
+    expect(drawHref('https://mail.google.com/mail/u/support@letaidothehardwork.com/#all/zz')).toBe('https://mail.google.com/mail/u/support%40letaidothehardwork.com/#all/zz')
+    expect(drawHref('https://mail.google.com/mail/?authuser=rob@x.example#inbox/1')).toBe('https://mail.google.com/mail/?authuser=rob%40x.example#inbox/1')
+    expect(drawHref('https://app.fireflies.ai/view/zz')).toBe('https://app.fireflies.ai/view/zz')
+    expect(drawHref('https://x.example@evil.example/path')).toBe('')
+    expect(drawHref('https://user:pw@x.example/')).toBe('')
+    expect(drawHref('not a url')).toBe('')
+  })
+
+  test('(0.7.49) a paragraph whose only link has a user name before the host draws its words as text, not a link', () => {
+    const made = JSON.parse(JSON.stringify(SMS_TREE)) as { nodes: unknown[] }
+    made.nodes.unshift({ r: [{ s: 'Open', href: 'https://x.example@evil.example/path' }] })
+    const tree = readTree(made) as MmCardTree
+    const drawn = JSON.stringify(drawChecked({ card: cardOf({ packageId: tree.package_id as string, tree }), marks: { signed: {} }, now: 0, onSign: () => undefined, onAsk: () => undefined, onPage: () => undefined }))
+    expect(drawn).not.toContain('evil.example')
+    expect(drawn).toContain('Open')
   })
 })
 

@@ -1278,16 +1278,36 @@ function drawRuns(els: Els, runs: readonly MmCardRun[], ctx: Ctx): Node[] {
   return runs.map(r => <Text {...runStyle(r.c, ctx)}>{r.s}</Text>)
 }
 
+/**
+ * (0.7.49) A link's address as the card draws it. An `@` after the host is written `%40`, as `sourceLink` writes the
+ * pane's: the desktop app draws a link whose address holds a raw `@` as plain text, and OW's Gmail links name the
+ * mailbox in the path (`/mail/u/<mailbox>/#all/<id>`). In the real Game Day card on 11-11 that was 8 links. An address
+ * with a user name or password before the host, or one that does not parse, is no link: '' (its words are drawn as text).
+ */
+export function drawHref(href: string): string {
+  try {
+    const url = new URL(href)
+    if (url.username || url.password || !url.href.startsWith(url.origin)) return ''
+    const safe = url.origin + url.href.slice(url.origin.length).replace(/@/g, '%40')
+    return safe.length <= 2048 ? safe : ''
+  } catch {
+    return ''
+  }
+}
+
 function drawPara(els: Els, node: MmCardNode, ctx: Ctx): Node {
   const { Box, Text, Link } = els
   const runs = node.r ?? []
   const c = node.c
   // a paragraph holding a link: its pieces side by side, each link a Link (a Text cannot hold one)
-  if (runs.some(r => r.href) && Link) {
+  if (runs.some(r => r.href && drawHref(r.href)) && Link) {
     return (
       <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
         {has(c, 'rp-li') ? <Text dimColor>•</Text> : null}
-        {runs.map(r => (r.href ? <Link href={r.href} label={r.s.trim() || r.href} /> : r.s.trim() ? <Text {...paraStyle(c, ctx)} {...runStyle(r.c, ctx)}>{r.s}</Text> : null))}
+        {runs.map(r => {
+          const href = r.href ? drawHref(r.href) : ''
+          return href ? <Link href={href} label={r.s.trim() || r.href} /> : r.s.trim() ? <Text {...paraStyle(c, ctx)} {...runStyle(r.c, ctx)}>{r.s}</Text> : null
+        })}
       </Box>
     )
   }
