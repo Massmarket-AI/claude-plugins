@@ -315,10 +315,10 @@ describe('0.7.43 what the quote says: each block, line and row of the page again
   })
 })
 
-// (0.7.50) Get Your Funds, 2026-11-11: OW #731 prints a table it read from the PDF under its own header, one cell a column, and the
+// (0.7.54) Get Your Funds, 2026-11-11: OW #731 prints a table it read from the PDF under its own header, one cell a column, and the
 // card draws that header (`rp-quote-cols`) and one `rp-quote-cell` a column. Before, the header line was read as a row and every row
 // of N cells as a mismatch, so such a package answered card not ready.
-describe('0.7.50 a quote table read from the PDF: its own header and its own cells against the card', () => {
+describe('0.7.54 a quote table read from the PDF: its own header and its own cells against the card', () => {
   const copy = (t: MmCardTree) => JSON.parse(JSON.stringify(t)) as MmCardTree
   const box = (t: MmCardTree) => ((t.nodes.find(n => /(?:^|\s)rp-quotes(?:\s|$)/.test(n.c ?? '')) as MmCardNode).k ?? []).find(k => k.c === 'rp-quote') as MmCardNode
   const parts = (t: MmCardTree, cls: string) => (box(t).k ?? []).filter(k => new RegExp(`(?:^|\\s)${cls}(?:\\s|$)`).test(k.c ?? ''))

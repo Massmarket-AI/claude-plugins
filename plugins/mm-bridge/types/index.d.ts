@@ -226,6 +226,11 @@ export type MmNotice = { text: string; at: number }
  * above the band with its own Open button for as long as the last sync lists the package (Rob, 2026-11-09: "it's important that
  * the chat tells them a reply package is waiting in the side panel when there is one").
  */
+/**
+ * (0.7.49) `drafts` and `waiting` are set only while the person's close of the pane for the thread's client stands (`MmSession`'s
+ * `closed`): anywhere else the pane opens by itself, and the band offers no way to it (Rob, 2026-11-11: "We don't need to have
+ * something cluttering up that space telling us to open the side panel").
+ */
 export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string; waiting?: string }
 
 /**
@@ -249,9 +254,9 @@ export type MmTrack = { pid: string; client: string; title: string; lines: MmTra
 /**
  * (0.6.0) This session's own record, for the pane and the band: the person's prompts so far, whether its first
  * prompt began `SINGLE-SESSION`, whether the person pressed Not client work, whether it runs for a person
- * (`interactive`) or unattended (`MM_UNATTENDED=1`), the project whose pane the person closed (`closed`) and the one
- * the pane was last opened for by itself (`opened`), the project the pane last drew (`handled`), and when this
- * session last asked OW for its project's time (`asked`).
+ * (`interactive`) or unattended (`MM_UNATTENDED=1`), the project whose pane the person closed (`closed`; (0.7.49) until the
+ * pane is opened again) and the one the pane was last opened for by itself (`opened`), the project the pane last drew
+ * (`handled`), and when this session last asked OW for its project's time (`asked`).
  */
 export type MmSession = {
   prompts: number
@@ -399,6 +404,8 @@ export type MmCardChecked = Record<string, number>
 /**
  * (0.7.40) The live `mm card` call: the main thread's own call (no `agentId`) whose answer was the last `card ready: Package <12>.`,
  * by its `tool_use_id`. That call's row in the thread draws the whole card; any earlier ready row draws one line. A later ready replaces it.
+ * (0.7.48) Once the thread's own line after that call is drawn (the first reply row naming its tag), the card is drawn under that line at
+ * its whole height and the call's row draws one line saying so: on the desktop a call's row scrolls inside 70% of the window.
  */
 export type MmCardAsked = { packageId: string; label: string; toolUseId: string; at: number }
 

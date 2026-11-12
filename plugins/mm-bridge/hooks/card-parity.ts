@@ -74,15 +74,15 @@ const SECTIONS: Record<string, string> = {
   'Date moves': 'Date moves',
 }
 /**
- * (0.7.43) The four cells of a quote row, and (0.7.50) a cell of a table OW read from the PDF and a word of its header: never a state
+ * (0.7.43) The four cells of a quote row, and (0.7.54) a cell of a table OW read from the PDF and a word of its header: never a state
  * line of the card, as the page's row is never one (`stateGap`).
  */
 const QUOTE_CELL = /\brp-quote-(?:no|line|hours|amt|cell|colhead)\b/
 /** (0.7.43) The header of a quote record's or worksheet's table on the page: the card draws none for it. */
 const QUOTE_TABLE_HEAD = /^\|\s*#\s*\|\s*Line\s*\|\s*Hours\s*\|\s*Amount\s*\|$/
-/** (0.7.50) The rule the page prints under a table's header, `|---|…|`: what tells a table's header line from its rows. */
+/** (0.7.54) The rule the page prints under a table's header, `|---|…|`: what tells a table's header line from its rows. */
 const TABLE_RULE = /^\|(?:\s*:?-{3,}:?\s*\|)+$/
-/** (0.7.50) A table's row on the card, and the header of a table OW read from the PDF (client-reply-prep render_visual.py). */
+/** (0.7.54) A table's row on the card, and the header of a table OW read from the PDF (client-reply-prep render_visual.py). */
 const QUOTE_ROW = /(?:^|\s)rp-quote-row(?:\s|$)/
 const QUOTE_COLS = /(?:^|\s)rp-quote-cols(?:\s|$)/
 /** (0.7.43) A line that carries its check's mark: the mark is part of what it says, so it is held as written. */
@@ -769,7 +769,7 @@ function contributionsGap(section: PageSection, node: MmCardNode | undefined): s
   return n + 1 === bys.length ? '' : `the page holds ${n + 1} additions by the team, the card ${bys.length}`
 }
 
-/** (0.7.50) A box's table rows and the headers of its PDF tables, in the order the card draws them, not looking inside one it found. */
+/** (0.7.54) A box's table rows and the headers of its PDF tables, in the order the card draws them, not looking inside one it found. */
 function tablePartsOf(nodes: readonly MmCardNode[]): MmCardNode[] {
   const out: MmCardNode[] = []
   for (const n of nodes) {
@@ -779,11 +779,11 @@ function tablePartsOf(nodes: readonly MmCardNode[]): MmCardNode[] {
   return out
 }
 
-/** (0.7.50) The words of these leaves of a drawn row or header, in order. */
+/** (0.7.54) The words of these leaves of a drawn row or header, in order. */
 const cellLeaves = (node: MmCardNode, cls: RegExp) => leavesOf([node]).filter(l => cls.test(l.c)).map(l => l.text)
 const FOUR_CELLS = ['rp-quote-no', 'rp-quote-line', 'rp-quote-hours', 'rp-quote-amt'].map(cls => new RegExp(`\\b${cls}\\b`))
 
-/** (0.7.50) The first cell of the page's row or header that is not the card's leaf in the same place, or '' when every one is. */
+/** (0.7.54) The first cell of the page's row or header that is not the card's leaf in the same place, or '' when every one is. */
 function cellsGap(raw: string, want: readonly (string | undefined)[]): string {
   const cells = cellsOf(raw)
   if (cells.length !== want.length) return lineOf(unmark(raw))
@@ -796,7 +796,7 @@ function cellsGap(raw: string, want: readonly (string | undefined)[]): string {
  * quoted"). Its blocks one to one in order with the card's `rp-quote` boxes, each by its `####` head. Each plain line of a block is a
  * whole line of that block's box, a ✅ or ⚠️ line with its mark; each table row one to one in order with the box's `rp-quote-row`s,
  * each of its cells equal to the leaf the card draws in that place. The counts of blocks and of rows are equal.
- * (0.7.50) A table OW read from the PDF's own text prints under its own header (OW #731, 2026-11-11), N cells a row. The header line,
+ * (0.7.54) A table OW read from the PDF's own text prints under its own header (OW #731, 2026-11-11), N cells a row. The header line,
  * the `|` line directly above a `|---` rule, is no row: it is held cell by cell against the box's `rp-quote-cols` in the same place,
  * one `rp-quote-colhead` a column, so a header on either side and not the other is a gap. A quote record's or worksheet's fixed
  * `| # | Line | Hours | Amount |` header has no `rp-quote-cols` on the card and is passed over as before. A row is held against its
