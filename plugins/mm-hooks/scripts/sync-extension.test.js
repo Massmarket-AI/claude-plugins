@@ -233,6 +233,59 @@ test("⛔ a sha256 mismatch anywhere in the carried build: nothing is written an
   assert.deepEqual(snapshot(folder), before);
 });
 
+/** Rewrite every carried file the way Git for Windows checks it out with core.autocrlf=true: LF to CRLF in a file with no CR. */
+function autocrlfCheckout(root) {
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else {
+        const text = fs.readFileSync(p, "latin1");
+        if (text.includes("\n") && !text.includes("\r")) fs.writeFileSync(p, text.replace(/\n/g, "\r\n"), "latin1");
+      }
+    }
+  };
+  walk(path.join(root, "extension"));
+}
+
+test("a carried build git checked out with CRLF (core.autocrlf=true on Windows) is written as its published LF bytes", () => {
+  const { home, folder } = oneFolder("0.11.4");
+  const root = carriedBuild("0.11.5", { tamper: (meta, r) => autocrlfCheckout(r) });
+  assert.match(fs.readFileSync(path.join(root, "extension", "background.js"), "utf8"), /\r\n/, "the fixture really is CRLF");
+  const { status } = runIn(home, root);
+  assert.equal(status.action, "updated");
+  assert.equal(status.carried_crlf_restored, 3, "manifest.json, background.js and selfreload.js; the icon has no line ending");
+  const after = snapshot(folder);
+  assert.equal(after["manifest.json"], manifest("0.11.5"));
+  assert.equal(after["background.js"], "// build 0.11.5\n");
+  assert.equal(after["selfreload.js"], "// new in 0.11.5\n");
+  assert.equal(after["icons/icon16.png"], "png-0.11.5");
+  assert.equal(Object.values(after).some((t) => t.includes("\r")), false, "no CR reaches Chrome's folder");
+});
+
+test("⛔ a CRLF checkout that differs in anything but line endings is still a mismatch: nothing is written", () => {
+  const { home, folder } = oneFolder("0.11.4");
+  const before = snapshot(folder);
+  const root = carriedBuild("0.11.5", {
+    tamper: (meta, r) => {
+      autocrlfCheckout(r);
+      fs.writeFileSync(path.join(r, "extension", "background.js"), "// build 0.11.5 changed\r\n");
+    },
+  });
+  const { status } = runIn(home, root);
+  assert.equal(status.action, "carried-invalid");
+  assert.match(status.error, /sha256 mismatch: background\.js/);
+  assert.deepEqual(snapshot(folder), before);
+});
+
+test("a file published WITH CRLF is written exactly as published, never converted", () => {
+  const { home, folder } = oneFolder("0.11.4");
+  const { status } = runIn(home, carriedBuild("0.11.5", { files: { "notes.txt": "one\r\ntwo\r\n" } }));
+  assert.equal(status.action, "updated");
+  assert.equal(status.carried_crlf_restored, undefined);
+  assert.equal(snapshot(folder)["notes.txt"], "one\r\ntwo\r\n");
+});
+
 test("⛔ a carried build that is not the tracker, or not extension.json's version, or reaches outside: nothing is written", () => {
   const cases = [
     ["another key", carriedBuild("0.11.5", { key: OTHER_KEY }), /tracker's key/],
