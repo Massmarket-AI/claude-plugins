@@ -6545,12 +6545,12 @@ describe('0.7.44 (Rob, 11-10: "we always want it to be parent threads"): client 
   })
 })
 
-// ======================================================================== 0.7.51
+// ======================================================================== 0.7.53
 
-// (0.7.51, Rob approved 2026-11-11: "You're good to go on all those recommendations") Working manually in browser: a person's browser
+// (0.7.53, Rob approved 2026-11-11: "You're good to go on all those recommendations") Working manually in browser: a person's browser
 // minutes on a client beside that client's row, "needs a client" with one tap to answer, and the end-of-day list. Every client, site
 // and person here is made up.
-describe('0.7.51: Working manually in browser', () => {
+describe('0.7.53: Working manually in browser', () => {
   const MIN = 60_000
   const iso = (ms: number) => new Date(ms).toISOString()
   const DUNE = '44444444-4444-4444-8444-444444444444'

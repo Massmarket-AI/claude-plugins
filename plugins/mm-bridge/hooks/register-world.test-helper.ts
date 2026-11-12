@@ -162,9 +162,9 @@ export type WorldOptions = {
   scopeProposal?: (body: Record<string, unknown>) => { status: number; body?: unknown } | 'network'
   /** (0.7.34) How OW answers `GET /team-now`. Left out, 404: an OW without the route yet. */
   teamNow?: () => { status: number; body?: unknown } | 'network'
-  /** (0.7.51) How OW answers `GET /browser-now`. Left out, 404: an OW without the route yet. */
+  /** (0.7.53) How OW answers `GET /browser-now`. Left out, 404: an OW without the route yet. */
   browserNow?: () => { status: number; body?: unknown } | 'network'
-  /** (0.7.51) How OW answers `POST /browser-answer`. Left out, 404. */
+  /** (0.7.53) How OW answers `POST /browser-answer`. Left out, 404. */
   browserAnswer?: (body: Record<string, unknown>) => { status: number; body?: unknown } | 'network'
   /** (0.7.23) How OW answers the sync's pin report (`POST /bridge-pins`): a status, or no answer at all. Left out, 404: an OW without the route yet. */
   bridgePins?: (body: PinReport) => { status: number; body?: unknown } | 'network'
@@ -305,7 +305,7 @@ export function world(on: On, opts: WorldOptions = {}) {
   const scopePosts: Array<{ url: string; method: string; headers: Record<string, string>; body: Record<string, unknown> }> = []
   /** (0.7.23) Every pin report the bridge sent, as it was sent. */
   const pinPosts: Array<{ method: string; headers: Record<string, string>; body: PinReport }> = []
-  /** (0.7.51) Every answer to a browser question the bridge sent, as it was sent. */
+  /** (0.7.53) Every answer to a browser question the bridge sent, as it was sent. */
   const browserPosts: Array<{ method: string; headers: Record<string, string>; body: Record<string, unknown> }> = []
   on('http.fetch', async (_$, e) => {
     fetched.push(e.url)
@@ -937,7 +937,7 @@ export const trackPart = (drawn: string[]): string[] => {
 }
 /** Every fetch the bridge made is a read of one of its own GET routes: never a pickup, a hold or a resolve. */
 // (0.7.23) and the sync's pin report (`/bridge-pins`): what is pinned and what should be, never a pickup, a hold or a claim
-// (0.7.51) and Working manually in browser (`/browser-now`): its read records a new stretch's question, never an answer
+// (0.7.53) and Working manually in browser (`/browser-now`): its read records a new stretch's question, never an answer
 export const onlyReads = (w: { fetched: string[] }) =>
   w.fetched.every(u => /\/api\/ext\/(?:closeout\?|skill-map$|client-time\?project_ids=|reply-package\?package_id=[0-9a-f-]+&format=pickup$|team-ask\?|bridge-pins$|team-now$|browser-now$)/.test(u))
 export const skill = async ($: Engine, name: string, over: Record<string, unknown> = {}) => $.tool.call({ tool: 'Skill', skill: name, ...over } as never)

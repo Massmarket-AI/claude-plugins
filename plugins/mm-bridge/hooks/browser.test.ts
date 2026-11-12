@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { ASK_HEADING, BROWSER_HEADING, PROFILE_TIP, askText, blockLineText, confirmHeading, confirmText, parseBrowserNow, rowLineText, savedText, withoutAnswered } from './browser'
 
-// (0.7.51, Rob approved 2026-11-11: "You're good to go on all those recommendations") Working manually in browser: OW's answer as the
+// (0.7.53, Rob approved 2026-11-11: "You're good to go on all those recommendations") Working manually in browser: OW's answer as the
 // bridge keeps it, and every word the pane draws for it. Every client, site and person below is made up.
 
 const NOW = Date.parse('2026-11-11T19:00:00Z')
@@ -25,7 +25,7 @@ const answer = (over: Record<string, unknown> = {}) => ({
   ok: true, as_of: iso(NOW), viewer: { email: 'builder-a@example.com', founder: false }, lines: [line()], question: ask(), confirm: [], questions: 'on', ...over,
 })
 
-describe('0.7.51: OW\'s browser-now answer, as the bridge keeps it', () => {
+describe('0.7.53: OW\'s browser-now answer, as the bridge keeps it', () => {
   test('a line, the question and its choices: the short client name, the site, the title, the times', async () => {
     const read = parseBrowserNow(answer())
     expect(read?.founder).toBe(false)
@@ -96,7 +96,7 @@ describe('0.7.51: OW\'s browser-now answer, as the bridge keeps it', () => {
   })
 })
 
-describe('0.7.51: the words the pane draws', () => {
+describe('0.7.53: the words the pane draws', () => {
   const read = parseBrowserNow(answer({ lines: [line(), line({ no_thread: false, title: '' })] }))
   const [noThread, covered] = read?.lines ?? []
 

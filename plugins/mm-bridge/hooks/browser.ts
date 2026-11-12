@@ -1,4 +1,4 @@
-// Pure "Working manually in browser" logic for the Massmarket bridge (0.7.51): no `$`, so tests can call it directly.
+// Pure "Working manually in browser" logic for the Massmarket bridge (0.7.53): no `$`, so tests can call it directly.
 //
 // Rob approved the design on 2026-11-11 ("You're good to go on all those recommendations"). The time tracker records a client for
 // each browser minute (the HighLevel sub-account on screen, the Gmail thread, the Drive doc, the Meta ad account, the client's own

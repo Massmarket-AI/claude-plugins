@@ -239,7 +239,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.51'
+export const VERSION = '0.7.53'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -250,7 +250,7 @@ const BAND = { plugin: 'mm-bridge', key: 'band' } as const
 const FOLDS = { plugin: 'mm-bridge', key: 'folds' } as const
 /** (0.7.34) The pane's Team now, from the store (`drawTeam`). */
 const TEAMNOW = { plugin: 'mm-bridge', key: 'teamNow' } as const
-/** (0.7.51) The pane's Working manually in browser part, from the store (`drawBrowser`). */
+/** (0.7.53) The pane's Working manually in browser part, from the store (`drawBrowser`). */
 const BROWSER = { plugin: 'mm-bridge', key: 'browser' } as const
 /** (0.7.38) The ready reply packages this thread's pane listed last (`revealNewPackages`). */
 const SEEN_PACKAGES = { plugin: 'mm-bridge', key: 'seenPackages' } as const
@@ -353,11 +353,11 @@ const ALIVE_MS = 5 * 60_000
 const TEAM_OPEN_MS = 60_000
 const TEAM_CLOSED_MS = 5 * 60_000
 const TEAM_SLACK_MS = 10_000
-/** (0.7.51) How often the lease holder reads Working manually in browser (`browserPass`): the lines are of the last 15 minutes. */
+/** (0.7.53) How often the lease holder reads Working manually in browser (`browserPass`): the lines are of the last 15 minutes. */
 const BROWSER_EVERY_MS = 3 * 60_000
-/** (0.7.51) A browser line older than this is not drawn, whatever the last read said (a lease holder that stopped reading). */
+/** (0.7.53) A browser line older than this is not drawn, whatever the last read said (a lease holder that stopped reading). */
 const BROWSER_LINE_MS = 15 * 60_000
-/** (0.7.51) How long an answered question stays left out here, until OW's reads agree; and the most kept. */
+/** (0.7.53) How long an answered question stays left out here, until OW's reads agree; and the most kept. */
 const BROWSER_ANSWERED_MS = 24 * 3_600_000
 const BROWSER_ANSWERED_MAX = 50
 /** (0.7.34) Team now on a pane whose OW has no such route yet. */
@@ -4107,9 +4107,41 @@ let threadDrawnAt = 0
 /** (0.7.48) When this thread's current turn of the main conversation began; null until one has in this process. */
 let turnBeganAt: number | null = null
 
+/** (0.7.52) Whether a turn of the main conversation is under way in this process. */
+let turnOpen = false
+
 /** (0.7.48) The turn under way began now. */
 async function noteTurnBegan($: EngineInterface): Promise<void> {
   turnBeganAt = await $.clock.now()
+  turnOpen = true
+}
+
+/** (0.7.52) The turn under way ended, however it ended. */
+function noteTurnEnded(): void {
+  turnOpen = false
+}
+
+/**
+ * (0.7.52) The line that took the card is drawn as a summary now (Rob, 2026-11-11: "Let's finish those", the gap #98 left open). The desktop
+ * app's default view can show a summary in place of a reply line, the `isSummary` row; a card under the line is not drawn there, so the
+ * line gives the card back: the call's row draws it again, and a later line of the same tag may take it. A card given back after the turn
+ * has ended is owed to the screen again (`owe`'s check), so the thread prints the page if no line shows it within SHOWN_WAIT_MS of a
+ * screen drawing the thread; while the turn is under way, the turn's end owes it.
+ */
+async function releaseLine($: EngineInterface, row: string): Promise<void> {
+  const calls = [...lineOfCall].filter(([, line]) => line === row).map(([call]) => call)
+  if (!calls.length) return
+  for (const call of calls) lineOfCall.delete(call)
+  try {
+    $.ui.invalidate('ui.render')
+  } catch {
+    // the call's row draws the card at its next draw
+  }
+  if (turnOpen) return
+  const asked = await askedOf($)
+  if (!asked || !calls.includes(asked.toolUseId) || drawFailTold.has(asked.label)) return
+  owedCard = { toolUseId: asked.toolUseId, label: asked.label, since: asked.at, armed: false }
+  armShown($)
 }
 
 /** (0.7.48) A turn of the main conversation ended with an answer: the ready answer it got, if any, is owed to the screen. */
@@ -4166,6 +4198,7 @@ export function resetShown(): void {
   owedCard = null
   threadDrawnAt = 0
   turnBeganAt = null
+  turnOpen = false
 }
 
 /** (0.7.40) This row fell back to the engine's: unlisted, and a row that was listed asks for one redraw, so its answer shows again. */
@@ -5110,7 +5143,7 @@ async function tick($: EngineInterface): Promise<void> {
       }
       // (0.7.34) Team now, for every thread here
       await teamPass($)
-      // (0.7.51) Working manually in browser, for every thread here
+      // (0.7.53) Working manually in browser, for every thread here
       await browserPass($)
       // (0.5.19, Rob 10-20) Remote Control follows the pin while /mm rc is on: off, it asks the app nothing
       await rcFollowsPin($).catch(err => noteFailure($, 'remote control', err))
@@ -5130,7 +5163,7 @@ async function tick($: EngineInterface): Promise<void> {
     // R5: this thread's own chips: the ones no longer wanted withdrawn, the missing ones minted
     await chipsTick($).catch(() => {})
     await refreshBand($)
-    // (0.7.51) this thread's Working manually in browser part, from the store (after the chips: their order is as before 0.7.51)
+    // (0.7.53) this thread's Working manually in browser part, from the store (after the chips: their order is as before 0.7.53)
     await drawBrowser($)
     // a failed refresh's line, once a sync since has worked (L3)
     await clearRefreshFailed($)
@@ -8779,12 +8812,12 @@ async function drawTeam($: EngineInterface): Promise<void> {
 }
 
 /**
- * (0.7.51) What the bridge keeps of Working manually in browser (`mm.browser`): the last good read, when it was asked, while OW has
+ * (0.7.53) What the bridge keeps of Working manually in browser (`mm.browser`): the last good read, when it was asked, while OW has
  * no such route until when not to ask, and the questions answered on this computer (by id, when) until OW's reads agree.
  */
 type BrowserKept = { asked?: number; got?: number; read?: BrowserRead; missingUntil?: number; answered?: Record<string, number> }
 
-/** (0.7.51) The answers on record still worth leaving out: the last BROWSER_ANSWERED_MS, at most BROWSER_ANSWERED_MAX, newest kept. */
+/** (0.7.53) The answers on record still worth leaving out: the last BROWSER_ANSWERED_MS, at most BROWSER_ANSWERED_MAX, newest kept. */
 function answeredKept(answered: unknown, now: number): Record<string, number> {
   const all = answered && typeof answered === 'object' && !Array.isArray(answered) ? (answered as Record<string, unknown>) : {}
   const kept = Object.entries(all)
@@ -8795,7 +8828,7 @@ function answeredKept(answered: unknown, now: number): Record<string, number> {
 }
 
 /**
- * (0.7.51, Rob approved 2026-11-11) Working manually in browser from OW (`GET /api/ext/browser-now`), into the store for every thread
+ * (0.7.53, Rob approved 2026-11-11) Working manually in browser from OW (`GET /api/ext/browser-now`), into the store for every thread
  * here: on the lease holder's tick every BROWSER_EVERY_MS, and at once (`force`) after an answer. OW decides what this token sees (a
  * teammate: their own lines and questions; the founder: everyone's lines, never a question) and records a new stretch's question as it
  * answers. A failure keeps the last read; a 404 or 405 (an OW without the route yet) is not asked again for PIN_REPORT_MISSING_MS, and
@@ -8837,7 +8870,7 @@ async function browserPass($: EngineInterface, force = false): Promise<void> {
 }
 
 /**
- * (0.7.51) This thread's pane catches up with the store's Working manually in browser: the last read, the questions answered here
+ * (0.7.53) This thread's pane catches up with the store's Working manually in browser: the last read, the questions answered here
  * left out, lines older than BROWSER_LINE_MS dropped, and this thread's own presses kept. A redraw only when something changed.
  */
 async function drawBrowser($: EngineInterface): Promise<void> {
@@ -8867,7 +8900,7 @@ async function drawBrowser($: EngineInterface): Promise<void> {
   }
 }
 
-/** (0.7.51) This thread's presses on the browser part: one question's busy mark and error, set or cleared. */
+/** (0.7.53) This thread's presses on the browser part: one question's busy mark and error, set or cleared. */
 async function markBrowser($: EngineInterface, id: string, busy: boolean, error?: string): Promise<void> {
   const { value } = await $.state.get(BROWSER)
   const b = { ...(value?.busy ?? {}) }
@@ -8882,14 +8915,14 @@ async function markBrowser($: EngineInterface, id: string, busy: boolean, error?
   await $.state.set(BROWSER, { ...next, ...(Object.keys(b).length ? { busy: b } : {}), ...(Object.keys(e).length ? { errors: e } : {}) } satisfies MmBrowser)
 }
 
-/** (0.7.51) On a question whose answer got no answer back, or failed on the way. */
+/** (0.7.53) On a question whose answer got no answer back, or failed on the way. */
 const BROWSER_NO_ANSWER = "Couldn't save: no answer. Try again in a minute."
 
-/** (0.7.51) The questions whose answer is on its way from this process: a second press on one does nothing. */
+/** (0.7.53) The questions whose answer is on its way from this process: a second press on one does nothing. */
 const answering = new Set<string>()
 
 /**
- * (0.7.51) A press on a "needs a client" question, or on a stretch of the end-of-day list: `POST /api/ext/browser-answer {question_id,
+ * (0.7.53) A press on a "needs a client" question, or on a stretch of the end-of-day list: `POST /api/ext/browser-answer {question_id,
  * answer, project_id?, from}`. On 200 the question leaves the pane here at once and in every thread's next draw (`mm.browser.answered`),
  * the pane says what was saved (and, the first Personal of the day, the Chrome profile tip), and the part is read again. Anything else:
  * the question says what OW answered, and stays. The person's press alone: nothing reaches a client, and nothing goes to Claude.
@@ -10088,6 +10121,7 @@ export const register: Register = on => {
     const done = await next(e)
     // the main conversation's turns only: a subagent's turn says nothing of this thread's work
     if ((e as { agentId?: unknown }).agentId) return done
+    noteTurnEnded()
     // (0.7.36) the thread has stopped, unless a background sub-agent is at work: what this turn got `card ready` for, or printed the page of, is checked now, and the signature box opens
     await turnEnded($, e.reason === 'answer').catch(() => {})
     // (0.7.48) a card this turn got `card ready` for is owed to the screen: under the thread's line, or the thread prints the page (`owe`)
@@ -10374,7 +10408,7 @@ export const register: Register = on => {
     const teamOpen = folds?.teamNow ?? panel.teamNow ?? false
     const { value: teamNow } = await $.state.get(TEAMNOW)
     const teamClock = await $.clock.now()
-    // (0.7.51) Working manually in browser: the lines (each beside its client's row, else in one short block), the one open
+    // (0.7.53) Working manually in browser: the lines (each beside its client's row, else in one short block), the one open
     // question and the end-of-day list. ⛔ Never a question in the founder's pane, whatever is stored.
     const { value: browser } = await $.state.get(BROWSER)
     const browserLines = Array.isArray(browser?.lines) ? browser.lines : []
@@ -10382,7 +10416,7 @@ export const register: Register = on => {
     const browserConfirm = browser && !browser.founder && Array.isArray(browser.confirm) ? browser.confirm.filter(q => q.id !== browserAsk?.id) : []
     const browserBusy = browser?.busy ?? {}
     const browserErrors = browser?.errors ?? {}
-    // (0.7.51) the first drawn row of each client the browser lines name, filled once the rows drawn are known (below)
+    // (0.7.53) the first drawn row of each client the browser lines name, filled once the rows drawn are known (below)
     const browserHome = new Map<string, Row>()
     const people = queue && Array.isArray(queue.people) ? queue.people : []
     const routeTo = queue && Array.isArray(queue.routeTo) ? queue.routeTo : []
@@ -10417,7 +10451,7 @@ export const register: Register = on => {
         {row.pin && !row.pin.pinned && row.pin.why !== 'no_thread' ? <Text color="warning">{rowPinWords(row.pin)}</Text> : null}
         {rowDetail(row) ? <Text dimColor>{rowDetail(row)}</Text> : null}
         {row.note ? <Text dimColor>{row.note}</Text> : null}
-        {/* (0.7.51) Working manually in browser, beside the client's row: the site, the page title, and whether a thread covers it */}
+        {/* (0.7.53) Working manually in browser, beside the client's row: the site, the page title, and whether a thread covers it */}
         {browserHome.get(row.projectId) === row
           ? browserLines
               .filter(l => l.projectId === row.projectId)
@@ -10515,7 +10549,7 @@ export const register: Register = on => {
     const groups = hasList && queue ? foldGroups(queue) : []
     // (0.7.21, for the founder) Team · late: its button last on the line of groups, and once opened, below the other groups
     const team = hasList && queue ? teamOf(queue.team) : []
-    // (0.7.51) a browser line goes under its client's first drawn row: Needs you now while open, then the groups opened; the rest in one block
+    // (0.7.53) a browser line goes under its client's first drawn row: Needs you now while open, then the groups opened; the rest in one block
     if (hasList && queue) {
       const drawnRows = [...(needsOpen ? rowGroups(queue.rows).flatMap(g => g.rows.map(r => r.row)) : []), ...groups.filter(g => folds?.[g.key]).flatMap(g => g.rows.map(r => r.row))]
       for (const r of drawnRows) if (!browserHome.has(r.projectId)) browserHome.set(r.projectId, r)
@@ -10566,7 +10600,7 @@ export const register: Register = on => {
             {cardShown ? null : <Markdown text={client.text} />}
           </Box>
         ) : null}
-        {/* (0.7.51) "needs a client": one tap answers it, never in the founder's pane */}
+        {/* (0.7.53) "needs a client": one tap answers it, never in the founder's pane */}
         {browserAsk ? (
           <Box key="mm-browser-ask" flexDirection="column" marginBottom={1}>
             <Text bold>{ASK_HEADING}</Text>
@@ -10671,7 +10705,7 @@ export const register: Register = on => {
             ))}
           </Box>
         ) : null}
-        {/* (0.7.51) the end-of-day list: from 4 PM New York, today's browser stretches with no client yet, closed until opened */}
+        {/* (0.7.53) the end-of-day list: from 4 PM New York, today's browser stretches with no client yet, closed until opened */}
         {browserConfirm.length && folds?.confirm ? (
           <Box key="mm-confirm" flexDirection="column" marginTop={1}>
             <Text bold dimColor>
@@ -10810,8 +10844,12 @@ export const register: Register = on => {
     await noteThreadDrawn($)
     if (e.surface !== 'desktop') return next(e)
     const text = String((e.props as { text?: unknown }).text ?? '')
-    if (!PACKAGE_TAG.test(text)) return next(e)
     const row = `${e.surface}:${e.requestId}`
+    // (0.7.52) a summary in the line's place, or a line that no longer names a tag, draws no card: one that held the card gives it back
+    if ((e.props as { isSummary?: unknown }).isSummary === true || !PACKAGE_TAG.test(text)) {
+      await releaseLine($, row).catch(() => {})
+      return next(e)
+    }
     let took = ''
     try {
       const asked = await askedOf($)
