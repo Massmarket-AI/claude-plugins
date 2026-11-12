@@ -27,7 +27,7 @@ describe('0.7.33 the card against the page: real pairs, from the two renderers t
     expect(pageGap(SMS_PAGE, realTree())).toBe('')
   })
 
-  for (const name of ['everything', 'source links', "rob's mail, plan not approved", "rob's mail, plan approved", 'html email', 'no reply', 'closed no reply', 'later messages', 'ticket check unreadable', 'follow-ups live', 'follow-ups switched off', 'tickets from the call', 'tickets from the call, all decided', 'tickets from the call, unread', 'tickets from the call, ticket check off', 'ticket gap under enforce, a teammate', "ticket gap under enforce, rob's machine", 'quotes', 'quotes, revised', 'date moves', 'date moves, ticket check off', 'answered', 'every ticket answered']) {
+  for (const name of ['everything', 'source links', "rob's mail, plan not approved", "rob's mail, plan approved", 'html email', 'no reply', 'closed no reply', 'later messages', 'ticket check unreadable', 'follow-ups live', 'follow-ups switched off', 'tickets from the call', 'tickets from the call, all decided', 'tickets from the call, unread', 'tickets from the call, ticket check off', 'ticket gap under enforce, a teammate', "ticket gap under enforce, rob's machine", 'quotes', 'quotes, revised', 'date moves', 'date moves, ticket check off', 'answered', 'every ticket answered', 'quotes, columns']) {
     test(`${name}: the page and the card agree`, () => {
       const { page, tree } = pair(name)
       expect(contentPieces(page).length).toBeGreaterThan(5)
@@ -312,6 +312,99 @@ describe('0.7.43 what the quote says: each block, line and row of the page again
     // and with the hash put aside, the changed amount itself is what the check finds
     expect(pageGap(after.page.replaceAll(after.tree.label, before.tree.label), before.tree)).toBe(MISSING('$2,497'))
     expect(pageGap(after.page, after.tree)).toBe('')
+  })
+})
+
+// (0.7.54) Get Your Funds, 2026-11-11: OW #731 prints a table it read from the PDF under its own header, one cell a column, and the
+// card draws that header (`rp-quote-cols`) and one `rp-quote-cell` a column. Before, the header line was read as a row and every row
+// of N cells as a mismatch, so such a package answered card not ready.
+describe('0.7.54 a quote table read from the PDF: its own header and its own cells against the card', () => {
+  const copy = (t: MmCardTree) => JSON.parse(JSON.stringify(t)) as MmCardTree
+  const box = (t: MmCardTree) => ((t.nodes.find(n => /(?:^|\s)rp-quotes(?:\s|$)/.test(n.c ?? '')) as MmCardNode).k ?? []).find(k => k.c === 'rp-quote') as MmCardNode
+  const parts = (t: MmCardTree, cls: string) => (box(t).k ?? []).filter(k => new RegExp(`(?:^|\\s)${cls}(?:\\s|$)`).test(k.c ?? ''))
+  /** The tree with its first match of `from` replaced: a replacer, so a `$` in the words is a `$`. */
+  const swap = (t: MmCardTree, from: string, to: string) => JSON.parse(JSON.stringify(t).replace(from, () => to)) as MmCardTree
+  const HEAD = '| # | Line | Estimate | Fixes (25%) | Hours | Milestone |'
+  const ROW_1 = '| 1 | Booking flow \\| two calendars | 1.5 | 0.375 | 1.875 | M1 |'
+
+  test('the page prints both tables under their own headers, the card draws them, and they agree', () => {
+    const { page, tree } = pair('quotes, columns')
+    expect(page).toContain(`\n${HEAD}\n|---|---|---|---|---|---|\n`)
+    expect(page).toContain('\n| Optional | Estimate | Hours | With the build | On its own |\n|---|---|---|---|---|\n')
+    expect(page).toContain('| 2 | Missed-call text-back | 0.5 | 0.125 | 0.625 | M2 |')
+    expect(parts(tree, 'rp-quote-cols').length).toBe(2)
+    expect(parts(tree, 'rp-quote-row').length).toBe(6)
+    expect(pageGap(page, tree)).toBe('')
+  })
+
+  test('a row the card leaves out is a gap, in the middle of a table or at its end', () => {
+    const { page, tree } = pair('quotes, columns')
+    const middle = copy(tree)
+    box(middle).k = (box(middle).k ?? []).filter(k => !JSON.stringify(k).includes('Missed-call text-back'))
+    expect(pageGap(page, middle)).toBe(MISSING('2'))
+    const last = copy(tree)
+    box(last).k = (box(last).k ?? []).filter(k => !JSON.stringify(k).includes('A row the PDF left short'))
+    expect(pageGap(page, last)).toBe('the page holds more rows in quote block 1 than the card (4)')
+    const more = copy(tree)
+    box(more).k = [...(box(more).k ?? []), parts(more, 'rp-quote-row').at(-1) as MmCardNode]
+    expect(pageGap(page, more)).toBe('the page holds 6 rows in quote block 1, the card 7')
+  })
+
+  test('a changed cell is a gap, on the card or on the page, and so are two cells in each other\'s place', () => {
+    const { page, tree } = pair('quotes, columns')
+    // the misreading that started it: 0.625 h shown as 0.63
+    expect(pageGap(page, swap(tree, '"s":"0.625"', '"s":"0.63"'))).toBe(MISSING('0.625'))
+    expect(pageGap(page.replace('| 0.5 | 0.125 | 0.625 | M2 |', '| 0.5 | 0.125 | 0.63 | M2 |'), tree)).toBe(MISSING('0.63'))
+    expect(pageGap(page, swap(tree, '"s":"$75"', '"s":"$57"'))).toBe(MISSING('$75'))
+    expect(pageGap(page, swap(tree, 'Booking flow | two calendars', 'Booking flow two calendars'))).toBe(MISSING('Booking flow | two calendars'))
+    expect(pageGap(page.replace(ROW_1, '| 1 | Booking flow \\| two calendars | 0.375 | 1.5 | 1.875 | M1 |'), tree)).toBe(MISSING('0.375'))
+    // an empty cell is its dash on both sides
+    expect(pageGap(page.replace('| — | Build | 2 | 0.5 | 2.5 | — |', '| — | Build | 2 | 0.5 | 2.5 | M1 |'), tree)).toBe(MISSING('M1'))
+  })
+
+  test('a cell the card lacks, or one more on it, is a gap', () => {
+    const { page, tree } = pair('quotes, columns')
+    const fewer = copy(tree)
+    const first = parts(fewer, 'rp-quote-row')[1] as MmCardNode
+    first.k = (first.k ?? []).filter(k => !JSON.stringify(k).includes('"M1"'))
+    expect(pageGap(page, fewer)).toBe(MISSING(ROW_1))
+    const more = copy(tree)
+    const row = parts(more, 'rp-quote-row')[1] as MmCardNode
+    row.k = [...(row.k ?? []), { c: 'rp-quote-cell', r: [{ s: 'M9' }] }]
+    expect(pageGap(page, more)).toBe(MISSING(ROW_1))
+  })
+
+  test('a page header the card lacks is a gap, and a card header the page lacks, or another word in one', () => {
+    const { page, tree } = pair('quotes, columns')
+    const headless = copy(tree)
+    box(headless).k = (box(headless).k ?? []).filter(k => k !== parts(headless, 'rp-quote-cols')[0])
+    expect(pageGap(page, headless)).toBe(MISSING(HEAD))
+    const second = page.replace('| Optional | Estimate | Hours | With the build | On its own |\n|---|---|---|---|---|\n', '')
+    expect(second).not.toBe(page)
+    expect(pageGap(second, tree)).toBe('the card holds a table header the page does not (Optional | Estimate | Hours | With the build | On its own)')
+    const extra = copy(tree)
+    box(extra).k = [...(box(extra).k ?? []), parts(extra, 'rp-quote-cols')[0] as MmCardNode]
+    expect(pageGap(page, extra)).toBe('the page holds 2 table headers in quote block 1, the card 3')
+    expect(pageGap(page, swap(tree, '"s":"Fixes (25%)"', '"s":"Fixes"'))).toBe(MISSING('Fixes (25%)'))
+    expect(pageGap(page.replace(HEAD, '| # | Line | Estimate | Fixes (25%) | Hours |'), tree)).toBe(MISSING('| # | Line | Estimate | Fixes (25%) | Hours |'))
+  })
+
+  test('a card drawn before OW read the columns, four cells a row and no header, is not ready', () => {
+    const { page, tree } = pair('quotes, columns')
+    const old = copy(tree)
+    const four = (): MmCardNode => ({ c: 'rp-quote-row', k: ['no', 'line', 'hours', 'amt'].map(c => para('—', `rp-quote-${c}`)) })
+    box(old).k = (box(old).k ?? []).filter(k => !/\brp-quote-cols\b/.test(k.c ?? '')).map(k => (/\brp-quote-row\b/.test(k.c ?? '') ? four() : k))
+    expect(parts(old, 'rp-quote-row').length).toBe(6)
+    expect(pageGap(page, old)).toBe(MISSING(HEAD))
+    // and a page row of N cells against a row of the four: the counts differ
+    expect(pageGap(page.replace(`${HEAD}\n|---|---|---|---|---|---|\n`, ''), old)).toBe(MISSING('| Phase 1 · the build | — | — | — | — | — |'))
+  })
+
+  test('a cell or a header word that reads like a state line is no state line on either side', () => {
+    const { page, tree } = pair('quotes, columns')
+    const said = page.replace('| Review requests |', '| Approved, review requests |').replace('| Optional | Estimate |', '| Approved, optional | Estimate |')
+    const drawn = swap(swap(tree, '"s":"Review requests"', '"s":"Approved, review requests"'), '"s":"Optional"', '"s":"Approved, optional"')
+    expect(pageGap(said, drawn)).toBe('')
   })
 })
 

@@ -2898,4 +2898,36 @@ describe('0.7.43 the quote view: each row of a quote PDF on one line of four cel
     expect(rowsOf(draw('everything'))).toEqual([])
     expect(texts(draw('everything')).join('\n')).not.toContain('What the quote says')
   })
+
+  // (0.7.54) OW #731: a table read from the PDF draws under its own header, one cell a column, the header and rows lined up
+  test('a table read from the PDF: its header on one line, each row one line of its own cells, the columns shared', () => {
+    for (const [surface, els] of [['desktop', ELS], ['terminal', { Box: 'Box', Text: 'Text' }]] as const) {
+      const drawn = draw('quotes, columns', els)
+      const lines = all(drawn).filter(e => e.type === 'Box' && e.props?.flexDirection === 'row' && kids(e).length >= 5 && kids(e).every(k => k.type === 'Box'))
+      expect(lines.map(r => kids(r).map(k => texts(k).join(''))), surface).toEqual([
+        ['#', 'Line', 'Estimate', 'Fixes (25%)', 'Hours', 'Milestone'],
+        ['Phase 1 · the build', '—', '—', '—', '—', '—'],
+        ['1', 'Booking flow | two calendars', '1.5', '0.375', '1.875', 'M1'],
+        ['2', 'Missed-call text-back', '0.5', '0.125', '0.625', 'M2'],
+        ['—', 'Build', '2', '0.5', '2.5', '—'],
+        ['Optional', 'Estimate', 'Hours', 'With the build', 'On its own'],
+        ['Review requests', '0.5', '0.625', '$50', '$75'],
+        ['A row the PDF left short', '4', '—', '—', '—'],
+      ])
+      // the first table: Line has the longest cell, so it takes the room; every other column is as wide as its longest cell, up to 16
+      const [head, sub, one] = lines as [El, El, El]
+      for (const row of [head, sub, one]) {
+        expect(kids(row)[1]?.props, surface).toMatchObject({ flexGrow: 1, flexShrink: 1 })
+        expect(kids(row).filter((_, j) => j !== 1).map(k => k.props?.minWidth), surface).toEqual([16, 8, 11, 5, 9])
+      }
+      // the second: its first column takes the room
+      expect(kids(lines[5] as El)[0]?.props).toMatchObject({ flexGrow: 1, flexShrink: 1 })
+      expect(kids(lines[6] as El).slice(1).map(k => k.props?.minWidth)).toEqual([8, 5, 14, 10])
+      // the header muted and bold, a cell small, a subtotal row muted and slanted
+      expect(kids(kids(head)[3] as El)[0]?.props).toMatchObject({ weight: 'semibold', dimColor: true, size: 'footnote' })
+      expect(kids(kids(one)[4] as El)[0]?.props).toMatchObject({ size: 'footnote', tabular: true })
+      expect(kids(kids(one)[4] as El)[0]?.props?.italic).toBeUndefined()
+      expect(kids(kids(sub)[0] as El)[0]?.props).toMatchObject({ italic: true, dimColor: true })
+    }
+  })
 })
