@@ -15657,7 +15657,8 @@ describe('0.7.51: Working manually in browser', () => {
       'Working manually in browser',
       'Asif · Acme Roofing · app.gohighlevel.com · Workflows · no thread',
       'Asif · Dune Dental · dune.example',
-      'Updated 11:00 AM',
+      // the person's own clock (CI runs in UTC)
+      `Updated ${localClock(NOW)}`,
     ])
     await ui.unmount()
   })
