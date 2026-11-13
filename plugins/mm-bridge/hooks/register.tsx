@@ -239,7 +239,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.53'
+export const VERSION = '0.7.55'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -573,6 +573,8 @@ const SCHEDULED_RUN = 'is a scheduled task run'
 type Last = {
   at: number
   member: string
+  /** (0.7.55) The tag of the tracker token the feed was read with (`holderTag`, never the token): whose sync this is on a shared login (`lastIsHolders`). */
+  holder?: string
   /** (0.7.34) What the pin report said of each client that should be pinned, for the pane's marks. */
   rowPins?: Record<string, RowPin>
   /** The clients that need the person now: what pins, and what the header and the band count. */
@@ -1268,7 +1270,8 @@ class FeedReadError extends Error {
 }
 
 async function fetchFeed($: EngineInterface): Promise<Feed> {
-  const init = { headers: { Authorization: `Bearer ${await token($)}`, ...CLIENT_HEADER } }
+  const held = await token($)
+  const init = { headers: { Authorization: `Bearer ${held}`, ...CLIENT_HEADER } }
   // Mail back to 24 business hours before the list's floor, at least 168 and at most 720 business hours
   // (mailLookbackHours, from this fetch's own now): it asks for 168 until Thu 2026-10-22 12:00 AM ET, and more
   // only after that, once OW takes up to 720 (an OW that still caps at 168 answers 400)
@@ -1283,9 +1286,14 @@ async function fetchFeed($: EngineInterface): Promise<Feed> {
   // you": read as an empty feed it would take every pin off and rename every thread "clear".
   if (!feed || typeof feed !== 'object' || !('tickets' in feed || 'mail' in feed)) throw failed()
   await keepPace($, feed, now)
+  // (0.7.55) whose token it was read with, for the sync record made from it (`storeLast`)
+  feedHolder.set(feed, sigHash(held))
   recent = { at: await $.clock.now(), feed, wrote: '' }
   return feed
 }
+
+/** (0.7.55) The tag of the token each feed this session read was read with (`holderTag`): `Last.holder`. */
+const feedHolder = new WeakMap<Feed, string>()
 
 /**
  * (0.7.27) ⛔ `pace` absent means OW could not read it this time, never that everyone is on track: the reader keeps what it had
@@ -2683,7 +2691,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     }
   }
   // (0.7.10) where the member's client threads run, by the app's list: the folder `kickoffs` starts a new one in
-  if (listed.complete) await noteFolder($, links, live, internal, now).catch(() => {})
+  if (listed.complete) await noteFolder($, links, live, internal, now, member).catch(() => {})
 
   // ⛔ (0.7.16, Rob 2026-11-03: "The profile switch routine is supposed to work in conjunction with the bridge and shouldn't
   // prevent the bridge from pinning or unpinning anything that should be pinned. I never pinned it myself. Of course, if I
@@ -3587,8 +3595,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
 /** The sync record a pass made, stored; and, when the pass was over the feed this session read last, kept with it (recentFeed). */
 
 async function storeLast($: EngineInterface, feed: Feed, last: Last): Promise<void> {
-  // (0.7.19) with the version that made it
-  const made: Last = { ...last, version: VERSION }
+  // (0.7.19) with the version that made it; (0.7.55) and the tag of the token its feed was read with
+  const holder = feedHolder.get(feed)
+  const made: Last = { ...last, version: VERSION, ...(holder ? { holder } : {}) }
   await $.store.set('mm.last', made)
   if (recent?.feed === feed) recent.wrote = JSON.stringify(made)
 }
@@ -3698,11 +3707,13 @@ async function syncPass($: EngineInterface): Promise<Pass> {
 async function syncedList($: EngineInterface, what: string): Promise<Last> {
   const now = await $.clock.now()
   const stored = await storeGet<Last | null>($, 'mm.last', null)
-  if (stored && !stored.error && Array.isArray(stored.items) && Number.isFinite(stored.at) && now - stored.at <= STALE_SYNC_MS) return stored
+  // ⛔ (0.7.55) on a shared login, never a list stored for the other person's token: synced again, and never fallen back to
+  const mine = await lastIsHolders($, stored)
+  if (mine && stored && !stored.error && Array.isArray(stored.items) && Number.isFinite(stored.at) && now - stored.at <= STALE_SYNC_MS) return stored
   try {
     return await sync($)
   } catch (err) {
-    if (!stored || !Array.isArray(stored.items)) throw err
+    if (!stored || !Array.isArray(stored.items) || !mine) throw err
     await noteFailure($, `${what}: the sync first`, err)
     return stored
   }
@@ -6439,7 +6450,11 @@ async function placeChip($: EngineInterface, me: string, projectId: string, at: 
  * client's chip where it gives only spawn_task (`startThread`).
  */
 async function startFor($: EngineInterface, it: QueueItem, pass: Pass, typed: boolean): Promise<string> {
-  if ((await sessionTools($)).start) return fillStart($, startWords(cleanName(it.client)), false)
+  const start = (await sessionTools($)).start
+  // ⛔ (0.7.55) on a shared login: a kickoff only into the current member's work folder, a card only from a thread in it
+  const refused = await sharedStartRefusal($, !start)
+  if (refused) return refused
+  if (start) return fillStart($, startWords(cleanName(it.client)), false)
   return startThread($, it, pass, typed)
 }
 
@@ -6558,7 +6573,10 @@ async function kickoffs($: EngineInterface, arg: string): Promise<string> {
   }
   const { want, held } = chosen
   const pass: Pass = { last, live: new Map(), pairs: {}, listed: true, unseen: new Set(), stored: true }
-  const cwd = await clientFolder($)
+  // ⛔ (0.7.55) on a shared login, only in a work folder of the current member's, or nothing at all
+  const folder = await pickFolder($)
+  if (folder.shared && !folder.dir && want.length) return folder.member === '' ? SHARED_NOT_SYNCED : SHARED_NO_FOLDER
+  const cwd = folder.dir
   const kicks: Kickoff[] = []
   const skipped: Array<{ client: string; why: string }> = []
   let reached = 0
@@ -6616,25 +6634,145 @@ async function pendingKickoffs($: EngineInterface, links: Readonly<Record<string
  *      `allowlist` only) that is not the app's own (its scratch folders);
  *   3. '' (no `cwd`): the app starts the thread in the asking thread's own folder, which a `cd` never moves.
  * Nothing read here leaves this computer; only the chosen folder goes into start_session's arguments.
+ * ⛔ (0.7.55) On a login two people share, only a folder of the bridge's current member: see `pickFolder`.
  */
 async function clientFolder($: EngineInterface): Promise<string> {
+  return (await pickFolder($)).dir
+}
+
+/**
+ * (0.7.55) The folder a new client thread starts in, and whether this login is shared (`shared`: some tracked folder is a
+ * work root, `workRoots`).
+ * ⛔ (0.7.55, 2026-11-13: on the cloud Mac two teammates share ONE macOS login, each with a work folder of their own marked
+ * by `.mm-root.json` and both folders in the hook's consent. Until 0.7.54 Start took `mm.folder`, which the app's one store
+ * per login keeps from whoever's client threads were seen last, or else the first tracked folder: a teammate who held the
+ * bridge started their client threads in the other person's folder, which booked the hours to that person and handed the
+ * bridge back to them on the new thread's SessionStart.) Where any tracked folder is a work root, only a root whose marker
+ * `email` is the bridge's current member (`currentMember`: the member OW named for the token held now) is used: `mm.folder`
+ * when it was noted for that member and lies inside one of their roots, else their first root. With no such root, or no
+ * member known for the token held now, `dir` is '' and nothing may be started (`SHARED_NO_FOLDER`). With no work root at
+ * all, as before 0.7.55.
+ */
+async function pickFolder($: EngineInterface): Promise<{ dir: string; shared: boolean; member?: string }> {
   const tracked = await trackedFolders($)
-  const seen = await storeGet<{ dir?: unknown } | null>($, 'mm.folder', null)
+  // (nothing tracked: no marker to read, and no step more than before 0.7.55)
+  const roots = tracked.length ? await workRoots($, tracked) : []
+  const seen = await storeGet<{ dir?: unknown; member?: unknown } | null>($, 'mm.folder', null)
   const dir = seen && isFolder(seen.dir) ? seen.dir : ''
-  if (dir && (!tracked.length || tracked.some(t => inFolder(dir, t)))) return dir
-  return tracked[0] ?? ''
+  if (!roots.length) {
+    if (dir && (!tracked.length || tracked.some(t => inFolder(dir, t)))) return { dir, shared: false }
+    return { dir: tracked[0] ?? '', shared: false }
+  }
+  const me = await currentMember($)
+  const mine = me ? roots.filter(r => r.email === me) : []
+  if (!mine.length) return { dir: '', shared: true, member: me }
+  const noted = typeof seen?.member === 'string' ? seen.member.toLowerCase() : ''
+  if (dir && noted === me && mine.some(r => inFolder(dir, r.dir))) return { dir, shared: true, member: me }
+  return { dir: mine[0]?.dir ?? '', shared: true, member: me }
+}
+
+/** (0.7.55) What a Start says on a shared login where none of the tracked work folders is the current member's. */
+export const SHARED_NO_FOLDER =
+  'Nothing was started: two people share this computer\'s login, and none of its work folders is marked (.mm-root.json "email") for the person whose tracker token the bridge holds now, so a new thread could land in someone else\'s folder. Open a thread in your own work folder first (that hands the bridge to you), then press Start again.'
+
+/** (0.7.55) What a Start says on a shared login before the bridge has synced for the token it holds now (just after a handover). */
+export const SHARED_NOT_SYNCED =
+  'Nothing was started: two people share this computer\'s login, and the bridge has not yet read the list for the person whose tracker token it holds now. Try again in a minute.'
+
+/** (0.7.55) What a Start says on a shared login when the card would open in this thread's folder, which is not the current member's. */
+export const SHARED_NOT_HERE =
+  'Nothing was started: two people share this computer\'s login, and a card started here opens in this thread\'s folder, which is not a work folder of the person whose tracker token the bridge holds now. Press Start from a thread in your own work folder.'
+
+/**
+ * (0.7.55) Why a Start must not go ahead on a shared login, or '' when it may: none of the work folders is the current
+ * member's (`SHARED_NO_FOLDER`); or `here` (a card, which opens where this thread runs) and this thread's folder is not
+ * inside one of them (`SHARED_NOT_HERE`). Always '' on a login with no work root.
+ */
+async function sharedStartRefusal($: EngineInterface, here: boolean): Promise<string> {
+  const pick = await pickFolder($)
+  if (!pick.shared) return ''
+  if (!pick.dir) return pick.member === '' ? SHARED_NOT_SYNCED : SHARED_NO_FOLDER
+  if (!here) return ''
+  const root = await $.session.root().catch(() => '')
+  const mine = (await workRoots($, await trackedFolders($))).filter(r => r.email === pick.member)
+  return typeof root === 'string' && root && mine.some(r => inFolder(root, r.dir)) ? '' : SHARED_NOT_HERE
+}
+
+/**
+ * (0.7.55) The tracked folders that are work roots of a login two people share: a folder holding `.mm-root.json` whose
+ * `root` is that folder, with its owner's address (`email`, lower case). Nothing else in the marker is read. [] on a
+ * login with none (every computer one person uses).
+ */
+async function workRoots($: EngineInterface, tracked: readonly string[]): Promise<Array<{ dir: string; email: string }>> {
+  const out: Array<{ dir: string; email: string }> = []
+  for (const dir of tracked) {
+    const win = /^[A-Za-z]:/.test(dir)
+    try {
+      const m = JSON.parse(await $.fs.read(`${dir.replace(/[\\/]+$/, '')}${win ? '\\' : '/'}.mm-root.json`)) as { root?: unknown; email?: unknown }
+      const email = typeof m?.email === 'string' ? memberText(m.email.trim()).toLowerCase() : ''
+      if (email && isFolder(m.root) && inFolder(m.root, dir) && inFolder(dir, m.root)) out.push({ dir, email })
+    } catch {
+      // no marker, or not one: not a work root
+    }
+  }
+  return out
+}
+
+/**
+ * (0.7.55) A short tag of the tracker token the bridge reads now (`sigHash`, never the token): which person's token a
+ * stored sync was made with (`Last.holder`). '' with no token.
+ */
+async function holderTag($: EngineInterface): Promise<string> {
+  try {
+    return sigHash(await token($))
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * (0.7.55) Whether the stored sync may stand for the person whose token the bridge holds now. On a login with no work root,
+ * always (as before 0.7.55). On a shared login only a sync made with this very token (`Last.holder`): right after the
+ * identity switch hands the bridge to the other person, the stored list is still the first person's, and a Start, a
+ * kickoff, a restore or a card must not act on it.
+ */
+async function lastIsHolders($: EngineInterface, last: Last | null, shared?: boolean): Promise<boolean> {
+  if (!last || shared === false) return true
+  if (shared === undefined && !(await workRoots($, await trackedFolders($))).length) return true
+  const tag = await holderTag($)
+  return Boolean(tag) && last.holder === tag
+}
+
+/** (0.7.55) The bridge's current member (lower case): the member of the stored sync when it was made with the token held now; '' otherwise. */
+async function currentMember($: EngineInterface): Promise<string> {
+  const last = await storeGet<Last | null>($, 'mm.last', null)
+  if (!last || typeof last.member !== 'string' || !last.member) return ''
+  const tag = await holderTag($)
+  return tag && last.holder === tag ? last.member.toLowerCase() : ''
 }
 
 /**
  * (0.7.10) The folder most of the member's linked client threads run in, as the app's list says (`AppThread.cwd`; a tie
  * goes to the thread used last), kept in the store (`mm.folder`) for `clientFolder`. Internal projects' threads do not
  * count. Nothing is written when no linked client thread names a folder, or the folder is the one on record.
+ * ⛔ (0.7.55) Kept with the member it was noted for (`member`), so a handover on a shared login never reuses the other
+ * person's; and on a shared login only threads inside the member's own work roots count (none at all when they have none).
  */
-async function noteFolder($: EngineInterface, links: Readonly<Record<string, string>>, live: ReadonlyMap<string, AppThread>, internal: ReadonlySet<string>, now: number): Promise<void> {
-  const count = new Map<string, { n: number; last: number }>()
+async function noteFolder($: EngineInterface, links: Readonly<Record<string, string>>, live: ReadonlyMap<string, AppThread>, internal: ReadonlySet<string>, now: number, member: string): Promise<void> {
+  const me = member.toLowerCase()
+  const found: AppThread[] = []
   for (const [pid, sid] of Object.entries(links)) {
     const t = live.get(sid)
     if (!t || t.isArchived || !t.cwd || internal.has(pid) || INTERNAL_PROJECTS.has(pid)) continue
+    found.push(t)
+  }
+  if (!found.length) return
+  // (read only once some thread names a folder: a sync with none reads nothing more than before)
+  const roots = await workRoots($, await trackedFolders($))
+  const mine = roots.filter(r => r.email === me)
+  const count = new Map<string, { n: number; last: number }>()
+  for (const t of found) {
+    if (!t.cwd || (roots.length && !mine.some(r => inFolder(t.cwd as string, r.dir)))) continue
     const c = count.get(t.cwd) ?? { n: 0, last: 0 }
     c.n++
     c.last = Math.max(c.last, Date.parse(t.lastActivityAt ?? '') || 0)
@@ -6642,8 +6780,8 @@ async function noteFolder($: EngineInterface, links: Readonly<Record<string, str
   }
   const best = [...count].sort((a, b) => b[1].n - a[1].n || b[1].last - a[1].last)[0]?.[0]
   if (!best) return
-  const was = await storeGet<{ dir?: unknown } | null>($, 'mm.folder', null)
-  if (was?.dir !== best) await $.store.set('mm.folder', { dir: best, at: now })
+  const was = await storeGet<{ dir?: unknown; member?: unknown } | null>($, 'mm.folder', null)
+  if (was?.dir !== best || (me && was?.member !== me)) await $.store.set('mm.folder', { dir: best, at: now, ...(me ? { member: me } : {}) })
 }
 
 /** (0.7.10) Whether `dir` is `root` or a folder inside it (a trailing separator, and case on Windows, aside). */
@@ -6766,6 +6904,9 @@ async function startAllWords($: EngineInterface): Promise<string> {
   if (!(await sessionTools($)).start) return 'Start all needs the app\'s start_session, which this thread does not have: press Start thread on each row.'
   const now = await $.clock.now()
   const last = await syncedList($, 'start all')
+  // ⛔ (0.7.55) on a shared login, nothing put in the box that kickoffs would refuse
+  const refused = await sharedStartRefusal($, false)
+  if (refused) return refused
   const links = await storeGet<Record<string, string>>($, 'mm.links', {})
   // (0.7.11) or a client off the list whose thread is in another Claude profile, with none of its own here
   if (!needingThreads(last, links, now).length && !awayOffList(last, links).length) return 'No client needs a new thread now.'
@@ -6986,6 +7127,7 @@ async function storedNeeds($: EngineInterface, now: number): Promise<Need[] | nu
   // (a lease that has run out names nobody: its holder has stopped ticking)
   const poller = lease && typeof lease.owner === 'string' && !(Number((lease as { until?: unknown }).until) < now) ? (pairs[lease.owner]?.app ?? '') : ''
   const chips = await chipsOf($, now)
+  const where: { shared?: boolean } = {}
   const needs = needsFor(
     last,
     {
@@ -6997,10 +7139,13 @@ async function storedNeeds($: EngineInterface, now: number): Promise<Need[] | nu
       chips,
       seen: await storeGet<Seen>($, 'mm.seen', {}),
       poller,
-      home: await mayHoldCard($),
+      home: await mayHoldCard($, where),
     },
     now,
   )
+  // ⛔ (0.7.55) on a shared login, no card from a list stored for the other person's token (asked only there, so a login one
+  // person uses reads nothing more than before)
+  if (where.shared && !(await lastIsHolders($, last, true))) return null
   return tools.spawn ? needs : needs.filter(n => n.kind === 'nothread')
 }
 
@@ -7010,10 +7155,13 @@ async function storedNeeds($: EngineInterface, now: number): Promise<Need[] | nu
  * (`clientFolder`), or wherever when none is known; and never from a worktree, which the new thread would take after.
  * True when the app cannot say.
  */
-async function mayHoldCard($: EngineInterface): Promise<boolean> {
+async function mayHoldCard($: EngineInterface, where?: { shared?: boolean }): Promise<boolean> {
   try {
-    const folder = await clientFolder($)
-    return !folder || (await $.session.root()) === folder
+    const pick = await pickFolder($)
+    if (where) where.shared = pick.shared
+    // ⛔ (0.7.55) on a shared login with no work folder of the current member's, no thread holds a card
+    if (pick.shared && !pick.dir) return false
+    return !pick.dir || (await $.session.root()) === pick.dir
   } catch {
     return true
   }
@@ -7732,6 +7880,8 @@ type Answer = { said: Said; after?: () => Promise<Said | void> }
 async function storedPass($: EngineInterface, verb: Exclude<Verb, 'drafts'>, row: Row): Promise<{ it: QueueItem; pass: Pass } | { said: Said } | null> {
   const last = await storeGet<Last | null>($, 'mm.last', null)
   if (!last || !Array.isArray(last.items) || !last.recs || typeof last.recs !== 'object') return null
+  // ⛔ (0.7.55) on a shared login, a row drawn from the other person's list is never acted on: the list is brought up to date first
+  if (!(await lastIsHolders($, last))) return null
   const it = listedIn(last).find(i => i.projectId === row.projectId)
   if (!it) return null
   const pass: Pass = { last, live: new Map(), pairs: {}, listed: true, unseen: new Set(), stored: true }
