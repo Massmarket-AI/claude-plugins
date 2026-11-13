@@ -13,7 +13,9 @@
 //     Never another extension, never a downgrade, never an equal version.
 //   - never into a git working copy (a folder with .git in it: someone working on the extension itself).
 //   - never into a folder a profile loads with Developer mode off: Chrome turns an unpacked extension off
-//     when it reloads there (measured 2026-10-23, Chrome 153), and the tracker would stop.
+//     when it reloads there (measured 2026-10-23, Chrome 153), and the tracker would stop. Developer mode is
+//     read from account_values.extensions.ui.developer_mode first (where Chrome keeps it for a profile signed
+//     in to Google, measured on Windows 2026-11-14), then from extensions.ui.developer_mode.
 //   - every carried file is checked against its sha256 in extension.json first; one mismatch and nothing is
 //     written anywhere.
 //   - new files first, manifest.json LAST, so the extension only sees the new version once every other file is
@@ -134,7 +136,8 @@ function workEmail(prefs) {
 function readProfile(userDataDir, dir) {
   const base = path.join(userDataDir, dir);
   let install = null;
-  let developerMode = null;
+  let accountDeveloperMode = null;
+  let localDeveloperMode = null;
   let email = null;
   for (const name of ["Secure Preferences", "Preferences"]) {
     const prefs = readJson(path.join(base, name));
@@ -142,9 +145,15 @@ function readProfile(userDataDir, dir) {
     if (name === "Preferences") email = workEmail(prefs);
     const entry = dig(prefs, ["extensions", "settings", EXT_ID]);
     if (!install && entry && typeof entry === "object") install = entry;
-    const dev = dig(prefs, ["extensions", "ui", "developer_mode"]);
-    if (developerMode === null && typeof dev === "boolean") developerMode = dev;
+    // A profile signed in to Google keeps the switch per account (Windows, 2026-11-14): Secure Preferences
+    // holds account_values.extensions.ui.developer_mode, the old key is absent, and tracked_preferences_reset
+    // lists both. The account value wins whenever it is a boolean, in either file; else the old key decides.
+    const account = dig(prefs, ["account_values", "extensions", "ui", "developer_mode"]);
+    if (accountDeveloperMode === null && typeof account === "boolean") accountDeveloperMode = account;
+    const local = dig(prefs, ["extensions", "ui", "developer_mode"]);
+    if (localDeveloperMode === null && typeof local === "boolean") localDeveloperMode = local;
   }
+  const developerMode = accountDeveloperMode !== null ? accountDeveloperMode : localDeveloperMode;
   let usedAt = 0;
   try {
     usedAt = fs.statSync(path.join(base, "Preferences")).mtimeMs;

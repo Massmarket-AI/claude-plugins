@@ -1,0 +1,15 @@
+# Every text file in this repo is stored with LF and checked out with LF on every computer, whatever
+# core.autocrlf says (Git for Windows ships core.autocrlf=true). Added with no churn: renormalizing the
+# repo under this line changed no file (2026-11-14). Binary files are detected and left alone.
+* text=auto eol=lf
+
+# The time tracker build mm-hooks carries is checked byte for byte against the sha256 values in
+# plugins/mm-hooks/extension.json, by plugins/mm-hooks/scripts/sync-extension.js on every teammate's
+# computer and by scripts/carry-extension.mjs in a release. Git for Windows ships core.autocrlf=true,
+# which would rewrite every text file here to CRLF on checkout (the marketplace clone Claude Code makes
+# and every plugin cache copy taken from it) and fail that check, so the tracker never updated on
+# Windows. -text: git never converts line endings in these files, on checkout or on commit, so the
+# working tree holds exactly the published bytes (fonts/OFL.txt is published with mixed line endings).
+# These lines come after the * line on purpose: the later line wins.
+plugins/mm-hooks/extension/** -text
+plugins/mm-hooks/extension.json -text
