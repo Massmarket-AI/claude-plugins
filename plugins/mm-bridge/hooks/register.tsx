@@ -6655,7 +6655,8 @@ async function clientFolder($: EngineInterface): Promise<string> {
  */
 async function pickFolder($: EngineInterface): Promise<{ dir: string; shared: boolean; member?: string }> {
   const tracked = await trackedFolders($)
-  const roots = await workRoots($, tracked)
+  // (nothing tracked: no marker to read, and no step more than before 0.7.55)
+  const roots = tracked.length ? await workRoots($, tracked) : []
   const seen = await storeGet<{ dir?: unknown; member?: unknown } | null>($, 'mm.folder', null)
   const dir = seen && isFolder(seen.dir) ? seen.dir : ''
   if (!roots.length) {
@@ -6735,9 +6736,9 @@ async function holderTag($: EngineInterface): Promise<string> {
  * identity switch hands the bridge to the other person, the stored list is still the first person's, and a Start, a
  * kickoff, a restore or a card must not act on it.
  */
-async function lastIsHolders($: EngineInterface, last: Last | null): Promise<boolean> {
-  if (!last) return true
-  if (!(await workRoots($, await trackedFolders($))).length) return true
+async function lastIsHolders($: EngineInterface, last: Last | null, shared?: boolean): Promise<boolean> {
+  if (!last || shared === false) return true
+  if (shared === undefined && !(await workRoots($, await trackedFolders($))).length) return true
   const tag = await holderTag($)
   return Boolean(tag) && last.holder === tag
 }
@@ -6759,14 +6760,19 @@ async function currentMember($: EngineInterface): Promise<string> {
  */
 async function noteFolder($: EngineInterface, links: Readonly<Record<string, string>>, live: ReadonlyMap<string, AppThread>, internal: ReadonlySet<string>, now: number, member: string): Promise<void> {
   const me = member.toLowerCase()
-  const roots = await workRoots($, await trackedFolders($))
-  const mine = roots.filter(r => r.email === me)
-  if (roots.length && !mine.length) return
-  const count = new Map<string, { n: number; last: number }>()
+  const found: AppThread[] = []
   for (const [pid, sid] of Object.entries(links)) {
     const t = live.get(sid)
     if (!t || t.isArchived || !t.cwd || internal.has(pid) || INTERNAL_PROJECTS.has(pid)) continue
-    if (roots.length && !mine.some(r => inFolder(t.cwd as string, r.dir))) continue
+    found.push(t)
+  }
+  if (!found.length) return
+  // (read only once some thread names a folder: a sync with none reads nothing more than before)
+  const roots = await workRoots($, await trackedFolders($))
+  const mine = roots.filter(r => r.email === me)
+  const count = new Map<string, { n: number; last: number }>()
+  for (const t of found) {
+    if (!t.cwd || (roots.length && !mine.some(r => inFolder(t.cwd as string, r.dir)))) continue
     const c = count.get(t.cwd) ?? { n: 0, last: 0 }
     c.n++
     c.last = Math.max(c.last, Date.parse(t.lastActivityAt ?? '') || 0)
@@ -7111,8 +7117,6 @@ async function storedNeeds($: EngineInterface, now: number): Promise<Need[] | nu
   const last = await storeGet<Last | null>($, 'mm.last', null)
   const fresh = Boolean(last && Array.isArray(last.items) && !last.error && Number.isFinite(last.at) && now - last.at <= STALE_SYNC_MS)
   if (!me || !fresh || !last) return null
-  // ⛔ (0.7.55) on a shared login, no card from a list stored for the other person's token
-  if (!(await lastIsHolders($, last))) return null
   // (0.7.34) Where the app gives no spawn_task (Claude.app since 10-14) a thread's kickoff has no chip: the pane's Update
   // does it there. A client with no thread gets its card (`mintChip`). ((0.5.25 to 0.7.33: none at all, Rob 10-22, as a card
   // never opened for him then. That is why no chip came for Doug Brockbank, Advanced Credit Therapy and Nirvvana on 11-07.)
@@ -7123,6 +7127,7 @@ async function storedNeeds($: EngineInterface, now: number): Promise<Need[] | nu
   // (a lease that has run out names nobody: its holder has stopped ticking)
   const poller = lease && typeof lease.owner === 'string' && !(Number((lease as { until?: unknown }).until) < now) ? (pairs[lease.owner]?.app ?? '') : ''
   const chips = await chipsOf($, now)
+  const where: { shared?: boolean } = {}
   const needs = needsFor(
     last,
     {
@@ -7134,10 +7139,13 @@ async function storedNeeds($: EngineInterface, now: number): Promise<Need[] | nu
       chips,
       seen: await storeGet<Seen>($, 'mm.seen', {}),
       poller,
-      home: await mayHoldCard($),
+      home: await mayHoldCard($, where),
     },
     now,
   )
+  // ⛔ (0.7.55) on a shared login, no card from a list stored for the other person's token (asked only there, so a login one
+  // person uses reads nothing more than before)
+  if (where.shared && !(await lastIsHolders($, last, true))) return null
   return tools.spawn ? needs : needs.filter(n => n.kind === 'nothread')
 }
 
@@ -7147,9 +7155,10 @@ async function storedNeeds($: EngineInterface, now: number): Promise<Need[] | nu
  * (`clientFolder`), or wherever when none is known; and never from a worktree, which the new thread would take after.
  * True when the app cannot say.
  */
-async function mayHoldCard($: EngineInterface): Promise<boolean> {
+async function mayHoldCard($: EngineInterface, where?: { shared?: boolean }): Promise<boolean> {
   try {
     const pick = await pickFolder($)
+    if (where) where.shared = pick.shared
     // ⛔ (0.7.55) on a shared login with no work folder of the current member's, no thread holds a card
     if (pick.shared && !pick.dir) return false
     return !pick.dir || (await $.session.root()) === pick.dir
