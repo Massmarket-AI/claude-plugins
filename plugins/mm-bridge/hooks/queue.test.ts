@@ -7,6 +7,7 @@ import {
   ROUTE_PAGE, dateText, peopleRows, routeChoices, routePage, routedText, seesPeople, shownText, sourceLink, waitedText,
   INTERNAL_OPS, INTERNAL_PROJECTS, askLine, asksMarkdown, feedClients, heldInternal, internalAskThread, openAsks,
   QUEUE_SHOWN_MAX, internalQueueThread, ownQueueRows, queueMarkdown, queueTotal, queuedOf,
+  QUEUE_OLDER_MAX, newestFirst, olderHeading, olderMarkdown, olderOf, olderTotal, ownOlderRows, queueWhen, shownOlder,
   ETA_ASK_TEXT, INTERNAL_DISCORD, etaAsksOf, etaOnly, lateSentence, matesOf, queueHome, undatedCount, undatedOnly, whoseLate,
   ASSIGN_ASK_TEXT, ASSIGN_BY_BASIS, assignAsksOf, assignMarkdown, assignOnly, committedCount,
   STILL_NEEDS_YOU, checkNow, ownActBy, pinReason, pinTitle, pinsFor, watchMarkdown, watchOf,
@@ -15,7 +16,7 @@ import {
   okLateOnly, ownBesides, teamLateOnly,
 } from './queue'
 import type { Feed, FeedAsk, FeedFollowups, FeedQueueTicket, FeedTicket, QueueItem } from './queue'
-import { assignParagraph, autoUpdatable, etaParagraph, goKickoff, goParagraph, handoverText, kickoffText, rowExtra, signatureOf, waitingText } from './threads'
+import { assignParagraph, autoUpdatable, etaParagraph, goKickoff, goParagraph, handoverText, kickoffText, queueParagraph, rowExtra, signatureOf, waitingText } from './threads'
 import { buildOf, paneText, recommend, rowFor, teamCount, teamHeading, teamLines, teamOf, teamPane, teamPerson } from './threads'
 
 // Most tests here run on clocks in early October 2026, before the list's floor (LIST_FLOOR_MS, Wed Oct 14 12:00 AM
@@ -2369,6 +2370,287 @@ describe('(0.7.3, internal queue) the viewer\'s queued internal tickets list on 
     expect(withMail).toMatchObject({ kind: 'reply', messages: 1, dueAt: Infinity, noDue: true })
     expect(heldInternal(withMail as QueueItem)).toBe(false)
     expect(clientMarkdown(withMail as QueueItem, tue).endsWith(draftsLine(withMail as QueueItem))).toBe(true)
+  })
+})
+
+// (0.7.56) Rob, 2026-11-13: "the queue here should sort by new items first. The way we sorted it was showing me basically
+// all stuff that really didn't even need to be done. I think it should be stuff sorted by things that are new or that I've
+// at least been working on in the last 3 days." Approved: "Yes, build 1 and 2". OW sends each queued ticket's
+// `last_activity_at`, `queue_group` and `activity_kind`, the queue in its own order (recent, in progress, open; newest
+// activity first), the older ones apart (`internal_queue_older`) and the two counts. The bridge only renders them: the
+// feed's order, each line's words of activity, the active count, and the older ones under a closed Older toggle alone.
+describe('(0.7.56, internal queue) newest first: the feed\'s order, the words of activity, and the older tickets under the Older toggle', () => {
+  /** Fri 2026-11-13 10 AM in New York (EST, UTC-5). */
+  const fri = Date.parse('2026-11-13T15:00:00Z')
+  const ROB = 'rob@massmarket.ai'
+  const tid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-000000000000`
+  const qt = (n: number, over: Partial<FeedQueueTicket> = {}): FeedQueueTicket => ({
+    ticket_id: tid(n), project_id: INTERNAL_OPS, project_name: 'Massmarket AI', title: `Ticket ${n}`, severity: 'high', internal: true, assignee_email: ROB,
+    queue_tier: 'now', queue_rank: n, queue_reason: `reason ${n}`, ...over,
+  })
+  /** A ticket as an OW with the groups sends it: last active at `at`, in `group`, with `kind`. */
+  const g = (n: number, at: string | null, group: string, kind: string | null = null, over: Partial<FeedQueueTicket> = {}): FeedQueueTicket =>
+    qt(n, { last_activity_at: at, queue_group: group, activity_kind: kind, ...over })
+  // the sample: 3 recent, 1 in progress, 2 open, then 4 older; OW's ranks run against its order, which the bridge keeps
+  const ACTIVE = [
+    g(21, '2026-11-13T14:10:00Z', 'recent', 'new', { title: '[internal] Rotate the sandbox key', queue_reason: 'the breach checklist still lists it', queue_rank: 6 }),
+    g(22, '2026-11-12T22:30:00Z', 'recent', 'worked', { title: "Fix the tracker's idle count", queue_reason: null, queue_rank: 5 }),
+    g(23, '2026-11-11T16:00:00Z', 'recent', 'new', { title: 'Add the Older toggle', queue_reason: 'Rob asked on the call', queue_rank: 4 }),
+    g(24, '2026-10-30T15:00:00Z', 'in_progress', null, { title: 'Move the runner to its own clone', queue_reason: 'half done', queue_rank: 3 }),
+    g(25, '2026-11-05T15:00:00Z', 'open', null, { title: 'Retire the old send script', queue_reason: null, queue_rank: 2 }),
+    g(26, '2026-10-27T14:00:00Z', 'open', null, { title: 'Check the drift alert wording', queue_reason: 'from the 10-27 review', queue_rank: 1 }),
+  ]
+  const OLDER = [
+    g(31, '2026-10-20T15:00:00Z', 'older', null, { title: 'Clean up the Q3 labels' }),
+    g(32, '2026-10-02T15:00:00Z', 'older', null, { title: 'Old proposal hero button', queue_reason: null }),
+    g(33, '2026-09-24T15:00:00Z', 'older', null, { title: 'Sync the archived skills' }),
+    g(34, '2026-07-27T15:00:00Z', 'older', null, { title: 'First tracker idea' }),
+  ]
+  const newFeed = (active = ACTIVE, older = OLDER, counts: { total?: number; active?: number; older?: number } = {}, over: Partial<Feed> = {}): Feed => ({
+    member: ROB, role: 'founder',
+    tickets: { internal_queue: active, internal_queue_older: older },
+    summary: {
+      internal_queue_total: counts.total ?? active.length + older.length,
+      internal_queue_active_total: counts.active ?? active.length,
+      internal_queue_older_total: counts.older ?? older.length,
+    },
+    ...over,
+  })
+  const itemOf = (f: Feed, now = fri): QueueItem => {
+    const it = buildQueue(f, now).find(i => i.projectId === INTERNAL_OPS)
+    if (!it) throw new Error('no item')
+    return it
+  }
+  const ACTIVE_LINES = [
+    '1. new today · Rotate the sandbox key (ticket 00000021) · the breach checklist still lists it',
+    "2. worked yesterday · Fix the tracker's idle count (ticket 00000022)",
+    '3. new Wed · Add the Older toggle (ticket 00000023) · Rob asked on the call',
+    '4. in progress · Move the runner to its own clone (ticket 00000024) · half done',
+    '5. last worked Nov 5 · Retire the old send script (ticket 00000025)',
+    '6. last worked Oct 27 · Check the drift alert wording (ticket 00000026) · from the 10-27 review',
+  ]
+  const OLDER_LINES = [
+    '1. last worked Oct 20 · Clean up the Q3 labels (ticket 00000031) · reason 31',
+    '2. last worked Oct 2 · Old proposal hero button (ticket 00000032)',
+    '3. last worked Sep 24 · Sync the archived skills (ticket 00000033) · reason 33',
+    '4. last worked Jul 27 · First tracker idea (ticket 00000034) · reason 34',
+  ]
+  /** ⛔ (Rob, 10-13) Anything that reads as a clock or a due time. */
+  const CLOCK = /\d+[hd] (?:late|left)|\bdue (?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|today|tomorrow)|\b\d{1,2}(?::\d{2})? (?:AM|PM)\b/
+
+  test('the feed\'s own order, never sorted again by rank; each line says its activity where the tier was', async () => {
+    const it = itemOf(newFeed())
+    expect(queuedOf(it).map(q => q.id)).toEqual([21, 22, 23, 24, 25, 26].map(tid))
+    expect(queuedOf(it)[0]).toEqual({ id: tid(21), title: 'Rotate the sandbox key', tier: 'now', reason: 'the breach checklist still lists it', rank: 6, severity: 'high', when: 'new today' })
+    expect(it.queue).toMatchObject({ total: 6, newest: true, older: { total: 4 } })
+    expect(newestFirst(it)).toBe(true)
+    expect(queueTotal(it)).toBe(6)
+    expect(olderTotal(it)).toBe(4)
+    expect(olderOf(it).map(q => q.id)).toEqual([31, 32, 33, 34].map(tid))
+    expect(queueMarkdown(it)).toBe(['### Internal queue (6 open, newest first)', '', ...ACTIVE_LINES].join('\n'))
+    // ⛔ still never pinned, never a clock, never a due date: the item is the same undated `queue` item as before
+    expect(it).toMatchObject({ kind: 'queue', noDue: true, dueAt: Infinity, tasks: 0 })
+    expect(pinsNow(it, fri)).toBe(false)
+    expect(titleFor(it, fri)).toBe('🟡 Massmarket AI · internal queue')
+    expect(queueMarkdown(it)).not.toMatch(CLOCK)
+    expect(olderMarkdown(it)).not.toMatch(CLOCK)
+  })
+
+  test('the words of activity, in New York time: today, yesterday, a weekday within 6 days, then the date; in progress; last worked', async () => {
+    const at = (iso: string, now: number, group = 'recent', kind: string | null = 'new') => queueWhen({ last_activity_at: iso, queue_group: group, activity_kind: kind }, now)
+    expect(at('2026-11-13T14:10:00Z', fri)).toBe('new today')
+    expect(at('2026-11-12T15:00:00Z', fri)).toBe('new yesterday')
+    expect(at('2026-11-12T15:00:00Z', fri, 'recent', 'worked')).toBe('worked yesterday')
+    expect(at('2026-11-11T15:00:00Z', fri)).toBe('new Wed')
+    expect(at('2026-11-07T15:00:00Z', fri)).toBe('new Sat')
+    // 7 days back reads as a date: a weekday name would read as this week's
+    expect(at('2026-11-06T15:00:00Z', fri)).toBe('new Nov 6')
+    expect(at('2026-11-02T15:00:00Z', fri, 'recent', 'worked')).toBe('worked Nov 2')
+    expect(at('2026-11-13T14:10:00Z', fri, 'in_progress', null)).toBe('in progress')
+    expect(at('2026-11-02T15:00:00Z', fri, 'open', null)).toBe('last worked Nov 2')
+    expect(at('2026-09-02T15:00:00Z', fri, 'older', null)).toBe('last worked Sep 2')
+    // an OW kind word it does not know, or none and no time: nothing it cannot say
+    expect(at('2026-11-13T14:10:00Z', fri, 'recent', 'touched')).toBe('last worked Nov 13')
+    expect(queueWhen({ last_activity_at: null, queue_group: 'open', activity_kind: null }, fri)).toBe('')
+    expect(queueWhen({ last_activity_at: 'soon', queue_group: 'recent', activity_kind: 'new' }, fri)).toBe('')
+    // around midnight in New York, not UTC: 11:59 PM ET Thu is yesterday at 12:01 AM ET Fri, and 12:00 AM is today
+    const justAfter = Date.parse('2026-11-13T05:01:00Z') // Fri 12:01 AM ET
+    expect(at('2026-11-13T04:59:00Z', justAfter, 'recent', 'worked')).toBe('worked yesterday')
+    expect(at('2026-11-13T05:00:00Z', justAfter)).toBe('new today')
+    const justBefore = Date.parse('2026-11-13T04:59:59Z') // Thu 11:59:59 PM ET
+    expect(at('2026-11-12T05:00:00Z', justBefore)).toBe('new today')
+    expect(at('2026-11-11T04:59:00Z', justBefore)).toBe('new Tue')
+    // 10 PM ET Thursday is already Friday in UTC: still yesterday at 10 AM Friday in New York
+    expect(at('2026-11-13T03:00:00Z', fri)).toBe('new yesterday')
+    // the same ticket, built again after midnight: the words move, the order and the ticket do not
+    const late = itemOf(newFeed(), Date.parse('2026-11-14T05:30:00Z')) // Sat 12:30 AM ET
+    expect(queuedOf(late).map(q => q.when)).toEqual(['new yesterday', 'worked Thu', 'new Wed', 'in progress', 'last worked Nov 5', 'last worked Oct 27'])
+  })
+
+  test('the heading counts the active tickets; how many more counts the active ones alone; the top 10 never holds an older one', async () => {
+    const twelve = Array.from({ length: 12 }, (_, i) => g(40 + i, '2026-11-13T14:00:00Z', 'recent', 'new'))
+    // OW put an older ticket in the active list: never listed there (the older ones are the toggle's alone)
+    const it = itemOf(newFeed([g(39, '2026-09-01T15:00:00Z', 'older'), ...twelve], OLDER, { total: 253, active: 24, older: 229 }))
+    expect(queuedOf(it).map(q => q.id)).toEqual(twelve.slice(0, QUEUE_SHOWN_MAX).map(q => q.ticket_id))
+    expect(queueTotal(it)).toBe(24)
+    expect(queueMarkdown(it).split('\n')[0]).toBe('### Internal queue (24 open, newest first)')
+    expect(queueMarkdown(it).endsWith('\n\n14 more in the queue.')).toBe(true)
+    expect(queueMarkdown(it)).not.toContain('00000039')
+    // the older count is OW's, never fewer than it listed
+    expect(olderTotal(it)).toBe(229)
+    expect(olderHeading(it)).toBe('Older: 229 with no activity in 3 weeks')
+    expect(olderMarkdown(it)).toBe([...OLDER_LINES, '', '225 more with no activity in 3 weeks.'].join('\n'))
+    // no active count from OW: its total less the older ones; neither: the tickets it listed
+    const bare = (s: Feed['summary']) => itemOf({ ...newFeed(twelve, OLDER), summary: s })
+    expect(queueTotal(bare({ internal_queue_total: 253, internal_queue_older_total: 229 }))).toBe(24)
+    expect(queueTotal(bare({ internal_queue_total: 253 }))).toBe(249)
+    expect(queueTotal(bare({}))).toBe(12)
+    expect(olderTotal(bare({}))).toBe(4)
+    // a count below what the feed listed is never believed; one that is no whole number is ignored
+    for (const n of [5, 0, -3, 2.5, Number.NaN, '300' as unknown as number, null]) expect(queueTotal(bare({ internal_queue_active_total: n })), String(n)).toBe(12)
+    for (const n of [3, 0, -3, 2.5, Number.NaN, '300' as unknown as number, null]) expect(olderTotal(bare({ internal_queue_active_total: 24, internal_queue_older_total: n })), String(n)).toBe(4)
+  })
+
+  test('the Older toggle: its words and its lines in the queue\'s format; none with no older ticket; only the viewer\'s own, each once', async () => {
+    const it = itemOf(newFeed())
+    expect(olderHeading(it)).toBe('Older: 4 with no activity in 3 weeks')
+    expect(olderMarkdown(it)).toBe(OLDER_LINES.join('\n'))
+    // ⛔ the older ones are never in the pane's queue part, which is drawn as before above the toggle
+    for (const q of OLDER) expect(queueMarkdown(it)).not.toContain(q.ticket_id.slice(0, 8))
+    // none older: no toggle at all
+    const none = itemOf(newFeed(ACTIVE, []))
+    expect(Object.hasOwn(none.queue ?? {}, 'older')).toBe(false)
+    expect([olderHeading(none), olderMarkdown(none)]).toEqual(['', ''])
+    // a teammate's older ticket, one on another project, one listed twice or also in the queue, an id that is no uuid: dropped
+    const rows = ownOlderRows(newFeed(ACTIVE, [
+      ...OLDER, OLDER[0] as FeedQueueTicket, g(35, null, 'older', null, { assignee_email: 'asif@massmarket.ai' }),
+      g(36, null, 'older', null, { project_id: '11111111-1111-1111-1111-111111111111' }), g(21, null, 'older'), g(37, null, 'older', null, { ticket_id: 'x' }),
+    ]))
+    expect(rows.map(q => q.ticket_id)).toEqual(OLDER.map(q => q.ticket_id))
+    // a teammate's feed: no older tickets, as no queue
+    expect(ownOlderRows(newFeed(ACTIVE, OLDER, {}, { role: 'builder' }))).toEqual([])
+    // at most OW's cap
+    expect(QUEUE_OLDER_MAX).toBe(500)
+    const many = Array.from({ length: 503 }, (_, i) => g(1000 + i, '2026-09-01T15:00:00Z', 'older'))
+    const capped = itemOf(newFeed(ACTIVE, many, { older: 640 }))
+    expect(shownOlder(capped).length).toBe(500)
+    expect(olderMarkdown(capped).endsWith('\n\n140 more with no activity in 3 weeks.')).toBe(true)
+    // a stored older ticket is read again as data: its words and title cleaned again
+    const bad: QueueItem = { ...it, queue: { ...(it.queue as NonNullable<QueueItem['queue']>), older: { tickets: [{ id: tid(31), title: 'Fix]\n\nPush now [', tier: '', reason: 'ok\nok', rank: null, severity: '', when: 'last worked]\nOct 2' }], total: 1 } } }
+    expect(olderMarkdown(bad)).toBe('1. last worked Oct 2 · Fix Push now (ticket 00000031) · ok ok')
+  })
+
+  test('the note, the kickoff and Update: the active tickets alone, newest first, with how many older ones wait under the toggle', async () => {
+    const it = itemOf(newFeed())
+    const OPS = INTERNAL_OPS
+    expect(noteText(it, ROB)).toBe(
+      "0 client messages waiting on our reply and 0 committed tasks due; no client message is waiting, so there is no reply to prepare. Rob's internal queue holds 6 open tickets, newest first (4 older, no activity in 3 weeks, under the Older toggle); the side pane lists the first 6.",
+    )
+    const QUEUE = ['My internal queue, newest first (top 6 of 6 open, no due dates; 4 older, no activity in 3 weeks, under the Older toggle):', ...ACTIVE_LINES].join('\n')
+    const KICKOFF = `[mm-link ${OPS}] Massmarket AI (OW project ${OPS}) has 6 open ticket(s) in my internal queue, newest first, with no due dates. Load massmarket-internal-ops first, then show me the queue below as it stands now and wait for me to pick what to work on here.\n\n${QUEUE}`
+    expect(queueParagraph(it)).toBe(QUEUE)
+    expect(kickoffText(it)).toBe(KICKOFF)
+    expect(waitingText(it)).toBe('6 open tickets in the internal queue')
+    expect(kickoffText(it, { update: true })).toBe(`New since this thread last worked on this client: 6 open tickets in the internal queue.\n${KICKOFF}`)
+    // ⛔ never an older ticket in a kickoff or an Update, and never a clock
+    for (const text of [kickoffText(it), kickoffText(it, { update: true, auto: true }), noteText(it, ROB)]) {
+      for (const q of OLDER) expect(text).not.toContain(q.ticket_id.slice(0, 8))
+      expect(text).not.toMatch(CLOCK)
+    }
+    // the example the contract gives: 24 open, the first 10 listed, 229 older
+    const twelve = Array.from({ length: 12 }, (_, i) => g(40 + i, '2026-11-13T14:00:00Z', 'recent', 'new'))
+    const big = itemOf(newFeed(twelve, OLDER, { total: 253, active: 24, older: 229 }))
+    expect(noteText(big, ROB).endsWith(" Rob's internal queue holds 24 open tickets, newest first (229 older, no activity in 3 weeks, under the Older toggle); the side pane lists the first 10.")).toBe(true)
+    expect(queueParagraph(big).split('\n')[0]).toBe('My internal queue, newest first (top 10 of 24 open, no due dates; 229 older, no activity in 3 weeks, under the Older toggle):')
+    expect(queueParagraph(big).endsWith('\n14 more in the queue.')).toBe(true)
+    // none older: the older clause is left out
+    const none = itemOf(newFeed(ACTIVE.slice(0, 1), []))
+    expect(noteText(none, ROB).endsWith(" Rob's internal queue holds 1 open ticket, newest first; the side pane lists the first 1.")).toBe(true)
+    expect(queueParagraph(none)).toBe('My internal queue, newest first (top 1 of 1 open, no due dates):\n1. new today · Rotate the sandbox key (ticket 00000021) · the breach checklist still lists it')
+    expect(waitingText(none)).toBe('1 open ticket in the internal queue')
+  })
+
+  test('team asks are still listed before the queue, by their clock, in the pane and in the kickoff', async () => {
+    const ask = (id: string, due: string): FeedAsk => ({
+      ask_id: id, project_id: INTERNAL_OPS, project_name: 'Massmarket AI', internal: true, asker_name: 'Shezan', asker_email: 'shezan@massmarket.ai', asked_email: ROB,
+      asked_at: '2026-11-13T13:00:00Z', due_at: due, snippet: 'Can you look at the tracker?', has_draft: false, draft_sha256: null,
+    })
+    const A1 = '5c1e2f3a-8b4d-4e6f-9a0b-1c2d3e4f5a6b'
+    const A2 = '6d2f3a4b-8b4d-4e6f-9a0b-1c2d3e4f5a6b'
+    const it = itemOf(newFeed(ACTIVE, OLDER, {}, { asks: [ask(A2, '2026-11-16T15:00:00Z'), ask(A1, '2026-11-16T13:00:00Z')] }))
+    expect(it.kind).toBe('ask')
+    expect(openAsks(it).map(a => a.id)).toEqual([A1, A2])
+    const md = clientMarkdown(it, fri)
+    expect(md.indexOf('### Internal asks (2)')).toBeGreaterThan(-1)
+    expect(md.indexOf('### Internal asks (2)')).toBeLessThan(md.indexOf('### Internal queue (6 open, newest first)'))
+    const text = kickoffText(it)
+    expect(text.indexOf('(ask 5c1e2f3a')).toBeLessThan(text.indexOf('(ask 6d2f3a4b'))
+    expect(text.indexOf('(ask 6d2f3a4b')).toBeLessThan(text.indexOf('My internal queue, newest first'))
+    expect(waitingText(it)).toBe('2 internal asks, 6 open tickets in the internal queue')
+  })
+
+  test('something new for the thread: the order or the top 10, never the words of activity, the counts or the older tickets', async () => {
+    const base = signatureOf(itemOf(newFeed()))
+    // after midnight every line's words move (`new today` is `new yesterday`): nothing new
+    expect(signatureOf(itemOf(newFeed(), Date.parse('2026-11-14T05:30:00Z')))).toBe(base)
+    // more or fewer older tickets, or a new count: nothing new
+    expect(signatureOf(itemOf(newFeed(ACTIVE, OLDER.slice(0, 1), { older: 12, total: 99, active: 40 })))).toBe(base)
+    expect(signatureOf(itemOf(newFeed(ACTIVE, [])))).toBe(base)
+    // a new ticket at the top, one gone from the top, or the order changed: something new
+    for (const active of [[g(20, '2026-11-13T14:50:00Z', 'recent', 'new'), ...ACTIVE], ACTIVE.slice(1), [ACTIVE[1], ACTIVE[0], ...ACTIVE.slice(2)] as FeedQueueTicket[]]) {
+      expect(signatureOf(itemOf(newFeed(active)))).not.toBe(base)
+    }
+  })
+
+  test('⛔ a feed without the groups is drawn exactly as before: rank order, the feed\'s total, no words of activity, no toggle', async () => {
+    const tue = Date.parse('2026-10-27T15:00:00Z')
+    const old: Feed = { member: ROB, role: 'founder', tickets: { internal_queue: [qt(2), qt(1, { queue_tier: null, severity: 'critical' }), qt(3, { queue_reason: null })] }, summary: { internal_queue_total: 314 } }
+    const it = itemOf(old, tue)
+    const QUEUE_PART = [
+      '### Internal queue (314 tickets, no due dates)',
+      '',
+      '1. critical · Ticket 1 (ticket 00000001) · reason 1',
+      '2. now · Ticket 2 (ticket 00000002) · reason 2',
+      '3. now · Ticket 3 (ticket 00000003)',
+      '',
+      '311 more in the queue.',
+    ].join('\n')
+    expect(queueMarkdown(it)).toBe(QUEUE_PART)
+    expect(it.queue).toEqual({ tickets: queuedOf(it), total: 314 })
+    expect(queuedOf(it)[0]).toEqual({ id: tid(1), title: 'Ticket 1', tier: '', reason: 'reason 1', rank: 1, severity: 'critical' })
+    expect(Object.hasOwn(queuedOf(it)[0] as object, 'when')).toBe(false)
+    expect([newestFirst(it), olderTotal(it), olderHeading(it), olderMarkdown(it)]).toEqual([false, 0, '', ''])
+    expect(noteText(it, ROB)).toBe(`0 client messages waiting on our reply and 0 committed tasks due; no client message is waiting, so there is no reply to prepare. Rob's internal queue holds 314 tickets, with no due dates; the side pane lists the top 3 in rank order.`)
+    expect(queueParagraph(it).split('\n')[0]).toBe('My internal queue, in rank order (top 3 of 314, no due dates):')
+    expect(kickoffText(it).includes(' has 314 ticket(s) in my internal queue, with no due dates. Load massmarket-internal-ops first,')).toBe(true)
+    expect(waitingText(it)).toBe('314 tickets in the internal queue')
+    // the new counts, an older list and words of activity without OW's groups (or with a group it does not know) change
+    // nothing at all: the same item, byte for byte
+    const before = JSON.stringify(buildLists(old, tue))
+    const withoutGroups = (rows: FeedQueueTicket[]): Feed => ({
+      ...old,
+      tickets: { internal_queue: rows, internal_queue_older: [g(31, '2026-10-01T15:00:00Z', 'older')] },
+      summary: { internal_queue_total: 314, internal_queue_active_total: 100, internal_queue_older_total: 214 },
+    })
+    const rows = old.tickets?.internal_queue ?? []
+    for (const f of [
+      withoutGroups(rows),
+      withoutGroups(rows.map(q => ({ ...q, last_activity_at: '2026-10-27T14:00:00Z', activity_kind: 'new' }))),
+      withoutGroups(rows.map(q => ({ ...q, queue_group: 'later' }))),
+      withoutGroups(rows.map(q => ({ ...q, queue_group: null }))),
+    ]) {
+      expect(JSON.stringify(buildLists(f, tue))).toBe(before)
+      const same = itemOf(f, tue)
+      expect([queueMarkdown(same), noteText(same, ROB), kickoffText(same), kickoffText(same, { update: true }), waitingText(same), signatureOf(same)]).toEqual([
+        QUEUE_PART, noteText(it, ROB), kickoffText(it), kickoffText(it, { update: true }), waitingText(it), signatureOf(it),
+      ])
+    }
+  })
+
+  test('with no active ticket the queue lists nothing, as with an empty one: the older ones alone never make a row, a chip or a kickoff', async () => {
+    const f = newFeed([], OLDER, { total: 4, active: 0, older: 4 })
+    expect(buildQueue(f, fri).find(i => i.projectId === INTERNAL_OPS)).toBeUndefined()
+    expect(ownQueueRows(f)).toEqual([])
   })
 })
 

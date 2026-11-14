@@ -15,6 +15,11 @@ export type MmView = {
   page?: MmMarkdown
   /** (0.7.33) With a pickup view: the hold banner, the open asks and the internal queue, drawn under the card and never folded with the page. */
   extra?: MmMarkdown
+  /**
+   * (0.7.56) Under the internal queue, the closed Older toggle: its words (`Older: 229 with no activity in 3 weeks`) and
+   * the older tickets' lines it opens to. Absent when there are none, and for every other part.
+   */
+  older?: { heading: string; text: MmMarkdown }
 }
 
 /** One client on the Needs-you pane: what is due, what is waiting, and the one thing to do about its thread. */
@@ -191,6 +196,11 @@ export type MmFolds = {
   tasks?: string[]
   /** (0.7.53) The end-of-day list of browser stretches with no client yet, closed until opened. */
   confirm?: boolean
+  /**
+   * (0.7.56) The internal queue's `Older` toggle, closed until opened. Its own key: a pane before 0.7.12 stored `older` for
+   * a group that is gone, and that must not open this one.
+   */
+  queueOlder?: boolean
 }
 
 /**
