@@ -20,7 +20,7 @@ import type { MmRow, MmTeam } from '../types'
 
 import {
   MAY_NEED_OK, NOBODY, assignAsksOf, assignOnly, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, committedCount, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
-  checkNow, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, tasksBesidesUndated, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
+  checkNow, newestFirst, olderTotal, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, tasksBesidesUndated, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
   TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine,
   goOf, goOnly, goWithMail, stepWord,
   NO_REPLY_WHAT, afterPackage, checkDot, noReplyNow, owesNoReply, paceOf, paceOnly, paceStatus, paceWord, statusOf,
@@ -530,7 +530,11 @@ export function signatureOf(it: QueueItem): string {
   // A package is read as it was before anyone picked it up, and without how many of its drafts are left:
   // picking it up or sending one of its drafts is not something new for the thread that has it.
   const unpicked: QueueItem = mine ? { ...it, open: null } : o ? { ...it, open: { ...o, unsent: 0 } } : it
-  const queuedPlain: QueueItem = queuedOf(it).length ? { ...unpicked, queue: { tickets: queuedOf(it), total: 0 } } : unpicked
+  // (0.7.3) the queue's total is not something new; (0.7.56) neither are the words of a ticket's activity (`new today` is
+  // `new yesterday` after midnight) nor the tickets under the Older toggle (never in a kickoff): its order and its top are
+  const queuedPlain: QueueItem = queuedOf(it).length
+    ? { ...unpicked, queue: newestFirst(it) ? { tickets: queuedOf(it).map(q => ({ ...q, when: '' })), total: 0, newest: true } : { tickets: queuedOf(it), total: 0 } }
+    : unpicked
   const nodate = undatedCount(it)
   const plain: QueueItem = nodate ? { ...queuedPlain, tasks: it.tasks - nodate, undatedTitles: [], undatedTasks: 0 } : queuedPlain
   const said = owesNoReply(plain) && afterPackage(it) === 0 ? withoutNoReply(plain) : plain
@@ -796,8 +800,9 @@ export function waitingText(it: QueueItem): string {
   const n = openAsks(it).length
   const asked = n ? `${n} internal ask${n > 1 ? 's' : ''}` : ''
   // (0.7.3, internal queue) and last the viewer's internal queue, `312 tickets in the internal queue`: never a due time
+  // (0.7.56) newest first, it counts the active tickets alone: `24 open tickets in the internal queue`
   const q = queuedOf(it).length ? queueTotal(it) : 0
-  const queued = q ? `${q} ticket${q > 1 ? 's' : ''} in the internal queue` : ''
+  const queued = q ? `${q}${newestFirst(it) ? ' open' : ''} ticket${q > 1 ? 's' : ''} in the internal queue` : ''
   // (0.7.4, for the founder) and his teammates' late internal tickets: `2 late with Asif`. ⛔ (0.7.21) Only on a client listed
   // by them alone (`lateOnly`): on a row of his own they no longer ride along (Team · late lists them)
   const m = lateOnly(it) ? matesOf(it) : []
@@ -887,7 +892,13 @@ export function queueParagraph(it: QueueItem): string {
   if (!shown.length) return ''
   const total = queueTotal(it)
   const more = queueMore(it)
-  return [`My internal queue, in rank order (top ${shown.length} of ${total}, no due dates):`, ...shown.map((q, i) => queueLine(q, i + 1)), ...(more ? [more] : [])].join('\n')
+  // (0.7.56, Rob 2026-11-13: tickets with no activity in 3 weeks go "out of the top 10 and out of the kickoff") newest
+  // first: the active tickets alone, and how many older ones the pane keeps under its Older toggle. ⛔ Never one listed here.
+  const older = olderTotal(it)
+  const head = newestFirst(it)
+    ? `My internal queue, newest first (top ${shown.length} of ${total} open, no due dates${older ? `; ${older} older, no activity in 3 weeks, under the Older toggle` : ''}):`
+    : `My internal queue, in rank order (top ${shown.length} of ${total}, no due dates):`
+  return [head, ...shown.map((q, i) => queueLine(q, i + 1)), ...(more ? [more] : [])].join('\n')
 }
 
 /**
@@ -997,7 +1008,8 @@ export function goParagraph(it: QueueItem): string {
  *    message, no task, no ask) has a case of its own after the asks': a first line that names it, how many tickets the
  *    queue holds, with no due dates, and to show the queue and wait. In every case the queue (`queueParagraph`) comes
  *    last in the body, after any ask's paragraph and before any hand-over. It takes nothing, so a send by itself carries
- *    the same words. ⛔ No due date and no clock for it anywhere.
+ *    the same words. ⛔ No due date and no clock for it anywhere. (0.7.56) From an OW that sends its groups, the first line
+ *    counts the open (active) tickets, newest first, and the queue lists them alone (`queueParagraph`).
  */
 export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: Replaced | undefined; auto?: boolean; wait?: boolean } = {}): string {
   const id = it.projectId
@@ -1062,7 +1074,7 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
                     `[mm-link ${id}] ${who} has ${asks.length} internal ask(s) waiting on my reply. Load the client's project skill first.`
                   : tasksBesidesUndated(it) === 0 && queue
                     ? // (0.7.3, internal queue) listed by its queue alone: a first line that names it, with no due time, then the queue
-                      `[mm-link ${id}] ${who} has ${queueTotal(it)} ticket(s) in my internal queue, with no due dates. Load massmarket-internal-ops first, then show me the queue below as it stands now and wait for me to pick what to work on here.`
+                      `[mm-link ${id}] ${who} has ${queueTotal(it)} ${newestFirst(it) ? 'open ticket(s) in my internal queue, newest first' : 'ticket(s) in my internal queue'}, with no due dates. Load massmarket-internal-ops first, then show me the queue below as it stands now and wait for me to pick what to work on here.`
                     : etaOnly(it)
                       ? // (0.7.4, ETA asks) listed by tickets that owe an ETA alone: a first line that names them, then their paragraph
                         `[mm-link ${id}] ${who} has ${etaAsksOf(it).length} ticket(s) of mine that need an ETA${due ? `, the first needed by ${due}` : ''}. Load ${skillFor(it)} first, then ask me for the ETA of each ticket below and record it. Send nothing else without my go.`
