@@ -7879,6 +7879,79 @@ describe('(0.7.3, internal queue) the Massmarket internal thread lists, chips an
   })
 })
 
+// (0.7.56) Rob, 2026-11-13: "Tickets with no activity in 3 weeks move under a closed Older toggle, out of the top 10 and
+// out of the kickoff. Nothing closes automatically." The pane draws the queue newest first, then the Older toggle under
+// it: a button, closed until pressed, as the groups under the list are, opening to the older tickets' lines.
+describe('(0.7.56, internal queue) the pane: newest first, then the closed Older toggle under the queue', () => {
+  const OPS = 'e6deffc3-2713-4def-a11d-b75a1efba9c1'
+  const tid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-000000000000`
+  // the world's clock: Mon 2026-10-12 11 AM in New York
+  const g = (n: number, at: string, group: string, kind: string | null = null): FeedQueueTicket => ({
+    ticket_id: tid(n), project_id: OPS, project_name: 'Massmarket AI', title: `Ticket ${n}`, severity: 'high', internal: true, assignee_email: ME,
+    queue_tier: 'now', queue_rank: 100 - n, queue_reason: `reason ${n}`, last_activity_at: at, queue_group: group, activity_kind: kind,
+  })
+  const ACTIVE = [g(1, '2026-10-12T13:00:00Z', 'recent', 'new'), g(2, '2026-10-09T15:00:00Z', 'recent', 'worked'), g(3, '2026-10-01T15:00:00Z', 'in_progress')]
+  const OLDER = [g(7, '2026-09-10T15:00:00Z', 'older'), g(8, '2026-08-20T15:00:00Z', 'older')]
+  const newFeed = (older: FeedQueueTicket[] = OLDER, olderTotal = 2): Feed => ({
+    member: ME, role: 'founder', mail: [], drafts: [],
+    tickets: { internal_queue: ACTIVE, internal_queue_older: older },
+    summary: { internal_queue_total: 3 + olderTotal, internal_queue_active_total: 3, internal_queue_older_total: olderTotal },
+  })
+  const QUEUE_PART = [
+    '### Internal queue (3 open, newest first)',
+    '',
+    '1. new today · Ticket 1 (ticket 00000001) · reason 1',
+    '2. worked Fri · Ticket 2 (ticket 00000002) · reason 2',
+    '3. in progress · Ticket 3 (ticket 00000003) · reason 3',
+  ].join('\n')
+  const OLDER_PART = ['1. last worked Sep 10 · Ticket 7 (ticket 00000007) · reason 7', '2. last worked Aug 20 · Ticket 8 (ticket 00000008) · reason 8'].join('\n')
+  const markdowns = async (ui: Drawing): Promise<string[]> => (await ui.findAll({ type: 'Markdown' })).map(m => String(m.text))
+
+  test('linked to this thread: the queue newest first, the Older toggle closed under it, its lines only once pressed', async ($, on) => {
+    const w = world(on, { feed: newFeed(), threads: [], store: { 'mm.links': { [OPS]: SELF } } })
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    expect(w.threads.get(SELF)).toMatchObject({ title: '🟡 Massmarket AI · internal queue', pinned: false })
+    const ui = await pane($)
+    expect(await markdowns(ui)).toEqual([`## Massmarket AI\n🟡 Massmarket AI · internal queue\n\nThis thread ${SOON}.\n\n${QUEUE_PART}`])
+    // closed: its button alone, dimmed as a closed group's is, and none of its tickets anywhere on the pane
+    const older = (await ui.findAll({ type: 'Button' })).find(b => b.key === 'mm-fold:queueOlder')
+    expect(older?.props).toMatchObject({ label: 'Older: 2 with no activity in 3 weeks', dimColor: true })
+    expect(JSON.stringify(await ui.findAll({}))).not.toContain('00000007')
+    // pressed: its lines, in the queue's format, under the button; pressed again: closed
+    await ui.press({ key: 'mm-fold:queueOlder' })
+    expect(await markdowns(ui)).toEqual([`## Massmarket AI\n🟡 Massmarket AI · internal queue\n\nThis thread ${SOON}.\n\n${QUEUE_PART}`, OLDER_PART])
+    expect((await ui.findAll({ type: 'Button' })).find(b => b.key === 'mm-fold:queueOlder')?.props).toMatchObject({ dimColor: false })
+    await ui.press({ key: 'mm-fold:queueOlder' })
+    expect((await markdowns(ui)).length).toBe(1)
+    expect(sends(w)).toEqual([])
+    expect(w.prompts).toEqual([])
+    await ui.unmount()
+  })
+
+  test('no older ticket: no toggle under the queue', async ($, on) => {
+    const none = world(on, { feed: newFeed([], 0), threads: [], store: { 'mm.links': { [OPS]: SELF } } })
+    await mm($, '')
+    const ui = await pane($)
+    expect((await buttons(ui)).filter(([k]) => k === 'mm-fold:queueOlder')).toEqual([])
+    expect(await markdowns(ui)).toEqual([`## Massmarket AI\n🟡 Massmarket AI · internal queue\n\nThis thread ${SOON}.\n\n${QUEUE_PART}`])
+    expect(sends(none)).toEqual([])
+    await ui.unmount()
+  })
+
+  test('the chip\'s kickoff: the active tickets newest first, the older count, never an older ticket', async ($, on) => {
+    const w = world(on, { feed: newFeed(), threads: [], store: { 'mm.links': { [OPS]: SELF } } })
+    await tickOnce($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
+    expect(chipTitles(w)).toEqual(['Do it here: Massmarket AI: work the internal queue'])
+    const prompt = String(w.minted().at(-1)?.args.prompt)
+    expect(prompt).toContain(`[mm-link ${OPS}] Massmarket AI (OW project ${OPS}) has 3 open ticket(s) in my internal queue, newest first, with no due dates.`)
+    expect(prompt).toContain(`My internal queue, newest first (top 3 of 3 open, no due dates; 2 older, no activity in 3 weeks, under the Older toggle):\n${QUEUE_PART.split('\n').slice(2).join('\n')}`)
+    expect(prompt).not.toContain('00000007')
+    expect(prompt).not.toContain('00000008')
+    expect(sends(w)).toEqual([])
+  })
+})
+
 // (0.7.4) Rob, 2026-10-27: "Team members need to provide ETAs, and this should show up just like any other client with a
 // due date. They need to provide an ETA in 24 hours to me or to the system, and then it holds them accountable to that."
 describe('(0.7.4) a teammate\'s internal ticket owes an ETA: listed with its clock, chipped and pinned as a client\'s; late, it reaches the founder', () => {

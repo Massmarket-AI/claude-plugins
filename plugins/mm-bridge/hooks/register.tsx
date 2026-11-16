@@ -5,7 +5,7 @@ import type { MmBand, MmBrowser, MmBrowserAsk, MmBrowserChoice, MmCard, MmFolds,
 import {
   INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients,
   peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
-  asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText,
+  asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, newestFirst, olderHeading, olderMarkdown, olderOf, olderTotal, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText,
   hasDue, clientActivity, isRecent, mayStart,
   pinsFor, pinTitle, threadWhy,
   teamLate, teamLateCount, teamLateSegment, teamLateWho, LATE_WITH_TEAM,
@@ -239,7 +239,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.55'
+export const VERSION = '0.7.56'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -4288,8 +4288,11 @@ async function newDraw($: EngineInterface): Promise<() => Promise<boolean>> {
 async function beginClient($: EngineInterface, it: QueueItem, own: boolean, atOnce: boolean): Promise<() => Promise<void>> {
   const heading = own ? `This thread: ${it.client}` : ''
   const newest = await newDraw($)
+  // (0.7.56) the internal queue's closed Older toggle, drawn under the part: its words and what it opens to
+  const olderLabel = olderHeading(it)
+  const older = olderLabel ? { older: { heading: olderLabel, text: olderMarkdown(it) } } : {}
   const draw = async (text: string, parts?: { page: string; extra: string }): Promise<void> => {
-    if (await newest()) await $.state.set(VIEW, { text, heading, ...parts } satisfies MmView)
+    if (await newest()) await $.state.set(VIEW, { text, heading, ...parts, ...older } satisfies MmView)
   }
   const withBanner = (view: string): string => [holdBanner(it), view].filter(Boolean).join('\n\n')
   /** (0.5.28, internal asks) The client's open asks under a pickup view: '' adds nothing, for a client with none. (0.7.3) Then its internal queue, as `clientMarkdown` draws it. */
@@ -4371,7 +4374,9 @@ function partSig(it: QueueItem): string {
   const asks = openAsks(it)
   const withAsks = asks.length ? `${base}:asks:${asks.map(a => `${a.id}/${a.hasDraft ? 1 : 0}`).join(',')}` : base
   const queued = queuedOf(it)
-  const withQueue = queued.length ? `${withAsks}:queue:${queueTotal(it)}:${queued.map(q => `${q?.id}/${q?.tier}/${q?.reason}`).join(',')}` : withAsks
+  // (0.7.56, newest first) and each ticket's words of activity, and the tickets under the Older toggle
+  const older = newestFirst(it) ? `:older:${olderTotal(it)}:${olderOf(it).map(q => `${q?.id}/${q?.when}/${q?.reason}`).join(',')}` : ''
+  const withQueue = queued.length ? `${withAsks}:queue:${queueTotal(it)}:${queued.map(q => `${q?.id}/${q?.tier}/${q?.reason}${q?.when === undefined ? '' : `/${q.when}`}`).join(',')}${older}` : withAsks
   // (0.7.4) the tickets that owe an ETA, (0.7.15) the tickets to give an owner, and (for the founder) his teammates' late ones
   const eta = etaAsksOf(it)
   const owners = assignAsksOf(it)
@@ -4389,6 +4394,10 @@ async function clientPart($: EngineInterface): Promise<MmView> {
     heading: typeof value.heading === 'string' ? value.heading : '',
     ...(typeof value.page === 'string' ? { page: value.page } : {}),
     ...(typeof value.extra === 'string' ? { extra: value.extra } : {}),
+    // (0.7.56) the Older toggle, when the part has one
+    ...(value.older && typeof value.older.heading === 'string' && value.older.heading && typeof value.older.text === 'string'
+      ? { older: { heading: value.older.heading, text: value.older.text } }
+      : {}),
   }
 }
 
@@ -8184,7 +8193,7 @@ async function resolvePerson($: EngineInterface, id: string, action: PersonActio
 }
 
 /** Opens or closes one of the groups under the list ((0.7.21) Team · late too), in this thread's pane. The person's press: nothing is fetched, called or changed. */
-async function toggleFold($: EngineInterface, key: Fold | 'people' | 'track' | 'more' | 'team' | 'confirm'): Promise<void> {
+async function toggleFold($: EngineInterface, key: Fold | 'people' | 'track' | 'more' | 'team' | 'confirm' | 'queueOlder'): Promise<void> {
   try {
     const { value } = await $.state.get(FOLDS)
     await $.state.set(FOLDS, { ...(value ?? {}), [key]: !value?.[key] } satisfies MmFolds)
@@ -10581,6 +10590,15 @@ export const register: Register = on => {
     const cardFailed = Boolean(client.text && card?.packageId && !card.tree && card.status === 'failed')
     // (0.7.40) the same drawing as the row of the thread's own `mm card` call (`drawLiveCard`)
     const cardDrawn = cardShown || cardFailed ? await drawLiveCard($, $.ui.resolve(e) as Els, card, String(e.surface)) : null
+    // (0.7.56, Rob 2026-11-13: "Tickets with no activity in 3 weeks move under a closed Older toggle") under the internal
+    // queue, its Older toggle: a button closed until pressed, as the groups under the list are, opening to the older lines
+    const olderOpen = folds?.queueOlder === true
+    const olderPart = client.older ? (
+      <Box key="mm-queue-older" flexDirection="column" marginTop={1}>
+        <Button key="mm-fold:queueOlder" label={client.older.heading} dimColor={!olderOpen} onPress={() => void toggleFold($, 'queueOlder')} />
+        {olderOpen ? <Markdown text={client.older.text} /> : null}
+      </Box>
+    ) : null
     // (0.6.0) this thread's Tracking part: what it is counted to, and the time tracked to that project
     const { value: track } = await $.state.get(TRACK)
     const tracking = track && track.pid && Array.isArray(track.lines) && track.lines.length ? track : undefined
@@ -10746,8 +10764,10 @@ export const register: Register = on => {
             {cardDrawn}
             {/* (0.7.33, G11) under a card the banner, the asks and the queue stay in sight: only the page folds */}
             {cardShown && client.extra ? <Markdown text={client.extra} /> : null}
+            {cardShown && client.extra ? olderPart : null}
             {cardShown && cardMarks.pageOpen ? <Markdown text={client.page ?? client.text} /> : null}
             {cardShown ? null : <Markdown text={client.text} />}
+            {cardShown ? null : olderPart}
           </Box>
         ) : null}
         {/* (0.7.53) "needs a client": one tap answers it, never in the founder's pane */}
