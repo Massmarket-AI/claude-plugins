@@ -1279,6 +1279,11 @@ function paraStyle(c: string | undefined, ctx: Ctx, words = ''): TextProps {
     const tone = toneColor(c) ?? (words.startsWith('⚠') ? 'warning' : words.startsWith('✅') ? 'success' : undefined)
     if (tone) p.color = tone
   }
+  // (0.7.58) the timeline (Rob, 2026-11-16): a group's name and the line under it, each message's "They sent" or "We sent",
+  // and "Proposed: goes at the go" on an item the go sends, in the accent colour as the Proposed group is
+  if (has(c, 'rp-band-h')) Object.assign(p, { weight: 'semibold' }, has(c, 'rp-band-h-proposed') ? { color: 'suggestion' } : {})
+  if (has(c, 'rp-band-sub')) Object.assign(p, { size: 'caption' }, dim())
+  if (has(c, 'rp-tag')) Object.assign(p, { size: 'caption', weight: 'semibold' }, has(c, 'rp-proposed') ? { color: 'suggestion' } : dim())
   if (has(c, 'rp-bub-out')) p.color = '#ffffff'
   if (ctx.dark && !p.color) p.color = DC_TEXT
   return p
@@ -1301,6 +1306,9 @@ function boxStyle(c: string | undefined, ctx: Ctx): BoxProps {
   if (has(c, 'rp-dc')) Object.assign(p, { backgroundColor: '#313338', borderStyle: 'round', borderColor: '#313338', paddingX: 1, marginY: 'xs' })
   if (has(c, 'rp-find') || has(c, 'rp-tl')) Object.assign(p, { marginY: 'xs' })
   if (has(c, 'rp-go')) Object.assign(p, { marginTop: 1 })
+  // (0.7.58) a timeline group: a box across the card, the Proposed one in the accent colour
+  if (has(c, 'rp-band'))
+    Object.assign(p, { flexDirection: 'row', gap: 1, borderStyle: 'round', borderColor: has(c, 'rp-band-proposed') ? 'suggestion' : 'subtle', paddingX: 1, marginTop: 1 })
   if (has(c, 'rp-actions')) Object.assign(p, { flexDirection: 'row', flexWrap: 'wrap', gap: 1, marginY: 'xs' })
   if (has(c, 'rp-banner')) {
     const tone = toneColor(c)

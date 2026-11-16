@@ -15,12 +15,28 @@
  * - A state line (STATE_LINES) is checked both ways: the card may not say what the page does not.
  * - (0.7.45) A date move and a ticket the reply answers (OW #717) say what the go does to a date or a ticket: each is the whole line
  *   of its own leaf on the card, one to one in order, and the counts are equal.
+ * - (0.7.58) The page reads as one timeline (Rob, 2026-11-16): its groups (GROUP_LINE) stand on the card in the same words, each
+ *   message heads "They sent" or "We sent", and an item the go sends says so (PROPOSED), on the card's same item and nowhere else.
  * The card may otherwise hold more than the page. Pure: no `$`, no state, nothing logged.
  */
 import type { MmCardNode, MmCardRun, MmCardTree } from '../types'
 
-/** The lines of the page that carry nothing of the package. ⛔ A line goes here only if it is the same for every package. */
-export const STRUCTURAL: readonly RegExp[] = [/^\|?[-:| ]+\|?$/, /^-{3,}$/, /^(?:Note|Transcript):$/, /^_No client email in this package\._$/]
+/**
+ * (0.7.58) The page's three timeline groups and the line under each (Rob, 2026-11-16: "It should be really easy to tell what's
+ * proposed ... versus what's already been said before that."), the same on every package. Not content, so STRUCTURAL; but each
+ * must stand on the card in the same words (`groupGap`).
+ */
+export const GROUP_LINE =
+  /^(?:## (?:Already said|Proposed|Also in this package)|_Sent or received before this package\. Nothing here sends\._|_What the go sends or schedules\. Each item says where it goes and when, or that it already went\._|_What else the go does, and what to read before it\._)$/
+/** (0.7.58) The line on an item the go sends, as the card draws it: checked on that item, both ways (`itemGap`). */
+export const PROPOSED = 'Proposed: goes at the go'
+
+/**
+ * The lines of the page that carry nothing of the package. ⛔ A line goes here only if it is the same for every package.
+ * (0.7.58) `Message:` too: the label over a LinkedIn message step's words, as `Note:` and `Transcript:` are over theirs. A package
+ * with one (Clarity FI, 2026-11-16) answered "the page holds a line the card does not (Message:)".
+ */
+export const STRUCTURAL: readonly RegExp[] = [/^\|?[-:| ]+\|?$/, /^-{3,}$/, /^(?:Note|Transcript|Message):$/, /^_No client email in this package\._$/, GROUP_LINE]
 
 /** A state line says what the go will do or what has happened, and neither hash covers all of them: both sides must say the same. */
 export const STATE_LINES: readonly RegExp[] = [
@@ -59,6 +75,7 @@ const STEP_HEAD = /^\*\*\d+\. /
 const SECTIONS: Record<string, string> = {
   'Every question answered?': 'Every question answered?',
   'ETA or proof for every open ticket?': 'ETA or proof for every open ticket?',
+  'What we said before': 'What we said before',
   'Their message': 'Their message',
   'Client reply': 'Our reply to the client',
   'Suggestion: no reply needed': 'Our reply to the client',
@@ -530,6 +547,10 @@ function itemGap(blocks: readonly Block[], item: CardItem): string {
       if (gap) return gap
     }
   }
+  // (0.7.58) both ways, on this item: the card may not say an item goes at the go where the page does not
+  const pageSays = blocks.some(b => b.kind === 'line' && unmark(b.text) === PROPOSED)
+  const cardSays = item.leaves.some(l => !l.isBody && squash(l.text) === PROPOSED)
+  if (pageSays !== cardSays) return pageSays ? lineOf(PROPOSED) : `the card says what the page does not (${PROPOSED}: ${item.title.slice(0, 30)})`
   return ''
 }
 
@@ -648,7 +669,10 @@ function theirGap(section: PageSection, node: MmCardNode | undefined): string {
       continue
     }
     if (b.kind !== 'line') continue
-    if (/^#### /.test(b.text)) who = unmark(b.text).split(' · ').map(squash)
+    if (/^#### /.test(b.text)) {
+      who = unmark(b.text).split(' · ').map(squash)
+      if (who[0] === 'They sent') who = who.slice(1) // (0.7.58) the page's label; the card draws it on its own leaf
+    }
     if (!/^(?:To|Cc|Subject): /.test(b.text.trim())) {
       const gap = lineGap(hay, b.text)
       if (gap) return gap
@@ -877,6 +901,12 @@ function quotesGap(section: PageSection, node: MmCardNode | undefined): string {
   return n + 1 === boxes.length ? '' : `the page holds ${n + 1} quote blocks, the card ${boxes.length}`
 }
 
+/** (0.7.58) Each timeline group the page prints, and the line under it, in the card's own words outside every body. */
+function groupGap(page: readonly Block[], card: Card): string {
+  for (const b of page) if (b.kind === 'line' && GROUP_LINE.test(b.text.trim()) && !card.frame.has(unmark(b.text))) return lineOf(unmark(b.text))
+  return ''
+}
+
 /** A state line on one side and not the other. */
 function stateGap(page: readonly Block[], card: Card): string {
   const lines = new Set<string>()
@@ -908,7 +938,7 @@ export function pageGap(page: string | null, tree: MmCardTree): string {
   if (holdsImage(page, tree)) return IMAGE_REASON
   const blocks = blocksOf(page)
   const card = readCard(tree)
-  const state = stateGap(blocks, card)
+  const state = stateGap(blocks, card) || groupGap(blocks, card)
   if (state) return state
   const used = new Set<CardItem>()
   for (const section of sectionsOf(blocks)) {
