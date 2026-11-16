@@ -15,6 +15,11 @@ export type MmView = {
   page?: MmMarkdown
   /** (0.7.33) With a pickup view: the hold banner, the open asks and the internal queue, drawn under the card and never folded with the page. */
   extra?: MmMarkdown
+  /**
+   * (0.7.56) Under the internal queue, the closed Older toggle: its words (`Older: 229 with no activity in 3 weeks`) and
+   * the older tickets' lines it opens to. Absent when there are none, and for every other part.
+   */
+  older?: { heading: string; text: MmMarkdown }
 }
 
 /** One client on the Needs-you pane: what is due, what is waiting, and the one thing to do about its thread. */
@@ -189,6 +194,37 @@ export type MmFolds = {
   more?: boolean
   /** (0.7.5) The tasks of the time list opened to their threads, by key (`MmTrackLine.toggle`). */
   tasks?: string[]
+  /** (0.7.53) The end-of-day list of browser stretches with no client yet, closed until opened. */
+  confirm?: boolean
+  /**
+   * (0.7.56) The internal queue's `Older` toggle, closed until opened. Its own key: a pane before 0.7.12 stored `older` for
+   * a group that is gone, and that must not open this one.
+   */
+  queueOlder?: boolean
+}
+
+/**
+ * (0.7.53, Rob approved 2026-11-11) "Working manually in browser": a person's active browser minutes on a client in the last 15 minutes,
+ * as OW's `GET /api/ext/browser-now` answers them (the latest page's site and title). `noThread`: no Claude Code thread of that person
+ * declared to that client in those minutes. `member`: the person's first name, in the founder's view only; `me`: the viewer's own line.
+ */
+export type MmBrowserLine = { projectId: string; client: string; site: string; title: string; lastAt: number; minutes: number; noThread: boolean; member: string | null; me: boolean }
+/** (0.7.53) A choice on a "needs a client" question: a likely client. */
+export type MmBrowserChoice = { projectId: string; client: string }
+/** (0.7.53) A stretch of browser minutes with no client: the open question, or one on the end-of-day list. */
+export type MmBrowserAsk = { id: string; from: number; to: number; minutes: number; site: string; title: string; choices: MmBrowserChoice[] }
+/**
+ * (0.7.53) The pane's browser part, from the store (`drawBrowser`): OW's last read with the answered questions left out, when it was
+ * read, and this thread's presses (`busy` by question, what OW refused in `errors`).
+ */
+export type MmBrowser = {
+  got?: number
+  founder?: boolean
+  lines?: MmBrowserLine[]
+  question?: MmBrowserAsk | null
+  confirm?: MmBrowserAsk[]
+  busy?: Record<string, boolean>
+  errors?: Record<string, string>
 }
 
 /** (0.7.34) One row of a person's pins on `Team now`, as the daily photo has it. */
@@ -226,6 +262,11 @@ export type MmNotice = { text: string; at: number }
  * above the band with its own Open button for as long as the last sync lists the package (Rob, 2026-11-09: "it's important that
  * the chat tells them a reply package is waiting in the side panel when there is one").
  */
+/**
+ * (0.7.49) `drafts` and `waiting` are set only while the person's close of the pane for the thread's client stands (`MmSession`'s
+ * `closed`): anywhere else the pane opens by itself, and the band offers no way to it (Rob, 2026-11-11: "We don't need to have
+ * something cluttering up that space telling us to open the side panel").
+ */
 export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string; waiting?: string }
 
 /**
@@ -249,9 +290,9 @@ export type MmTrack = { pid: string; client: string; title: string; lines: MmTra
 /**
  * (0.6.0) This session's own record, for the pane and the band: the person's prompts so far, whether its first
  * prompt began `SINGLE-SESSION`, whether the person pressed Not client work, whether it runs for a person
- * (`interactive`) or unattended (`MM_UNATTENDED=1`), the project whose pane the person closed (`closed`) and the one
- * the pane was last opened for by itself (`opened`), the project the pane last drew (`handled`), and when this
- * session last asked OW for its project's time (`asked`).
+ * (`interactive`) or unattended (`MM_UNATTENDED=1`), the project whose pane the person closed (`closed`; (0.7.49) until the
+ * pane is opened again) and the one the pane was last opened for by itself (`opened`), the project the pane last drew
+ * (`handled`), and when this session last asked OW for its project's time (`asked`).
  */
 export type MmSession = {
   prompts: number
@@ -399,6 +440,8 @@ export type MmCardChecked = Record<string, number>
 /**
  * (0.7.40) The live `mm card` call: the main thread's own call (no `agentId`) whose answer was the last `card ready: Package <12>.`,
  * by its `tool_use_id`. That call's row in the thread draws the whole card; any earlier ready row draws one line. A later ready replaces it.
+ * (0.7.48) Once the thread's own line after that call is drawn (the first reply row naming its tag), the card is drawn under that line at
+ * its whole height and the call's row draws one line saying so: on the desktop a call's row scrolls inside 70% of the window.
  */
 export type MmCardAsked = { packageId: string; label: string; toolUseId: string; at: number }
 
@@ -419,6 +462,8 @@ declare module 'claude-code' {
       band: MmBand
       folds: MmFolds
       teamNow: MmTeamNow
+      /** (0.7.53) Working manually in browser: the lines, the open question and the end-of-day list. */
+      browser: MmBrowser
       people: MmPeople
       track: MmTrack
       sess: MmSession

@@ -27,7 +27,7 @@ describe('0.7.33 the card against the page: real pairs, from the two renderers t
     expect(pageGap(SMS_PAGE, realTree())).toBe('')
   })
 
-  for (const name of ['everything', 'source links', "rob's mail, plan not approved", "rob's mail, plan approved", 'html email', 'no reply', 'closed no reply', 'later messages', 'ticket check unreadable', 'follow-ups live', 'follow-ups switched off', 'tickets from the call', 'tickets from the call, all decided', 'tickets from the call, unread', 'tickets from the call, ticket check off', 'ticket gap under enforce, a teammate', "ticket gap under enforce, rob's machine", 'quotes', 'quotes, revised']) {
+  for (const name of ['everything', 'source links', "rob's mail, plan not approved", "rob's mail, plan approved", 'html email', 'no reply', 'closed no reply', 'later messages', 'ticket check unreadable', 'follow-ups live', 'follow-ups switched off', 'tickets from the call', 'tickets from the call, all decided', 'tickets from the call, unread', 'tickets from the call, ticket check off', 'ticket gap under enforce, a teammate', "ticket gap under enforce, rob's machine", 'quotes', 'quotes, revised', 'date moves', 'date moves, ticket check off', 'answered', 'every ticket answered']) {
     test(`${name}: the page and the card agree`, () => {
       const { page, tree } = pair(name)
       expect(contentPieces(page).length).toBeGreaterThan(5)
@@ -315,6 +315,110 @@ describe('0.7.43 what the quote says: each block, line and row of the page again
   })
 })
 
+describe('0.7.45 date moves and a ticket the reply answers (OW #717): each line against its own leaf, one to one, both ways', () => {
+  const copy = (t: MmCardTree) => JSON.parse(JSON.stringify(t)) as MmCardTree
+  /** The tree with its first match of `from` replaced: a replacer, so a `$` in the words is a `$`. */
+  const swap = (t: MmCardTree, from: string, to: string) => JSON.parse(JSON.stringify(t).replace(from, () => to)) as MmCardTree
+  const has = (n: MmCardNode, cls: string) => new RegExp(`(?:^|\\s)${cls}(?:\\s|$)`).test(n.c ?? '')
+  /** The tree without any node of this class, wherever it sits. */
+  const drop = (t: MmCardTree, cls: string, which?: (n: MmCardNode) => boolean): MmCardTree => {
+    const walk = (list: readonly MmCardNode[]): MmCardNode[] =>
+      list.filter(n => !(has(n, cls) && (!which || which(n)))).map(n => (n.k ? { ...n, k: walk(n.k) } : n))
+    return { ...t, nodes: walk(t.nodes) }
+  }
+  const movesSection = (t: MmCardTree) => t.nodes.find(n => JSON.stringify(n).includes('"Date moves"')) as MmCardNode
+  const TICKET_MOVE =
+    'Ticket aaaaaaaa "ZZ_ticket_title": Thu Nov 12 → Mon Nov 16 (ZZ_move_reason_one). Source: ZZ_move_call_title, Nov 10: "ZZ_move_call_quote push it to Monday"'
+  const PHASE_MOVE = 'Phase 2 "ZZ_phase_title": none → Tue Nov 17 (ZZ_move_reason_two). Source: this email: "ZZ_move_email_quote"'
+  const ANSWERED_LINE = 'Ticket aaaaaaaa "ZZ_answered_title": closes on send — answered by: "ZZ_answered_quote: the login redirect is fixed."'
+
+  test('the moves are a section of their own after the tickets, in the words OW prints, and the page and card agree', () => {
+    const { page, tree } = pair('date moves')
+    expect(page).toContain(`\n### Date moves\n- ${TICKET_MOVE}\n- ${PHASE_MOVE}\n`)
+    expect(page.indexOf('### Date moves')).toBeGreaterThan(page.indexOf('### ETA or proof for every open ticket?'))
+    expect(page.indexOf('### Date moves')).toBeLessThan(page.indexOf('### Their message'))
+    expect(pageGap(page, tree)).toBe('')
+  })
+
+  test('a page with no move is as it was: no section, the same page, and its own card agrees', () => {
+    const moves = pair('date moves')
+    const plain = pair('everything')
+    const at = moves.page.indexOf('\n### Date moves\n')
+    expect(moves.page.slice(0, at) + moves.page.slice(moves.page.indexOf('\n### Their message\n'))).toBe(plain.page)
+    expect(plain.page).not.toContain('Date moves')
+    expect(plain.page).not.toContain('closes on send')
+    expect(pageGap(plain.page, plain.tree)).toBe('')
+  })
+
+  test('a move the card lacks, another date on it, or one more on the card is a gap', () => {
+    const { page, tree } = pair('date moves')
+    expect(pageGap(page, drop(tree, 'rp-move', n => JSON.stringify(n).includes('ZZ_phase_title')))).toBe(MISSING(PHASE_MOVE))
+    expect(pageGap(page, drop(tree, 'rp-move', n => JSON.stringify(n).includes('ZZ_ticket_title')))).toBe(MISSING(TICKET_MOVE))
+    expect(pageGap(page, swap(tree, 'Mon Nov 16', 'Tue Nov 17'))).toBe(MISSING(TICKET_MOVE))
+    expect(pageGap(page, swap(tree, 'ZZ_move_reason_two', 'ZZ_move_reason_oth'))).toBe(MISSING(PHASE_MOVE))
+    const more = copy(tree)
+    const section = movesSection(more)
+    section.k = [...(section.k ?? []), { c: 'rp-qa rp-move', r: [{ s: 'Ticket bbbbbbbb: none → Fri Nov 20 (ZZ_extra). Source: this email: "ZZ_extra"' }] }]
+    expect(pageGap(page, more)).toBe('the page holds 2 date moves, the card 3')
+  })
+
+  test('the moves in another order are a gap: each line stands against its own leaf', () => {
+    const { page, tree } = pair('date moves')
+    const turned = copy(tree)
+    const section = movesSection(turned)
+    const moves = (section.k ?? []).filter(n => has(n, 'rp-move'))
+    section.k = [...(section.k ?? []).filter(n => !has(n, 'rp-move')), ...moves.reverse()]
+    expect(pageGap(page, turned)).toBe(MISSING(TICKET_MOVE))
+  })
+
+  test('the section gone from the card is a gap, and the card showing moves the page does not is one too', () => {
+    const { page, tree } = pair('date moves')
+    expect(pageGap(page, { ...tree, nodes: tree.nodes.filter(n => n !== movesSection(tree)) })).toBe(
+      'the page holds a section the card does not (Date moves)',
+    )
+    expect(pageGap(pair('everything').page, tree)).toBe('the card says what the page does not (Date moves)')
+  })
+
+  test('with the ticket check off the moves still stand, on both sides', () => {
+    const { page, tree } = pair('date moves, ticket check off')
+    expect(page).not.toContain('### ETA or proof')
+    expect(page).toContain(`### Date moves\n- ${TICKET_MOVE}\n`)
+    expect(pageGap(page, tree)).toBe('')
+  })
+
+  test('an answered ticket is its own line under the table, not a row, and the page and card agree', () => {
+    const { page, tree } = pair('answered')
+    expect(page).toContain(`|\n\n- ${ANSWERED_LINE}\n`)
+    expect(page).toContain('1 of 3 open tickets have no ETA')
+    expect(pageGap(page, tree)).toBe('')
+  })
+
+  test('with every ticket answered there is no table, on either side', () => {
+    const { page, tree } = pair('every ticket answered')
+    expect(page).toContain(`### ETA or proof for every open ticket?\n- ${ANSWERED_LINE}\n`)
+    expect(page).not.toContain('| # | Ticket |')
+    expect(pageGap(page, tree)).toBe('')
+  })
+
+  test('an answered line the card lacks or words otherwise, a row for it, or one the page does not have, is a gap', () => {
+    const { page, tree } = pair('answered')
+    expect(pageGap(page, drop(tree, 'rp-answered'))).toBe(MISSING(ANSWERED_LINE))
+    expect(pageGap(page, swap(tree, 'closes on send', 'stays open'))).toBe(MISSING(ANSWERED_LINE))
+    expect(pageGap(page, swap(tree, 'the login redirect is fixed.', 'the login redirect is next.'))).toBe(MISSING(ANSWERED_LINE))
+    // drawn as a row instead: one row more than the page's table
+    expect(pageGap(page, swap(tree, '"c":"rp-qa rp-answered"', '"c":"rp-q"'))).toBe(
+      'the page holds 2 rows in ETA or proof for every open ticket?, the card 3',
+    )
+    // a card with the line, against a page without it, or with no ticket section at all to say it
+    expect(pageGap(page.replace(`\n\n- ${ANSWERED_LINE}`, ''), tree)).toBe('the page holds 0 answered tickets, the card 1')
+    const all = pair('every ticket answered')
+    const at = all.page.indexOf('\n### ETA or proof for every open ticket?\n')
+    const cut = all.page.slice(0, at) + all.page.slice(all.page.indexOf('\n### Their message\n'))
+    expect(cut).not.toContain('closes on send')
+    expect(pageGap(cut, all.tree)).toBe('the card says what the page does not (an answered ticket)')
+  })
+})
+
 describe('0.7.33 added by the team: never sent, so the name is not compared, its time and words are', () => {
   /** OW's page prints the roster's name where this computer's renderer prints the address. */
   const onOwPage = (page: string) => page.replace(/^(#### )[^\n·]*@[^\n·]*( · )/gm, '$1Roster Name$2')
@@ -512,6 +616,27 @@ describe('0.7.33 the normalising and the frame', () => {
     expect(pageGap(page, cardOf(sec('Every question answered?', q(1))))).toBe('')
     expect(pageGap(page, cardOf(sec('Every question answered?', q(1), q(2))))).toBe('the page holds 1 rows in Every question answered?, the card 2')
     expect(pageGap(page.replace('"Yes"', '"No"'), cardOf(sec('Every question answered?', q(1))))).toBe(MISSING('"No"'))
+  })
+
+  // (0.7.46) NFE, 2026-11-11: rows 8 to 22 of a 24-row check each quoted a bullet line of our reply, and the card was held off for it
+  test('a row quoting a bullet line of our reply is the same row on the card, and other words in it are still a gap', () => {
+    const row = (us: string) => ({ c: 'rp-q', k: [para('Q1'), { c: 'rp-grow', k: [para('Could you break the hours down by step?', 'rp-qa rp-qa-them'), para(us, 'rp-qa rp-qa-us')] }] })
+    const table = (cell: string) => `### Every question answered?\n| # | They asked | Our reply says | |\n|---|---|---|---|\n| 1 | Could you break the hours down by step? | ${cell} | ✅ |`
+    for (const mark of ['- ', '> ']) {
+      const us = `${mark}Setup by step, and a price for just the key and test lead`
+      expect(pageGap(table(`"${us}"`), cardOf(sec('Every question answered?', row(us))))).toBe('')
+      expect(pageGap(table(`"${us}"`), cardOf(sec('Every question answered?', row(`${mark}Setup by step, and a price for the whole build`))))).toBe(MISSING(`"${us}"`))
+    }
+    // a plain quote is held exactly as before
+    expect(pageGap(table('"Yes, we can split it."'), cardOf(sec('Every question answered?', row('Yes, we can split it.'))))).toBe('')
+    expect(pageGap(table('"Yes, we can split it."'), cardOf(sec('Every question answered?', row('No, we cannot split it.'))))).toBe(MISSING('"Yes, we can split it."'))
+    // the mark is held, never dropped (review round 1): the page saying more than the leaf, or a mark the leaf lacks, is still a gap
+    expect(pageGap(table('">2 weeks"'), cardOf(sec('Every question answered?', row('2 weeks'))))).toBe(MISSING('">2 weeks"'))
+    expect(pageGap(table('">2 weeks"'), cardOf(sec('Every question answered?', row('>2 weeks'))))).toBe('')
+    expect(pageGap(table('"- 5 hours"'), cardOf(sec('Every question answered?', row('5 hours'))))).toBe(MISSING('"- 5 hours"'))
+    // a row with no reply leaf: the quoted words are looked for as the page wrote them, mark and all, as before
+    const bare = { c: 'rp-q', k: [para('Q1'), { c: 'rp-grow', k: [para('Yes or no: can you split it?', 'rp-qa rp-qa-them')] }] }
+    expect(pageGap(table('"- Yes"').replace('Could you break the hours down by step?', 'Yes or no: can you split it?'), cardOf(sec('Every question answered?', bare)))).toBe(MISSING('"- Yes"'))
   })
 
   test('the page\'s heading is the card\'s client and hash', () => {

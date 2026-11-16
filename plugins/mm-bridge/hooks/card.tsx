@@ -1278,16 +1278,36 @@ function drawRuns(els: Els, runs: readonly MmCardRun[], ctx: Ctx): Node[] {
   return runs.map(r => <Text {...runStyle(r.c, ctx)}>{r.s}</Text>)
 }
 
+/**
+ * (0.7.49) A link's address as the card draws it. An `@` after the host is written `%40`, as `sourceLink` writes the
+ * pane's: the desktop app draws a link whose address holds a raw `@` as plain text, and OW's Gmail links name the
+ * mailbox in the path (`/mail/u/<mailbox>/#all/<id>`). In the real Game Day card on 11-11 that was 8 links. An address
+ * with a user name or password before the host, or one that does not parse, is no link: '' (its words are drawn as text).
+ */
+export function drawHref(href: string): string {
+  try {
+    const url = new URL(href)
+    if (url.username || url.password || !url.href.startsWith(url.origin)) return ''
+    const safe = url.origin + url.href.slice(url.origin.length).replace(/@/g, '%40')
+    return safe.length <= 2048 ? safe : ''
+  } catch {
+    return ''
+  }
+}
+
 function drawPara(els: Els, node: MmCardNode, ctx: Ctx): Node {
   const { Box, Text, Link } = els
   const runs = node.r ?? []
   const c = node.c
   // a paragraph holding a link: its pieces side by side, each link a Link (a Text cannot hold one)
-  if (runs.some(r => r.href) && Link) {
+  if (runs.some(r => r.href && drawHref(r.href)) && Link) {
     return (
       <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
         {has(c, 'rp-li') ? <Text dimColor>•</Text> : null}
-        {runs.map(r => (r.href ? <Link href={r.href} label={r.s.trim() || r.href} /> : r.s.trim() ? <Text {...paraStyle(c, ctx)} {...runStyle(r.c, ctx)}>{r.s}</Text> : null))}
+        {runs.map(r => {
+          const href = r.href ? drawHref(r.href) : ''
+          return href ? <Link href={href} label={r.s.trim() || r.href} /> : r.s.trim() ? <Text {...paraStyle(c, ctx)} {...runStyle(r.c, ctx)}>{r.s}</Text> : null
+        })}
       </Box>
     )
   }
@@ -1371,14 +1391,27 @@ function etTime(at: number): string {
   }
 }
 
+/**
+ * (0.7.46) What the pane says of a card drawn from the package as it stands whose page holds something it does not (`pageGap`). Until
+ * 0.7.46 it said the drift words, "This view does not match the stored drafts", which read as an older version left on the screen
+ * (Rob, 2026-11-11, on NFE's package after five revisions: "That should just be gone, and the new one should be there."). It was the
+ * newest version: the check had found a line it did not hold. Now it says that, and names the line.
+ */
+export const PAGE_HOLD = (gap: string): string =>
+  `This card is the package as it stands now, but it cannot stand in for the page: ${gap || 'the page holds a line the card does not'}. Signing is off here. Go by the page printed in the thread.`
+/** The drift words: the card's own text is not what the renderer fingerprinted, so it is no view of the stored drafts at all (`copyCheck`). */
+export const DRIFT_HOLD = 'This view does not match the stored drafts, so signing is off here. Go by the page printed in the thread.'
+
 /** What the pane says in place of the signature box, by why it holds it back. */
 export function holdText(hold: string, card: MmCard, label: string): string {
   const now = card.current ? card.current.slice(0, 12) : 'unknown'
   switch (hold) {
     case 'drift':
+      // (0.7.33) `mm card` answers not ready for this and for a page gap, so the thread prints the page
+      return DRIFT_HOLD
     case 'page':
-      // (0.7.33) true of both: `mm card` answers not ready for either, so the thread prints the page
-      return 'This view does not match the stored drafts, so signing is off here. Go by the page printed in the thread.'
+      // (0.7.46) only ever a card of the version as it stands (`holdOf` tells an older one first), so never the drift words
+      return PAGE_HOLD(card.gap ?? '')
     case 'stale':
       return card.status === 'failed'
         ? `This card was drawn from package ${label || 'with no tag'}; the package is now ${now}, and it could not be drawn again here. Go by the page printed in the thread.`
@@ -1539,7 +1572,7 @@ export function drawCard(els: Els, d: CardDraw): Node {
   const nodes = drawNodes(els, tree.nodes, ctx, sign)
   return (
     <Box key={`mm-card:${card.packageId}`} flexDirection="column">
-      {hold === 'drift' || hold === 'page' ? <Text color="error">This view does not match the stored drafts, so signing is off here. Go by the page printed in the thread.</Text> : null}
+      {hold === 'drift' || hold === 'page' ? <Text color="error">{holdText(hold, card, tree.label)}</Text> : null}
       {hold === 'stale' && !signOf(tree) ? <Text dimColor>{holdText('stale', card, tree.label)}</Text> : null}
       {notice && !signOf(tree) ? <Text color="warning">{notice}</Text> : null}
       {nodes}

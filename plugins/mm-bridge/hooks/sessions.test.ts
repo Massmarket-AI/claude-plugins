@@ -676,9 +676,10 @@ describe('F2: a write the engine refuses midway leaves nothing half done', () =>
     expect(w.app.get('local_tt')).toMatchObject({ title: 'My own name', pinned: false })
   })
 
-  // (0.7.18, B; Rob 2026-11-03: "Our bridge should repin it if there's still something needed") a pin the person takes off
-  // while its client still pins is pinned again by the next pass (register.test.ts, `0.7.18 B`); the unpin stands, and is
-  // recorded, once nothing pins the client: here its task moved out to later in the week as the pin came off
+  // (0.7.18, B; Rob 2026-11-03: "Our bridge should repin it if there's still something needed") a pin the person takes
+  // off while its client still pins is pinned again by the next pass (register-updates-time-card.test.ts, `0.7.18 B`);
+  // the unpin stands, and is recorded, once nothing pins the client: here its task moved out to later in the week as
+  // the pin came off
   test('F7: a pin the person took off stays off when the sync that saw it could not record it', async () => {
     const task = (hours: number) => ({ ticket_id: 'tf7', project_id: pid(1), project_name: 'Client One', title: 'Send the plan', due_at: new Date(NOW + hours * 3_600_000).toISOString(), due_source: 'commitment', assignee_email: ME })
     const feed: Feed = { member: ME, role: 'founder', mail: [], tickets: { due_today: [task(5)] }, threads: [] } as Feed
