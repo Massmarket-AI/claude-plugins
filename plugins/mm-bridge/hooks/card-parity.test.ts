@@ -27,7 +27,7 @@ describe('0.7.33 the card against the page: real pairs, from the two renderers t
     expect(pageGap(SMS_PAGE, realTree())).toBe('')
   })
 
-  for (const name of ['everything', 'source links', "rob's mail, plan not approved", "rob's mail, plan approved", 'html email', 'no reply', 'closed no reply', 'later messages', 'ticket check unreadable', 'follow-ups live', 'follow-ups switched off', 'tickets from the call', 'tickets from the call, all decided', 'tickets from the call, unread', 'tickets from the call, ticket check off', 'ticket gap under enforce, a teammate', "ticket gap under enforce, rob's machine", 'quotes', 'quotes, revised', 'date moves', 'date moves, ticket check off', 'answered', 'every ticket answered', 'quotes, columns']) {
+  for (const name of ['everything', 'source links', "rob's mail, plan not approved", "rob's mail, plan approved", 'html email', 'no reply', 'closed no reply', 'later messages', 'ticket check unreadable', 'follow-ups live', 'follow-ups switched off', 'tickets from the call', 'tickets from the call, all decided', 'tickets from the call, unread', 'tickets from the call, ticket check off', 'ticket gap under enforce, a teammate', "ticket gap under enforce, rob's machine", 'quotes', 'quotes, revised', 'date moves', 'date moves, ticket check off', 'answered', 'every ticket answered', 'quotes, columns', 'linkedin reply']) {
     test(`${name}: the page and the card agree`, () => {
       const { page, tree } = pair(name)
       expect(contentPieces(page).length).toBeGreaterThan(5)
@@ -128,6 +128,64 @@ describe('0.7.33 the card against the page: real pairs, from the two renderers t
   })
 })
 
+describe('0.7.58 the timeline (Rob, 2026-11-16): what was already said, then what is proposed, then the rest', () => {
+  const edit = (tree: MmCardTree, from: string, to: string) => JSON.parse(JSON.stringify(tree).replaceAll(from, to)) as MmCardTree
+
+  test('a LinkedIn reply with a LinkedIn follow-up step (Clarity FI): the page and the card agree, its Message: label included', () => {
+    const { page, tree } = pair('linkedin reply')
+    expect(page).toContain('\nMessage:\n')
+    expect(STRUCTURAL.some(p => p.test('Message:'))).toBe(true)
+    expect(pageGap(page, tree)).toBe('')
+  })
+
+  test('the page reads in time order, and the LinkedIn reply stands under Client reply, right after their message', () => {
+    const { page, tree } = pair('linkedin reply')
+    const at = (s: string) => page.indexOf(s)
+    const order = ['### Every question answered?', '## Already said', '### What we said before', '### Their message', '## Proposed', '### Client reply', '#### 6. ZZ_li_reply_title', '### Follow-ups', '## Also in this package', '### Team post']
+    for (const [i, s] of order.entries()) {
+      expect(at(s)).toBeGreaterThan(-1)
+      if (i) expect(at(s)).toBeGreaterThan(at(order[i - 1] as string))
+    }
+    // and on the card: the reply is an item of "Our reply to the client"
+    const reply = tree.nodes.find(n => n.c === 'rp-sec' && n.k?.some(k => k.c?.includes('rp-h') && drawnText([k]) === 'Our reply to the client'))
+    expect(drawnText(reply?.k ?? [])).toContain('ZZ_li_reply_body')
+  })
+
+  test('each group and the line under it stands on the card: one left off is a gap', () => {
+    const { page, tree } = pair('linkedin reply')
+    expect(pageGap(page, edit(tree, 'Already said', 'Earlier'))).toBe(MISSING('Already said'))
+    expect(pageGap(page, edit(tree, 'What the go sends or schedules.', 'What goes.'))).toBe(MISSING('What the go sends or schedules. Each item says where it goes and when, or that it already went.'))
+    expect(pageGap(page, edit(tree, 'Also in this package', 'More'))).toBe(MISSING('Also in this package'))
+  })
+
+  test('"They sent" and what we said before them are held: the label left off, or our earlier words changed, is a gap', () => {
+    const { page, tree } = pair('linkedin reply')
+    expect(page).toContain('#### They sent · Dana Example · Thu Nov 5, 11:41 AM ET · linkedin')
+    expect(pageGap(page, edit(tree, '"They sent"', '"From them"'))).toBe(MISSING('They sent'))
+    expect(page).toContain('#### We sent · Rob Eason · Wed Nov 4, 9:05 AM ET · linkedin\n> ```text\n> ZZ_li_our_turn: would Thursday suit you?')
+    expect(pageGap(page, edit(tree, 'ZZ_li_our_turn: would Thursday suit you?', 'ZZ_li_our_turn: Friday?'))).toBe(MISSING('ZZ_li_our_turn: would Thursday suit you?'))
+  })
+
+  test('"Proposed: goes at the go" is held on its own item, both ways', () => {
+    const { page, tree } = pair('everything')
+    expect(page).toContain('#### 1. ZZ_d1_title\n**Proposed:** goes at the go\n')
+    // dropped from the client reply's item on the card
+    const dropped = JSON.parse(JSON.stringify(tree)) as MmCardTree
+    const reply = dropped.nodes.find(n => n.c === 'rp-sec' && n.k?.some(k => drawnText([k]) === 'Our reply to the client')) as MmCardNode
+    const i = (reply.k ?? []).findIndex(k => (k.c ?? '').includes('rp-proposed'))
+    expect(i).toBeGreaterThan(-1)
+    reply.k = (reply.k ?? []).filter((_, j) => j !== i)
+    expect(pageGap(page, dropped)).toBe(MISSING('Proposed: goes at the go'))
+    // said on the card of an item the page says already went
+    const sent = JSON.parse(JSON.stringify(tree)) as MmCardTree
+    const again = sent.nodes.find(n => n.c === 'rp-sec' && n.k?.some(k => drawnText([k]) === 'Our reply to the client')) as MmCardNode
+    const at = (again.k ?? []).findIndex(k => (k.c ?? '').includes('rp-dtitle') && drawnText([k]).includes('ZZ_d5_title'))
+    expect(at).toBeGreaterThan(-1)
+    again.k?.splice(at + 1, 0, { c: 'rp-tag rp-proposed', r: [{ s: 'Proposed: goes at the go' }] })
+    expect(pageGap(page, sent)).toContain('the card says what the page does not (Proposed: goes at the go')
+  })
+})
+
 describe('0.7.33 finding 6: each hole has a gap, and its control line passes', () => {
   const HOLES: Array<{ name: string; page: string; card: MmCardTree; control: MmCardTree }> = [
     { name: 'an amount-only line', page: fence('$5000'), card: cardWith('Hi Dana'), control: cardWith('$5000') },
@@ -215,7 +273,8 @@ describe('0.7.43 what the quote says: each block, line and row of the page again
     const quotes = pair('quotes')
     const plain = pair('everything')
     const at = quotes.page.indexOf(`\n### ${HEAD}\n`)
-    expect(quotes.page.slice(0, at) + quotes.page.slice(quotes.page.indexOf('\n### Team post\n'))).toBe(plain.page)
+    // (0.7.58) the follow-ups come right after it now, so the section ends at the next one
+    expect(quotes.page.slice(0, at) + quotes.page.slice(quotes.page.indexOf('\n### ', at + 1))).toBe(plain.page)
     expect(plain.page).not.toContain(HEAD)
     expect(pageGap(plain.page, plain.tree)).toBe('')
     expect(pageGap(plain.page, quotes.tree)).toBe('')
@@ -437,7 +496,8 @@ describe('0.7.45 date moves and a ticket the reply answers (OW #717): each line 
     const moves = pair('date moves')
     const plain = pair('everything')
     const at = moves.page.indexOf('\n### Date moves\n')
-    expect(moves.page.slice(0, at) + moves.page.slice(moves.page.indexOf('\n### Their message\n'))).toBe(plain.page)
+    // (0.7.58) the timeline's first group follows the checks
+    expect(moves.page.slice(0, at) + moves.page.slice(moves.page.indexOf('\n## Already said\n'))).toBe(plain.page)
     expect(plain.page).not.toContain('Date moves')
     expect(plain.page).not.toContain('closes on send')
     expect(pageGap(plain.page, plain.tree)).toBe('')
