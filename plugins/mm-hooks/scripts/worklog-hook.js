@@ -45,6 +45,14 @@
  * folder's marker sha and the copies it kept, so OW can tell a copy that is
  * behind from one that was edited, or both.
  *
+ * Tokens per person (0.13.0, 2026-11-12): at every Stop the hook counts the
+ * session's token use from its transcript and its sub-agents' transcripts (counts
+ * per New York day, read from where the last Stop left off) and posts the changed
+ * days to /api/ext/token-usage; once per install a detached child of SessionStart
+ * backfills the last 25 business days, and `--tokens-backfill [--dry-run]` runs it
+ * by hand. Only the day, the session id and the counts leave the machine. See
+ * TOKEN USAGE.
+ *
  * Turn origin (0.11.5, 2026-10-12): every worklog POST also says who started the
  * work it belongs to, `person` or `auto`, read from the stamp Claude Code writes
  * on the turn's opening entry in the session's transcript. A turn the system
@@ -174,7 +182,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.12.3";
+const HOOK_VERSION = "0.13.0";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -9936,6 +9944,1103 @@ async function handlePreToolUse(payload) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ⛔ TOKEN USAGE (0.13.0, 2026-11-12). Rob: "I also think we should show the
+// total tokens used ... I can see Jarvis used 1.2 billion on Wednesday ... I
+// wonder what my leverage hours are or tokens are." Rule 4 of the five he
+// approved that day ("Yes, all five"): tokens per person from the hook, 25 days
+// backfilled. OW stores them in public.member_token_days (migration 355) through
+// POST /api/ext/token-usage; the morning image reads them.
+//
+// WHAT IS COUNTED. Every `type: "assistant"` entry of the session's transcript,
+// and of its sub-agents' transcripts (`<session>/subagents/**/*.jsonl` beside it,
+// measured on Claude Code 2.1.321), that carries `message.usage`:
+// input_tokens, cache_creation_input_tokens, cache_read_input_tokens and
+// output_tokens, plus one message. Its day is the New York date of its
+// `timestamp`. One API response is written as one entry per content block, all
+// with the same `message.id` + `requestId`: it counts once, at the largest
+// numbers any of its entries carries (the first block's output_tokens is often
+// a partial count). Measured on Rob's Mac 2026-11-12 over 2,413 files: every
+// repeat sits within 8 entries of the first, so a ring of the last 16 keys per
+// file is the whole dedupe. An entry whose `sessionId` is another session's is a
+// copy that session already counts (a fork or a resumed history) and is skipped:
+// with that rule the per-session sums equal a global dedupe exactly.
+//
+// WHERE IT MAY COME FROM. The consent gate decides, per entry, on the folder the
+// entry was written in (its `cwd`): evaluateConsent, the gate the worklog rows
+// use, unchanged. A folder that no longer exists (a removed worktree) is judged
+// by its nearest folder that does, through the same gate: a folder inside a
+// tracked root stays inside it after it is gone, and one outside stays outside.
+// A run with MM_UNATTENDED=1 (the launchd runners, which are Jarvis) reports
+// nothing at all.
+//
+// ⛔ WHAT LEAVES THIS COMPUTER: the day, the session id, five counts, the hook
+// version and the word "hook" or "backfill". Never a prompt, a reply, a path, a
+// tool input or any other transcript text, and none is logged or stored: the
+// state files below hold byte offsets, message ids, counts and file names.
+//
+// LIVE (Stop). Beside the Stop line, inside the Stop's hard exit: read what the
+// session's transcripts gained since the last Stop (from the byte offset kept in
+// `state/tokens/<session>.json`; at most TOKENS_STOP_PARSE_MS and
+// TOKENS_STOP_READ_MAX_BYTES a Stop, so an old long session catches up over a
+// few Stops), save, then post the days whose totals changed as ABSOLUTE totals,
+// source "hook". A post that fails stays pending (`<session>.pending`) and goes
+// with the session's next Stop; a session that has stopped for good is sent by
+// another session's Stop (TOKENS_ORPHANS_MAX, idle at least
+// TOKENS_ORPHAN_IDLE_MS). A refusal of the rows themselves (400, 413, 422) is not
+// retried. Each session's work holds `<session>.lock`, so two Stops never count
+// the same bytes twice.
+//
+// BACKFILL (SessionStart, once per install). A detached child of SessionStart
+// runs `--tokens-backfill --background`: every `*.jsonl` under the Claude
+// projects folders modified since two days before the window (at most the last
+// 36 days), the last 25 business days of New York days (the weekends between
+// them included), in batches of at most
+// 500 rows, source "backfill". The marker `state/tokens-backfill-v1.json` is
+// written only after every batch succeeded; a run that fails waits
+// TOKENS_BACKFILL_RETRY_MS before the next SessionStart starts another. A
+// session the live path has fully read is left to it.
+//
+// CLI: `node worklog-hook.js --tokens-backfill [--days 25] [--dry-run]` runs the
+// backfill in the foreground and prints counts only. `--dry-run` sends nothing
+// and writes nothing.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const TOKEN_USAGE_URL = `${API_BASE}/api/ext/token-usage`;
+/** `state/tokens/`: one state file per session, its lock and its pending marker. */
+const TOKENS_DIR_NAME = "tokens";
+/** The backfill's marker, its lock and its last failed attempt, in `state/`. */
+const TOKENS_BACKFILL_MARKER = "tokens-backfill-v1.json";
+const TOKENS_BACKFILL_LOCK = "tokens-backfill.lock";
+const TOKENS_BACKFILL_ATTEMPT = "tokens-backfill-attempt.json";
+/** At most this many rows per POST (the route's cap). */
+const TOKENS_BATCH_MAX = 500;
+/** The backfill's window in business days, by default and at most. */
+const TOKENS_BACKFILL_BUSINESS_DAYS = 25;
+const TOKENS_BACKFILL_MAX_BUSINESS_DAYS = 28;
+/** The route takes a day up to 40 days back; one day of margin for clocks. */
+const TOKENS_SERVER_DAYS_BACK = 39;
+/** After a failed backfill, the next SessionStart waits this long before another. */
+const TOKENS_BACKFILL_RETRY_MS = 6 * 3600 * 1000;
+/** A backfill lock older than this was left by a run that died. */
+const TOKENS_BACKFILL_LOCK_STALE_MS = 45 * 60 * 1000;
+/** The background backfill's own hard exit. */
+const TOKENS_BACKFILL_HARD_EXIT_MS = 40 * 60 * 1000;
+/** Tries per backfill batch, and the waits between them. */
+const TOKENS_BATCH_TRIES = 3;
+const TOKENS_BATCH_RETRY_WAIT_MS = [2000, 10000];
+/** A session lock older than this was left by a Stop the hard exit ended. */
+const TOKENS_SESSION_LOCK_STALE_MS = 20 * 1000;
+/**
+ * A Stop reads transcripts for at most this long, and at most this many bytes.
+ * Measured on Rob's Mac 2026-11-12: 48 MB in 170 ms, a session at rest in 2 ms.
+ */
+const TOKENS_STOP_PARSE_MS = 1500;
+const TOKENS_STOP_READ_MAX_BYTES = 192 * 1024 * 1024;
+/** Bytes per read, and the longest transcript line read (a longer one is skipped). */
+const TOKENS_READ_CHUNK = 4 * 1024 * 1024;
+const TOKENS_LINE_MAX_BYTES = 64 * 1024 * 1024;
+/** Message keys remembered per file for the dedupe; dropped once the file is idle. */
+const TOKENS_RING = 16;
+const TOKENS_RING_IDLE_MS = 3600 * 1000;
+/** A session state unused for longer than this goes (the route takes 40 days). */
+const TOKENS_STATE_KEEP_MS = 45 * 24 * 3600 * 1000;
+/** At most this many sub-agent transcripts per session, this deep. */
+const TOKENS_SUBAGENT_FILES_MAX = 2000;
+const TOKENS_SUBAGENT_DEPTH_MAX = 4;
+/** Other sessions' pending rows one Stop may send, and how idle they must be. */
+const TOKENS_ORPHANS_MAX = 5;
+const TOKENS_ORPHAN_IDLE_MS = 10 * 60 * 1000;
+/** A session id as the route takes it, and as a state file name. */
+const TOKENS_SESSION_ID_RE = /^[A-Za-z0-9_-]{1,200}$/;
+/** The bytes every counted line contains: only lines holding them are parsed. */
+const TOKENS_USAGE_NEEDLE = Buffer.from('"usage"');
+
+/** True while a backfill that may send is running (the backfill gates each entry itself). */
+let TOKENS_BACKFILL_SENDING = false;
+
+/** Does this run report tokens at all? Not under MM_UNATTENDED=1 (the runners are Jarvis). */
+function tokensReportingApplies(env) {
+  const e = env || process.env;
+  return e.MM_UNATTENDED !== "1";
+}
+
+// ── New York days ──────────────────────────────────────────────────────────
+
+/** undefined = not built yet; null = this node has no time zone data (nothing is counted). */
+let TOKENS_NY_FORMAT;
+/** UTC hour (epoch ms / 3,600,000) -> New York day. New York's offset is whole hours, so one hour is one day. */
+const TOKENS_NY_DAY_BY_HOUR = new Map();
+
+/** The New York calendar day (YYYY-MM-DD) of an instant, or null. Never throws. */
+function nyDayOf(ms) {
+  if (!Number.isFinite(ms)) return null;
+  const hour = Math.floor(ms / 3600000);
+  if (TOKENS_NY_DAY_BY_HOUR.has(hour)) return TOKENS_NY_DAY_BY_HOUR.get(hour);
+  if (TOKENS_NY_FORMAT === undefined) {
+    try {
+      TOKENS_NY_FORMAT = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/New_York",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      });
+    } catch {
+      TOKENS_NY_FORMAT = null;
+    }
+  }
+  let day = null;
+  try {
+    const text = TOKENS_NY_FORMAT ? TOKENS_NY_FORMAT.format(new Date(hour * 3600000)) : "";
+    day = /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
+  } catch {
+    day = null;
+  }
+  if (TOKENS_NY_DAY_BY_HOUR.size > 20000) TOKENS_NY_DAY_BY_HOUR.clear();
+  TOKENS_NY_DAY_BY_HOUR.set(hour, day);
+  return day;
+}
+
+/** `day` moved by `n` calendar days. */
+function tokensDayShift(day, n) {
+  const d = new Date(`${day}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Monday to Friday. */
+function tokensIsWeekday(day) {
+  const w = new Date(`${day}T12:00:00Z`).getUTCDay();
+  return w !== 0 && w !== 6;
+}
+
+/**
+ * The first day of the backfill window: the earliest of the last `businessDays`
+ * business days ending on `today` (today counts when it is one). Every day from
+ * it to today is in the window, weekends included.
+ */
+function tokensWindowStart(today, businessDays) {
+  let day = today;
+  let n = 0;
+  for (let i = 0; i < 400; i++) {
+    if (tokensIsWeekday(day)) {
+      n += 1;
+      if (n >= businessDays) return day;
+    }
+    day = tokensDayShift(day, -1);
+  }
+  return day;
+}
+
+// ── The consent gate, per entry ────────────────────────────────────────────
+
+/** The nearest folder above `dir` that exists, or null. */
+function tokensExistingAncestor(dir) {
+  let cur = dir;
+  for (let i = 0; i < 64; i++) {
+    const up = path.dirname(cur);
+    if (!up || up === cur) return null;
+    cur = up;
+    try {
+      if (fs.statSync(cur).isDirectory()) return cur;
+    } catch {
+      /* keep climbing */
+    }
+  }
+  return null;
+}
+
+/**
+ * The gate's verdict on the folder an entry was written in: `{ ok, gone }`.
+ * evaluateConsent unchanged; a folder that no longer exists is asked about its
+ * nearest folder that does (`gone: true`). Cached per folder in `cache`. Never
+ * throws; anything unexpected is a no.
+ */
+function tokensCwdVerdict(cwd, cache) {
+  if (typeof cwd !== "string" || !cwd || cwd.length > 4096 || !path.isAbsolute(cwd)) {
+    return { ok: false, gone: false };
+  }
+  const known = cache.get(cwd);
+  if (known) return known;
+  let verdict = { ok: false, gone: false };
+  try {
+    let target = cwd;
+    let gone = false;
+    try {
+      fs.statSync(cwd);
+    } catch (err) {
+      if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) {
+        gone = true;
+        target = tokensExistingAncestor(cwd);
+      }
+    }
+    if (target) verdict = { ok: evaluateConsent({ cwd: target }).allowed === true, gone };
+    else verdict = { ok: false, gone };
+  } catch {
+    verdict = { ok: false, gone: false };
+  }
+  cache.set(cwd, verdict);
+  return verdict;
+}
+
+// ── Reading a transcript ───────────────────────────────────────────────────
+
+/** A count as the route takes it: a whole number from 0, else 0. */
+function tokensCount(v) {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : 0;
+}
+
+/**
+ * Count one transcript line into `ctx.days` (day -> [input, cache write, cache
+ * read, output, messages]). `fileState.ring` is the file's dedupe ring: entries
+ * `[key, day, input, cache write, cache read, output, how]`, how 0 counted, 1
+ * refused by the gate, 2 counted from a folder since removed. Nothing of the
+ * line is kept but its counts, its day and its message key.
+ */
+function tokensCountLine(text, fileState, ctx) {
+  let o;
+  try {
+    o = JSON.parse(text);
+  } catch {
+    return;
+  }
+  if (!o || typeof o !== "object" || o.type !== "assistant") return;
+  const m = o.message;
+  const u = m && typeof m === "object" ? m.usage : null;
+  if (!u || typeof u !== "object") return;
+  // A copy of another session's message: that session counts it.
+  if (o.sessionId !== undefined && o.sessionId !== ctx.sessionId) return;
+  const day = nyDayOf(Date.parse(o.timestamp));
+  if (!day) return;
+  if (ctx.firstDay && day < ctx.firstDay) return;
+  if (ctx.lastDay && day > ctx.lastDay) return;
+  const vals = [
+    tokensCount(u.input_tokens),
+    tokensCount(u.cache_creation_input_tokens),
+    tokensCount(u.cache_read_input_tokens),
+    tokensCount(u.output_tokens),
+  ];
+  const id = typeof m.id === "string" && m.id ? m.id : "";
+  const key = id ? `${id}|${typeof o.requestId === "string" ? o.requestId : ""}` : null;
+  const ring = fileState.ring;
+  if (key) {
+    for (let i = 0; i < ring.length; i++) {
+      const hit = ring[i];
+      if (hit[0] !== key) continue;
+      // The same response again: only what grew counts, the way its first entry was judged.
+      const sums = hit[6] === 1 ? null : ctx.days[hit[1]] || (ctx.days[hit[1]] = [0, 0, 0, 0, 0]);
+      for (let k = 0; k < 4; k++) {
+        const grew = vals[k] - hit[2 + k];
+        if (grew <= 0) continue;
+        hit[2 + k] = vals[k];
+        if (sums) sums[k] += grew;
+        if (ctx.onTokens) ctx.onTokens(hit[6], grew);
+      }
+      return;
+    }
+  }
+  const verdict = ctx.cwdVerdict(o.cwd);
+  const how = !verdict.ok ? 1 : verdict.gone ? 2 : 0;
+  if (key) {
+    ring.push([key, day, vals[0], vals[1], vals[2], vals[3], how]);
+    if (ring.length > TOKENS_RING) ring.splice(0, ring.length - TOKENS_RING);
+  }
+  if (ctx.onTokens) ctx.onTokens(how, vals[0] + vals[1] + vals[2] + vals[3]);
+  if (how === 1) return;
+  const sums = ctx.days[day] || (ctx.days[day] = [0, 0, 0, 0, 0]);
+  for (let k = 0; k < 4; k++) sums[k] += vals[k];
+  sums[4] += 1;
+}
+
+/**
+ * Read `file` from `fileState.off` to its end (or the budget), counting every
+ * complete line that holds `"usage"`. `fileState.off` ends at the byte after the
+ * last line read; a line still being written is left for the next read.
+ * Answers "done" (read to the end), "budget" (stopped early) or "truncated" (the
+ * file is shorter than the offset: the caller starts the session again).
+ */
+async function tokensScanFile(file, fileState, ctx) {
+  let handle = null;
+  try {
+    handle = await fs.promises.open(file, "r");
+    const size = (await handle.stat()).size;
+    if (size < fileState.off) return "truncated";
+    let pos = fileState.off;
+    let chunk = TOKENS_READ_CHUNK;
+    let buf = Buffer.allocUnsafe(chunk);
+    while (pos < size) {
+      if (ctx.deadlineAt && Date.now() >= ctx.deadlineAt) return "budget";
+      if (ctx.budget && ctx.budget.bytes <= 0) return "budget";
+      const want = Math.min(chunk, size - pos);
+      const { bytesRead } = await handle.read(buf, 0, want, pos);
+      if (bytesRead <= 0) break;
+      if (ctx.budget) ctx.budget.bytes -= bytesRead;
+      const lastNl = buf.lastIndexOf(10, bytesRead - 1);
+      if (lastNl < 0) {
+        if (pos + bytesRead >= size) break; // a line still being written
+        if (chunk < TOKENS_LINE_MAX_BYTES) {
+          chunk = Math.min(chunk * 2, TOKENS_LINE_MAX_BYTES);
+          buf = Buffer.allocUnsafe(chunk);
+          continue;
+        }
+        // A line longer than any this reads: skip to its end.
+        let skip = pos + bytesRead;
+        let found = -1;
+        while (skip < size && found < 0) {
+          const r = await handle.read(buf, 0, Math.min(chunk, size - skip), skip);
+          if (r.bytesRead <= 0) break;
+          const nl = buf.indexOf(10);
+          if (nl >= 0 && nl < r.bytesRead) found = skip + nl;
+          else skip += r.bytesRead;
+        }
+        if (found < 0) break;
+        pos = found + 1;
+        fileState.off = pos;
+        continue;
+      }
+      let from = 0;
+      while (from <= lastNl) {
+        const hit = buf.indexOf(TOKENS_USAGE_NEEDLE, from);
+        if (hit < 0 || hit > lastNl) break;
+        const start = hit === 0 ? 0 : buf.lastIndexOf(10, hit - 1) + 1;
+        const end = buf.indexOf(10, hit);
+        tokensCountLine(buf.toString("utf8", start, end), fileState, ctx);
+        from = end + 1;
+      }
+      pos += lastNl + 1;
+      fileState.off = pos;
+      if (chunk > TOKENS_READ_CHUNK) {
+        chunk = TOKENS_READ_CHUNK;
+        buf = Buffer.allocUnsafe(chunk);
+      }
+    }
+    return "done";
+  } catch {
+    return "budget";
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+  }
+}
+
+/**
+ * The session's sub-agent transcripts: `<dir>/<session>/subagents/**\/*.jsonl`
+ * beside its main transcript, as `[{ rel, abs }]` sorted by rel. Regular files
+ * only; no link is followed. Never throws.
+ */
+function tokensSubagentFiles(mainFile) {
+  const out = [];
+  const base = path.join(path.dirname(mainFile), path.basename(mainFile, ".jsonl"), "subagents");
+  const walk = (dir, rel, depth) => {
+    if (depth > TOKENS_SUBAGENT_DEPTH_MAX || out.length >= TOKENS_SUBAGENT_FILES_MAX) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (out.length >= TOKENS_SUBAGENT_FILES_MAX) return;
+      if (e.isSymbolicLink()) continue;
+      const childRel = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(path.join(dir, e.name), childRel, depth + 1);
+      else if (e.isFile() && e.name.endsWith(".jsonl")) out.push({ rel: `subagents/${childRel}`, abs: path.join(dir, e.name) });
+    }
+  };
+  walk(base, "", 1);
+  out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+  return out;
+}
+
+// ── A session's state ──────────────────────────────────────────────────────
+
+function tokensStateDir() {
+  const root = stateRootDir();
+  return root ? path.join(root, TOKENS_DIR_NAME) : null;
+}
+
+function tokensFreshState(sessionId) {
+  return { v: 1, session_id: sessionId, caught_up: false, files: {}, days: {}, sent: {} };
+}
+
+function tokensSumsValid(a) {
+  return Array.isArray(a) && a.length === 5 && a.every((x) => Number.isSafeInteger(x) && x >= 0);
+}
+
+/** This session's token state, or a fresh one. Never throws. */
+function loadTokensState(dir, sessionId) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(dir, `${sessionId}.json`), "utf8"));
+    if (!raw || raw.v !== 1 || raw.session_id !== sessionId) return tokensFreshState(sessionId);
+    const state = tokensFreshState(sessionId);
+    state.caught_up = raw.caught_up === true;
+    for (const [rel, f] of Object.entries(raw.files || {})) {
+      if (!f || !Number.isSafeInteger(f.off) || f.off < 0) continue;
+      const ring = Array.isArray(f.ring)
+        ? f.ring.filter((e) => Array.isArray(e) && e.length === 7 && typeof e[0] === "string" && typeof e[1] === "string")
+        : [];
+      state.files[rel] = { off: f.off, ring };
+    }
+    for (const key of ["days", "sent"]) {
+      for (const [day, sums] of Object.entries(raw[key] || {})) {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(day) && tokensSumsValid(sums)) state[key][day] = sums.slice();
+      }
+    }
+    return state;
+  } catch {
+    return tokensFreshState(sessionId);
+  }
+}
+
+/** Write `obj` as JSON to `file` atomically (an exclusive temp file, one rename). Never throws. */
+function tokensWriteJson(file, obj) {
+  const tmp = `${file}.${process.pid}-${require("crypto").randomBytes(4).toString("hex")}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, `${JSON.stringify(obj)}\n`, { encoding: "utf8", flag: "wx" });
+    fs.renameSync(tmp, file);
+    return true;
+  } catch {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* never created */
+    }
+    return false;
+  }
+}
+
+function tokensSameSums(a, b) {
+  return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => x === b[i]);
+}
+
+/** One route row. */
+function tokensRow(sessionId, day, sums) {
+  return {
+    day,
+    session_id: sessionId,
+    input_tokens: sums[0],
+    cache_creation_tokens: sums[1],
+    cache_read_tokens: sums[2],
+    output_tokens: sums[3],
+    messages: sums[4],
+  };
+}
+
+/** The rows of the days whose totals changed since they were last sent, inside the route's window. */
+function tokensPendingRows(state, today) {
+  const earliest = tokensDayShift(today, -TOKENS_SERVER_DAYS_BACK);
+  return Object.keys(state.days)
+    .sort()
+    .filter((d) => d >= earliest && d <= today && state.days[d][4] > 0 && !tokensSameSums(state.days[d], state.sent[d]))
+    .map((d) => tokensRow(state.session_id, d, state.days[d]));
+}
+
+/** Save the state, and keep `<session>.pending` exactly when rows wait to be sent. */
+function saveTokensState(dir, state, today) {
+  // Days the route can no longer take are of no use here.
+  const earliest = tokensDayShift(today, -TOKENS_SERVER_DAYS_BACK - 1);
+  for (const key of ["days", "sent"]) {
+    for (const day of Object.keys(state[key])) if (day < earliest) delete state[key][day];
+  }
+  tokensWriteJson(path.join(dir, `${state.session_id}.json`), state);
+  const marker = path.join(dir, `${state.session_id}.pending`);
+  try {
+    if (tokensPendingRows(state, today).length > 0) fs.writeFileSync(marker, "", { flag: "a" });
+    else fs.unlinkSync(marker);
+  } catch {
+    /* a missing marker to remove, or none to write: either way the state file decides */
+  }
+}
+
+/** Take a lock file; a lock older than `staleMs` is taken over. Never throws. */
+function takeTokensLock(file, staleMs) {
+  const body = `${process.pid} ${Date.now()}\n`;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, body, { flag: "wx" });
+    return true;
+  } catch (err) {
+    if (!err || err.code !== "EEXIST") return false;
+  }
+  try {
+    if (Date.now() - fs.statSync(file).mtimeMs <= staleMs) return false;
+    fs.unlinkSync(file);
+    fs.writeFileSync(file, body, { flag: "wx" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function releaseTokensLock(file) {
+  try {
+    fs.unlinkSync(file);
+  } catch {
+    /* already gone */
+  }
+}
+
+/**
+ * Read what the session's transcripts gained into `state`. `ctx` carries the
+ * deadline, the byte budget and the consent check. Sets `state.caught_up` when
+ * every file was read to its end. A shortened file starts the session again.
+ */
+async function tokensScanSession(mainFile, state, ctx) {
+  const files = [{ rel: "main", abs: mainFile }].concat(tokensSubagentFiles(mainFile));
+  const scanCtx = Object.assign({}, ctx, { sessionId: state.session_id, days: state.days });
+  let caughtUp = true;
+  for (let pass = 0; pass < 2; pass++) {
+    let restart = false;
+    caughtUp = true;
+    for (const f of files) {
+      let st;
+      try {
+        st = fs.lstatSync(f.abs);
+      } catch {
+        continue;
+      }
+      if (!st.isFile()) continue;
+      const fileState = state.files[f.rel] || (state.files[f.rel] = { off: 0, ring: [] });
+      if (Date.now() - st.mtimeMs > TOKENS_RING_IDLE_MS) fileState.ring = [];
+      if (st.size === fileState.off) continue;
+      const outcome = await tokensScanFile(f.abs, fileState, scanCtx);
+      if (outcome === "truncated") {
+        restart = true;
+        break;
+      }
+      if (outcome !== "done") caughtUp = false;
+    }
+    if (!restart) break;
+    // A transcript got shorter: its counts can no longer be trusted. Count again from the start.
+    state.files = {};
+    state.days = {};
+    scanCtx.days = state.days;
+  }
+  state.caught_up = caughtUp;
+}
+
+// ── Sending ────────────────────────────────────────────────────────────────
+
+/** A refusal of the rows themselves, which sending again would not change. */
+function tokensRefusedForGood(status) {
+  return status === 400 || status === 413 || status === 422;
+}
+
+/**
+ * POST rows to /api/ext/token-usage. Behind the consent gate (or a backfill,
+ * which gates each entry itself) and the token, inside the shared deadline.
+ * Never throws; never logs a response body.
+ */
+async function postTokenRows(rows, source, deadlineAt) {
+  if (!(CONSENT_OK || TOKENS_BACKFILL_SENDING)) return { ok: false, reason: "consent_gate" };
+  if (!TOKEN) return { ok: false, reason: "no_token" };
+  if (deadlinePassed(deadlineAt)) return { ok: false, reason: "deadline" };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const deadlineTimer = abortAtDeadline(controller, deadlineAt);
+  try {
+    const res = await fetch(TOKEN_USAGE_URL, {
+      method: "POST",
+      headers: Object.assign(
+        { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+        hookClientHeaders(),
+      ),
+      body: JSON.stringify({ hook_version: HOOK_VERSION, source, rows }),
+      signal: controller.signal,
+    });
+    await res.text().catch(() => "");
+    if (!res.ok) return { ok: false, reason: `http_${res.status}`, status: res.status };
+    return { ok: true };
+  } catch {
+    return { ok: false, reason: "network_error" };
+  } finally {
+    clearTimeout(timer);
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+  }
+}
+
+/** Mark `rows` of `state` as sent: the totals they carried. */
+function tokensMarkSent(state, rows) {
+  for (const r of rows) {
+    state.sent[r.day] = [r.input_tokens, r.cache_creation_tokens, r.cache_read_tokens, r.output_tokens, r.messages];
+  }
+}
+
+/**
+ * Other sessions' pending rows, for this Stop to send: sessions with a
+ * `.pending` marker whose state has been idle TOKENS_ORPHAN_IDLE_MS, at most
+ * TOKENS_ORPHANS_MAX of them and `room` rows. Each comes locked; the caller
+ * releases. Never throws.
+ */
+function tokensOrphans(dir, ownSessionId, today, room) {
+  const out = [];
+  try {
+    const names = fs.readdirSync(dir).filter((n) => n.endsWith(".pending")).sort();
+    for (const name of names) {
+      if (out.length >= TOKENS_ORPHANS_MAX || room <= 0) break;
+      const sid = name.slice(0, -".pending".length);
+      if (sid === ownSessionId || !TOKENS_SESSION_ID_RE.test(sid)) continue;
+      try {
+        if (Date.now() - fs.statSync(path.join(dir, `${sid}.json`)).mtimeMs < TOKENS_ORPHAN_IDLE_MS) continue;
+      } catch {
+        continue;
+      }
+      const lock = path.join(dir, `${sid}.lock`);
+      if (!takeTokensLock(lock, TOKENS_SESSION_LOCK_STALE_MS)) continue;
+      const state = loadTokensState(dir, sid);
+      const rows = tokensPendingRows(state, today).slice(0, room);
+      if (rows.length === 0) {
+        saveTokensState(dir, state, today);
+        releaseTokensLock(lock);
+        continue;
+      }
+      room -= rows.length;
+      out.push({ state, rows, lock });
+    }
+  } catch {
+    /* whatever was gathered goes */
+  }
+  return out;
+}
+
+/**
+ * Stop: count what this session's transcripts gained and send the changed days.
+ * Never throws; prints nothing.
+ */
+async function reportSessionTokens(payload) {
+  let lock = null;
+  const orphans = [];
+  try {
+    if (!tokensReportingApplies(process.env) || !CONSENT_OK || !TOKEN) return;
+    const sessionId = payload && payload.session_id;
+    if (typeof sessionId !== "string" || !TOKENS_SESSION_ID_RE.test(sessionId)) return;
+    let mainFile = null;
+    try {
+      mainFile = transcriptFileAllowed(payload.transcript_path);
+    } catch {
+      mainFile = null;
+    }
+    if (!mainFile) return;
+    const dir = tokensStateDir();
+    if (!dir) return;
+    const startedAt = Date.now();
+    const hardExitAt = HARD_EXIT_AT || startedAt + HARD_EXIT_DEFAULT_MS;
+    const parseDeadline = Math.min(startedAt + TOKENS_STOP_PARSE_MS, hardExitAt - 3000);
+    const postDeadline = hardExitAt - POST_TOOL_USE_SAVE_MARGIN_MS;
+    lock = path.join(dir, `${sessionId}.lock`);
+    if (!takeTokensLock(lock, TOKENS_SESSION_LOCK_STALE_MS)) {
+      lock = null;
+      return;
+    }
+    const state = loadTokensState(dir, sessionId);
+    const cache = new Map();
+    try {
+      // The gate already said yes to the folder this hook runs in.
+      cache.set(process.cwd(), { ok: true, gone: false });
+    } catch {
+      /* no cwd to seed */
+    }
+    await tokensScanSession(mainFile, state, {
+      deadlineAt: parseDeadline,
+      budget: { bytes: TOKENS_STOP_READ_MAX_BYTES },
+      cwdVerdict: (cwd) => tokensCwdVerdict(cwd, cache),
+    });
+    const today = nyDayOf(Date.now());
+    if (!today) return;
+    // Saved before the request: the hard exit may end this run while it waits.
+    saveTokensState(dir, state, today);
+    const own = tokensPendingRows(state, today).slice(0, TOKENS_BATCH_MAX);
+    orphans.push(...tokensOrphans(dir, sessionId, today, TOKENS_BATCH_MAX - own.length));
+    const rows = own.concat(...orphans.map((o) => o.rows));
+    if (rows.length === 0) return;
+    const res = await postTokenRows(rows, "hook", postDeadline);
+    const settled = res.ok || tokensRefusedForGood(res.status);
+    if (!res.ok) debugLog(`token usage POST ${res.reason} (${rows.length} rows)`);
+    if (!settled) return;
+    tokensMarkSent(state, own);
+    saveTokensState(dir, state, today);
+    for (const o of orphans) {
+      tokensMarkSent(o.state, o.rows);
+      saveTokensState(dir, o.state, today);
+    }
+  } catch (err) {
+    debugLog(`token usage failed: ${(err && err.code) || "error"}`);
+  } finally {
+    for (const o of orphans) releaseTokensLock(o.lock);
+    if (lock) releaseTokensLock(lock);
+  }
+}
+
+/** SessionStart: drop session states nobody can use any more. Never throws. */
+function pruneTokensStates() {
+  const dir = tokensStateDir();
+  if (!dir) return;
+  try {
+    const cutoff = Date.now() - TOKENS_STATE_KEEP_MS;
+    let n = 0;
+    for (const name of fs.readdirSync(dir)) {
+      if (++n > 20000) break;
+      try {
+        const p = path.join(dir, name);
+        const st = fs.lstatSync(p);
+        const stale = name.endsWith(".tmp") ? Date.now() - st.mtimeMs > 3600 * 1000 : st.mtimeMs < cutoff;
+        if (st.isFile() && stale) fs.unlinkSync(p);
+      } catch {
+        /* this entry only */
+      }
+    }
+  } catch {
+    /* no folder yet */
+  }
+}
+
+// ── The backfill ───────────────────────────────────────────────────────────
+
+/**
+ * Every session with a transcript under the Claude projects folders modified at
+ * or after `mtimeCutoff`: Map session id -> [{ rel, abs }] (its main transcript
+ * as "main", its sub-agents' under "subagents/..."). No link is followed.
+ */
+function tokensBackfillSessions(mtimeCutoff) {
+  const sessions = new Map();
+  const roots = [];
+  for (const r of transcriptRoots()) {
+    const projects = path.join(r, "projects");
+    let real = projects;
+    try {
+      real = fs.realpathSync(projects);
+    } catch {
+      continue;
+    }
+    if (roots.indexOf(real) === -1) roots.push(real);
+  }
+  const add = (sid, rel, abs) => {
+    if (!TOKENS_SESSION_ID_RE.test(sid)) return;
+    const list = sessions.get(sid) || [];
+    if (list.length === 0) sessions.set(sid, list);
+    if (list.length < TOKENS_SUBAGENT_FILES_MAX + 1 && !list.some((f) => f.abs === abs)) list.push({ rel, abs });
+  };
+  const fresh = (abs) => {
+    try {
+      const st = fs.lstatSync(abs);
+      return st.isFile() && st.mtimeMs >= mtimeCutoff;
+    } catch {
+      return false;
+    }
+  };
+  for (const root of roots) {
+    let projectDirs;
+    try {
+      projectDirs = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const pd of projectDirs) {
+      if (!pd.isDirectory() || pd.isSymbolicLink()) continue;
+      const pdir = path.join(root, pd.name);
+      let entries;
+      try {
+        entries = fs.readdirSync(pdir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        if (e.isSymbolicLink()) continue;
+        if (e.isFile() && e.name.endsWith(".jsonl")) {
+          const abs = path.join(pdir, e.name);
+          if (fresh(abs)) add(e.name.slice(0, -".jsonl".length), "main", abs);
+        } else if (e.isDirectory() && TOKENS_SESSION_ID_RE.test(e.name)) {
+          for (const f of tokensSubagentFiles(path.join(pdir, `${e.name}.jsonl`))) {
+            if (fresh(f.abs)) add(e.name, f.rel, f.abs);
+          }
+        }
+      }
+    }
+  }
+  for (const list of sessions.values()) list.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+  return sessions;
+}
+
+/**
+ * Count the backfill window from every recent transcript. Answers the rows to
+ * send and the counts the CLI prints. `opts.days` business days.
+ */
+async function tokensBackfillCount(opts) {
+  const now = Date.now();
+  const today = nyDayOf(now);
+  if (!today) return null;
+  const serverFirst = tokensDayShift(today, -TOKENS_SERVER_DAYS_BACK);
+  const windowFirst = tokensWindowStart(today, opts.days);
+  const firstDay = windowFirst < serverFirst ? serverFirst : windowFirst;
+  // A file last written before the window holds nothing in it. 25 business days
+  // reach at most 34 calendar days back, so with the 2 days of margin this is
+  // the spec's 36 days at most; a shorter window reads fewer files.
+  const mtimeCutoff = Date.parse(`${firstDay}T00:00:00Z`) - 2 * 86400000;
+  const sessions = tokensBackfillSessions(mtimeCutoff);
+  const liveDir = tokensStateDir();
+  const cache = new Map();
+  const summary = {
+    today,
+    firstDay,
+    files: 0,
+    sessionsRead: 0,
+    sessionsLive: 0,
+    perDay: {},
+    dropped: { sessions: new Set(), tokens: 0 },
+    gone: { sessions: new Set(), tokens: 0 },
+    rows: [],
+  };
+  const ids = Array.from(sessions.keys()).sort();
+  for (const sid of ids) {
+    // A session the live path has read to its end is the live path's.
+    if (liveDir && loadTokensState(liveDir, sid).caught_up) {
+      summary.sessionsLive += 1;
+      continue;
+    }
+    const days = {};
+    const ctx = {
+      sessionId: sid,
+      days,
+      firstDay,
+      lastDay: today,
+      cwdVerdict: (cwd) => tokensCwdVerdict(cwd, cache),
+      onTokens: (how, n) => {
+        const bucket = how === 1 ? summary.dropped : how === 2 ? summary.gone : null;
+        if (!bucket) return;
+        bucket.sessions.add(sid);
+        bucket.tokens += n;
+      },
+    };
+    summary.sessionsRead += 1;
+    for (const f of sessions.get(sid)) {
+      summary.files += 1;
+      await tokensScanFile(f.abs, { off: 0, ring: [] }, ctx);
+    }
+    for (const day of Object.keys(days).sort()) {
+      const sums = days[day];
+      if (sums[4] <= 0) continue;
+      summary.rows.push(tokensRow(sid, day, sums));
+      const d = summary.perDay[day] || (summary.perDay[day] = { sessions: 0, sums: [0, 0, 0, 0, 0] });
+      d.sessions += 1;
+      for (let k = 0; k < 5; k++) d.sums[k] += sums[k];
+    }
+  }
+  summary.rows.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.session_id < b.session_id ? -1 : a.session_id > b.session_id ? 1 : 0));
+  return summary;
+}
+
+function tokensSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Send the backfill's rows in batches of at most TOKENS_BATCH_MAX. Answers
+ * `{ ok, batches, sent }`; ok only when every batch was accepted.
+ */
+async function tokensBackfillSend(rows) {
+  let batches = 0;
+  let sent = 0;
+  TOKENS_BACKFILL_SENDING = true;
+  try {
+    for (let i = 0; i < rows.length; i += TOKENS_BATCH_MAX) {
+      const batch = rows.slice(i, i + TOKENS_BATCH_MAX);
+      let res = null;
+      for (let t = 0; t < TOKENS_BATCH_TRIES; t++) {
+        res = await postTokenRows(batch, "backfill", null);
+        if (res.ok || tokensRefusedForGood(res.status) || res.reason === "no_token") break;
+        if (t < TOKENS_BATCH_TRIES - 1) await tokensSleep(TOKENS_BATCH_RETRY_WAIT_MS[t] || 10000);
+      }
+      if (!res || !res.ok) return { ok: false, batches, sent, reason: (res && res.reason) || "failed" };
+      batches += 1;
+      sent += batch.length;
+    }
+    return { ok: true, batches, sent };
+  } finally {
+    TOKENS_BACKFILL_SENDING = false;
+  }
+}
+
+/** A count with thousands separators. */
+function tokensFmt(n) {
+  return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/** The CLI's lines: counts only. */
+function tokensBackfillLines(summary, opts, outcome) {
+  const lines = [];
+  lines.push(opts.dryRun ? "Token backfill, dry run: nothing was sent." : "Token backfill.");
+  lines.push(`Window: ${opts.days} business days, ${summary.firstDay} to ${summary.today} (New York days).`);
+  lines.push(`Read: ${tokensFmt(summary.files)} transcript files of ${tokensFmt(summary.sessionsRead)} sessions.`);
+  if (summary.sessionsLive > 0) lines.push(`Left to the live hook: ${tokensFmt(summary.sessionsLive)} sessions.`);
+  const pad = (s, n) => (s.length >= n ? s : " ".repeat(n - s.length) + s);
+  lines.push(
+    ["day       ", pad("sessions", 9), pad("total", 16), pad("input", 13), pad("cache write", 15), pad("cache read", 16), pad("output", 13), pad("messages", 10)].join(" "),
+  );
+  const total = [0, 0, 0, 0, 0];
+  for (const day of Object.keys(summary.perDay).sort()) {
+    const d = summary.perDay[day];
+    const t = d.sums[0] + d.sums[1] + d.sums[2] + d.sums[3];
+    for (let k = 0; k < 5; k++) total[k] += d.sums[k];
+    lines.push(
+      [day, pad(tokensFmt(d.sessions), 9), pad(tokensFmt(t), 16), pad(tokensFmt(d.sums[0]), 13), pad(tokensFmt(d.sums[1]), 15), pad(tokensFmt(d.sums[2]), 16), pad(tokensFmt(d.sums[3]), 13), pad(tokensFmt(d.sums[4]), 10)].join(" "),
+    );
+  }
+  const sessionsAll = new Set(summary.rows.map((r) => r.session_id)).size;
+  lines.push(
+    ["total     ", pad(tokensFmt(sessionsAll), 9), pad(tokensFmt(total[0] + total[1] + total[2] + total[3]), 16), pad(tokensFmt(total[0]), 13), pad(tokensFmt(total[1]), 15), pad(tokensFmt(total[2]), 16), pad(tokensFmt(total[3]), 13), pad(tokensFmt(total[4]), 10)].join(" "),
+  );
+  lines.push(
+    `Not counted, folder not tracked: ${tokensFmt(summary.dropped.sessions.size)} sessions, ${tokensFmt(summary.dropped.tokens)} tokens.`,
+  );
+  lines.push(
+    `Counted from folders since removed (judged by the nearest folder that exists): ${tokensFmt(summary.gone.sessions.size)} sessions, ${tokensFmt(summary.gone.tokens)} tokens.`,
+  );
+  lines.push(`Rows: ${tokensFmt(summary.rows.length)} in ${tokensFmt(Math.ceil(summary.rows.length / TOKENS_BATCH_MAX))} batches of at most ${TOKENS_BATCH_MAX}.`);
+  if (outcome) {
+    lines.push(
+      outcome.ok
+        ? `Sent: ${tokensFmt(outcome.sent)} rows in ${tokensFmt(outcome.batches)} batches.`
+        : `Not finished: ${tokensFmt(outcome.sent)} rows sent in ${tokensFmt(outcome.batches)} batches, then ${outcome.reason}. Run it again later.`,
+    );
+  }
+  return lines;
+}
+
+/** `--days N`: 1 to TOKENS_BACKFILL_MAX_BUSINESS_DAYS, or null when malformed. */
+function tokensBackfillDaysArg(argv) {
+  const i = argv.indexOf("--days");
+  if (i === -1) return TOKENS_BACKFILL_BUSINESS_DAYS;
+  const raw = String(argv[i + 1] == null ? "" : argv[i + 1]);
+  if (!/^\d{1,3}$/.test(raw)) return null;
+  const n = Number(raw);
+  return n >= 1 && n <= TOKENS_BACKFILL_MAX_BUSINESS_DAYS ? n : null;
+}
+
+/**
+ * `node worklog-hook.js --tokens-backfill [--days 25] [--dry-run]`, and the
+ * SessionStart child (`--background`: prints nothing, keeps the marker).
+ * Exit 0 done (or nothing to do); 1 not finished; 2 a malformed command.
+ */
+async function tokensBackfillCli(argv) {
+  const background = argv.indexOf("--background") !== -1;
+  const dryRun = argv.indexOf("--dry-run") !== -1;
+  const emit = (line) => {
+    if (!background) process.stdout.write(`${line}\n`);
+  };
+  const known = new Set(["--tokens-backfill", "--background", "--dry-run", "--days"]);
+  const days = tokensBackfillDaysArg(argv);
+  const unknown = argv.some((a, i) => !known.has(a) && argv[i - 1] !== "--days");
+  if (argv[0] !== "--tokens-backfill" || days === null || unknown) {
+    emit(`usage: node worklog-hook.js --tokens-backfill [--days 1-${TOKENS_BACKFILL_MAX_BUSINESS_DAYS}] [--dry-run]`);
+    return 2;
+  }
+  if (!dryRun && !tokensReportingApplies(process.env)) {
+    emit("Token backfill skipped: MM_UNATTENDED=1.");
+    return 0;
+  }
+  if (!dryRun && !TOKEN) {
+    emit("Token backfill not run: no tracker token on this computer.");
+    return 1;
+  }
+  const root = stateRootDir();
+  const lockFile = root ? path.join(root, TOKENS_BACKFILL_LOCK) : null;
+  if (background) {
+    setTimeout(() => process.exit(0), TOKENS_BACKFILL_HARD_EXIT_MS).unref();
+    try {
+      os.setPriority(0, 10);
+    } catch {
+      /* a lower priority is a courtesy */
+    }
+  }
+  if (!dryRun) {
+    if (!lockFile || !takeTokensLock(lockFile, TOKENS_BACKFILL_LOCK_STALE_MS)) {
+      emit("Token backfill not run: another one is running.");
+      return 1;
+    }
+  }
+  try {
+    const summary = await tokensBackfillCount({ days });
+    if (!summary) {
+      emit("Token backfill not run: this computer cannot tell New York days.");
+      return 1;
+    }
+    if (dryRun) {
+      tokensBackfillLines(summary, { days, dryRun }, null).forEach(emit);
+      return 0;
+    }
+    const outcome = await tokensBackfillSend(summary.rows);
+    tokensBackfillLines(summary, { days, dryRun }, outcome).forEach(emit);
+    const at = new Date().toISOString();
+    if (outcome.ok) {
+      if (days >= TOKENS_BACKFILL_BUSINESS_DAYS) {
+        tokensWriteJson(path.join(root, TOKENS_BACKFILL_MARKER), {
+          v: 1,
+          done_at: at,
+          hook_version: HOOK_VERSION,
+          days,
+          first_day: summary.firstDay,
+          last_day: summary.today,
+          rows: outcome.sent,
+          batches: outcome.batches,
+        });
+      }
+      return 0;
+    }
+    tokensWriteJson(path.join(root, TOKENS_BACKFILL_ATTEMPT), { v: 1, at, outcome: outcome.reason, sent: outcome.sent });
+    return 1;
+  } finally {
+    if (!dryRun && lockFile) releaseTokensLock(lockFile);
+  }
+}
+
+/** True when a Claude projects folder holds anything at all (one readdir per folder). Never throws. */
+function tokensHaveTranscripts() {
+  for (const r of transcriptRoots()) {
+    try {
+      if (fs.readdirSync(path.join(r, "projects")).length > 0) return true;
+    } catch {
+      /* no projects folder there */
+    }
+  }
+  return false;
+}
+
+/**
+ * SessionStart: start the backfill in a detached child when this install has not
+ * done it yet, none is running and the last one did not fail in the last
+ * TOKENS_BACKFILL_RETRY_MS. This session start does not wait for it. Never throws.
+ */
+function maybeStartTokensBackfill() {
+  try {
+    if (!tokensReportingApplies(process.env) || !CONSENT_OK || !TOKEN) return false;
+    const root = stateRootDir();
+    if (!root) return false;
+    if (pathKind(path.join(root, TOKENS_BACKFILL_MARKER)) !== "missing") return false;
+    const attempt = readJsonObject(path.join(root, TOKENS_BACKFILL_ATTEMPT));
+    const attemptAt = attempt && typeof attempt.at === "string" ? Date.parse(attempt.at) : NaN;
+    if (Number.isFinite(attemptAt) && Date.now() - attemptAt < TOKENS_BACKFILL_RETRY_MS) return false;
+    try {
+      if (Date.now() - fs.statSync(path.join(root, TOKENS_BACKFILL_LOCK)).mtimeMs <= TOKENS_BACKFILL_LOCK_STALE_MS) return false;
+    } catch {
+      /* no lock: none is running */
+    }
+    // No transcripts on this computer yet: nothing to backfill, and no child.
+    if (!tokensHaveTranscripts()) return false;
+    const child = childProcess.spawn(process.execPath, [__filename, "--tokens-backfill", "--background"], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      cwd: process.cwd(),
+      env: process.env,
+    });
+    child.on("error", () => {});
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function handleStop(payload) {
   const sessionId = payload.session_id;
   const state = loadSessionState(sessionId);
@@ -9971,6 +11076,10 @@ async function handleStop(payload) {
   // ⛔ The skill top-up runs BESIDE the Stop line, not after it: the Stop POST
   // keeps its own 10 s timeout and may use all of the 6 s hard exit, while the
   // sync has its own 4 s budget inside it (SPEC v2 §2.5).
+  //
+  // ⛔ The token counts (0.13.0) run beside both, inside the same hard exit: their
+  // read has its own TOKENS_STOP_PARSE_MS budget and their POST ends before the
+  // hard exit, so the Stop takes no longer than it did. See TOKEN USAGE.
   await Promise.allSettled([
     postWorklog({
       contentMd: `🛑 Session ended. ${state.toolCallCount} tool call(s) streamed.`,
@@ -9978,6 +11087,7 @@ async function handleStop(payload) {
       declarations: declarationFields(sessionId, state, null),
     }),
     syncRegistrySkills(),
+    reportSessionTokens(payload),
   ]);
 }
 
@@ -10037,6 +11147,12 @@ async function handleSessionStart(payload) {
       `[worklog-hook] Could not verify tracking hook installation: ${err && err.message}\n`,
     );
   }
+
+  // ── Token counts (0.13.0): the once-per-install backfill, in a detached ───
+  // child this session start does not wait for, and the old session states.
+  // Prints nothing. See TOKEN USAGE.
+  pruneTokensStates();
+  maybeStartTokensBackfill();
 
   // ── Setup report (0.12.0): beside the chip feed, never in front of it. ───
   // At most once an hour per machine; its own 6 s budget; silent on every
@@ -10598,6 +11714,19 @@ async function main() {
   if (argv.length > 0 && String(argv[0]).indexOf("--skill-edit-seen") === 0) {
     try {
       process.exitCode = skillEditSeenCli(argv);
+    } catch {
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  // ⛔ `--tokens-backfill` (0.13.0): the token backfill by hand (`--dry-run` sends
+  // nothing), and the SessionStart child that runs it (`--background`). Its own
+  // exit codes; it never reads stdin. It gates every transcript entry on the
+  // folder it was written in, not on this process's cwd. See TOKEN USAGE.
+  if (argv.length > 0 && String(argv[0]).indexOf("--tokens-backfill") === 0) {
+    try {
+      process.exitCode = await tokensBackfillCli(argv);
     } catch {
       process.exitCode = 1;
     }

@@ -6544,3 +6544,200 @@ describe('0.7.44 (Rob, 11-10: "we always want it to be parent threads"): client 
     })
   })
 })
+
+// ======================================================================== 0.7.53
+
+// (0.7.53, Rob approved 2026-11-11: "You're good to go on all those recommendations") Working manually in browser: a person's browser
+// minutes on a client beside that client's row, "needs a client" with one tap to answer, and the end-of-day list. Every client, site
+// and person here is made up.
+describe('0.7.53: Working manually in browser', () => {
+  const MIN = 60_000
+  const iso = (ms: number) => new Date(ms).toISOString()
+  const DUNE = '44444444-4444-4444-8444-444444444444'
+  const Q1 = 'aaaaaaaa-0000-4000-8000-000000000001'
+  const Q2 = 'aaaaaaaa-0000-4000-8000-000000000002'
+  const line = (over: Record<string, unknown> = {}) => ({
+    member_email: ME, project_id: ACME, client: 'Acme Roofing — Pat', site: 'app.gohighlevel.com', title: 'Workflows', last_at: iso(NOW - MIN), minutes: 9,
+    no_thread: true, confidence: 'high', member: null, me: true, ...over,
+  })
+  const ask = (over: Record<string, unknown> = {}) => ({
+    id: Q1, stretch_start: iso(NOW - 25 * MIN), stretch_end: iso(NOW - 5 * MIN), minutes: 14, site: 'plumber.example', title: 'Plumber admin',
+    choices: [{ project_id: ACME, client: 'Acme Roofing — Pat' }, { project_id: BOLT, client: 'Bolt Staffing (Sam)' }], ...over,
+  })
+  const read = (over: Record<string, unknown> = {}) => ({
+    status: 200, body: { ok: true, as_of: iso(NOW), viewer: { email: ME, founder: false }, lines: [], question: null, confirm: [], questions: 'on', ...over },
+  })
+  const browserReads = (w: { fetched: string[] }) => w.fetched.filter(u => u.endsWith('/api/ext/browser-now')).length
+  const ROW_LINE = 'Working manually in browser · app.gohighlevel.com · Workflows · no thread'
+
+  test('a line goes under its client\'s row; a client with no row is in one short block above Team now', async ($, on) => {
+    const w = world(on, { feed: feed(), browserNow: () => read({ lines: [line(), line({ project_id: DUNE, client: 'Dune Dental', site: 'dune.example', title: 'Booking', no_thread: false })] }) })
+    await tickOnce($, w)
+    const ui = await pane($)
+    const drawn = await lines(ui)
+    const acme = drawn.findIndex(l => l.includes('Acme Roofing'))
+    expect(acme).toBeGreaterThan(-1)
+    expect(drawn.indexOf(ROW_LINE)).toBeGreaterThan(acme)
+    // once: under Acme's own row, not in the block as well
+    expect(drawn.filter(l => l.includes('app.gohighlevel.com'))).toEqual([ROW_LINE])
+    const block = drawn.indexOf('Working manually in browser')
+    expect(block).toBeGreaterThan(drawn.indexOf(ROW_LINE))
+    expect(drawn[block + 1]).toBe('Dune Dental · dune.example · Booking')
+    const keys = (await buttons(ui)).map(b => b[0])
+    expect(keys).toContain('mm-teamnow-toggle')
+    expect(keys.some(k => k.startsWith('mm-browser:'))).toBe(false)
+    // Needs you now folded: Acme's row is not drawn, so its line goes to the block
+    await ui.press({ key: 'mm-needs-toggle' })
+    const folded = await lines(ui)
+    expect(folded).toContain('Acme Roofing · app.gohighlevel.com · Workflows · no thread')
+    expect(folded).not.toContain(ROW_LINE)
+    await ui.unmount()
+  })
+
+  test('the question: one tap answers it, the pane says what was saved, and the next read leaves it out', async ($, on) => {
+    let now = read({ question: ask() })
+    const w = world(on, { feed: feed(), browserNow: () => now, browserAnswer: () => ({ status: 200, body: { ok: true, learned: true, suggest_profile: false } }) })
+    await tickOnce($, w)
+    const ui = await pane($)
+    const drawn = await lines(ui)
+    expect(drawn.slice(drawn.indexOf('Needs a client'), drawn.indexOf('Needs a client') + 2)).toEqual(['Needs a client', '14m in the browser · plumber.example · Plumber admin'])
+    // above Needs you now
+    expect(drawn.indexOf('Needs a client')).toBeLessThan(drawn.findIndex(l => l.startsWith('Needs you now')))
+    expect((await buttons(ui)).filter(b => b[0].startsWith(`mm-browser:pane:${Q1}`)).map(b => b[1])).toEqual(['Acme Roofing', 'Bolt Staffing', 'Internal', 'Personal'])
+    now = read()
+    const before = browserReads(w)
+    await ui.press({ key: `mm-browser:pane:${Q1}:${ACME}` })
+    expect(w.browserPosts.map(p => [p.method, p.body])).toEqual([['POST', { question_id: Q1, answer: 'client', project_id: ACME, from: 'pane' }]])
+    expect(w.browserPosts[0]?.headers.Authorization).toBe('Bearer fixture-token-not-a-real-one')
+    const after = await lines(ui)
+    expect(after).toContain("Saved: Acme Roofing. It won't ask about plumber.example again.")
+    expect(after).not.toContain('Needs a client')
+    expect(w.toasts).toContain("Saved: Acme Roofing. It won't ask about plumber.example again.")
+    expect(browserReads(w)).toBe(before + 1)
+    // sends nothing, starts nothing
+    expect(sends(w)).toEqual([])
+    await ui.unmount()
+  })
+
+  test('an answer OW has but its read still lists stays out of the pane; Personal, the first of the day, suggests a Chrome profile', async ($, on) => {
+    const w = world(on, { feed: feed(), browserNow: () => read({ question: ask() }), browserAnswer: () => ({ status: 200, body: { ok: true, learned: false, suggest_profile: true } }) })
+    await tickOnce($, w)
+    const ui = await pane($)
+    await ui.press({ key: `mm-browser:pane:${Q1}:personal` })
+    expect(w.browserPosts.map(p => p.body)).toEqual([{ question_id: Q1, answer: 'personal', from: 'pane' }])
+    const after = await lines(ui)
+    expect(after).toContain('Saved: Personal. Tip: a separate Chrome profile for personal browsing keeps it out of the tracker.')
+    expect(after).not.toContain('Needs a client')
+    // the toast is the short part
+    expect(w.toasts).toContain('Saved: Personal.')
+    await w.clock.advance(3 * MIN)
+    expect(await lines(ui)).not.toContain('Needs a client')
+    await ui.unmount()
+  })
+
+  test('a refusal stays on the question and says why; no answer at all says so; the buttons stay', async ($, on) => {
+    let answer: { status: number; body?: unknown } | 'network' = { status: 403, body: { error: 'That project is not one you can read.', code: 'not_readable' } }
+    const w = world(on, { feed: feed(), browserNow: () => read({ question: ask() }), browserAnswer: () => answer })
+    await tickOnce($, w)
+    const ui = await pane($)
+    await ui.press({ key: `mm-browser:pane:${Q1}:${BOLT}` })
+    expect(await lines(ui)).toContain("Couldn't save: That project is not one you can read. (HTTP 403)")
+    expect(await lines(ui)).toContain('Needs a client')
+    answer = 'network'
+    await ui.press({ key: `mm-browser:pane:${Q1}:internal` })
+    expect(await lines(ui)).toContain("Couldn't save: no answer. Try again in a minute.")
+    expect((await buttons(ui)).filter(b => b[0].startsWith(`mm-browser:pane:${Q1}`)).length).toBe(4)
+    await ui.unmount()
+  })
+
+  test('⛔ the founder\'s pane never asks, whatever OW sends, and names whose line it is', async ($, on) => {
+    const w = world(on, {
+      feed: feed({ member: FOUNDER, role: 'founder' }),
+      browserNow: () => read({ viewer: { email: FOUNDER, founder: true }, question: ask(), confirm: [ask({ id: Q2 })], lines: [line({ member: 'Asif', me: false }), line({ project_id: DUNE, client: 'Dune Dental', member: 'Asif', me: false, no_thread: false, site: 'dune.example', title: '' })] }),
+    })
+    await tickOnce($, w)
+    const ui = await pane($)
+    const drawn = await lines(ui)
+    expect(drawn).not.toContain('Needs a client')
+    expect((await buttons(ui)).some(b => b[0].startsWith('mm-browser:') || b[0] === 'mm-fold:confirm')).toBe(false)
+    // nothing of Acme needs the founder, so it has no row: both lines are in the block, each with whose it is
+    expect(drawn.slice(drawn.indexOf('Working manually in browser'))).toEqual([
+      'Working manually in browser',
+      'Asif · Acme Roofing · app.gohighlevel.com · Workflows · no thread',
+      'Asif · Dune Dental · dune.example',
+      // the person's own clock (CI runs in UTC)
+      `Updated ${localClock(NOW)}`,
+    ])
+    await ui.unmount()
+  })
+
+  test('the end-of-day list: closed until opened, one tap each, sent as from the end of day', async ($, on) => {
+    const w = world(on, { feed: feed(), browserNow: () => read({ confirm: [ask({ id: Q2, minutes: 12, title: 'Supplier portal', site: 'supplier.example' })] }), browserAnswer: () => ({ status: 200, body: { ok: true, learned: false, suggest_profile: false } }) })
+    await tickOnce($, w)
+    const ui = await pane($)
+    expect((await buttons(ui)).find(b => b[0] === 'mm-fold:confirm')?.[1]).toBe('To confirm today (1)')
+    expect(await lines(ui)).not.toContain('Browser time with no client yet. One tap each.')
+    await ui.press({ key: 'mm-fold:confirm' })
+    const open = await lines(ui)
+    const at = open.indexOf('Browser time with no client yet. One tap each.')
+    expect(open[at - 1]).toBe('To confirm today (1)')
+    expect(open[at + 1]).toBe(`${localClock(NOW - 25 * MIN)} to ${localClock(NOW - 5 * MIN)} · 12m · supplier.example · Supplier portal`)
+    await ui.press({ key: `mm-browser:end_of_day:${Q2}:internal` })
+    expect(w.browserPosts.map(p => p.body)).toEqual([{ question_id: Q2, answer: 'internal', from: 'end_of_day' }])
+    expect(await lines(ui)).toContain('Saved: Internal.')
+    expect((await buttons(ui)).some(b => b[0] === 'mm-fold:confirm')).toBe(false)
+    await ui.unmount()
+  })
+
+  test('read every 3 minutes by the thread that syncs; an OW without the route draws nothing and is not asked again for 6 hours; a line older than 15 minutes goes', LONG, async ($, on) => {
+    let answer: { status: number; body?: unknown } | 'network' = { status: 404 }
+    const w = world(on, { feed: feed(), browserNow: () => answer })
+    await tickOnce($, w)
+    const ui = await pane($)
+    expect((await lines(ui)).some(l => l.includes('Working manually in browser'))).toBe(false)
+    expect(browserReads(w)).toBe(1)
+    for (let i = 0; i < 10; i++) await w.clock.advance(MIN)
+    expect(browserReads(w)).toBe(1)
+    await ui.unmount()
+    // a world whose OW has the route
+    answer = read({ lines: [line()] })
+    w.stored['mm.browser'] = {}
+    await w.clock.advance(MIN)
+    const reads = browserReads(w)
+    expect(reads).toBe(2)
+    const ui2 = await pane($)
+    expect(await lines(ui2)).toContain(ROW_LINE)
+    await w.clock.advance(MIN)
+    expect(browserReads(w)).toBe(reads)
+    await w.clock.advance(2 * MIN)
+    expect(browserReads(w)).toBe(reads + 1)
+    // OW stops answering: the last read stands until its line is 15 minutes old
+    answer = 'network'
+    for (let i = 0; i < 12; i++) await w.clock.advance(MIN)
+    expect(await lines(ui2)).not.toContain(ROW_LINE)
+    expect(onlyReads(w)).toBe(true)
+    await ui2.unmount()
+  })
+
+  for (const who of ['teammate', 'founder'] as const) {
+    test(`[render proof] the pane as drawn on the desktop: ${who}`, async ($, on) => {
+      const founder = who === 'founder'
+      const lines2 = founder
+        ? [line({ member: 'Asif', me: false }), line({ project_id: DUNE, client: 'Dune Dental', member: 'Nayan', me: false, no_thread: false, site: 'dune.example', title: 'Booking settings' })]
+        : [line(), line({ project_id: DUNE, client: 'Dune Dental', no_thread: false, site: 'dune.example', title: 'Booking settings' })]
+      const w = world(on, {
+        feed: founder ? feed({ member: FOUNDER, role: 'founder' }) : feed(),
+        browserNow: () => read({ viewer: { email: founder ? FOUNDER : ME, founder }, lines: lines2, question: founder ? null : ask(), confirm: founder ? [] : [ask({ id: Q2, minutes: 12, title: 'Supplier portal', site: 'supplier.example' })] }),
+      })
+      await tickOnce($, w)
+      const ui = await pane($)
+      if (!founder) await ui.press({ key: 'mm-fold:confirm' })
+      const drawn = await tree(ui)
+      ;(globalThis as unknown as { console?: { log: (s: string) => void } }).console?.log(`RENDER-PROOF browser ${who}\n${drawn.join('\n')}\nEND-RENDER-PROOF`)
+      expect(drawn.some(l => l.includes('working manually in browser') || l.includes('Working manually in browser'))).toBe(true)
+      // `tree` marks bold text with **
+      expect(drawn.some(l => l.endsWith('Needs a client'))).toBe(!founder)
+      await ui.unmount()
+    })
+  }
+})

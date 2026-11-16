@@ -242,16 +242,32 @@ export type FeedQueueTicket = {
   queue_tier?: number | string | null
   queue_rank?: number | null
   queue_reason?: string | null
+  /**
+   * (0.7.56, newest first; Rob, 2026-11-13: "the queue here should sort by new items first") OW's three fields, one
+   * contract with the bridge: when the ticket was last active (ISO), its group (`recent`: active in the last 3 business
+   * days; `in_progress`; `open`; `older`: no activity in 3 weeks) and, for a recent one, `new` (opened in that window) or
+   * `worked`. OW computes all three; the bridge only shows them. Absent on an OW before them: rank order, as before.
+   */
+  last_activity_at?: string | null
+  queue_group?: string | null
+  activity_kind?: string | null
 }
 
 /**
  * (0.7.3, internal queue) A queued ticket as the internal-ops item keeps it: its id (a lower-case uuid), its title, tier
  * and reason (each cleaned: they go into the kickoff), its rank (null: none) and its severity (one of the four, or '').
+ * (0.7.56) With the feed's groups, `when`: what its line says of its activity in place of the tier (`queueWhen`), worded
+ * when the list was built. Absent on a feed without them, and on a ticket an older version stored.
  */
-export type QueueRef = { id: string; title: string; tier: string; reason: string; rank: number | null; severity: string }
+export type QueueRef = { id: string; title: string; tier: string; reason: string; rank: number | null; severity: string; when?: string }
 
-/** (0.7.3, internal queue) The viewer's queue on the internal-ops item: the top tickets in rank order, and how many there are in all. */
-export type InternalQueue = { tickets: QueueRef[]; total: number }
+/**
+ * (0.7.3, internal queue) The viewer's queue on the internal-ops item: the top tickets in rank order, and how many there are in all.
+ * (0.7.56, Rob 2026-11-13, "Yes, build 1 and 2") With the feed's groups (`newest`): the top tickets in the feed's own
+ * order, newest activity first, `total` counting the active tickets alone, and `older` the tickets with no activity in 3
+ * weeks, listed only under the pane's closed Older toggle. Neither key on a feed without the groups: as before.
+ */
+export type InternalQueue = { tickets: QueueRef[]; total: number; newest?: true; older?: { tickets: QueueRef[]; total: number } }
 
 /** (0.7.27) OW's word for a client's pace (src/lib/team-ops/pace-load.ts). `behind`: it needs more hours a day than the client pays for; `overbooked`: behind, and the holder's needed hours a day across their clients are more than a workday. */
 export type PaceState = 'late' | 'behind' | 'overbooked' | 'on_track'
@@ -337,10 +353,14 @@ export type Feed = {
    * (0.7.4) `undated`: the viewer's own tickets on client projects that nobody dated (Rob, 2026-10-27: "All of those belong
    * to client projects ... They should be routed to the client projects"), R17's undated rows. Until OW's next release the
    * founder's feed alone sends it; (0.7.32) nothing here reads it as the founder's.
+   * (0.7.56) `internal_queue_older`: the internal queue's tickets with no activity in 3 weeks, in OW's order, at most 500.
    */
-  tickets?: { overdue?: FeedTicket[]; due_today?: FeedTicket[]; due_soon?: FeedTicket[]; start_now?: FeedTicket[]; internal_queue?: FeedQueueTicket[]; undated?: FeedTicket[] }
-  /** (0.7.3, internal queue) The feed's counts: `internal_queue_total`, how many tickets the caller's internal queue holds in all. */
-  summary?: { internal_queue_total?: number | null }
+  tickets?: { overdue?: FeedTicket[]; due_today?: FeedTicket[]; due_soon?: FeedTicket[]; start_now?: FeedTicket[]; internal_queue?: FeedQueueTicket[]; internal_queue_older?: FeedQueueTicket[]; undated?: FeedTicket[] }
+  /**
+   * (0.7.3, internal queue) The feed's counts: `internal_queue_total`, how many tickets the caller's internal queue holds in all.
+   * (0.7.56) `internal_queue_active_total` and `internal_queue_older_total`: the two parts of it.
+   */
+  summary?: { internal_queue_total?: number | null; internal_queue_active_total?: number | null; internal_queue_older_total?: number | null }
   threads?: FeedThread[]
   /** The feed's projects: what Route offers when the feed gives no `route_projects` (an OW before them). */
   projects?: FeedProject[]
@@ -673,6 +693,24 @@ export const queuedOf = (it: Pick<QueueItem, 'queue'>): QueueRef[] => {
 export const queueTotal = (it: Pick<QueueItem, 'queue'>): number => {
   const n = Number((it.queue ?? null)?.total)
   return Math.max(queuedOf(it).length, Number.isSafeInteger(n) && n > 0 ? n : 0)
+}
+
+/** (0.7.56) Whether the item's internal queue is in the feed's own order, newest activity first, with `total` counting the active tickets alone. */
+export const newestFirst = (it: Pick<QueueItem, 'queue'>): boolean => {
+  const q = it.queue ?? null
+  return Boolean(q && typeof q === 'object' && q.newest === true)
+}
+
+/** (0.7.56) The tickets with no activity in 3 weeks, as the item holds them: none on a queue in rank order, or one an older version stored. */
+export const olderOf = (it: Pick<QueueItem, 'queue'>): QueueRef[] => {
+  const o = newestFirst(it) ? (it.queue?.older ?? null) : null
+  return o && typeof o === 'object' && Array.isArray(o.tickets) ? o.tickets : []
+}
+
+/** (0.7.56) How many tickets have had no activity in 3 weeks: never fewer than the ones the item holds. */
+export const olderTotal = (it: Pick<QueueItem, 'queue'>): number => {
+  const n = newestFirst(it) ? Number(it.queue?.older?.total) : NaN
+  return Math.max(olderOf(it).length, Number.isSafeInteger(n) && n > 0 ? n : 0)
 }
 
 /**
@@ -1501,6 +1539,10 @@ export function internalProjects(feed: Feed): Set<string> {
 
 /** (0.7.3, internal queue) The most queued tickets the internal-ops item lists, the kickoff carries and the pane draws: the feed's own cap. */
 export const QUEUE_SHOWN_MAX = 10
+/** (0.7.56) The most tickets with no activity in 3 weeks the internal-ops item keeps and the Older toggle lists: OW's own cap (`INTERNAL_QUEUE_OLDER_CAP`). */
+export const QUEUE_OLDER_MAX = 500
+/** (0.7.56) The groups OW gives a queued ticket. A feed whose queue carries one of them is in OW's order, newest activity first. */
+const QUEUE_GROUPS: ReadonlySet<string> = new Set(['recent', 'in_progress', 'open', 'older'])
 /** (0.7.3, internal queue) The most characters of a queued ticket's title, as it goes into the kickoff and the pane. */
 const QUEUE_TITLE_MAX = 120
 /** (0.7.3, internal queue) The most characters of its one-line reason. */
@@ -1624,7 +1666,22 @@ export const teamLateSegment = (count: number): string => (Number.isFinite(count
  * (INTERNAL_TICKET_PROJECTS): the queue is one list, on the internal-ops item.
  */
 export function ownQueueRows(feed: Feed): FeedQueueTicket[] {
-  const rows = (feed.tickets ?? {}).internal_queue
+  return ownRowsOf(feed, (feed.tickets ?? {}).internal_queue)
+}
+
+/**
+ * (0.7.56) The viewer's own tickets with no activity in 3 weeks (`tickets.internal_queue_older`), read as the queue's own
+ * rows are (`ownQueueRows`), each once and never one the queue itself lists, at most QUEUE_OLDER_MAX.
+ */
+export function ownOlderRows(feed: Feed): FeedQueueTicket[] {
+  const active = new Set(ownQueueRows(feed).map(q => q.ticket_id))
+  return ownRowsOf(feed, (feed.tickets ?? {}).internal_queue_older)
+    .filter(q => !active.has(q.ticket_id))
+    .slice(0, QUEUE_OLDER_MAX)
+}
+
+/** (0.7.3, internal queue; 0.7.56: either list) The rows of one of the feed's queue lists that are the viewer's own (`ownQueueRows`). */
+function ownRowsOf(feed: Feed, rows: unknown): FeedQueueTicket[] {
   const me = typeof feed.member === 'string' ? feed.member.toLowerCase() : ''
   if (!Array.isArray(rows) || me === '' || feed.role !== 'founder') return []
   const seen = new Set<string>()
@@ -1669,8 +1726,11 @@ export function queueTier(tier: unknown): string {
   return /^\d+$/.test(word) ? `tier ${word}` : word
 }
 
-/** (0.7.3, internal queue) A queued ticket as the internal-ops item keeps it (QueueRef): every text cleaned. */
-function queueRefOf(q: FeedQueueTicket): QueueRef {
+/**
+ * (0.7.3, internal queue) A queued ticket as the internal-ops item keeps it (QueueRef): every text cleaned. (0.7.56) With
+ * `now` (a feed with OW's groups), what its line says of its activity at that time (`queueWhen`).
+ */
+function queueRefOf(q: FeedQueueTicket, now?: number): QueueRef {
   const rank = typeof q.queue_rank === 'number' && Number.isFinite(q.queue_rank) ? q.queue_rank : null
   const severity = typeof q.severity === 'string' ? q.severity.toLowerCase() : ''
   return {
@@ -1680,7 +1740,30 @@ function queueRefOf(q: FeedQueueTicket): QueueRef {
     reason: queueText(q.queue_reason, QUEUE_REASON_MAX),
     rank,
     severity: (SEVERITIES as readonly string[]).includes(severity) ? severity : '',
+    ...(now === undefined ? {} : { when: queueWhen(q, now) }),
   }
+}
+
+/** (0.7.56) Whether the feed's internal queue is in OW's order, newest activity first: one of its rows carries one of OW's groups. */
+const feedNewest = (rows: readonly FeedQueueTicket[]): boolean => rows.some(q => typeof q.queue_group === 'string' && QUEUE_GROUPS.has(q.queue_group))
+
+/**
+ * (0.7.56, Rob 2026-11-13: "I think it should be stuff sorted by things that are new or that I've at least been working on
+ * in the last 3 days") What a queued ticket's line says of its activity, in New York time, in place of its tier: OW's
+ * `activity_kind` with the day of its last activity (`new today`, `worked yesterday`, `new Wed` within the last 6 days,
+ * `new Nov 2` before that), `in progress` for one in OW's `in_progress` group, else `last worked Nov 2`. '' with none of
+ * those (no activity time OW could give). ⛔ A day, never a clock time or a due date.
+ */
+export function queueWhen(q: Pick<FeedQueueTicket, 'last_activity_at' | 'queue_group' | 'activity_kind'>, now: number): string {
+  const at = typeof q.last_activity_at === 'string' ? ms(q.last_activity_at) : NaN
+  const kind = q.activity_kind === 'new' || q.activity_kind === 'worked' ? q.activity_kind : null
+  if (kind && Number.isFinite(at)) {
+    const a = etParts(at)
+    const back = etParts(now).serial - a.serial
+    return `${kind} ${back <= 0 ? 'today' : back === 1 ? 'yesterday' : back <= 6 ? a.day : a.md}`
+  }
+  if (q.queue_group === 'in_progress') return 'in progress'
+  return Number.isFinite(at) ? `last worked ${etParts(at).md}` : ''
 }
 
 /**
@@ -2382,17 +2465,40 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
   // never counted in `tasks`, and one the feed also lists with a date is counted there alone. A viewer with no queue
   // of their own: nothing here at all.
   // (0.7.4) The founder's alone, on the internal-ops item whichever internal project a ticket is on (`queueHome`).
-  const queued = ownQueueRows(feed).filter(q => !counting.has(q.ticket_id))
+  // (0.7.56, Rob 2026-11-13: "the queue here should sort by new items first"; "Yes, build 1 and 2") A feed whose queue
+  // carries OW's groups (`feedNewest`) is listed in OW's own order, newest activity first, never sorted again here: its
+  // first QUEUE_SHOWN_MAX active tickets (never one OW put in `older`), the feed's count of the active ones, and the
+  // tickets with no activity in 3 weeks (`tickets.internal_queue_older`, OW's order, at most QUEUE_OLDER_MAX) kept apart
+  // for the pane's closed Older toggle alone. Each line's words of activity are worded at `now`. Nothing closes here.
+  // A feed without the groups: rank order and the feed's total, exactly as before.
+  const own = ownQueueRows(feed).filter(q => !counting.has(q.ticket_id))
+  const newest = feedNewest(own)
+  const queued = newest ? own.filter(q => q.queue_group !== 'older') : own
   const home = queueHome(feed)
   if (queued.length && home) {
     const it = item(home.projectId, home.projectName)
     undated(it)
     // listed by its queue alone: what its title and chip call it (anything else of its keeps its own kind)
     if (it.kind === 'task' && tasksBesidesUndated(it) === 0 && openAsks(it).length === 0) it.kind = 'queue'
-    const shown = byRank(queued.map(queueRefOf)).slice(0, QUEUE_SHOWN_MAX)
-    // the feed's total, a whole number, never fewer than the tickets it listed
-    const total = (feed.summary ?? null)?.internal_queue_total
-    it.queue = { tickets: shown, total: Math.max(queued.length, typeof total === 'number' && Number.isSafeInteger(total) && total > 0 ? total : 0) }
+    // a count the feed gives: a whole number, else none
+    const whole = (n: unknown): number => (typeof n === 'number' && Number.isSafeInteger(n) && n > 0 ? n : 0)
+    const s = feed.summary ?? null
+    if (newest) {
+      const older = ownOlderRows(feed).filter(q => !counting.has(q.ticket_id))
+      const olderTotal = Math.max(older.length, whole(s?.internal_queue_older_total))
+      // the active count OW gives (else its total less the older ones), never fewer than the tickets it listed
+      const active = whole(s?.internal_queue_active_total) || Math.max(0, whole(s?.internal_queue_total) - olderTotal)
+      it.queue = {
+        tickets: queued.slice(0, QUEUE_SHOWN_MAX).map(q => queueRefOf(q, now)),
+        total: Math.max(queued.length, active),
+        newest: true,
+        ...(olderTotal > 0 ? { older: { tickets: older.map(q => queueRefOf(q, now)), total: olderTotal } } : {}),
+      }
+    } else {
+      const shown = byRank(queued.map(q => queueRefOf(q))).slice(0, QUEUE_SHOWN_MAX)
+      // the feed's total, a whole number, never fewer than the tickets it listed
+      it.queue = { tickets: shown, total: Math.max(queued.length, whole(s?.internal_queue_total)) }
+    }
   }
 
   // (0.7.24, Rob 2026-11-04: "if it's approved, it shouldn't show up to me at all ... unless the system comes up with some
@@ -2946,7 +3052,13 @@ export function noteText(it: QueueItem, member: string): string {
   // (0.7.3, internal queue) and, with an internal queue, how many tickets it holds: never a due time
   const shown = shownQueue(it).length
   const total = queueTotal(it)
-  const queue = shown ? ` ${holderName(member)}'s internal queue holds ${total} ticket${total === 1 ? '' : 's'}, with no due dates; the side pane lists the top ${shown} in rank order.` : ''
+  // (0.7.56) newest first: the active tickets, and how many older ones wait under the Older toggle (never listed here)
+  const older = olderTotal(it)
+  const queue = !shown
+    ? ''
+    : newestFirst(it)
+      ? ` ${holderName(member)}'s internal queue holds ${total} open ticket${total === 1 ? '' : 's'}, newest first${older ? ` (${older} older, ${OLDER_WHY}, under the Older toggle)` : ''}; the side pane lists the first ${shown}.`
+      : ` ${holderName(member)}'s internal queue holds ${total} ticket${total === 1 ? '' : 's'}, with no due dates; the side pane lists the top ${shown} in rank order.`
   // (0.7.4, ETA asks) and the tickets that owe an ETA: which, so it can be recorded against each
   const eta = etaAsksOf(it).filter(a => isUuid(a?.id))
   const etas = eta.length ? ` ${eta.length} ticket${eta.length === 1 ? '' : 's'} of ${holderName(member)}'s need${eta.length === 1 ? 's' : ''} an ETA (ticket ${eta.map(a => a.id.slice(0, 8)).join(', ')}): record each as task-chip-flow §5.3 says, with task_fingerprint "ticket:<id>".` : ''
@@ -2964,22 +3076,42 @@ export function noteText(it: QueueItem, member: string): string {
 
 /** (0.7.3, internal queue) The queued tickets an item lists, each checked again (an item an older version stored, or a store edited by hand, is read as data). */
 export function shownQueue(it: Pick<QueueItem, 'queue'>): QueueRef[] {
-  return queuedOf(it)
-    .filter(q => q && typeof q === 'object' && isUuid(q.id))
-    .map(q => ({ ...q, title: queueAgain(q.title, QUEUE_TITLE_MAX), tier: cleanText(q.tier, QUEUE_TIER_MAX), reason: queueAgain(q.reason, QUEUE_REASON_MAX), severity: cleanText(q.severity, 10) }))
-    .filter(q => q.title !== '')
-    .slice(0, QUEUE_SHOWN_MAX)
+  return checkedRefs(queuedOf(it), QUEUE_SHOWN_MAX)
 }
+
+/** (0.7.56) The tickets with no activity in 3 weeks an item lists under the Older toggle, each checked again as `shownQueue`'s are. */
+export function shownOlder(it: Pick<QueueItem, 'queue'>): QueueRef[] {
+  return checkedRefs(olderOf(it), QUEUE_OLDER_MAX)
+}
+
+/** (0.7.3, internal queue; 0.7.56: either list) Stored tickets checked again: a lower-case uuid, every text cleaned again, a title left. */
+function checkedRefs(list: readonly QueueRef[], max: number): QueueRef[] {
+  return list
+    .filter(q => q && typeof q === 'object' && isUuid(q.id))
+    .map(q => ({
+      ...q, title: queueAgain(q.title, QUEUE_TITLE_MAX), tier: cleanText(q.tier, QUEUE_TIER_MAX), reason: queueAgain(q.reason, QUEUE_REASON_MAX), severity: cleanText(q.severity, 10),
+      ...(q.when === undefined ? {} : { when: cleanText(q.when, QUEUE_WHEN_MAX) }),
+    }))
+    .filter(q => q.title !== '')
+    .slice(0, max)
+}
+
+/** (0.7.56) The most characters of a ticket's words of activity (`last worked Nov 22` is 18). */
+const QUEUE_WHEN_MAX = 24
+/** (0.7.56) Why a ticket is under the Older toggle, as the toggle, the note and the kickoff say it. */
+const OLDER_WHY = 'no activity in 3 weeks'
 
 /**
  * (0.7.3, internal queue; spec 2026-10-27: "show the queue in rank order: the top 10, each with its tier and one-line
  * reason, then 'N more' from the total") One queued ticket's line, numbered, as the kickoff and the pane write it:
  * `1. tier 1 · Rotate the sandbox key (ticket 1a2b3c4d) · the breach checklist still lists it`. Its tier (its severity when
  * it has none), its title, its short id and its reason. ⛔ Never a due time or a clock.
+ * (0.7.56, newest first) A ticket from a feed with OW's groups says its activity where the tier was (`queueWhen`):
+ * `1. new today · Rotate the sandbox key (ticket 1a2b3c4d) · the breach checklist still lists it`.
  */
 export const queueLine = (q: QueueRef, n: number): string => {
-  const tier = q.tier || q.severity
-  return `${n}. ${tier ? `${tier} · ` : ''}${q.title} (ticket ${q.id.slice(0, 8)})${q.reason ? ` · ${q.reason}` : ''}`
+  const lead = typeof q.when === 'string' ? q.when : q.tier || q.severity
+  return `${n}. ${lead ? `${lead} · ` : ''}${q.title} (ticket ${q.id.slice(0, 8)})${q.reason ? ` · ${q.reason}` : ''}`
 }
 
 /** (0.7.3, internal queue) `304 more in the queue.`, or '' when the queue lists every ticket it holds. */
@@ -2991,14 +3123,41 @@ export function queueMore(it: Pick<QueueItem, 'queue'>): string {
 /**
  * (0.7.3, internal queue) The viewer's internal queue in its part of the pane: a heading with how many tickets it holds,
  * each listed ticket's line in rank order, then how many more. '' for an item with none.
+ * (0.7.56, newest first) With OW's groups: `### Internal queue (24 open, newest first)`, the active tickets in the feed's
+ * order, then how many more active ones. The older ones are never here: they are the closed Older toggle's under it
+ * (`olderHeading`, `olderMarkdown`).
  */
 export function queueMarkdown(it: Pick<QueueItem, 'queue'>): string {
   const shown = shownQueue(it)
   if (!shown.length) return ''
   const total = queueTotal(it)
-  const out = [`### Internal queue (${total} ticket${total === 1 ? '' : 's'}, no due dates)`, '', ...shown.map((q, i) => queueLine(q, i + 1))]
+  const heading = newestFirst(it) ? `### Internal queue (${total} open, newest first)` : `### Internal queue (${total} ticket${total === 1 ? '' : 's'}, no due dates)`
+  const out = [heading, '', ...shown.map((q, i) => queueLine(q, i + 1))]
   const more = queueMore(it)
   if (more) out.push('', more)
+  return out.join('\n')
+}
+
+/**
+ * (0.7.56, Rob 2026-11-13: "Tickets with no activity in 3 weeks move under a closed Older toggle, out of the top 10 and
+ * out of the kickoff. Nothing closes automatically.") The Older toggle's words, under the queue in the pane, closed until
+ * pressed: `Older: 229 with no activity in 3 weeks`. '' with none, and for a queue without OW's groups: no toggle.
+ */
+export function olderHeading(it: Pick<QueueItem, 'queue'>): string {
+  const n = olderTotal(it)
+  return n > 0 && shownQueue(it).length > 0 ? `Older: ${n} with ${OLDER_WHY}` : ''
+}
+
+/**
+ * (0.7.56) What the Older toggle opens to: each older ticket's line, in the queue's own format and the feed's order,
+ * numbered from 1, then how many it does not list (more than OW sends). '' with none.
+ */
+export function olderMarkdown(it: Pick<QueueItem, 'queue'>): string {
+  if (!olderHeading(it)) return ''
+  const listed = shownOlder(it)
+  const out = listed.map((q, i) => queueLine(q, i + 1))
+  const more = olderTotal(it) - listed.length
+  if (more > 0) out.push(...(out.length ? [''] : []), `${more} more with ${OLDER_WHY}.`)
   return out.join('\n')
 }
 

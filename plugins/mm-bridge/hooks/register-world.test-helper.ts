@@ -162,6 +162,10 @@ export type WorldOptions = {
   scopeProposal?: (body: Record<string, unknown>) => { status: number; body?: unknown } | 'network'
   /** (0.7.34) How OW answers `GET /team-now`. Left out, 404: an OW without the route yet. */
   teamNow?: () => { status: number; body?: unknown } | 'network'
+  /** (0.7.53) How OW answers `GET /browser-now`. Left out, 404: an OW without the route yet. */
+  browserNow?: () => { status: number; body?: unknown } | 'network'
+  /** (0.7.53) How OW answers `POST /browser-answer`. Left out, 404. */
+  browserAnswer?: (body: Record<string, unknown>) => { status: number; body?: unknown } | 'network'
   /** (0.7.23) How OW answers the sync's pin report (`POST /bridge-pins`): a status, or no answer at all. Left out, 404: an OW without the route yet. */
   bridgePins?: (body: PinReport) => { status: number; body?: unknown } | 'network'
   /**
@@ -301,8 +305,19 @@ export function world(on: On, opts: WorldOptions = {}) {
   const scopePosts: Array<{ url: string; method: string; headers: Record<string, string>; body: Record<string, unknown> }> = []
   /** (0.7.23) Every pin report the bridge sent, as it was sent. */
   const pinPosts: Array<{ method: string; headers: Record<string, string>; body: PinReport }> = []
+  /** (0.7.53) Every answer to a browser question the bridge sent, as it was sent. */
+  const browserPosts: Array<{ method: string; headers: Record<string, string>; body: Record<string, unknown> }> = []
   on('http.fetch', async (_$, e) => {
     fetched.push(e.url)
+    if (e.url.endsWith('/api/ext/browser-now') || e.url.endsWith('/api/ext/browser-answer')) {
+      const posting = e.url.endsWith('/browser-answer')
+      const body = posting ? (JSON.parse(String(e.init?.body ?? '{}')) as Record<string, unknown>) : {}
+      if (posting) browserPosts.push({ method: String(e.init?.method ?? 'GET'), headers: { ...(e.init?.headers ?? {}) }, body })
+      const missing = { status: 404, body: { error: 'not_found' } }
+      const answer = posting ? (opts.browserAnswer?.(body) ?? missing) : (opts.browserNow?.() ?? missing)
+      if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
+      return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: JSON.stringify(answer.body ?? {}) } }
+    }
     if (e.url.endsWith('/api/ext/bridge-pins')) {
       const body = JSON.parse(String(e.init?.body ?? '{}')) as PinReport
       pinPosts.push({ method: String(e.init?.method ?? 'GET'), headers: { ...(e.init?.headers ?? {}) }, body })
@@ -517,7 +532,7 @@ export function world(on: On, opts: WorldOptions = {}) {
   /** The chips this session asked the app for. */
   const minted = () => calls.filter(c => c.tool === 'spawn_task')
   return {
-    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, notices, ran, renders, shell, box, fills, resolves, statuses, closes, scopePosts, pinPosts,
+    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, notices, ran, renders, shell, box, fills, resolves, statuses, closes, scopePosts, pinPosts, browserPosts,
     /** The app calls that change a thread: a rename, a pin, a message, a chip. (Reading this session's own usage, and withdrawing a chip, change none.) */
     writes: () => calls.filter(c => !['get_session', 'list_sessions', 'get_usage', 'dismiss_task'].includes(c.tool)).map(c => [c.tool, c.args.session_id ?? '', c.args.title ?? c.args.pinned ?? ''].join(' | ')),
     /** The chips this session asked the app to withdraw, by their ids. */
@@ -922,8 +937,9 @@ export const trackPart = (drawn: string[]): string[] => {
 }
 /** Every fetch the bridge made is a read of one of its own GET routes: never a pickup, a hold or a resolve. */
 // (0.7.23) and the sync's pin report (`/bridge-pins`): what is pinned and what should be, never a pickup, a hold or a claim
+// (0.7.53) and Working manually in browser (`/browser-now`): its read records a new stretch's question, never an answer
 export const onlyReads = (w: { fetched: string[] }) =>
-  w.fetched.every(u => /\/api\/ext\/(?:closeout\?|skill-map$|client-time\?project_ids=|reply-package\?package_id=[0-9a-f-]+&format=pickup$|team-ask\?|bridge-pins$|team-now$)/.test(u))
+  w.fetched.every(u => /\/api\/ext\/(?:closeout\?|skill-map$|client-time\?project_ids=|reply-package\?package_id=[0-9a-f-]+&format=pickup$|team-ask\?|bridge-pins$|team-now$|browser-now$)/.test(u))
 export const skill = async ($: Engine, name: string, over: Record<string, unknown> = {}) => $.tool.call({ tool: 'Skill', skill: name, ...over } as never)
 export const person = async ($: Engine, text: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
 /** Everything a mounted drawing shows, in order: each Text, and each Button as `[label]`. */

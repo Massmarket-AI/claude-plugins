@@ -70,9 +70,11 @@ const snapshot = (dir) => {
 
 /**
  * A fabricated Chrome user data folder under `home` for `platform`. `profiles` maps a profile folder to
- * { name, install: {path, location} | null, devMode, inSecure, usedDaysAgo, otherIds, accounts, prefsText }.
- * `accounts` is written as Preferences' account_info exactly as given (so it can be malformed); `prefsText`
- * replaces the whole Preferences file.
+ * { name, install: {path, location} | null, devMode, accountDevMode, accountIn, inSecure, usedDaysAgo, otherIds,
+ * accounts, prefsText }. `accounts` is written as Preferences' account_info exactly as given (so it can be
+ * malformed); `prefsText` replaces the whole Preferences file. `accountDevMode` is written as
+ * account_values.extensions.ui.developer_mode, the way Chrome keeps it for a profile signed in to Google, in
+ * Secure Preferences unless `accountIn` is "plain".
  */
 function fakeChrome(home, platform, profiles) {
   const env = { LOCALAPPDATA: path.join(home, "AppData", "Local") };
@@ -92,6 +94,10 @@ function fakeChrome(home, platform, profiles) {
     const secure = p.inSecure !== false ? { extensions: ext } : {};
     const plain = p.inSecure !== false ? { browser: {} } : { extensions: ext };
     if (p.accounts !== undefined) plain.account_info = p.accounts;
+    if (p.accountDevMode !== undefined) {
+      (p.accountIn === "plain" ? plain : secure).account_values = { extensions: { ui: { developer_mode: p.accountDevMode } } };
+      plain.prefs = { tracked_preferences_reset: ["extensions.ui.developer_mode", "account_values.extensions.ui.developer_mode"] };
+    }
     fs.writeFileSync(path.join(base, "Secure Preferences"), JSON.stringify(secure));
     fs.writeFileSync(path.join(base, "Preferences"), p.prefsText !== undefined ? p.prefsText : JSON.stringify(plain));
     const when = (Date.now() - (p.usedDaysAgo || 0) * DAY) / 1000;
@@ -272,6 +278,36 @@ test("⛔ Developer mode off (or never set) in a profile that loads the folder: 
   assert.equal(status.folders.length, 1, "one folder, however many profiles load it");
   assert.equal(status.folders[0].action, "skipped-developer-mode-off");
   assert.deepEqual(snapshot(folder), before);
+});
+
+// Measured on Windows 2026-11-14: a profile signed in to Google keeps Developer mode only at
+// account_values.extensions.ui.developer_mode in Secure Preferences, with no extensions.ui.developer_mode at all.
+test("Developer mode: the account value wins when it is a boolean, in either file; else the old key decides", () => {
+  const OS_NOW = process.platform === "win32" ? "win32" : process.platform === "darwin" ? "darwin" : "linux";
+  const cases = [
+    // [label, profile fields, developerMode read, action]
+    ["account key true, local key absent (Secure Preferences)", { accountDevMode: true }, true, "updated"],
+    ["account key true, local key absent (Preferences)", { accountDevMode: true, accountIn: "plain" }, true, "updated"],
+    ["account key false, local key true", { accountDevMode: false, devMode: true }, false, "skipped-developer-mode-off"],
+    ["account key false in Preferences, local key true in Secure Preferences", { accountDevMode: false, accountIn: "plain", devMode: true }, false, "skipped-developer-mode-off"],
+    ["account key true, local key false", { accountDevMode: true, devMode: false }, true, "updated"],
+    ["account key not a boolean: the local key decides", { accountDevMode: "true", devMode: false }, false, "skipped-developer-mode-off"],
+    ["only the local key, true", { devMode: true }, true, "updated"],
+    ["only the local key, false", { devMode: false }, false, "skipped-developer-mode-off"],
+    ["only the local key, true, Linux-style in Preferences", { devMode: true, inSecure: false }, true, "updated"],
+    ["neither key", {}, null, "skipped-developer-mode-off"],
+  ];
+  for (const [label, fields, read, action] of cases) {
+    const home = tmp("mm-home-");
+    const folder = installedFolder("0.11.4");
+    const { ud } = fakeChrome(home, OS_NOW, { Default: { name: "Work", install: { path: folder, location: 4 }, ...fields } });
+    assert.equal(sx.listProfiles(ud).find((p) => p.dir === "Default").developerMode, read, label);
+    const before = snapshot(folder);
+    const { status } = runIn(home, carriedBuild("0.11.5"));
+    assert.equal(status.folders[0].action, action, label);
+    if (action === "updated") assert.equal(JSON.parse(snapshot(folder)["manifest.json"]).version, "0.11.5", label);
+    else assert.deepEqual(snapshot(folder), before, label);
+  }
 });
 
 test("⛔ a git working copy is never written", () => {
