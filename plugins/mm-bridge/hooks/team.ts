@@ -37,6 +37,8 @@ const WHY_NOT: Readonly<Record<string, string>> = {
   unseen: "can't see thread",
   person_unpinned: 'they unpinned it',
   write_cap: 'not pinned yet',
+  // (0.7.59) the Claude app refused the bridge's pin (OW's morning image says the same)
+  refused: 'app refused pin',
   unknown: 'not pinned',
 }
 

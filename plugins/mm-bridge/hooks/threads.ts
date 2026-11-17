@@ -1282,11 +1282,51 @@ export const START_MISSING = 'Start missing threads'
 
 /** (0.7.34) A row's pin, as the pin report has it: whether its thread is pinned, and why not. The photo's words, for the viewer's own row. */
 export type RowPin = { pinned: boolean; why?: string }
-const OWN_WHY: Readonly<Record<string, string>> = { no_thread: 'not pinned: no thread', unseen: "not pinned: can't see thread", person_unpinned: 'not pinned: you unpinned it', write_cap: 'not pinned yet' }
+const OWN_WHY: Readonly<Record<string, string>> = {
+  no_thread: 'not pinned: no thread',
+  unseen: "not pinned: can't see thread",
+  person_unpinned: 'not pinned: you unpinned it',
+  write_cap: 'not pinned yet',
+  // (0.7.59) the app refused the bridge's pin
+  refused: 'not pinned: the app refused',
+}
 export const rowPinWords = (pin: RowPin): string => (pin.pinned ? 'pinned' : (pin.why && Object.hasOwn(OWN_WHY, pin.why) ? (OWN_WHY[pin.why] as string) : 'not pinned'))
 /** (0.7.34) The report's rows by client, for the pane's marks. */
 export const rowPinsOf = (report: Pick<PinReport, 'items'>): Record<string, RowPin> =>
   Object.fromEntries(report.items.map(i => [i.project_id, i.pinned ? { pinned: true } : { pinned: false, ...(i.why_not ? { why: i.why_not } : {}) }]))
+
+/**
+ * ⛔ (0.7.59, Rob 2026-11-16: "Yes, build it") The pane's line under `Needs you now` when the app refused `n` of the rows' pins:
+ * the reason the person can act on. The app's `set_pinned` asks the person first for a thread other than the caller (or one it
+ * started) unless the session runs in Bypass permissions mode; asked from the bridge, nobody answers, and the pin is refused.
+ * Opus-authored, placed verbatim.
+ */
+export const refusedPinsText = (n: number): string =>
+  `The Claude app refused ${n} pin${n === 1 ? '' : 's'}. It asks before the bridge pins a thread unless Claude Code runs in Bypass permissions mode: switch the mode, or pin ${n === 1 ? 'it' : 'them'} yourself.`
+
+/** (0.7.59) How many of these rows' pins the app refused, by the pin report's marks (`rowPinsOf`). */
+export const refusedPinCount = (rows: Iterable<{ pin?: RowPin } | undefined>): number => {
+  let n = 0
+  for (const r of rows) if (r?.pin && !r.pin.pinned && r.pin.why === 'refused') n++
+  return n
+}
+
+/**
+ * (0.7.59) The report as an OW from before `refused` takes it: each `refused` item reads `unknown` and carries no `why_text`.
+ * OW answers 400 for a `why_not` it does not know, so `sendPinReport` sends this once after a 400 to a report with a `refused`
+ * item: the rest of the report still reaches the team. Null when the report has no `refused` item (nothing to send again).
+ */
+export function pinReportForOlderOw(report: PinReport): PinReport | null {
+  if (!report.items.some(i => i.why_not === 'refused')) return null
+  return {
+    ...report,
+    items: report.items.map(i => {
+      if (i.why_not !== 'refused') return i
+      const { why_text: _whyText, ...rest } = i
+      return { ...rest, why_not: 'unknown' }
+    }),
+  }
+}
 
 
 /** (0.5.25) What a row's Start, and /mm start <client>, puts there. */
@@ -2069,8 +2109,16 @@ export function lookupOrder(missing: readonly string[], ours: (sid: string) => b
     .map(x => x.sid)
 }
 
-/** (0.7.23) Why a client that should be pinned is not, as the pin report says it. */
-export type PinWhyNot = 'no_thread' | 'unseen' | 'person_unpinned' | 'write_cap' | 'unknown'
+/**
+ * (0.7.23) Why a client that should be pinned is not, as the pin report says it. ⛔ (0.7.59, Rob 2026-11-16: "Yes, build it",
+ * the bridge fix so a refused pin shows its reason) `refused`: the app refused the pass's `set_pinned`, or a refusal of the last
+ * PIN_WAIT_MS is still holding it back. Before 0.7.59 that read `unknown`, so Team now said "not pinned" with no reason while
+ * the teammates' apps, outside Bypass permissions mode, asked before every pin of another thread and nobody answered.
+ */
+export type PinWhyNot = 'no_thread' | 'unseen' | 'person_unpinned' | 'write_cap' | 'refused' | 'unknown'
+
+/** (0.7.59) The most characters of the app's own words a `refused` item carries (OW's `BRIDGE_PINS_WHY_TEXT_MAX`). */
+export const PIN_REPORT_WHY_TEXT_MAX = 120
 
 /** (0.7.23) One client in the pin report: one that should be pinned (R1, `pinsFor`), and whether it is. */
 export type PinReportItem = {
@@ -2081,6 +2129,8 @@ export type PinReportItem = {
   due_at: string | null
   pinned: boolean
   why_not: PinWhyNot | null
+  /** (0.7.59) With `refused` alone: the app's own words, cleaned and cut at PIN_REPORT_WHY_TEXT_MAX. */
+  why_text?: string
 }
 
 /** (0.7.23) A client thread that is pinned though its client is not in the report's items: who pinned it. */
@@ -2106,7 +2156,8 @@ const capText = (text: string, max: number): string => [...text].slice(0, max).j
  * your reply; a client once, the first wins) that should be pinned by R1's test (`pinsFor`), with whether its linked thread
  * is pinned once the pass is done and, when not, why: `no_thread` (no link), `unseen` (its thread could not be seen this
  * sync: `unseen` or `away`), `person_unpinned` (the person's unpin stands: `staysOff`), `write_cap` (the pass wanted it pinned
- * but had no writes left, MAX_WRITES), else `unknown`. `tone` is red once the clock its thread's name shows is past, and
+ * but had no writes left, MAX_WRITES), (0.7.59) `refused` (the app refused the pin, or a refusal still holds it back: `refused`,
+ * with the app's words as `why_text`), else `unknown`. `tone` is red once the clock its thread's name shows is past, and
  * `due_at` that clock. `extra`: the client threads pinned once the pass is done whose client is not in `items`, and whether
  * the pin is the bridge's or the person's; never a thread linked to no client (the person's own). ⛔ Pure: it reads only what
  * it is given. (0.7.23, coordinator 2026-11-05) A client whose thread the pass named through the checking loop
@@ -2124,6 +2175,8 @@ export function pinReport(o: {
   elsewhere?: (sid: string) => boolean
   stayedOff: ReadonlySet<string>
   capped: ReadonlySet<string>
+  /** (0.7.59) The threads whose pin the app refused this pass, or whose refusal still holds them back: thread id → the app's words. */
+  refused?: ReadonlyMap<string, string>
   /** (0.7.23) The clients (project ids) whose thread the pass named through the checking loop (R8). */
   checkedOff?: ReadonlySet<string>
   byUs: (sid: string) => boolean
@@ -2144,7 +2197,14 @@ export function pinReport(o: {
         ? 'no_thread'
         : !s
           ? o.hidden(sid) ? 'unseen' : 'unknown'
-          : o.stayedOff.has(sid) ? 'person_unpinned' : o.capped.has(sid) ? 'write_cap' : 'unknown'
+          : o.stayedOff.has(sid)
+            ? 'person_unpinned'
+            : o.refused?.has(sid)
+              ? 'refused'
+              : o.capped.has(sid)
+                ? 'write_cap'
+                : 'unknown'
+    const whyText = whyNot === 'refused' && sid ? cleanText(o.refused?.get(sid), PIN_REPORT_WHY_TEXT_MAX) : ''
     // the clock its thread's name shows (`pinTitle`): a teammate's part to check on (the PM's), else the client's due time
     const c = ownPins(it, o.now) ? null : checkNow(it, o.now)
     // (0.7.27, Rob 2026-11-05: "Every status shows by name in each person's row on the 9 AM image") the status that names the
@@ -2160,6 +2220,7 @@ export function pinReport(o: {
       due_at: Number.isFinite(at) ? new Date(at).toISOString() : null,
       pinned,
       why_not: whyNot,
+      ...(whyText ? { why_text: whyText } : {}),
     })
   }
   const inItems = new Set(items.map(i => i.project_id))

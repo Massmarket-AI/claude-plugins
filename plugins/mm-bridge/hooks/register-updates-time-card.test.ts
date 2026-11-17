@@ -4045,6 +4045,64 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
     })
   }
 
+  // ⛔ (0.7.59, Rob 2026-11-16: "Yes, build it") a pin the app refused reads `refused`, with the app's words, not `unknown`
+  test('0.7.59: a pin the app refuses is reported refused, with its words; held back by the wait, it still reads refused', async ($, on) => {
+    const refusePins: Record<string, string> = { local_w02: 'The user declined to pin\nthis session.' }
+    const w = reportWorld(on, { refusePins }, 3)
+    await mm($, '')
+    expect(w.pinPosts).toHaveLength(1)
+    const first = (pid: string) => w.pinPosts[0]?.body.items.find(i => i.project_id === pid)
+    expect(first(pidOf(2))).toMatchObject({ client: nameOf(2), pinned: false, why_not: 'refused', why_text: 'The user declined to pin this session.' })
+    // a pin that went through carries no words
+    expect(first(pidOf(1))).toMatchObject({ pinned: true, why_not: null })
+    expect(Object.keys(first(pidOf(1)) ?? {})).not.toContain('why_text')
+    // the person's own row says so
+    expect((w.stored['mm.last'] as { rowPins: Record<string, unknown> }).rowPins[pidOf(2)]).toEqual({ pinned: false, why: 'refused' })
+    // within PIN_WAIT_MS the app is not asked again, even once it would take the pin: still refused, in the same words
+    delete refusePins.local_w02
+    const mark = w.calls.length
+    await w.clock.advance(31 * 60_000)
+    await mm($, '')
+    expect(w.calls.slice(mark).some(c => c.tool === 'set_pinned' && c.args.session_id === 'local_w02')).toBe(false)
+    expect(w.pinPosts).toHaveLength(2)
+    expect(w.pinPosts[1]?.body.items.find(i => i.project_id === pidOf(2))).toMatchObject({ pinned: false, why_not: 'refused', why_text: 'The user declined to pin this session.' })
+  })
+
+  test('0.7.59: an OW from before refused (400): the same report again at once, refused read as unknown with no words; kept as sent', async ($, on) => {
+    const bodies: PinReport[] = []
+    const w = reportWorld(
+      on,
+      {
+        refusePins: { local_w02: 'The user declined to pin this session.' },
+        bridgePins: body => {
+          bodies.push(body)
+          return body.items.some(i => i.why_not === 'refused') ? { status: 400, body: { code: 'invalid_field', field: 'why_not' } } : OK
+        },
+      },
+      3,
+    )
+    await mm($, '')
+    expect(bodies).toHaveLength(2)
+    const was = bodies[0]?.items.find(i => i.project_id === pidOf(2))
+    expect(was).toMatchObject({ why_not: 'refused', why_text: 'The user declined to pin this session.' })
+    const { why_text: _whyText, ...rest } = was ?? ({} as PinReport['items'][number])
+    expect(bodies[1]?.items.find(i => i.project_id === pidOf(2))).toEqual({ ...rest, why_not: 'unknown' })
+    expect(JSON.stringify(bodies[1])).not.toContain('why_text')
+    expect(bodies[1]?.items.filter(i => i.project_id !== pidOf(2))).toEqual(bodies[0]?.items.filter(i => i.project_id !== pidOf(2)))
+    // taken: kept as the report's own hash, so it is not sent again before 30 minutes
+    expect(Object.keys(w.stored['mm.pinReport'] as Record<string, unknown>).sort()).toEqual(['at', 'hash'])
+    await w.clock.advance(6 * 60_000)
+    await mm($, '')
+    expect(bodies).toHaveLength(2)
+  })
+
+  test('0.7.59: a 400 to a report with nothing refused is not sent again in that sync', async ($, on) => {
+    const w = reportWorld(on, { bridgePins: () => ({ status: 400, body: { code: 'invalid_field', field: 'at' } }) }, 3)
+    await mm($, '')
+    expect(w.pinPosts).toHaveLength(1)
+    expect(w.stored['mm.pinReport']).toBeUndefined()
+  })
+
   // (`200` here is the yardstick: the same sync, with OW taking the report)
   for (const answer of [{ status: 200 }, { status: 500 }, 'network'] as const) {
     const label = typeof answer === 'string' ? 'no answer' : String(answer.status)

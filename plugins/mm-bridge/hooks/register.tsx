@@ -23,7 +23,7 @@ import {
   teamCount, teamHeading, teamOf, teamPane, teamPerson,
   START_ALL_MAX, startAllKickoff, START_MISSING, notStartedText, packageReady, awaitingPackage, readyPackages, packageArrived, rowPinWords, rowPinsOf, startMissingLabel, AWAY_REASON, ownThreads, START_ALL_WORDS, startWords, startFillSaid, kickoffsAnswer,
   ARCHIVED_REASON, KICKOFF_PENDING_MS,
-  lookupOrder, pinReport,
+  lookupOrder, pinReport, pinReportForOlderOw, refusedPinCount, refusedPinsText,
   awayHandoverText, awayPromptLine, awaySorted, carryKickoff, switchPromptLine, transcriptPath,
   DETACH_SELF_NOTE, isChildThread, recordLooksFinished, withTopLevelStep, withoutTopLevelStep,
 } from './threads'
@@ -239,7 +239,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.58'
+export const VERSION = '0.7.59'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -3409,6 +3409,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       elsewhere: sid => away.has(sid),
       stayedOff,
       capped: outOfWrites,
+      // (0.7.59) a pin the app refused this pass, or one a refusal still holds back, by its words; never a scheduled run let go
+      // (`mcpJson` puts `ccd_sidebar.set_pinned: ` before the app's own words: OW gets the app's words alone)
+      refused: new Map(refused.filter(r => r.pinned && !r.why.includes(SCHEDULED_RUN)).map(r => [r.thread, r.why.replace(/^ccd_sidebar\.set_pinned:\s*/, '')])),
       checkedOff,
       byUs: sid => pins[sid]?.byUs === true,
       client: (pid, sid) => listedNow.find(i => i.projectId === pid)?.client ?? pins[sid]?.client,
@@ -8893,10 +8896,18 @@ async function sendPinReport($: EngineInterface, report: PinReport, now: number)
     if (Number(was.missingUntil) > now) return
     const hash = sigHash(JSON.stringify({ items: report.items, extra: report.extra }))
     if (was.hash === hash && now - (Number(was.at) || 0) < PIN_REPORT_EVERY_MS) return
-    const body = JSON.stringify(report)
-    const asked = await within($, $.http.fetch(`${EXT}/bridge-pins`, { method: 'POST', headers: { ...(await authHeaders($)), 'Content-Type': 'application/json' }, body }))
+    const post = async (r: PinReport) => within($, $.http.fetch(`${EXT}/bridge-pins`, { method: 'POST', headers: { ...(await authHeaders($)), 'Content-Type': 'application/json' }, body: JSON.stringify(r) }))
+    const asked = await post(report)
     if (!asked.ok) return
-    const status = asked.value.status
+    let status = asked.value.status
+    // ⛔ (0.7.59) an OW from before `refused` answers 400 for it: the same report once more, each `refused` read as `unknown`
+    // (`pinReportForOlderOw`), so the rest of the report still reaches the team. Its hash stays the report's own.
+    const older = status === 400 ? pinReportForOlderOw(report) : null
+    if (older) {
+      const again = await post(older)
+      if (!again.ok) return
+      status = again.value.status
+    }
     if (status === 404 || status === 405) {
       await $.store.set('mm.pinReport', { ...(was.hash ? { hash: was.hash, at: was.at } : {}), missingUntil: now + PIN_REPORT_MISSING_MS } satisfies PinReportSent)
       return
@@ -10791,6 +10802,8 @@ export const register: Register = on => {
         )}
         {notice?.text ? <Text>{notice.text}</Text> : null}
         {hasList && queue?.warning ? <Text>{queue.warning}</Text> : null}
+        {/* ⛔ (0.7.59, Rob 2026-11-16: "Yes, build it") the pins the app refused, and what the person can do about it */}
+        {hasList && queue && refusedPinCount(queue.rows) > 0 ? <Text color="warning">{refusedPinsText(refusedPinCount(queue.rows))}</Text> : null}
         {hasList && queue && needsOpen ? rowGroups(queue.rows).flatMap(group => group.rows.map(({ row, n, mark }) => drawRow(row, `${mark}${n}.`))) : null}
         {/* (0.7.34, Rob 2026-11-07: "a dropdown that reveals something that looks just like what we added to the bottom of the daily team photo")
             (0.7.38, Rob 2026-11-07: "Any Reply package should appear above the team member tracking") under the client part and the list */}
