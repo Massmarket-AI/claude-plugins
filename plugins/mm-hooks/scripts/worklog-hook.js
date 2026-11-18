@@ -53,6 +53,11 @@
  * by hand. Only the day, the session id and the counts leave the machine. See
  * TOKEN USAGE.
  *
+ * No open line (0.13.1, 2026-11-18): when a thread names its task with `--task`
+ * on a session tied to a client, the CLI asks GET /api/ext/open-line whether that
+ * client has a line the work can count to, and prints one more line when it has
+ * none. Short timeout, silent on any failure. See NO OPEN LINE.
+ *
  * Turn origin (0.11.5, 2026-10-12): every worklog POST also says who started the
  * work it belongs to, `person` or `auto`, read from the stamp Claude Code writes
  * on the turn's opening entry in the session's transcript. A turn the system
@@ -182,7 +187,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.13.0";
+const HOOK_VERSION = "0.13.1";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -11668,6 +11673,116 @@ function taskCliLine(argv) {
   return label ? `Task noted: ${label}` : TASK_NOT_NOTED_LINE;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// ⛔ NO OPEN LINE (0.13.1, 2026-11-18). OW counts a client's work against what
+// the client paid for or agreed (its scope lines), and work that sits on no
+// line shows as unmatched in the morning image and, past 2 hours, as an OW task.
+// That is a day late. So when a thread names its task, the `--task` CLI asks OW
+// whether the session's client has a line the work can count to (paid, agreed,
+// or a bank with hours left) and, when it has none, prints NO_OPEN_LINE_NOTICE
+// on the line after `Task noted:`. The teammate learns it while the work starts.
+//
+// WHICH CLIENT. The session's own: the `<client>-project` skill its PostToolUse
+// recorded (DECLARATION_STATE_DIR), found by CLAUDE_CODE_SESSION_ID, which
+// Claude Code puts in its shell's environment. Read only: the state file and
+// the declarations record, the newer declaration of the two, as a load takes
+// it. Nothing here writes a file, not even the debug log.
+//
+// ⛔ ASKED ONLY WHEN ALL HOLD: the label was noted; a tracker token; not
+// MM_UNATTENDED=1 and a person at the session (isInteractiveSession), since the
+// line is for the teammate; a session id in the environment; a `-project` skill
+// declared in it (Massmarket's own two work skills are no client); and the
+// consent gate allows this folder, as for any request that names a client.
+//
+// ⛔ FAIL OPEN AND SILENT. One GET, OPEN_LINE_TIMEOUT_MS for the whole of it,
+// body included. Anything but a 200 whose JSON says `ok: true` and
+// `open_line: false` exactly prints nothing. OW's answer is never printed, and
+// neither is the token or a header: the one line printed is the constant below.
+// The exit code is 0 whatever happens, and the `Task noted:` line (which the
+// PostToolUse run reads the declaration from) is written first, unchanged.
+// ───────────────────────────────────────────────────────────────────────────
+
+const OPEN_LINE_URL = `${API_BASE}/api/ext/open-line`;
+
+/** The whole check (request and body) ends within this, then it is silence. */
+const OPEN_LINE_TIMEOUT_MS = 2500;
+
+/** A backstop past the timeout: the CLI is gone by then, exit 0, whatever is still pending. */
+const OPEN_LINE_HARD_EXIT_MS = 4000;
+
+/** A Claude Code session id as the environment carries it. */
+const CLI_SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * VERBATIM — Opus, 2026-11-18. Printed on its own line after `Task noted:` when
+ * OW says the session's client has no open line. Do not reflow or reword it.
+ */
+const NO_OPEN_LINE_NOTICE =
+  "Heads up: this client has no open line right now (nothing paid, agreed, or hours left in a bank), so this work will show as unmatched until a quote or invoice covers it.";
+
+/** A `<client>-project` skill proper: Massmarket's own two work skills are not one. */
+function isClientSkillProper(name) {
+  const segments = String(name || "").split(":");
+  return /-project$/.test(segments[segments.length - 1]);
+}
+
+/**
+ * The client skill this shell's Claude Code session declared, or null. Read
+ * only (header). Never throws.
+ */
+function cliSessionClientSkill(env) {
+  try {
+    const e = env || process.env;
+    const sid = typeof e.CLAUDE_CODE_SESSION_ID === "string" ? e.CLAUDE_CODE_SESSION_ID.trim() : "";
+    if (!CLI_SESSION_ID_RE.test(sid)) return null;
+    const held = { declared_skill: null, declared_skill_at: null, declared_task: null, declared_task_at: null };
+    const file = SESSION_STATE_DIR ? path.join(SESSION_STATE_DIR, sessionStateFileName(sid)) : null;
+    adoptNewerDeclarations(file ? readJsonObject(file) : null, held);
+    adoptNewerDeclarations(readDeclarationRecord(sid), held);
+    const skill = stateString(held.declared_skill);
+    return skill && isClientSkillProper(skill) ? skill : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * NO_OPEN_LINE_NOTICE when OW says this session's client has no open line;
+ * null in every other case, failures included (header). Never throws.
+ */
+async function noOpenLineNotice(env) {
+  try {
+    const e = env || process.env;
+    if (!TOKEN) return null;
+    if (e.MM_UNATTENDED === "1") return null;
+    if (!isInteractiveSession(e)) return null;
+    const skill = cliSessionClientSkill(e);
+    if (!skill) return null;
+    if (!evaluateConsent().allowed) return null;
+    // A runtime warning (an older node's fetch) would land in the thread's
+    // shell output. This process prints nothing but its own lines.
+    process.removeAllListeners("warning");
+    setTimeout(() => process.exit(0), OPEN_LINE_HARD_EXIT_MS).unref();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OPEN_LINE_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${OPEN_LINE_URL}?skill=${encodeURIComponent(skill)}`, {
+        method: "GET",
+        headers: Object.assign({ Authorization: `Bearer ${TOKEN}` }, hookClientHeaders(), profileHeaders()),
+        signal: controller.signal,
+      });
+      if (res.status !== 200) return null;
+      const body = await res.json();
+      const answered = body && typeof body === "object" && !Array.isArray(body) && body.ok === true;
+      return answered && body.open_line === false ? NO_OPEN_LINE_NOTICE : null;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The hard-exit budget for the event in this payload: HARD_EXIT_SESSION_START_MS
  * for SessionStart, whose chip-feed request alone may use 10 s, and
@@ -11734,14 +11849,26 @@ async function main() {
   }
 
   // ⛔ `--task` (SPEC v2 §2.2) — run by the THREAD, in its own shell, to declare
-  // its task. It prints one line and exits 0, always: no stdin, no network, no
-  // file. The PostToolUse run for that shell call does the recording.
-  // `process.exitCode` + return for the same flush reason as above.
+  // its task. It prints its line and exits 0, always: no stdin, no file. The
+  // PostToolUse run for that shell call does the recording. Since 0.13.1 a noted
+  // task may get one more line (NO OPEN LINE), after one short GET that is made
+  // only for a session tied to a client. `process.exitCode` + return for the
+  // same flush reason as above.
   if (argv.length > 0 && isTaskCliArg(argv[0])) {
+    const line = taskCliLine(argv);
     try {
-      process.stdout.write(`${taskCliLine(argv)}\n`);
+      process.stdout.write(`${line}\n`);
     } catch {
       /* a closed stdout is not a reason to fail */
+    }
+    process.exitCode = 0;
+    if (line.indexOf(TASK_NOTED_PREFIX) === 0) {
+      try {
+        const notice = await noOpenLineNotice();
+        if (notice) process.stdout.write(`${notice}\n`);
+      } catch {
+        /* the notice is a courtesy; the task is noted either way */
+      }
     }
     process.exitCode = 0;
     return;
