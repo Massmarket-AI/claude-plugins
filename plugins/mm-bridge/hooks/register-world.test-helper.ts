@@ -168,6 +168,8 @@ export type WorldOptions = {
   browserAnswer?: (body: Record<string, unknown>) => { status: number; body?: unknown } | 'network'
   /** (0.7.23) How OW answers the sync's pin report (`POST /bridge-pins`): a status, or no answer at all. Left out, 404: an OW without the route yet. */
   bridgePins?: (body: PinReport) => { status: number; body?: unknown } | 'network'
+  /** (0.7.59) Threads the app refuses to pin or unpin, with its words (as outside Bypass permissions mode). Read at each call. */
+  refusePins?: Record<string, string>
   /**
    * (0.7.6) How the app answers `unarchive_session`: left out, the thread is unarchived and the app says so; `refuse`,
    * the person said no to the app's question (an error answer); `error`, the call itself fails; `silent`, the app never
@@ -253,6 +255,7 @@ export function world(on: On, opts: WorldOptions = {}) {
       return text(`Session ${id} unarchived.`)
     }
     if (e.tool === 'set_session_title' && t) t.title = String(e.args.title)
+    if (e.tool === 'set_pinned' && opts.refusePins && Object.hasOwn(opts.refusePins, id)) return refused(String(opts.refusePins[id]))
     if (e.tool === 'set_pinned' && t) t.pinned = Boolean(e.args.pinned)
     // As the app answers a session asking for its own usage: the account's plan, and the session's context window.
     if (e.tool === 'get_usage') return text(opts.usage ? opts.usage() : { plan: { status: 'ok', plan: PLAN_MARK }, context: { session: 'self', status: 'unavailable' } })

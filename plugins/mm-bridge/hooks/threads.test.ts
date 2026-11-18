@@ -14,6 +14,7 @@ import {
   LABEL_MAX, buttonLabel, cardReady, needsCard,
   askParagraph, queueParagraph,
   DETACH_SELF_NOTE, TOP_LEVEL_STEP, carryKickoff, isChildThread, kickoffsAnswer, recordLooksFinished, switchPromptLine, withTopLevelStep, withoutTopLevelStep,
+  pinReportForOlderOw, refusedPinCount, refusedPinsText, rowPinWords,
 } from './threads'
 import type { AppThread, ClientThread, Pairs, Platform } from './threads'
 
@@ -2172,5 +2173,22 @@ describe('0.7.44 (Rob, 11-10: "we always want it to be parent threads"): client 
       ['not an object', 'completed', false],
     ]
     for (const [name, record, finished] of cases) expect(recordLooksFinished(record), name).toBe(finished)
+  })
+})
+
+// (0.7.59, Rob 2026-11-16: "Yes, build it") the pins the app refused: the row's words, the pane's line, the older OW's report
+describe('0.7.59: refused pins', () => {
+  test("the person's row and the pane's line", () => {
+    expect(rowPinWords({ pinned: false, why: 'refused' })).toBe('not pinned: the app refused')
+    expect(rowPinWords({ pinned: false, why: 'unknown' })).toBe('not pinned')
+    expect(refusedPinCount([{ pin: { pinned: false, why: 'refused' } }, { pin: { pinned: true } }, {}, undefined, { pin: { pinned: false, why: 'no_thread' } }, { pin: { pinned: false, why: 'refused' } }])).toBe(2)
+    expect(refusedPinsText(1)).toBe('The Claude app refused 1 pin. It asks before the bridge pins a thread unless Claude Code runs in Bypass permissions mode: switch the mode, or pin it yourself.')
+    expect(refusedPinsText(3)).toBe('The Claude app refused 3 pins. It asks before the bridge pins a thread unless Claude Code runs in Bypass permissions mode: switch the mode, or pin them yourself.')
+  })
+  test('an older OW gets refused as unknown with no words; a report with nothing refused is not sent again', () => {
+    const item = { project_id: '11111111-1111-4111-8111-111111111111', client: 'Client A', kind: 'task', tone: 'red' as const, due_at: null, pinned: false }
+    const report = { at: '2026-11-16T19:00:00.000Z', items: [{ ...item, why_not: 'refused' as const, why_text: 'The user declined.' }, { ...item, client: 'Client B', why_not: 'no_thread' as const }], extra: [] }
+    expect(pinReportForOlderOw(report)).toEqual({ ...report, items: [{ ...item, why_not: 'unknown' }, { ...item, client: 'Client B', why_not: 'no_thread' }] })
+    expect(pinReportForOlderOw({ ...report, items: [report.items[1] as (typeof report.items)[number]] })).toBeNull()
   })
 })

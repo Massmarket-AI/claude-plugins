@@ -137,3 +137,12 @@ describe('0.7.34: the dropdown\'s own line', () => {
     expect(teamText(read([person()]), NOW).split('\n').slice(0, 3)).toEqual(['Team now', 'Asif | No report from this bridge', '  Nothing running'])
   })
 })
+
+// (0.7.59, Rob 2026-11-16: "Yes, build it") a pin the app refused is named, the same words as OW's morning image
+describe('0.7.59: a refused pin in Team now', () => {
+  test('a row the app refused to pin reads "app refused pin"', () => {
+    const lines = texts([person({ report: report([item({ pinned: false, why_not: 'refused', why_text: 'The user declined to pin this session.' }), item({ pinned: false, why_not: 'unknown' })]) })])
+    expect(lines).toContain('  ○ Acme Legal · task · due Mon 5:00 PM · app refused pin')
+    expect(lines).toContain('  ○ Acme Legal · task · due Mon 5:00 PM · not pinned')
+  })
+})
