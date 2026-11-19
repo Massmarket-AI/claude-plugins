@@ -118,11 +118,12 @@ describe("Rob's pin and clock rules, one test each (0.7.25)", () => {
     const eta = { ...ticket(1, null), eta_needed_by: iso(NOW + 3 * H), eta_ask: 'no ETA' }
     const etaItem = one(feed({ tickets: { due_soon: [eta] } }))
     expect(pinsFor(etaItem, NOW)).toBe(true)
-    expect(titleFor(etaItem, NOW)).toBe(`🔴 3h left · ${ACME} · ETA needed`)
+    // (0.7.60, Rob approved 2026-11-19 ('Yes, all five')) both are internal clocks: they pin as before, never red
+    expect(titleFor(etaItem, NOW)).toBe(`🟡 3h left · ${ACME} · ETA needed`)
     const assign = ticket(2, NOW + 5 * H, { commitment_basis: 'assign_by' })
     const assignItem = one(feed({ tickets: { due_soon: [assign] } }))
     expect(pinsFor(assignItem, NOW)).toBe(true)
-    expect(titleFor(assignItem, NOW)).toBe(`🔴 5h left · ${ACME} · assign an owner`)
+    expect(titleFor(assignItem, NOW)).toBe(`🟡 5h left · ${ACME} · assign an owner`)
   })
 
   test('P8 (10-23: "that should also trigger a 24 hr reply not just for me but for anyone asked to do something internally"; 11-05: "Should work the same way for the team members"): an internal ask gives whoever is asked a 24-business-hour clock on that client\'s thread', () => {
@@ -928,12 +929,13 @@ describe('0.7.32: a ticket with no due date never pins and never asks for a date
       const it = one(as(who, role, { tickets: { due_today: [etaAsk(who)], undated: [noDate(who)] } }))
       expect(etaAsksOf(it).map(a => a.id)).toEqual([P(102)])
       expect(pinsFor(it, NOW)).toBe(true)
-      expect(titleFor(it, NOW)).toBe(`🔴 3h left · ${ACME} · ETA needed`)
+      // (0.7.60) an owed ETA is an internal clock: never red
+      expect(titleFor(it, NOW)).toBe(`🟡 3h left · ${ACME} · ETA needed`)
       expect([it.tasks, undatedCount(it)]).toEqual([2, 1])
       expect(noDateGroup(it)).toBe(false)
       const twice = one(as(who, role, { tickets: { due_today: [etaAsk(who)], undated: [noDate(who, 0, { ticket_id: P(102) })] } }))
       expect([twice.tasks, undatedCount(twice), twice.undatedTasks ?? 0]).toEqual([1, 0, 0])
-      expect(titleFor(twice, NOW)).toBe(`🔴 3h left · ${ACME} · ETA needed`)
+      expect(titleFor(twice, NOW)).toBe(`🟡 3h left · ${ACME} · ETA needed`)
     })
 
     test(`${name}: a package that is not the viewer's lists nothing by itself, so it takes nothing out from under the toggle`, () => {

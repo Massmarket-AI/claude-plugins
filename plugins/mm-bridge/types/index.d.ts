@@ -228,7 +228,8 @@ export type MmBrowser = {
 }
 
 /** (0.7.34) One row of a person's pins on `Team now`, as the daily photo has it. */
-export type MmTeamItem = { client: string; kind: string; tone: 'red' | 'yellow' | 'green'; dueAt: number | null; pinned: boolean; whyNot: string | null }
+/** (0.7.60) `internal`: the row's clock is one of the person's own (OW never draws it red or late); absent: a client's. */
+export type MmTeamItem = { client: string; kind: string; tone: 'red' | 'yellow' | 'green'; dueAt: number | null; pinned: boolean; whyNot: string | null; internal?: true }
 /** (0.7.34) One of a person's threads with a tracked row in the last 30 minutes. A thread with no client said has none, and no task. */
 export type MmTeamThread = { client: string | null; working: boolean; auto: boolean; since: number | null; capped: boolean; lastAt: number; task: string | null }
 /** (0.7.34) A task assigned to a person in the last day. `from`: who this bridge last saw it with. */

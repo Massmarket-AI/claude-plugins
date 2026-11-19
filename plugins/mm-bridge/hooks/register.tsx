@@ -7,7 +7,7 @@ import {
   peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
   asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, newestFirst, olderHeading, olderMarkdown, olderOf, olderTotal, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText,
   hasDue, clientActivity, isRecent, mayStart,
-  pinsFor, pinTitle, threadWhy,
+  leadDueOf, pinsFor, pinTitle, threadWhy,
   teamLate, teamLateCount, teamLateSegment, teamLateWho, LATE_WITH_TEAM,
   teamLateOnly,
   goOf, goMine, goOnly, goWithMail,
@@ -239,7 +239,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.59'
+export const VERSION = '0.7.60'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -3539,7 +3539,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
         client,
         sid,
         ...(said?.dir ? { dir: said.dir } : {}),
-        ...(what && at ? { due: at.it.dueAt, what } : {}),
+        // (0.7.60) the client's own due time once an internal clock has passed (`leadDueOf`): an away label never reads late for it
+        ...(what && at && Number.isFinite(leadDueOf(at.it, now)) ? { due: leadDueOf(at.it, now), what } : {}),
         listed: at ? at.listed : 'none',
         ...(transcript ? { transcript } : {}),
         ...(title ? { title } : {}),
