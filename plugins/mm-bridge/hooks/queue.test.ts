@@ -2148,6 +2148,20 @@ describe('(0.5.28, internal asks) an ask lists on the asked person\'s item for i
       'grep -rn "team-ask/post" docs/',
     ]) expect(isClosingRoute(command), command).toBe(false)
   })
+
+  // ⛔ (0.7.62, Rob 2026-11-19: "I don't want to miss something from a teammate when they need something for a client,
+  // so they can keep working on time.") An open ask has no age: OW serves it until it is answered or closed (#785), and
+  // the bridge's 3-week cut (`listCutoff`) never drops it, as it drops a ticket the nightly job would have closed.
+  test('(0.7.62) an open ask 30 days past its reply time still lists, reads late and pins', async () => {
+    const later = DUE + 30 * 24 * 3_600_000
+    const [it] = buildQueue(robFeed({ asks: [ask()] }), later)
+    if (!it) throw new Error('no item: the ask was cut')
+    expect(it).toMatchObject({ projectId: CREG, kind: 'ask', dueAt: DUE, actBy: DUE })
+    expect(openAsks(it).map(a => a.id)).toEqual([ASK])
+    expect(pinsNow(it, later)).toBe(true)
+    // an ask with no time at all is still dropped, as before
+    expect(buildQueue(robFeed({ asks: [ask({ asked_at: 'not a time', due_at: null })] }), later)).toEqual([])
+  })
 })
 
 // (0.7.3, internal queue) Rob, 2026-10-27: "I should be assigned all those tickets. They should just be in a queue... for

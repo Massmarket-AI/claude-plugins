@@ -2615,7 +2615,10 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     if (me === '' || typeof a.asked_email !== 'string' || a.asked_email.toLowerCase() !== me) continue
     const asked = ms(a.asked_at)
     const due = Number.isFinite(ms(a.due_at)) ? ms(a.due_at as string) : Number.isFinite(asked) ? businessDeadline(asked, DAY) : NaN
-    if (!inWindow(due)) continue
+    // ⛔ (0.7.62, Rob 2026-11-19: "I don't want to miss something from a teammate when they need something for a client,
+    // so they can keep working on time.") An open ask has no age: never cut by `listCutoff`, however far past its reply
+    // time. OW serves it until it is answered or closed (OW #785); only the 3-week ticket close lines up with the cut.
+    if (!Number.isFinite(due)) continue
     askIds.add(a.ask_id)
     if (typeof a.asker_email === 'string' && a.asker_email) askers.set(a.project_id, (askers.get(a.project_id) ?? new Set<string>()).add(a.asker_email.toLowerCase()))
     const it = item(a.project_id, a.project_name)
