@@ -4420,8 +4420,11 @@ async function ownIn($: EngineInterface, items: readonly QueueItem[]): Promise<Q
   const key = await knownKey($)
   const cur = key && (await tracks($)) ? (await currents($))[key] : undefined
   if (!cur || !isUuid(cur.pid)) return undefined
-  // (0.7.62) not a thread the client's newer thread replaced (`replacedChecked`): the client's part is the newer thread's
-  if (await replacedChecked($, { [key]: cur }, links ?? (await storeGet<Record<string, string>>($, 'mm.links', {})), key)) return undefined
+  // (0.7.62) not a thread the client's newer thread replaced (`replacedIn`): the client's part is the newer thread's. The
+  // links are read again only off the desktop app, where this thread's id may not be known yet (`knownSelf`).
+  const mine = { [key]: cur }
+  const ls = links ?? (await storeGet<Record<string, string>>($, 'mm.links', {}))
+  if (replaceCouldApply(mine, ls, key) && replacedIn(mine, ls, key, await markerRecordsOf($))) return undefined
   return items.find(i => i.projectId === cur.pid)
 }
 
@@ -8897,14 +8900,12 @@ function currentIn(all: Readonly<Record<string, Current>>, links: Readonly<Recor
 }
 
 /**
- * (0.7.62) `currentIn` with the replaced check, reading the marker records only when they could matter: the thread's record
- * is the bridge's own word on a client whose link is another thread. Any other thread costs no read more than before.
+ * (0.7.62) Whether `replacedIn` could find this thread replaced: its record is the bridge's own word on a client linked to
+ * another thread. ⛔ Callers read the marker records only when it says so, and inline (`cond ? await markerRecordsOf($) :
+ * undefined`), never through a helper of their own: any other thread then reads the store, and waits, exactly as before.
+ * An extra await on these paths alone moved a dozen threads' interleaving enough to leave a client two cards (concurrency
+ * test, seed 42).
  */
-async function currentChecked($: EngineInterface, all: Readonly<Record<string, Current>>, links: Readonly<Record<string, string>>, key: string): Promise<Current | undefined> {
-  return currentIn(all, links, key, replaceCouldApply(all, links, key) ? await markerRecordsOf($) : undefined)
-}
-
-/** (0.7.62) Whether `replacedIn` could find this thread replaced: its record is the bridge's own word on a client linked to another thread. */
 function replaceCouldApply(all: Readonly<Record<string, Current>>, links: Readonly<Record<string, string>>, key: string): boolean {
   const c = Object.hasOwn(all, key) ? all[key] : undefined
   return Boolean(c && typeof c === 'object' && isUuid(c.pid) && c.how !== 'press' && c.how !== 'link' && Object.hasOwn(links, c.pid) && links[c.pid] !== key)
@@ -8917,7 +8918,9 @@ async function replacedChecked($: EngineInterface, all: Readonly<Record<string, 
 
 async function currentFor($: EngineInterface, key: string): Promise<Current | undefined> {
   if (!key) return undefined
-  return currentChecked($, await currents($), await storeGet<Record<string, string>>($, 'mm.links', {}), key)
+  const all = await currents($)
+  const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+  return currentIn(all, links, key, replaceCouldApply(all, links, key) ? await markerRecordsOf($) : undefined)
 }
 
 async function skillStore($: EngineInterface): Promise<SkillStore> {
@@ -9270,7 +9273,8 @@ async function declareTask($: EngineInterface, label: string): Promise<void> {
   const key = await threadKey($)
   if (!key) return
   const links = await storeGet<Record<string, string>>($, 'mm.links', {})
-  const cur = await currentChecked($, await currents($), links, key)
+  const all = await currents($)
+  const cur = currentIn(all, links, key, replaceCouldApply(all, links, key) ? await markerRecordsOf($) : undefined)
   if (!cur) {
     pendingTasks.set(key, label)
     return
@@ -9729,7 +9733,8 @@ async function drawTrack($: EngineInterface, why: TrackWhy): Promise<void> {
     const s = await sessOf($)
     const now = await $.clock.now()
     const links = await storeGet<Record<string, string>>($, 'mm.links', {})
-    const cur = key ? await currentChecked($, await currents($), links, key) : undefined
+    const all = key ? await currents($) : {}
+    const cur = key ? currentIn(all, links, key, replaceCouldApply(all, links, key) ? await markerRecordsOf($) : undefined) : undefined
     const skills = await skillList($)
     const pid = cur?.pid ?? ''
     const kind = pid ? kindOf(pid, skills) : 'client'
