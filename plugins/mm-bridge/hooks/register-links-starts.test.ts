@@ -8002,7 +8002,7 @@ describe('(0.7.4) a teammate\'s internal ticket owes an ETA: listed with its clo
     expect(all.some(l => l.includes('with Builder A') || l.includes('Team · late'))).toBe(false)
     await ui.unmount()
     expect(String(w.statuses.at(-1) ?? '')).toMatch(/^MM: clear(  |$)/)
-    expect(await mm($, 'status')).toContain('late with the team: 1 (Builder A 1)')
+    expect(await mm($, 'status')).toContain('1 behind with the team (Builder A 1)')
     for (let i = 0; i < 3; i++) await w.clock.advance(60_000)
     expect(chipTitles(w)).toEqual([])
     expect(sends(w)).toEqual([])
