@@ -8,7 +8,7 @@ import {
   FRESH_THREAD_BYTES, freshParagraph,
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLink, titleLooksLike, titleSuggestion, waitingText,
-  newerThreadFor, threadStart, markedThreads, ownThreads, AWAY_REASON,
+  newerThreadFor, threadStart, markedThreads, ownThreads, replacedBy, AWAY_REASON,
   CHIP_TITLE_MAX, REFRESH_FAILED, bandText, chipTitle, claimText, isStillOpenRow, secondThreadSentence, startKickoff,
   START_ALL_MAX, startAllKickoff, startAllLabel, startAllSummary, startMissingLabel,
   LABEL_MAX, buttonLabel, cardReady, needsCard,
@@ -2190,5 +2190,48 @@ describe('0.7.59: refused pins', () => {
     const report = { at: '2026-11-16T19:00:00.000Z', items: [{ ...item, why_not: 'refused' as const, why_text: 'The user declined.' }, { ...item, client: 'Client B', why_not: 'no_thread' as const }], extra: [] }
     expect(pinReportForOlderOw(report)).toEqual({ ...report, items: [{ ...item, why_not: 'unknown' }, { ...item, client: 'Client B', why_not: 'no_thread' }] })
     expect(pinReportForOlderOw({ ...report, items: [report.items[1] as (typeof report.items)[number]] })).toBeNull()
+  })
+})
+
+describe('0.7.64 (Rob, 11-19: "Once there\'s a new bridge thread, the old ones should stop being updated"): replacedBy', () => {
+  const DAY = 24 * 3_600_000
+  // Sellers Hub, 11-18: the old thread opened with the client's marker on 11-12; its new thread opened with it on 11-18 and took the link
+  const links = { [ACME]: 'local_new' }
+  const marked = { local_old: ACME, local_new: ACME }
+  const markedAt = { local_old: NOW - 6 * DAY, local_new: NOW }
+
+  test('an older bridge thread of the client, once its newer thread holds the link, is replaced by it', () => {
+    expect(replacedBy('local_old', ACME, links, marked, markedAt)).toBe('local_new')
+  })
+
+  test('the linked thread itself never is, nor a client with no linked thread', () => {
+    expect(replacedBy('local_new', ACME, links, marked, markedAt)).toBeUndefined()
+    expect(replacedBy('local_old', ACME, {}, marked, markedAt)).toBeUndefined()
+    expect(replacedBy('local_old', BOLT, links, marked, markedAt)).toBeUndefined()
+  })
+
+  test('the second-thread case: a thread that opened with the marker AFTER the linked one is a second thread, not replaced', () => {
+    expect(replacedBy('local_second', ACME, links, { ...marked, local_second: ACME }, { ...markedAt, local_second: NOW + DAY })).toBeUndefined()
+  })
+
+  test('the person moved the link back with /mm link: the old thread is the linked one, and the newer one is a second thread', () => {
+    const back = { [ACME]: 'local_old' }
+    expect(replacedBy('local_old', ACME, back, marked, markedAt)).toBeUndefined()
+    expect(replacedBy('local_new', ACME, back, marked, markedAt)).toBeUndefined()
+  })
+
+  test('nothing on record says so: no marker, another client\'s marker, a linked thread with no marker, a time missing or equal', () => {
+    expect(replacedBy('local_plain', ACME, links, marked, markedAt)).toBeUndefined()
+    expect(replacedBy('local_old', ACME, links, { ...marked, local_old: BOLT }, markedAt)).toBeUndefined()
+    expect(replacedBy('local_old', ACME, links, { local_old: ACME }, markedAt)).toBeUndefined()
+    expect(replacedBy('local_old', ACME, links, marked, { local_new: NOW })).toBeUndefined()
+    expect(replacedBy('local_old', ACME, links, marked, { local_old: NOW - DAY })).toBeUndefined()
+    expect(replacedBy('local_old', ACME, links, marked, { local_old: NOW, local_new: NOW })).toBeUndefined()
+    expect(replacedBy('local_old', ACME, links, marked, { local_old: Number.NaN, local_new: NOW })).toBeUndefined()
+  })
+
+  test('only app thread ids', () => {
+    expect(replacedBy('cli:abc', ACME, links, { ...marked, 'cli:abc': ACME }, { ...markedAt, 'cli:abc': 0 })).toBeUndefined()
+    expect(replacedBy('local_old', ACME, { [ACME]: 'not-a-thread' }, { ...marked, 'not-a-thread': ACME }, { ...markedAt, 'not-a-thread': NOW })).toBeUndefined()
   })
 })

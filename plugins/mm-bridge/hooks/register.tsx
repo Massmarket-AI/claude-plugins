@@ -18,7 +18,7 @@ import {
   LABEL, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, secondThreadSentence, startKickoff, threadLink, titleLooksLike, titleSuggestion,
   REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, bandText, chipTitle, ownPackage, seenNow, selfUpdateAt, selfUpdateText, waitingText,
-  FRESH_THREAD_BYTES, draftsComing, freshParagraph, prepDue,
+  FRESH_THREAD_BYTES, draftsComing, freshParagraph, prepDue, replacedBy,
   buildHeading, buildMore, buildOf, buildShown,
   teamCount, teamHeading, teamOf, teamPane, teamPerson,
   START_ALL_MAX, startAllKickoff, START_MISSING, notStartedText, packageReady, awaitingPackage, readyPackages, packageArrived, rowPinWords, rowPinsOf, startMissingLabel, AWAY_REASON, ownThreads, START_ALL_WORDS, startWords, startFillSaid, kickoffsAnswer,
@@ -239,7 +239,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.63'
+export const VERSION = '0.7.64'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -1013,6 +1013,8 @@ function asThread(raw: unknown): AppThread | null {
     ...(typeof t.parentSessionId === 'string' && THREAD_ID.test(t.parentSessionId) ? { parentSessionId: t.parentSessionId } : {}),
     ...(typeof t.startedBy === 'string' && THREAD_ID.test(t.startedBy) ? { startedBy: t.startedBy } : {}),
     ...(typeof t.detached === 'boolean' ? { detached: t.detached } : {}),
+    // (0.7.64) the app says it is in the middle of a turn: a message sent now waits for the turn to end
+    ...((t as { isRunning?: unknown }).isRunning === true ? { running: true } : {}),
   }
 }
 
@@ -4411,12 +4413,19 @@ async function clientPart($: EngineInterface): Promise<MmView> {
  */
 async function ownIn($: EngineInterface, items: readonly QueueItem[]): Promise<QueueItem | undefined> {
   const me = await knownSelf($)
-  const pid = me ? ownerOf(me, await storeGet<Record<string, string>>($, 'mm.links', {})) : undefined
+  const links = me ? await storeGet<Record<string, string>>($, 'mm.links', {}) : undefined
+  const pid = me && links ? ownerOf(me, links) : undefined
   if (pid) return items.find(i => i.projectId === pid)
   // (0.6.0) a second thread of a client: its current project is the client its part shows (Rob, 2026-10-25)
   const key = await knownKey($)
   const cur = key && (await tracks($)) ? (await currents($))[key] : undefined
-  return cur && isUuid(cur.pid) ? items.find(i => i.projectId === cur.pid) : undefined
+  if (!cur || !isUuid(cur.pid)) return undefined
+  // (0.7.64) not a thread the client's newer thread replaced (`replacedIn`): the client's part is the newer thread's. The
+  // links are read again only off the desktop app, where this thread's id may not be known yet (`knownSelf`).
+  const mine = { [key]: cur }
+  const ls = links ?? (await storeGet<Record<string, string>>($, 'mm.links', {}))
+  if (replaceCouldApply(mine, ls, key) && replacedIn(mine, ls, key, await markerRecordsOf($))) return undefined
+  return items.find(i => i.projectId === cur.pid)
 }
 
 /**
@@ -5990,6 +5999,11 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
     // the next sync tries again.
     const active = found.lastActivityAt ? Date.parse(found.lastActivityAt) : NaN
     if (Number.isFinite(active) && now - active < AUTO_IDLE_MS) return
+    // ⛔ (0.7.64, Sellers Hub 2026-11-18) nor while the thread is in the middle of a turn (`running`): the app holds a message
+    // to a busy thread and delivers it when the turn ends. An update sent at 6:08 PM to the client's thread, busy then, was
+    // delivered at 7:14 PM, a minute after the client's new thread had taken the link, and the old thread ran a turn on it.
+    // Nothing is on record, so the next sync tries again, and finds the link where it is by then.
+    if (found.running) return
     let read: Feed
     try {
       read = await fetchFeed($)
@@ -8847,10 +8861,37 @@ async function currents($: EngineInterface): Promise<Record<string, Current>> {
   return v && typeof v === 'object' && !Array.isArray(v) ? v : {}
 }
 
-/** (0.6.0) A thread's current project: its record, else the client it is linked to (`primary`). */
-function currentIn(all: Readonly<Record<string, Current>>, links: Readonly<Record<string, string>>, key: string): Current | undefined {
+/** (0.7.64) The client markers on record, as `replacedBy` reads them: which client each thread's marker named, and when. */
+type MarkerRecords = { marked: Readonly<Record<string, string>>; markedAt: Readonly<Record<string, number>> }
+
+async function markerRecordsOf($: EngineInterface): Promise<MarkerRecords> {
+  const marked = await storeGet<Record<string, string>>($, 'mm.marked', {})
+  const markedAt = await storeGet<Record<string, number>>($, 'mm.markedAt', {})
+  return { marked: marked && typeof marked === 'object' ? marked : {}, markedAt: markedAt && typeof markedAt === 'object' ? markedAt : {} }
+}
+
+/**
+ * (0.7.64) A thread's current project that the client's newer thread has replaced: its record names the client, the record
+ * is the bridge's own word (the feed, its marker, a skill load, a link it lost), and `replacedBy` says the client's linked
+ * thread is a newer bridge thread of the client. The client and that thread, else undefined. ⛔ The person's own word
+ * stands, and is never read as replaced: a band press (`press`) or their /mm link (`link`, which makes the thread the
+ * linked one again in any case).
+ */
+function replacedIn(all: Readonly<Record<string, Current>>, links: Readonly<Record<string, string>>, key: string, marks: MarkerRecords): { pid: string; by: string } | undefined {
   const c = Object.hasOwn(all, key) ? all[key] : undefined
-  if (c && typeof c === 'object' && isUuid(c.pid) && Number.isFinite(c.at)) return c
+  if (!c || typeof c !== 'object' || !isUuid(c.pid) || c.how === 'press' || c.how === 'link') return undefined
+  const by = replacedBy(key, c.pid, links, marks.marked, marks.markedAt)
+  return by ? { pid: c.pid, by } : undefined
+}
+
+/**
+ * (0.6.0) A thread's current project: its record, else the client it is linked to (`primary`).
+ * (0.7.64) With `marks`, a record the client's newer thread replaced (`replacedIn`) counts as none: the old thread is not
+ * one of the client's current threads, its pane draws no client part, and /mm status counts it apart.
+ */
+function currentIn(all: Readonly<Record<string, Current>>, links: Readonly<Record<string, string>>, key: string, marks?: MarkerRecords): Current | undefined {
+  const c = Object.hasOwn(all, key) ? all[key] : undefined
+  if (c && typeof c === 'object' && isUuid(c.pid) && Number.isFinite(c.at) && !(marks && replacedIn(all, links, key, marks))) return c
   if (THREAD_ID.test(key)) {
     const pid = ownerOf(key, links)
     if (pid) return { pid, how: 'primary', at: 0 }
@@ -8858,9 +8899,28 @@ function currentIn(all: Readonly<Record<string, Current>>, links: Readonly<Recor
   return undefined
 }
 
+/**
+ * (0.7.64) Whether `replacedIn` could find this thread replaced: its record is the bridge's own word on a client linked to
+ * another thread. ⛔ Callers read the marker records only when it says so, and inline (`cond ? await markerRecordsOf($) :
+ * undefined`), never through a helper of their own: any other thread then reads the store, and waits, exactly as before.
+ * An extra await on these paths alone moved a dozen threads' interleaving enough to leave a client two cards (concurrency
+ * test, seed 42).
+ */
+function replaceCouldApply(all: Readonly<Record<string, Current>>, links: Readonly<Record<string, string>>, key: string): boolean {
+  const c = Object.hasOwn(all, key) ? all[key] : undefined
+  return Boolean(c && typeof c === 'object' && isUuid(c.pid) && c.how !== 'press' && c.how !== 'link' && Object.hasOwn(links, c.pid) && links[c.pid] !== key)
+}
+
+/** (0.7.64) `replacedIn`, reading the marker records only when it could find the thread replaced (`replaceCouldApply`). */
+async function replacedChecked($: EngineInterface, all: Readonly<Record<string, Current>>, links: Readonly<Record<string, string>>, key: string): Promise<{ pid: string; by: string } | undefined> {
+  return replaceCouldApply(all, links, key) ? replacedIn(all, links, key, await markerRecordsOf($)) : undefined
+}
+
 async function currentFor($: EngineInterface, key: string): Promise<Current | undefined> {
   if (!key) return undefined
-  return currentIn(await currents($), await storeGet<Record<string, string>>($, 'mm.links', {}), key)
+  const all = await currents($)
+  const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+  return currentIn(all, links, key, replaceCouldApply(all, links, key) ? await markerRecordsOf($) : undefined)
 }
 
 async function skillStore($: EngineInterface): Promise<SkillStore> {
@@ -9213,7 +9273,8 @@ async function declareTask($: EngineInterface, label: string): Promise<void> {
   const key = await threadKey($)
   if (!key) return
   const links = await storeGet<Record<string, string>>($, 'mm.links', {})
-  const cur = currentIn(await currents($), links, key)
+  const all = await currents($)
+  const cur = currentIn(all, links, key, replaceCouldApply(all, links, key) ? await markerRecordsOf($) : undefined)
   if (!cur) {
     pendingTasks.set(key, label)
     return
@@ -9672,7 +9733,8 @@ async function drawTrack($: EngineInterface, why: TrackWhy): Promise<void> {
     const s = await sessOf($)
     const now = await $.clock.now()
     const links = await storeGet<Record<string, string>>($, 'mm.links', {})
-    const cur = key ? currentIn(await currents($), links, key) : undefined
+    const all = key ? await currents($) : {}
+    const cur = key ? currentIn(all, links, key, replaceCouldApply(all, links, key) ? await markerRecordsOf($) : undefined) : undefined
     const skills = await skillList($)
     const pid = cur?.pid ?? ''
     const kind = pid ? kindOf(pid, skills) : 'client'
@@ -9820,8 +9882,18 @@ async function pressLineAsk($: EngineInterface, what: { line: MmLineChoice } | '
 
 /** (0.7.0) What `mm line`, `mm propose` and `mm bank` act on: this thread's client, its lines as last read, its task. Or a sentence saying why not. */
 async function lineContext($: EngineInterface, needLines: boolean): Promise<{ pid: string; client: string; p: TimeProject | undefined; task: string | undefined } | string> {
-  const cur = await currentFor($, await threadKey($))
-  if (!cur) return 'This thread is not tracked to a client yet: load the client\'s project skill first, then try again.'
+  const key = await threadKey($)
+  const cur = await currentFor($, key)
+  if (!cur) {
+    // (0.7.64) an older thread of a client whose newer thread replaced it: loading the skill again would not change that
+    const was = key ? await replacedChecked($, await currents($), await storeGet<Record<string, string>>($, 'mm.links', {}), key) : undefined
+    if (was) {
+      const listed = listedIn(await storeGet<Last | null>($, 'mm.last', null)).find(i => i.projectId === was.pid)?.client
+      const name = (listed ? cleanName(listed) : '') || (await nameOfStored($, was.pid)) || 'this client'
+      return `This thread was replaced for ${name} by a newer thread, which has the client's link. Run this there, or type /mm link ${name} here to make this thread the client's again.`
+    }
+    return 'This thread is not tracked to a client yet: load the client\'s project skill first, then try again.'
+  }
   const skills = await skillList($)
   if (!isClientProject(cur.pid, skills)) return 'This thread is Massmarket\'s own work: there is no client quote to count it toward.'
   const client = cleanName(await projectName($, cur.pid, 'client', skills)) || 'this client'
@@ -9977,10 +10049,21 @@ async function nudgeSuggestions($: EngineInterface): Promise<MmSuggestion[]> {
   await ensureSkills($)
   const listed = listedIn(await storeGet<Last | null>($, 'mm.last', null))
   const out: MmSuggestion[] = []
+  // (0.7.64) never the client whose newer thread replaced this one (`replacedChecked`): a press would only make this old
+  // thread one of the client's current threads again, and the client's work is in the newer thread. Read on the first
+  // match only, so a thread whose title names no client reads nothing more than before.
+  let goneRead = false
+  let gonePid: string | undefined
   for (const s of await skillList($)) {
     if (s.kind !== 'client' || INTERNAL_PROJECTS.has(s.project_id) || out.some(o => o.pid === s.project_id)) continue
     const client = cleanName(listed.find(i => i.projectId === s.project_id)?.client || clientName(s.name))
-    if (client && titleLooksLike(title, client)) out.push({ pid: s.project_id, client, skill: s.skill_key })
+    if (!client || !titleLooksLike(title, client)) continue
+    if (!goneRead) {
+      goneRead = true
+      gonePid = me ? (await replacedChecked($, await currents($), await storeGet<Record<string, string>>($, 'mm.links', {}), me.sessionId))?.pid : undefined
+    }
+    if (s.project_id === gonePid) continue
+    out.push({ pid: s.project_id, client, skill: s.skill_key })
     if (out.length >= 2) break
   }
   return out
@@ -10218,23 +10301,32 @@ async function clearCurrent($: EngineInterface, me: string): Promise<void> {
   for (const k of keys) pendingTasks.delete(k)
 }
 
-/** (0.6.0) /mm status's line: how many threads have a current project, on how many projects, and how many are a client's second thread. */
+/**
+ * (0.6.0) /mm status's line: how many threads have a current project, on how many projects, and how many are a client's second thread.
+ * (0.7.64) And how many older bridge threads a client's newer thread replaced (`replacedIn`): counted apart, never as current.
+ */
 async function currentLine($: EngineInterface): Promise<string> {
   const all = await currents($)
   const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+  const marks = await markerRecordsOf($)
   const skills = await skillList($)
   const keys = new Set([...Object.keys(all), ...Object.values(links).filter(sid => THREAD_ID.test(sid))])
   const pids = new Set<string>()
   let n = 0
   let second = 0
+  let replacedCount = 0
   for (const key of keys) {
-    const c = currentIn(all, links, key)
+    if (replacedIn(all, links, key, marks) && !ownerOf(key, links)) {
+      replacedCount++
+      continue
+    }
+    const c = currentIn(all, links, key, marks)
     if (!c) continue
     n++
     pids.add(c.pid)
     if (isClientProject(c.pid, skills) && links[c.pid] !== undefined && links[c.pid] !== key) second++
   }
-  return `current threads: ${n} on ${pids.size} projects · second threads: ${second}`
+  return `current threads: ${n} on ${pids.size} projects · second threads: ${second} · replaced threads: ${replacedCount}`
 }
 
 export const register: Register = on => {
