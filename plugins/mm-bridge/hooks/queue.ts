@@ -1579,7 +1579,11 @@ export function pinReason(it: QueueItem, now: number): string {
   // (0.7.23) a teammate's late package flagged for the founder's OK, with nothing of his own beside it. (0.7.27) He sees it once a day, on the 9 AM image
   if (okLateOnly(it)) return `No pin needed: ${cleanText(it.okLate?.by, 40) || 'a teammate'} holds the late reply to ${it.client}, flagged for your OK, and it is on the 9 AM image.`
   if (withTeammate(it)) return `No pin needed: ${it.theirs ?? it.open?.by ?? 'a teammate'} has ${it.client}'s reply drafts, so nothing here needs you.`
-  if (lateOnly(it)) return `No pin needed: only ${whoseLate(matesOf(it))}'s late tickets are here, and they are on the 9 AM image.`
+  if (lateOnly(it)) {
+    // ⛔ (0.7.61, Rob approved 2026-11-19 ('Yes, all five')) when every ref behind it is internal: `tickets behind`, never `late`
+    const refs = matesOf(it)
+    return `No pin needed: only ${whoseLate(refs)}'s ${refs.every(r => r.internal === true) ? 'tickets behind' : 'late tickets'} are here, and they are on the 9 AM image.`
+  }
   if (it.kind === 'ok' && it.theirs) return `No pin needed: ${it.theirs} decides whether the reply to ${it.client} needs your OK.`
   if (it.kind === 'queue') return 'No pin needed: the internal queue has no due dates.'
   const own = ownActBy(it)
@@ -1688,9 +1692,13 @@ export const teamLateOnly = (it: QueueItem): boolean => lateOnly(it) || okLateOn
 /** (0.7.21) The pane group's title, and what the status line says after its count (`MM: 4 need you · 2 pinned · 5 late with the team`). */
 export const TEAM_LATE = 'Team · late'
 export const LATE_WITH_TEAM = 'late with the team'
+// (0.7.61, Rob approved 2026-11-19 ('Yes, all five'); 'I think we should fix the small gaps.') an internal clock never reads late:
+// Team · late holds client refs as `late` and internal ones as `behind`, and its heading and count say which.
+export const TEAM_BEHIND = 'Team · behind'
+export const BEHIND_WITH_TEAM = 'behind with the team'
 
 /** (0.7.21) One teammate in Team · late: their name, how many of their tickets are late, and those tickets by client. */
-export type TeamLate = { by: string; count: number; clients: Array<{ projectId: string; client: string; refs: MateRef[] }> }
+export type TeamLate = { by: string; count: number; /** (0.7.61) how many of `count` are on an internal clock (`behind`, never `late`) */ behind: number; clients: Array<{ projectId: string; client: string; refs: MateRef[] }> }
 
 /**
  * (0.7.21, Rob 2026-11-05: "It should show people and which tasks are overdue for which clients, so I can run through those
@@ -1727,7 +1735,7 @@ export function teamLate(items: readonly QueueItem[]): TeamLate[] {
   for (const [by, clients] of people) {
     const list = [...clients.values()].map(c => ({ ...c, refs: [...c.refs].sort((a, b) => a.lateSince - b.lateSince || byName(a.title, b.title)) }))
     list.sort((a, b) => (a.refs[0]?.lateSince ?? 0) - (b.refs[0]?.lateSince ?? 0) || byName(a.client, b.client))
-    out.push({ by, count: list.reduce((n, c) => n + c.refs.length, 0), clients: list })
+    out.push({ by, count: list.reduce((n, c) => n + c.refs.length, 0), behind: list.reduce((n, c) => n + c.refs.filter(r => r.internal === true).length, 0), clients: list })
   }
   return out.sort((a, b) => b.count - a.count || byName(a.by, b.by))
 }
@@ -1751,7 +1759,37 @@ export function teamLateLine(r: Pick<MateRef, 'title' | 'lateSince' | 'eta' | 'o
 }
 
 /** (0.7.21) What the status line adds after `· P pinned`: ` · 5 late with the team`, or '' with none (every viewer but the founder). */
-export const teamLateSegment = (count: number): string => (Number.isFinite(count) && count > 0 ? ` · ${count} ${LATE_WITH_TEAM}` : '')
+export type TeamSplit = { late: number; behind: number }
+
+/**
+ * (0.7.61, Rob approved 2026-11-19 ('Yes, all five'); 'I think we should fix the small gaps.') Team · late's tickets split by
+ * clock: `late` for a client's (and a package flagged for his OK), `behind` for an internal clock, which never reads late.
+ * `behind` missing (a pane an older version stored) reads as 0.
+ */
+export function teamLateSplit(team: readonly { count: number; behind?: number }[]): TeamSplit {
+  let late = 0
+  let behind = 0
+  for (const p of team) {
+    const n = Number.isFinite(p.count) ? p.count : 0
+    const b = Math.min(n, Math.max(0, Number.isFinite(p.behind) ? (p.behind as number) : 0))
+    behind += b
+    late += n - b
+  }
+  return { late, behind }
+}
+
+/** (0.7.61) The count as the status line says it: `5 late with the team`, `3 behind with the team`, `2 late, 3 behind with the team`; '' with none. */
+export function teamSplitText(s: TeamSplit): string {
+  if (s.late > 0 && s.behind > 0) return `${s.late} late, ${s.behind} behind with the team`
+  if (s.behind > 0) return `${s.behind} ${BEHIND_WITH_TEAM}`
+  return s.late > 0 ? `${s.late} ${LATE_WITH_TEAM}` : ''
+}
+
+/** (0.7.21) What the status line adds after `· P pinned`. (0.7.61) A number counts as late (as before); a split says which are behind. */
+export const teamLateSegment = (counts: number | TeamSplit): string => {
+  const text = teamSplitText(typeof counts === 'number' ? { late: Number.isFinite(counts) ? counts : 0, behind: 0 } : counts)
+  return text ? ` · ${text}` : ''
+}
 
 /**
  * (0.7.3, internal queue) The viewer's own queued tickets the feed gives, each once: the row's ticket id a lower-case uuid,
@@ -3116,7 +3154,17 @@ export function lateSentence(refs: readonly MateRef[]): string {
   const noEta = refs.filter(r => r.eta).length
   const owes = new Set(refs.map(r => r.by)).size > 1 ? 'owe' : 'owes'
   const is = new Set(refs.map(r => r.by)).size > 1 ? 'are' : 'is'
-  return noEta === n ? `${who} ${owes} an ETA on ${tickets}` : noEta === 0 ? `${who} ${is} past the ETA on ${tickets}` : `${who}: ${tickets} late, ${noEta} with no ETA`
+  // ⛔ (0.7.61, Rob approved 2026-11-19 ('Yes, all five')) a ticket on an internal clock is `behind`, never `late`
+  const behind = refs.filter(r => r.internal === true).length
+  const state = behind === 0 ? 'late' : behind === n ? 'behind' : `${n - behind} late, ${behind} behind`
+  const head = behind === 0 || behind === n ? `${tickets} ${state}` : `${tickets}, ${state}`
+  return noEta === n ? `${who} ${owes} an ETA on ${tickets}` : noEta === 0 ? `${who} ${is} past the ETA on ${tickets}` : `${who}: ${head}, ${noEta} with no ETA`
+}
+
+/** (0.7.61) The word for a set of teammates' refs: `late`, `behind` (every ref internal), or `late and behind`. */
+export function lateWord(refs: readonly Pick<MateRef, 'internal'>[]): string {
+  const behind = refs.filter(r => r.internal === true).length
+  return behind === 0 ? 'late' : behind === refs.length ? 'behind' : 'late and behind'
 }
 
 export function clearedTitle(client: string, now: number): string {
@@ -3248,7 +3296,7 @@ export function noteText(it: QueueItem, member: string): string {
   const owners = own.length ? ` ${own.length} ticket${one ? '' : 's'} of ${holderName(member)}'s need${one ? 's' : ''} an owner (ticket ${own.map(a => a.id.slice(0, 8)).join(', ')}): a team post handed ${one ? 'it' : 'them'} over to be assigned (POST /api/ext/ticket-status with an assignee) by ${one ? 'its due time' : 'their due times'}, which ${one ? 'is not a delivery date' : 'are not delivery dates'}. A ticket ${holderName(member)} takes instead needs an ETA, recorded as task-chip-flow §5.3 says, with task_fingerprint "ticket:<id>".` : ''
   // (0.7.4, for the founder) and his teammates' late internal tickets: whose, never his to do
   const late = lateSentence(matesOf(it))
-  const mates = late ? ` ${late} (late); the side pane lists them. They are the teammate's to answer, not ${holderName(member)}'s.` : ''
+  const mates = late ? ` ${late} (${lateWord(matesOf(it))}); the side pane lists them. They are the teammate's to answer, not ${holderName(member)}'s.` : ''
   // (0.7.24) and follow-up steps that wait for a go, where the body is not already about them
   const go = goOnly(it) ? '' : goSentence(it, member)
   return `${noteBody(it, member)}${more}${queue}${etas}${owners}${mates}${go ? ` ${go}` : ''}`

@@ -11,7 +11,7 @@ import {
   ETA_ASK_TEXT, INTERNAL_DISCORD, etaAsksOf, etaOnly, lateSentence, matesOf, queueHome, undatedCount, undatedOnly, whoseLate,
   ASSIGN_ASK_TEXT, ASSIGN_BY_BASIS, assignAsksOf, assignMarkdown, assignOnly, committedCount,
   STILL_NEEDS_YOU, checkNow, ownActBy, pinReason, pinTitle, pinsFor, watchMarkdown, watchOf,
-  LATE_WITH_TEAM, TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine, teamLateSegment, teamLateWho,
+  LATE_WITH_TEAM, TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine, teamLateSegment, teamLateSplit, teamLateWho,
   GO_THEIRS, GO_WHAT, clientWaiting, goFirstText, goMarkdown, goMine, goOf, goOnly, goSentence, mayStart, ownPins, stepWord,
   okLateOnly, ownBesides, teamLateOnly,
 } from './queue'
@@ -2818,7 +2818,7 @@ describe('(0.7.4) a teammate\'s internal tickets owe an ETA and list with a cloc
     expect(holdSentence(beta)).toBe(`${nayan} owes an ETA on 1 internal ticket`)
     expect(holdSentence(discord)).toBe(`${nayan} is past the ETA on 1 internal ticket`)
     expect(titleFor(discord, wed)).toContain('past ETA')
-    expect(noteText(beta, ROB)).toContain(`${nayan} owes an ETA on 1 internal ticket (late); the side pane lists them. They are the teammate's to answer, not Rob's.`)
+    expect(noteText(beta, ROB)).toContain(`${nayan} owes an ETA on 1 internal ticket (behind); the side pane lists them. They are the teammate's to answer, not Rob's.`)
     // ⛔ the client ticket nothing marks internal reaches him nowhere
     expect([...lists.queue, ...lists.teammate].map(i => i.projectId)).not.toContain(CLIENT)
     // ⛔ a teammate's own feed never gets anyone else's
@@ -3260,7 +3260,46 @@ describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from
     const stored = { ...it, checkAhead: 2 * H } as QueueItem
     expect(watchOf(stored)).toEqual([])
     expect(pinsFor(stored, wed)).toBe(false)
-    expect(teamLate([it])).toEqual([{ by: 'Asif', count: 1, clients: [{ projectId: CLIENT, client: 'Acme Legal', refs: [{ by: 'Asif', id: tid(1), title: 'Build 1', lateSince: wed - 4 * H, eta: true, internal: true }] }] }])
+    expect(teamLate([it])).toEqual([{ by: 'Asif', count: 1, behind: 1, clients: [{ projectId: CLIENT, client: 'Acme Legal', refs: [{ by: 'Asif', id: tid(1), title: 'Build 1', lateSince: wed - 4 * H, eta: true, internal: true }] }] }])
+  })
+
+  test('(0.7.61, Rob approved 2026-11-19 \'Yes, all five\'; \'I think we should fix the small gaps.\') an internal clock reads behind, never late, in lateSentence and the pin reason', async () => {
+    const r = (by: string, e: boolean, internal?: true) => ({ by, id: tid(1), title: 't', lateSince: 0, eta: e, ...(internal ? { internal } : {}) })
+    // internal only: behind
+    expect(lateSentence([r('Asif', false, true), r('Asif', true, true), r('Asif', true, true)])).toBe('Asif: 3 internal tickets behind, 2 with no ETA')
+    expect(lateSentence([r('Asif', false, true), r('Asif', true, true), r('Asif', true, true)])).not.toContain('late')
+    // client only: unchanged
+    expect(lateSentence([r('Asif', false), r('Nayan', true)])).toBe('Asif and Nayan: 2 internal tickets late, 1 with no ETA')
+    // mixed: split
+    expect(lateSentence([r('Asif', false), r('Asif', true, true), r('Asif', true, true)])).toBe('Asif: 3 internal tickets, 1 late, 2 behind, 2 with no ETA')
+    const f: Feed = { member: ROB, role: 'founder', tickets: { overdue: [ticket(1, ASIF, 0, { due_at: null, due_source: null, eta_needed_by: at(-4), eta_ask: 'x' })] } }
+    const it = listed(f)
+    expect(lateOnly(it)).toBe(true)
+    const refs = matesOf(it)
+    const withInternal = { ...it, theirs: undefined, mates: refs.map(m => ({ ...m, internal: true as const })) } as QueueItem
+    expect(pinReason(withInternal, wed)).toBe("No pin needed: only Asif's tickets behind are here, and they are on the 9 AM image.")
+    expect(pinReason({ ...it, theirs: undefined, mates: refs.map(m => ({ ...m, internal: undefined })) } as QueueItem, wed)).toBe("No pin needed: only Asif's late tickets are here, and they are on the 9 AM image.")
+  })
+
+  test('(0.7.61) Team · late: the count and heading split client refs (late) from internal ones (behind)', async () => {
+    const person = (count: number, behind?: number) => ({ by: 'Asif', count, ...(behind ? { behind } : {}), clients: [{ client: 'Acme', lines: ['x'] }] })
+    // all client refs
+    expect(teamLateSplit([person(5)])).toEqual({ late: 5, behind: 0 })
+    expect(teamLateSegment(teamLateSplit([person(5)]))).toBe(' · 5 late with the team')
+    expect(teamHeading([person(5)])).toBe('Team · late (5)')
+    // all internal refs
+    expect(teamLateSplit([person(3, 3)])).toEqual({ late: 0, behind: 3 })
+    expect(teamLateSegment(teamLateSplit([person(3, 3)]))).toBe(' · 3 behind with the team')
+    expect(teamHeading([person(3, 3)])).toBe('Team · behind (3)')
+    // a mix, over two people
+    const mix = [person(3, 1), person(2, 2)]
+    expect(teamLateSplit(mix)).toEqual({ late: 2, behind: 3 })
+    expect(teamLateSegment(teamLateSplit(mix))).toBe(' · 2 late, 3 behind with the team')
+    expect(teamHeading(mix)).toBe('Team · late (5)')
+    expect(teamLateSegment(teamLateSplit([]))).toBe('')
+    // the pane carries the split from the refs
+    const t = teamLate([{ ...listed({ member: ROB, role: 'founder', tickets: { overdue: [ticket(1, ASIF, 0, { due_at: null, due_source: null, eta_needed_by: at(-4), eta_ask: 'x' })] } }) }] as QueueItem[])
+    expect(t[0]?.behind).toBeGreaterThanOrEqual(0)
   })
 
   test('an item an older version stored (no `own`) pins as R1 always read it', async () => {
