@@ -1,4 +1,4 @@
-// The bridge against a pretend desktop app, feed and store: a client's REPLACED thread (0.7.62).
+// The bridge against a pretend desktop app, feed and store: a client's REPLACED thread (0.7.64).
 //
 // Rob, 2026-11-19: "I noticed that even the old pinned bridge threads are still getting updated every time there's
 // something new from the client. I think that's an issue that's probably wasting a lot of tokens team-wide. Once there's
@@ -52,7 +52,7 @@ const oldThreadWorld = (on: On, more: WorldOptions = {}) =>
     },
   })
 
-describe('0.7.62: once a client\'s new bridge thread holds the link, its old thread is replaced', () => {
+describe('0.7.64: once a client\'s new bridge thread holds the link, its old thread is replaced', () => {
   test('the old thread\'s own view: not one of the client\'s current threads, no client part, no note, no pin, no name; the update goes to the new thread', LONG, async ($, on) => {
     const w = oldThreadWorld(on)
     await tickOnce($, w)
@@ -154,7 +154,7 @@ describe('0.7.62: once a client\'s new bridge thread holds the link, its old thr
   })
 })
 
-describe('0.7.62: no update goes by itself into a thread in the middle of a turn', () => {
+describe('0.7.64: no update goes by itself into a thread in the middle of a turn', () => {
   test('the thread is busy: nothing is sent and nothing is on record; once its turn ends, the next sync sends it', LONG, async ($, on) => {
     const w = world(on, { feed: acmeOnly(), threads: [thread('local_a', 'Roof quote', 30, { isRunning: true })], store: { 'mm.links': { [ACME]: 'local_a' } } })
     await tickOnce($, w)

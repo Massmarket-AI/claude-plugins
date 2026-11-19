@@ -2193,7 +2193,7 @@ describe('0.7.59: refused pins', () => {
   })
 })
 
-describe('0.7.62 (Rob, 11-19: "Once there\'s a new bridge thread, the old ones should stop being updated"): replacedBy', () => {
+describe('0.7.64 (Rob, 11-19: "Once there\'s a new bridge thread, the old ones should stop being updated"): replacedBy', () => {
   const DAY = 24 * 3_600_000
   // Sellers Hub, 11-18: the old thread opened with the client's marker on 11-12; its new thread opened with it on 11-18 and took the link
   const links = { [ACME]: 'local_new' }

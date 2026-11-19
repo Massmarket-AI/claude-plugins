@@ -53,7 +53,7 @@ export const PKG = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 /** (0.7.33) The line over a client's page on a computer whose renderer draws no card (this test world's, unless it says `renderer: 'tree'`). */
 export const CARD_NOT_DRAWN = 'The card could not be drawn on this computer. Your thread prints the whole package instead.'
 
-/** (0.7.62) `isRunning`: as the app answers a thread in the middle of a turn. */
+/** (0.7.64) `isRunning`: as the app answers a thread in the middle of a turn. */
 export type Thread = { sessionId: string; title: string; pinned: boolean; isArchived: boolean; lastActivityAt: string; link?: string; cwd?: string; isRunning?: boolean }
 export type Call = { server: string; tool: string; args: Record<string, unknown> }
 

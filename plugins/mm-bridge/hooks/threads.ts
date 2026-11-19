@@ -62,7 +62,7 @@ export type AppThread = {
   detached?: boolean
   startedBy?: string
   /**
-   * (0.7.62) The app says the thread is in the middle of a turn (`isRunning`). A message sent to it now is held by the app
+   * (0.7.64) The app says the thread is in the middle of a turn (`isRunning`). A message sent to it now is held by the app
    * and delivered when the turn ends, however long that takes and whatever has changed by then.
    */
   running?: boolean
@@ -390,7 +390,7 @@ export function markedThreads(
 }
 
 /**
- * (0.7.62, Rob 2026-11-19: "I noticed that even the old pinned bridge threads are still getting updated every time there's
+ * (0.7.64, Rob 2026-11-19: "I noticed that even the old pinned bridge threads are still getting updated every time there's
  * something new from the client... Once there's a new bridge thread, the old ones should stop being updated.") The thread
  * that replaced `sid` for client `pid`, when `sid` is an OLDER bridge thread of the client: it carries the client's own
  * [mm-link] marker (`marked`: it opened with it, or an Update carried it in), and the client's linked thread is another
