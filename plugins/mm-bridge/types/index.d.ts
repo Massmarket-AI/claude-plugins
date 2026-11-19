@@ -128,7 +128,7 @@ export type MmQueue = {
  * worded as one line (`Send the onboarding form · late since Mon 3 PM · no ETA given`). Every text is drawn as given; none
  * goes to Claude.
  */
-export type MmTeam = { by: string; count: number; clients: Array<{ client: string; lines: string[] }> }
+export type MmTeam = { by: string; count: number; behind?: number; clients: Array<{ client: string; lines: string[] }> }
 
 /**
  * (0.7.5, the panel redesign) `Your build queue · N` under the list: how many tickets the viewer's internal queue holds,

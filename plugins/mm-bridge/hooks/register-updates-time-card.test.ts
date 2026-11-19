@@ -3738,35 +3738,35 @@ describe('0.7.21 (Rob, 11-05: "When things are overdue but not assigned to me, I
     expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([])
     expect(before.some(l => l.includes('Team · late') || l.includes('With a teammate'))).toBe(false)
     await ui.unmount()
-    expect((await mm($, 'status')).split('\n')).toContain('late with the team: 3 (Builder B 2, Builder C 1)')
+    expect((await mm($, 'status')).split('\n')).toContain('3 behind with the team (Builder B 2, Builder C 1)')
     expect(sends(w)).toEqual([])
   })
 
   test('(0.7.27) the status line says nothing of the team; /mm status keeps naming who is late', async ($, on) => {
     const w = world(on, { feed: robFeed(5), threads: [thread('local_c', 'Cedar work', 2)], store: { 'mm.links': { [CEDAR]: 'local_c' } } })
     await mm($, '')
-    // (0.7.21 to 0.7.26: `MM: 1 need you · 1 pinned · 3 late with the team`)
+    // (0.7.21 to 0.7.26: `MM: 1 need you · 1 pinned · 3 late with the team; 0.7.61: 3 behind with the team`)
     expect(String(w.statuses.at(-1) ?? '')).toMatch(/^MM: 1 need you · 1 pinned(  |$)/)
     const status = await mm($, 'status')
-    expect(status.split('\n')).toContain('late with the team: 3 (Builder B 2, Builder C 1)')
+    expect(status.split('\n')).toContain('3 behind with the team (Builder B 2, Builder C 1)')
     // nobody late: the line as it was
     w.setFeed(robFeed(5, false))
     await mm($, '')
     expect(String(w.statuses.at(-1) ?? '')).toMatch(/^MM: 1 need you · 1 pinned(  |$)/)
-    expect(await mm($, 'status')).not.toContain('late with the team')
+    expect(await mm($, 'status')).not.toContain('with the team')
   })
 
   test('⛔ a teammate\'s feed and the PM\'s: no Team · late, and the status line is as it was', async ($, on) => {
     const w = world(on, { feed: { ...robFeed(5), member: ME, role: 'builder' }, threads: [] })
     await mm($, '')
-    expect(String(w.statuses.at(-1) ?? '')).not.toContain('late with the team')
+    expect(String(w.statuses.at(-1) ?? '')).not.toContain('with the team')
     const ui = await pane($)
     expect((await buttons(ui)).some(b => b[0] === 'mm-fold:team')).toBe(false)
     await ui.unmount()
     w.setFeed({ ...robFeed(5), member: 'has9@example.com', role: 'pm' })
     await mm($, '')
-    expect(String(w.statuses.at(-1) ?? '')).not.toContain('late with the team')
-    expect(await mm($, 'status')).not.toContain('late with the team')
+    expect(String(w.statuses.at(-1) ?? '')).not.toContain('with the team')
+    expect(await mm($, 'status')).not.toContain('with the team')
   })
 
   test('S1 (0.7.27, Rob 11-05: "everything that shows up as needing to be worked on right now ... shouldn\'t show up for me and clutter my page"): the founder\'s pane and strip have neither Team · late nor With a teammate, drawn from a sync or from the stored one; (0.7.34) a PM\'s has none either', async ($, on) => {
@@ -3781,7 +3781,7 @@ describe('0.7.21 (Rob, 11-05: "When things are overdue but not assigned to me, I
     expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([])
     const shown = await lines(ui)
     expect(shown.some(l => l.includes('With a teammate') || l.includes('Team · late') || l.includes('late with'))).toBe(false)
-    expect(String(w.statuses.at(-1) ?? '')).not.toContain('late with the team')
+    expect(String(w.statuses.at(-1) ?? '')).not.toContain('with the team')
     await ui.unmount()
     // (0.7.34) and a PM's page has none either: Team now shows him the team's
     const t: FeedTicket = { ticket_id: tid(2), project_id: CEDAR, project_name: 'Cedar Dental', title: 'Build the intake flow', due_at: new Date(NOW + 5 * HOUR).toISOString(), due_source: 'commitment', assignee_email: 'builder-b@example.com' }

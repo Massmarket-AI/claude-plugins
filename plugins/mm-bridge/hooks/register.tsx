@@ -8,7 +8,7 @@ import {
   asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, newestFirst, olderHeading, olderMarkdown, olderOf, olderTotal, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText,
   hasDue, clientActivity, isRecent, mayStart,
   leadDueOf, pinsFor, pinTitle, threadWhy,
-  teamLate, teamLateCount, teamLateSegment, teamLateWho, LATE_WITH_TEAM,
+  teamLate, teamLateCount, teamLateSegment, teamLateSplit, teamSplitText, teamLateWho, LATE_WITH_TEAM,
   teamLateOnly,
   goOf, goMine, goOnly, goWithMail,
   NO_REPLY_WHAT, keptPace, noDateGroup, noReplyNow, paceOnly, paceWord,
@@ -239,7 +239,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.60'
+export const VERSION = '0.7.61'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -3690,7 +3690,7 @@ async function showQueue(
   const { value: notice } = await $.state.get(NOTICE)
   if (notice?.text && now - notice.at > SYNC_MS) await $.state.set(NOTICE, { text: '', at: now })
   // (0.7.21) and, for the founder, how many of his teammates' tickets are late (`· 5 late with the team`): none, no segment
-  const late = teamLateSegment(teamCount(teamRows))
+  const late = teamLateSegment(teamLateSplit(teamRows))
   await putStatus($, 'base', listed.length ? `MM: ${listed.length} need you · ${pinned} pinned${late}` : `MM: clear${late}`)
 }
 
@@ -8304,10 +8304,11 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
     // (0.7.21, for the founder) his teammates' late internal tickets, who and how many, as the last sync listed them
     const team = teamLate(listedIn(last))
     const late = teamLateCount(team)
+    const split = teamLateSplit(team)
     return [
       `member: ${memberText(last?.member) || '?'}`,
       `last sync: ${last ? new Date(last.at).toISOString() : 'never'} · ${last?.items.length ?? 0} need you · ${last?.pinned ?? 0} pinned`,
-      ...(late > 0 ? [`${LATE_WITH_TEAM}: ${late} (${teamLateWho(team)})`] : []),
+      ...(late > 0 ? [`${split.behind > 0 ? teamSplitText(split) : `${LATE_WITH_TEAM}: ${late}`} (${teamLateWho(team)})`] : []),
       `linked threads: ${Object.keys(links).length} · this thread: ${await selfId($)}`,
       // (0.6.0) every thread with a current project, and the second threads among them
       await currentLine($),
