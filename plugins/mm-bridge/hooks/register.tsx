@@ -4114,8 +4114,111 @@ export const CARD_NOT_SHOWN = (label: string): string =>
   `[Massmarket bridge] The card for Package ${label} is not drawn under your line in this thread. Print the whole page now, as client-reply-prep §9.3 says for a card that is not ready.`
 /** (0.7.48) How long after the thread is drawn the line has to have taken the card. */
 export const SHOWN_WAIT_MS = 6_000
-/** (0.7.48) The ready answer whose card is still to be seen under the thread's line, from when it answered (`since`). One at a time. */
-let owedCard: { toolUseId: string; label: string; since: number; armed: boolean } | null = null
+/**
+ * (0.7.48) The ready answer whose card is still to be seen under the thread's line, from when it answered (`since`). One at a time.
+ * (0.7.60) `lost`: a ready answer an earlier process of this thread gave (`lookForLostCard`), whose card no row here can draw.
+ */
+let owedCard: { toolUseId: string; label: string; since: number; armed: boolean; lost?: true } | null = null
+/** (0.7.60) Whether this process has read the transcript for a ready answer an earlier process gave (`lookForLostCard`): once a process. */
+let lostLooked = false
+
+/**
+ * (0.7.60) Where a reply that names the live call's tag was written, as the transcript holds it: after the call (it may take the
+ * call's card), at or before it (an older reply of the same tag: it never takes a newer call's card), not in the transcript yet
+ * (`pending`: still streaming; drawn again at the turn's end), or the transcript could not say (`unread`: the 0.7.48 rule stands).
+ *
+ * Agency Acquisition thread, 2026-11-18 (Package 8840c9137e2e, asked at 12:04 PM ET and again at 4:02 PM ET): the app shut the
+ * thread's process down at 12:34 PM after 30 minutes idle, and the process that answered the 4:02 call had never drawn the 12:04
+ * line, so nothing bound that line to the 12:04 call (`callOfLine` lives in the process). The 12:04 line ends with the same
+ * `Package 8840c9137e2e.` as the 4:03 one, and the app draws a transcript top down, so the 12:04 line was bound to the 4:02 call and
+ * took its card, four hours up the thread; the 4:03 line found the card taken and drew none. The check then counted the card as
+ * shown (`lineOfCall`) and told nothing. Rob saw no card and had to ask for the page twice.
+ */
+type LineWritten = 'after' | 'before' | 'pending' | 'unread'
+/** (0.7.60) By `<row>\n<tool_use_id>`: a reply row already placed after or before that call. At most ROWS_MAX, the oldest dropped first. */
+const lineWrittenOf = new Map<string, 'after' | 'before'>()
+
+/** (0.7.60) Text as compared with the transcript's: runs of white space as one space, trimmed. */
+const flat = (text: string): string => text.replace(/\s+/g, ' ').trim()
+
+/**
+ * (0.7.60) Where this reply was written against the call `toolUseId` (`LineWritten`). The whole reply's text is looked for in the
+ * transcript's assistant messages; where the surface drew it otherwise than the transcript holds it, the words leading up to the tag
+ * stand for it, and those found on both sides of the call (two lines that end alike) count as before: no card, so the check tells the
+ * thread to print the page. Reads only. Never throws.
+ */
+async function lineWritten($: EngineInterface, toolUseId: string, label: string, text: string): Promise<LineWritten> {
+  try {
+    const messages = await $.session.messages()
+    if (!Array.isArray(messages)) return 'unread'
+    const at = messages.findIndex(m => m.role === 'assistant' && (m.toolUses ?? []).some(u => u.tool_use_id === toolUseId))
+    if (at < 0) return 'unread'
+    const said = messages.map(m => (m.role === 'assistant' ? flat(String(m.text ?? '')) : ''))
+    const sides = (words: string) => ({
+      before: said.slice(0, at + 1).some(s => s.includes(words)),
+      after: said.slice(at + 1).some(s => s.includes(words)),
+    })
+    const whole = flat(text)
+    let found = whole ? sides(whole) : { before: false, after: false }
+    if (!found.before && !found.after) {
+      const tag = `Package ${label}`
+      const end = whole.lastIndexOf(tag)
+      if (end >= 0) found = sides(whole.slice(Math.max(0, end - 120), end + tag.length))
+    }
+    if (found.before) return 'before'
+    return found.after ? 'after' : 'pending'
+  } catch {
+    return 'unread'
+  }
+}
+
+/**
+ * (0.7.60) The newest `mm card` call the transcript holds, when it answered ready and no go (`Send package <12>`) and no note of the
+ * bridge's for its tag came after it: a ready answer this process never gave. Null for anything else. Never throws.
+ */
+async function lostReadyOf($: EngineInterface): Promise<{ toolUseId: string; packageId: string; label: string } | null> {
+  try {
+    const messages = await $.session.messages()
+    if (!Array.isArray(messages)) return null
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m?.role !== 'assistant') continue
+      const use = [...(m.toolUses ?? [])].reverse().find(u => u.tool === 'mcp__mm-bridge__mm' && cardAskOf((u.input as { args?: unknown } | undefined)?.args))
+      if (!use) continue
+      const packageId = cardAskOf((use.input as { args?: unknown }).args) as string
+      const label = CARD_READY_HEAD.exec(typeof use.text === 'string' ? use.text : rowText(use.result))?.[1]
+      if (!label) return null
+      const later = messages.slice(i + 1).map(n => String(n.text ?? ''))
+      if (later.some(s => s.trim() === `Send package ${label}` || s.includes(`The card for Package ${label} is not drawn`) || s.includes(`The card for Package ${label} could not be drawn`))) return null
+      return { toolUseId: use.tool_use_id, packageId, label }
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * (0.7.60) A ready answer an earlier process of this thread gave is owed to the screen too (Agency Acquisition thread, 2026-11-18: the
+ * 12:04 PM card was asked while Rob was in another thread, the app shut the process down at 12:34 PM, and when he opened the thread at
+ * 4:00 PM no card and no note showed). The live call and the card are this process's state (`$.state` outlives a reload of the code,
+ * never the process), so no row here can draw that card. The first time a surface draws the thread, the transcript is read: its newest
+ * `mm card` answer, ready, with no go and no note after it, for a package still waiting (`offTheLists`), is owed (`lost`). It is owed
+ * no more once this process asks for a card (the thread's own new call), and otherwise told as any card not shown (CARD_NOT_SHOWN)
+ * once the thread has been drawn and no turn is under way.
+ */
+async function lookForLostCard($: EngineInterface): Promise<void> {
+  try {
+    if (owedCard || (await askedOf($))) return
+    const lost = await lostReadyOf($)
+    if (!lost || drawFailTold.has(lost.label) || owedCard || (await askedOf($))) return
+    if (await offTheLists($, lost.packageId)) return
+    owedCard = { toolUseId: lost.toolUseId, label: lost.label, since: threadDrawnAt, armed: false, lost: true }
+    armShown($)
+  } catch {
+    // the next process looks again
+  }
+}
 /** (0.7.48) When a surface last drew this thread: its band, or one of its reply rows. */
 let threadDrawnAt = 0
 /** (0.7.48) When this thread's current turn of the main conversation began; null until one has in this process. */
@@ -4158,12 +4261,24 @@ async function releaseLine($: EngineInterface, row: string): Promise<void> {
   armShown($)
 }
 
-/** (0.7.48) A turn of the main conversation ended with an answer: the ready answer it got, if any, is owed to the screen. */
+/**
+ * (0.7.48) A turn of the main conversation ended with an answer: the ready answer it got, if any, is owed to the screen. (0.7.60) The
+ * rows are asked to draw again first: the thread's line was in the transcript only once it had streamed (`lineWritten`'s `pending`),
+ * so a draw from before that took no card. A lost card (`lookForLostCard`) held back while the turn ran is checked now.
+ */
 async function owe($: EngineInterface): Promise<void> {
   const asked = await askedOf($)
-  if (!asked || turnBeganAt === null || asked.at < turnBeganAt) return
+  if (!asked || turnBeganAt === null || asked.at < turnBeganAt) {
+    if (owedCard?.lost) armShown($)
+    return
+  }
   if (lineOfCall.has(asked.toolUseId) || drawFailTold.has(asked.label)) return
   owedCard = { toolUseId: asked.toolUseId, label: asked.label, since: asked.at, armed: false }
+  try {
+    $.ui.invalidate('ui.render')
+  } catch {
+    // the rows draw again at the next draw
+  }
   armShown($)
 }
 
@@ -4174,8 +4289,15 @@ async function owe($: EngineInterface): Promise<void> {
 async function noteThreadDrawn($: EngineInterface): Promise<void> {
   try {
     threadDrawnAt = await $.clock.now()
-    if (owedCard && (await askedOf($))?.toolUseId !== owedCard.toolUseId) owedCard = null
+    // (0.7.60) a lost card is owed no more once this process holds a live call; any other, once a newer call replaced it
+    const asked = owedCard ? await askedOf($) : null
+    if (owedCard && (owedCard.lost ? asked !== null : asked?.toolUseId !== owedCard.toolUseId)) owedCard = null
     armShown($)
+    // (0.7.60) the first draw in this process reads the transcript for a ready answer an earlier process gave
+    if (!lostLooked) {
+      lostLooked = true
+      void lookForLostCard($)
+    }
   } catch {
     // the next draw notes it
   }
@@ -4198,11 +4320,14 @@ function armShown($: EngineInterface): void {
 async function checkShown($: EngineInterface, it: NonNullable<typeof owedCard>): Promise<void> {
   if (owedCard !== it) return
   it.armed = false
-  if (lineOfCall.has(it.toolUseId) || (await askedOf($))?.toolUseId !== it.toolUseId) {
+  const asked = await askedOf($)
+  if (it.lost ? asked !== null : lineOfCall.has(it.toolUseId) || asked?.toolUseId !== it.toolUseId) {
     owedCard = null
     return
   }
   if (threadDrawnAt < it.since) return
+  // (0.7.60) a lost card waits out a turn under way: the thread may be asking for the card again (the turn's end checks it, `owe`)
+  if (it.lost && turnOpen) return
   owedCard = null
   tellDrawFailed($, it.label, CARD_NOT_SHOWN(it.label))
 }
@@ -4213,6 +4338,10 @@ export function resetShown(): void {
   threadDrawnAt = 0
   turnBeganAt = null
   turnOpen = false
+  lostLooked = false
+  lineWrittenOf.clear()
+  lineOfCall.clear()
+  callOfLine.clear()
 }
 
 /** (0.7.40) This row fell back to the engine's: unlisted, and a row that was listed asks for one redraw, so its answer shows again. */
@@ -11037,6 +11166,17 @@ export const register: Register = on => {
     try {
       const asked = await askedOf($)
       if (!asked || !text.includes(`Package ${asked.label}`)) return next(e)
+      // (0.7.60) only a reply written after the live call takes its card: an older reply of the same tag never does (`lineWritten`)
+      const placed = `${row}\n${asked.toolUseId}`
+      let written: LineWritten | undefined = lineWrittenOf.get(placed)
+      if (!written) {
+        written = await lineWritten($, asked.toolUseId, asked.label, text)
+        if (written === 'after' || written === 'before') {
+          lineWrittenOf.set(placed, written)
+          trimRows(lineWrittenOf)
+        }
+      }
+      if (written === 'before' || written === 'pending') return next(e)
       if (!callOfLine.has(row)) {
         callOfLine.set(row, asked.toolUseId)
         trimRows(callOfLine)
