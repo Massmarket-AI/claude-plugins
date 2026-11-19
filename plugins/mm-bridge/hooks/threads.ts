@@ -61,6 +61,11 @@ export type AppThread = {
   parentSessionId?: string
   detached?: boolean
   startedBy?: string
+  /**
+   * (0.7.62) The app says the thread is in the middle of a turn (`isRunning`). A message sent to it now is held by the app
+   * and delivered when the turn ends, however long that takes and whatever has changed by then.
+   */
+  running?: boolean
 }
 
 /**
@@ -382,6 +387,35 @@ export function markedThreads(
   skip: OwnSkip = {},
 ): string[] {
   return byNewest(markedOf(projectId, links, feedThreads, pairs, skip)).map(o => o.sid)
+}
+
+/**
+ * (0.7.62, Rob 2026-11-19: "I noticed that even the old pinned bridge threads are still getting updated every time there's
+ * something new from the client... Once there's a new bridge thread, the old ones should stop being updated.") The thread
+ * that replaced `sid` for client `pid`, when `sid` is an OLDER bridge thread of the client: it carries the client's own
+ * [mm-link] marker (`marked`: it opened with it, or an Update carried it in), and the client's linked thread is another
+ * one whose marker for the client was recorded LATER (`markedAt`). Undefined for anything else: the linked thread
+ * itself, a thread of no marker or another client's, a second thread opened with the marker AFTER the linked one (R5, a
+ * second thread by the person's own start), or a time not on record for either.
+ * Read from the links as they are NOW, so it never outlives them: the person's /mm link in the old thread makes it the
+ * linked one again, and it is not replaced; a client with no linked thread has no replaced thread. What it changes is the
+ * bridge's own reading of the old thread (`currentIn`: not one of the client's current threads, no client part in its
+ * pane). Updates, auto-updates and the reply-ready note already go to the linked thread alone, and the pin follows the
+ * link, so nothing else needs this rule.
+ */
+export function replacedBy(
+  sid: string,
+  pid: string,
+  links: Readonly<Record<string, string>>,
+  marked: Readonly<Record<string, string>>,
+  markedAt: Readonly<Record<string, number>>,
+): string | undefined {
+  const linked = Object.hasOwn(links, pid) ? links[pid] : undefined
+  if (!linked || linked === sid || !THREAD_ID.test(sid) || !THREAD_ID.test(linked)) return undefined
+  if (marked[sid] !== pid || marked[linked] !== pid) return undefined
+  const was = markedAt[sid]
+  const now = markedAt[linked]
+  return typeof was === 'number' && typeof now === 'number' && Number.isFinite(was) && Number.isFinite(now) && was < now ? linked : undefined
 }
 
 /** (0.7.6) What `markedThreads` and `ownThreads` pass over, and the records they read. */
