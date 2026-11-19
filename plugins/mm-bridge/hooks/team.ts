@@ -99,7 +99,7 @@ export function teamFrom(raw: unknown): TeamNow | null {
       const client = shortClient(it?.client)
       const tone = it?.tone
       if (!it || !client || (tone !== 'red' && tone !== 'yellow' && tone !== 'green')) continue
-      items.push({ client, kind: text(it.kind, 16) ?? 'task', tone, dueAt: when(it.due_at), pinned: it.pinned === true, whyNot: text(it.why_not, 24) })
+      items.push({ client, kind: text(it.kind, 16) ?? 'task', tone, dueAt: when(it.due_at), pinned: it.pinned === true, whyNot: text(it.why_not, 24), ...(it.clock === 'internal' ? { internal: true as const } : {}) })
     }
     const running: TeamThread[] = []
     for (const t of list(p.running)) {
@@ -180,14 +180,24 @@ const hasKey = (o: Readonly<Record<string, string>>, k: string): boolean => Obje
 const kindWord = (kind: string): string => (hasKey(KIND, kind) ? (KIND[kind] as string) : kind)
 const whyWord = (why: string | null): string => (why && hasKey(WHY_NOT, why) ? (WHY_NOT[why] as string) : (WHY_NOT.unknown as string))
 
-/** A row's colour: red once its due time has passed, whatever the report said, else the report's (the photo's rule). */
-export const itemTone = (i: Pick<TeamItem, 'tone' | 'dueAt'>, now: number): TeamTone => (i.dueAt !== null && i.dueAt <= now ? 'red' : i.tone)
+/**
+ * A row's colour: red once its due time has passed, whatever the report said, else the report's (the photo's rule). ⛔ (0.7.60,
+ * Rob approved 2026-11-19 ('Yes, all five'): "Only a client date turns a thread red") a row on an internal clock is never red:
+ * yellow where the report or the clock would say red (OW morning-pins-core.ts `pinItemTone`, the same rule).
+ */
+export const itemTone = (i: Pick<TeamItem, 'tone' | 'dueAt' | 'internal'>, now: number): TeamTone => {
+  if (i.internal === true) return i.tone === 'red' ? 'yellow' : i.tone
+  return i.dueAt !== null && i.dueAt <= now ? 'red' : i.tone
+}
 const TONE_COLOR: Readonly<Record<TeamTone, 'error' | 'warning' | 'success'>> = { red: 'error', yellow: 'warning', green: 'success' }
 
-/** `15h late` (business time: a weekend adds nothing), `due Wed 2:29 PM`, or null with no due time. */
-export function itemTime(i: Pick<TeamItem, 'dueAt'>, now: number): string | null {
+/**
+ * `15h late` (business time: a weekend adds nothing), `due Wed 2:29 PM`, or null with no due time. ⛔ (0.7.60) A row on an
+ * internal clock never reads late: `due Wed 2:29 PM` past its time too (its kind already says `behind`), as on OW's photo.
+ */
+export function itemTime(i: Pick<TeamItem, 'dueAt' | 'internal'>, now: number): string | null {
   if (i.dueAt === null) return null
-  return i.dueAt <= now ? `${photoSpan(businessMsBetween(i.dueAt, now))} late` : `due ${nyWeekdayClock(i.dueAt)}`
+  return i.dueAt <= now && i.internal !== true ? `${photoSpan(businessMsBetween(i.dueAt, now))} late` : `due ${nyWeekdayClock(i.dueAt)}`
 }
 
 /** How many threads are working, and how many rows should be pinned and are not, across the team. */

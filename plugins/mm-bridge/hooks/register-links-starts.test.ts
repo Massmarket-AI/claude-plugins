@@ -7979,7 +7979,7 @@ describe('(0.7.4) a teammate\'s internal ticket owes an ETA: listed with its clo
   test('linked to this thread: pinned on the ETA clock, named for it, and the pane lists the ticket under OW\'s words', async ($, on) => {
     const w = world(on, { feed: mateFeed(), threads: [], store: { 'mm.links': { [OPS]: SELF } } })
     await mm($, '')
-    expect(w.threads.get(SELF)).toMatchObject({ title: '🔴 2h left · Massmarket AI · ETA needed', pinned: true })
+    expect(w.threads.get(SELF)).toMatchObject({ title: '🟡 2h left · Massmarket AI · ETA needed', pinned: true })
     const ui = await pane($)
     const md = String((await ui.find({ type: 'Markdown' }))?.text)
     expect(md).toContain('### ⏳ NO ETA — give one in Claude Code\n\n- Fix the tracker export (ticket 0000e7a0) · ETA needed by ')
@@ -8043,7 +8043,7 @@ describe('(0.7.15) a ticket on an `assign_by` clock: chipped, pinned and named a
   test('linked to this thread: pinned on the clock, named for an owner, and the pane lists it apart from committed dates', async ($, on) => {
     const w = world(on, { feed: pmFeed(), threads: [], store: { 'mm.links': { [ACME]: SELF } } })
     await mm($, '')
-    expect(w.threads.get(SELF)).toMatchObject({ title: '🔴 2h left · Acme Roofing · assign an owner', pinned: true })
+    expect(w.threads.get(SELF)).toMatchObject({ title: '🟡 2h left · Acme Roofing · assign an owner', pinned: true })
     const ui = await pane($)
     const md = String((await ui.find({ type: 'Markdown' }))?.text)
     expect(md).toContain('### Needs an owner: name one in Claude Code, or take it and give the ETA\n\n- Build the booking page (ticket 0000a551) · owner needed by ')

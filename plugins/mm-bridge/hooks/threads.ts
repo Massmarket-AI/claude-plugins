@@ -20,7 +20,7 @@ import type { MmRow, MmTeam } from '../types'
 
 import {
   MAY_NEED_OK, NOBODY, assignAsksOf, assignOnly, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, committedCount, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
-  checkNow, newestFirst, olderTotal, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, tasksBesidesUndated, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
+  checkNow, clientDueOf, internalBehindAt, leadDueOf, newestFirst, olderTotal, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, tasksBesidesUndated, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
   TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine,
   goOf, goOnly, goWithMail, stepWord,
   NO_REPLY_WHAT, afterPackage, checkDot, noReplyNow, owesNoReply, paceOf, paceOnly, paceStatus, paceWord, statusOf,
@@ -2131,6 +2131,12 @@ export type PinReportItem = {
   why_not: PinWhyNot | null
   /** (0.7.59) With `refused` alone: the app's own words, cleaned and cut at PIN_REPORT_WHY_TEXT_MAX. */
   why_text?: string
+  /**
+   * ⛔ (0.7.60, Rob approved 2026-11-19 ('Yes, all five'): "Only a client date turns a thread red") Whose clock `due_at` is:
+   * `internal` for one of the person's own clocks (an owed ETA, or INTERNAL_CLOCK_BASES), which OW never draws red or late;
+   * `client` for every other. OW before it ignores the key.
+   */
+  clock: 'client' | 'internal'
 }
 
 /** (0.7.23) A client thread that is pinned though its client is not in the report's items: who pinned it. */
@@ -2211,16 +2217,24 @@ export function pinReport(o: {
     // thread, when one does: its kind, its colour and its date
     const status = c ? (c.pace ? paceStatus(c.pace, o.now) : null) : statusOf(it, o.now)
     const notStarted = c !== null && c.pace === undefined && c.notStarted && checkDot(c, o.now) === '🟡'
-    const at = status ? status.at : c ? c.due : hasDue(it) ? it.dueAt : NaN
+    // ⛔ (0.7.60) the clock its name shows is the client's own due time once an internal one has passed (`leadDueOf`); with
+    // none, the internal one, sent as such
+    const lead = leadDueOf(it, o.now)
+    const behind = internalBehindAt(it, o.now)
+    const at = status ? status.at : c ? c.due : Number.isFinite(lead) ? lead : Number.isFinite(behind) ? behind : NaN
+    // whose clock that is: an internal one passed (`behind`), or (no status, or a not-started start-by, the one status with
+    // no sentence of its own) the client's soonest due time while it is not the client's own. A pace row's date is a client's.
+    const internal = c === null && Number.isFinite(at) && (status ? status.internal === true || (status.why === '' && at < clientDueOf(it)) : at < clientDueOf(it))
     items.push({
       project_id: it.projectId,
       client: capText(cleanText(it.client, 80), 80),
       kind: capText(status ? status.kind : notStarted ? 'behind' : String(it.kind ?? ''), 16),
-      tone: status ? REPORT_TONE[status.dot] : Number.isFinite(at) && at <= o.now ? 'red' : 'yellow',
+      tone: status ? REPORT_TONE[status.dot] : Number.isFinite(at) && at <= o.now && !internal ? 'red' : 'yellow',
       due_at: Number.isFinite(at) ? new Date(at).toISOString() : null,
       pinned,
       why_not: whyNot,
       ...(whyText ? { why_text: whyText } : {}),
+      clock: internal ? 'internal' : 'client',
     })
   }
   const inItems = new Set(items.map(i => i.project_id))

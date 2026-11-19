@@ -2694,10 +2694,11 @@ describe('(0.7.4) a teammate\'s internal tickets owe an ETA and list with a cloc
     expect(heldInternal(it)).toBe(false)
     expect(pinsNow(it, wed)).toBe(true)
     expect(autoUpdatable(it, wed)).toBe(true)
-    expect(titleFor(it, wed)).toBe('🔴 2h left · Massmarket AI · ETA needed')
+    // (0.7.60, Rob approved 2026-11-19 ('Yes, all five')) an owed ETA is an internal clock: never red, past it `behind`, never late
+    expect(titleFor(it, wed)).toBe('🟡 2h left · Massmarket AI · ETA needed')
     expect(waitingText(it)).toBe('1 needs an ETA')
     // the pane: OW's words, then the ticket and when its ETA is needed by; no word of reply drafts
-    expect(clientMarkdown(it, wed)).toBe(['## Massmarket AI', '🔴 2h left · Massmarket AI · ETA needed', '', `### ${ETA_ASK_TEXT}`, '', `- Ticket 1 (ticket 00000001) · ETA needed by ${clockText(Date.parse('2026-10-28T21:00:00Z'), wed)}`].join('\n'))
+    expect(clientMarkdown(it, wed)).toBe(['## Massmarket AI', '🟡 2h left · Massmarket AI · ETA needed', '', `### ${ETA_ASK_TEXT}`, '', `- Ticket 1 (ticket 00000001) · ETA needed by ${clockText(Date.parse('2026-10-28T21:00:00Z'), wed)}`].join('\n'))
     // the kickoff: the internal skill, then how to record each ETA, with the ticket's full id
     expect(kickoffText(it)).toBe(
       [
@@ -2723,11 +2724,13 @@ describe('(0.7.4) a teammate\'s internal tickets owe an ETA and list with a cloc
     expect(lists.queue.map(i => i.projectId)).toEqual([INTERNAL_OPS, CLIENT, INTERNAL_DISCORD])
     const [ops, acme, discord] = lists.queue as [QueueItem, QueueItem, QueueItem]
     // (0.7.12) with when it was due (until 0.7.12: the clock alone)
-    expect(titleFor(ops, wed)).toBe('🔴 4h late, due 11 AM · Massmarket AI · ETA needed')
-    expect(titleFor(acme, wed)).toBe('🔴 3h late, due 12 PM · Acme Legal · ETA needed')
+    // (0.7.60, Rob approved 2026-11-19 ('Yes, all five')) an owed ETA is an internal clock: never red, past it `behind`, never late
+    expect(titleFor(ops, wed)).toBe('🟡 Massmarket AI · behind · due 11 AM')
+    expect(titleFor(acme, wed)).toBe('🟡 Acme Legal · behind · due 12 PM')
     expect(pinsNow(ops, wed)).toBe(true)
     expect(clientMarkdown(ops, wed)).toContain('- Ticket 1 (ticket 00000001) · ETA was needed by ')
-    expect(clientMarkdown(ops, wed)).toContain(', 4h late')
+    expect(clientMarkdown(ops, wed)).toContain(', behind')
+    expect(clientMarkdown(ops, wed)).not.toContain('late')
     // a client's item is never internal: it was never held, and now it has a clock
     expect(acme).toMatchObject({ projectId: CLIENT, tasks: 1 })
     expect(acme.internal).toBeUndefined()
@@ -2797,10 +2800,10 @@ describe('(0.7.4) a teammate\'s internal tickets owe an ETA and list with a cloc
     expect(lists.queue.map(i => i.projectId)).toEqual([INTERNAL_OPS])
     const ops = lists.queue[0] as QueueItem
     expect(ops).toMatchObject({ kind: 'queue', tasks: 0 })
-    expect(matesOf(ops)).toEqual([{ by: holderName(ASIF), id: tid(2), title: 'Ticket 2', lateSince: Date.parse('2026-10-28T15:00:00Z'), eta: true }])
+    expect(matesOf(ops)).toEqual([{ by: holderName(ASIF), id: tid(2), title: 'Ticket 2', lateSince: Date.parse('2026-10-28T15:00:00Z'), eta: true, internal: true }])
     // ((0.7.21) not on his own row: `1 late with Asif` until 0.7.21; Team · late lists it)
     expect(waitingText(ops)).toBe('1 ticket in the internal queue')
-    expect(clientMarkdown(ops, wed)).toContain(['### Late with a teammate (1)', '', `- ${holderName(ASIF)} · Ticket 2 (ticket 00000002) · no ETA given, 4h late`].join('\n'))
+    expect(clientMarkdown(ops, wed)).toContain(['### Late with a teammate (1)', '', `- ${holderName(ASIF)} · Ticket 2 (ticket 00000002) · no ETA given, behind since 11 AM`].join('\n'))
     // ⛔ never in his kickoff: it is the teammate's to answer
     expect(kickoffText(ops)).not.toContain('Ticket 2')
     // a client with nothing of his: under With a teammate, whose and what; never pinned, never counted
@@ -3012,13 +3015,14 @@ describe('(0.7.15) an `assign_by` commitment asks for an owner by its clock, nev
     expect(pinsNow(it, wed)).toBe(true)
     expect(autoUpdatable(it, wed)).toBe(true)
     // the thread's name and the row: what is asked, never `task`
-    expect(titleFor(it, wed)).toBe('🔴 2h left · Acme Legal · assign an owner')
-    expect(rowLine(it, wed)).toBe('🔴 Acme Legal · assign an owner · 2h left')
+    // (0.7.60, Rob approved 2026-11-19 ('Yes, all five')) `assign_by` is an internal clock: never red, past it `behind`, never late
+    expect(titleFor(it, wed)).toBe('🟡 2h left · Acme Legal · assign an owner')
+    expect(rowLine(it, wed)).toBe('🟡 Acme Legal · assign an owner · 2h left')
     expect(waitingText(it)).toBe('1 needs an owner')
     expect(rowExtra(it)).toBe('')
     // the pane: what to do, then the ticket and its clock; no `Due (dates we committed to)`, no word of reply drafts
     const md = clientMarkdown(it, wed)
-    expect(md).toBe(['## Acme Legal', '🔴 2h left · Acme Legal · assign an owner', '', `### ${ASSIGN_ASK_TEXT}`, '', `- Build 1 (ticket 00000001) · owner needed by ${clockText(CLOCK, wed)}`].join('\n'))
+    expect(md).toBe(['## Acme Legal', '🟡 2h left · Acme Legal · assign an owner', '', `### ${ASSIGN_ASK_TEXT}`, '', `- Build 1 (ticket 00000001) · owner needed by ${clockText(CLOCK, wed)}`].join('\n'))
     expect(md).not.toContain('committed')
     // the kickoff: an owner by the clock, assigned through /ticket-status; an ETA through §5.3 only for one taken
     expect(kickoffText(it)).toBe(
@@ -3037,9 +3041,10 @@ describe('(0.7.15) an `assign_by` commitment asks for an owner by its clock, nev
 
   test('late: past its clock it is late as any task is, and the pane says when the owner was needed', async () => {
     const it = one(h9Feed({ overdue: [handed(1, { due_at: '2026-10-28T16:00:00Z' })] }))
-    expect(titleFor(it, wed)).toBe('🔴 3h late, due 12 PM · Acme Legal · assign an owner')
+    // (0.7.60, Rob approved 2026-11-19 ('Yes, all five')) `assign_by` is an internal clock: never red, past it `behind`, never late
+    expect(titleFor(it, wed)).toBe('🟡 Acme Legal · behind · due 12 PM')
     expect(pinsNow(it, wed)).toBe(true)
-    expect(assignMarkdown(it, wed)).toBe([`### ${ASSIGN_ASK_TEXT}`, '', `- Build 1 (ticket 00000001) · owner was needed by ${clockText(Date.parse('2026-10-28T16:00:00Z'), wed)}, 3h late`].join('\n'))
+    expect(assignMarkdown(it, wed)).toBe([`### ${ASSIGN_ASK_TEXT}`, '', `- Build 1 (ticket 00000001) · owner was needed by ${clockText(Date.parse('2026-10-28T16:00:00Z'), wed)}, behind`].join('\n'))
   })
 
   test('it acts by its clock, not by the start-by time of the work\'s estimate; a committed task still acts by its start-by', async () => {
@@ -3056,7 +3061,8 @@ describe('(0.7.15) an `assign_by` commitment asks for an owner by its clock, nev
       expect(it).toMatchObject({ kind: 'task', tasks: 1, taskTitles: ['Build 1'] })
       expect(assignAsksOf(it)).toEqual([])
       expect(assignOnly(it)).toBe(false)
-      expect(titleFor(it, wed)).toBe('🔴 2h left · Acme Legal · task')
+      // (0.7.60) `eta_owed` is an internal clock: never red
+      expect(titleFor(it, wed)).toBe(basis === 'eta_owed' ? '🟡 2h left · Acme Legal · task' : '🔴 2h left · Acme Legal · task')
       expect(waitingText(it)).toBe('1 task due')
       expect(assignMarkdown(it, wed)).toBe('')
       expect(assignParagraph(it)).toBe('')
@@ -3072,7 +3078,8 @@ describe('(0.7.15) an `assign_by` commitment asks for an owner by its clock, nev
     expect(committedCount(mixed)).toBe(1)
     expect(waitingText(mixed)).toBe('1 task due, 1 needs an ETA, 1 needs an owner')
     expect(rowExtra(mixed)).toBe('1 task due · 1 needs an ETA · 1 needs an owner')
-    expect(titleFor(mixed, wed)).toBe('🔴 2h left · Acme Legal · task')
+    // (0.7.60) the soonest clock is the owner ask's (internal), and the client's own is tomorrow: yellow
+    expect(titleFor(mixed, wed)).toBe('🟡 2h left · Acme Legal · task')
     const md = clientMarkdown(mixed, wed)
     expect(md).toContain('### Due (dates we committed to)\n- Page 2')
     expect(md).toContain(`### ${ASSIGN_ASK_TEXT}\n\n- Build 1 (ticket 00000001) · owner needed by `)
@@ -3253,7 +3260,7 @@ describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from
     const stored = { ...it, checkAhead: 2 * H } as QueueItem
     expect(watchOf(stored)).toEqual([])
     expect(pinsFor(stored, wed)).toBe(false)
-    expect(teamLate([it])).toEqual([{ by: 'Asif', count: 1, clients: [{ projectId: CLIENT, client: 'Acme Legal', refs: [{ by: 'Asif', id: tid(1), title: 'Build 1', lateSince: wed - 4 * H, eta: true }] }] }])
+    expect(teamLate([it])).toEqual([{ by: 'Asif', count: 1, clients: [{ projectId: CLIENT, client: 'Acme Legal', refs: [{ by: 'Asif', id: tid(1), title: 'Build 1', lateSince: wed - 4 * H, eta: true, internal: true }] }] }])
   })
 
   test('an item an older version stored (no `own`) pins as R1 always read it', async () => {
@@ -3340,20 +3347,20 @@ describe('0.7.21 (Rob, 11-05): the founder\'s teammates\' late tickets leave his
       'Team · late (7)',
       'Asif (3)',
       '  Beta Co',
-      '    - Build the booking page · late since Mon 1 PM · no ETA given',
-      '    - Fix the form · late since 1 PM · no ETA given',
+      '    - Build the booking page · behind since Mon 1 PM · no ETA given',
+      '    - Fix the form · behind since 1 PM · no ETA given',
       '  Acme Legal',
-      '    - Send the intake form · late since 11 AM · no ETA given',
+      '    - Send the intake form · behind since 11 AM · no ETA given',
       'Nayan (2)',
       '  Massmarket Internal',
-      '    - Name the channels · late since Tue 1 PM · no ETA given',
+      '    - Name the channels · behind since Tue 1 PM · no ETA given',
       '    - Post the recap · late since 9 AM · past its ETA',
       'Antu (1)',
       '  Beta Co',
-      '    - Write the FAQ · late since 2 PM · no ETA given',
+      '    - Write the FAQ · behind since 2 PM · no ETA given',
       'Mahfuz (1)',
       '  Acme Legal',
-      '    - Logo files · late since 12 PM · no ETA given',
+      '    - Logo files · behind since 12 PM · no ETA given',
     ])
     // stored and read back, as the pane holds it
     expect(teamOf(JSON.parse(JSON.stringify(pane)))).toEqual(pane)
@@ -3451,7 +3458,7 @@ describe('0.7.21 (Rob, 11-05): the founder\'s teammates\' late tickets leave his
     expect(text.filter(l => l === 'Team · late (7)')).toHaveLength(2)
     expect(text.join('\n')).not.toContain('With a teammate')
     const head = text.lastIndexOf('Team · late (7)')
-    expect(text.slice(head, head + 4)).toEqual(['Team · late (7)', 'Asif (3)', '  Beta Co', '    - Build the booking page · late since Mon 1 PM · no ETA given'])
+    expect(text.slice(head, head + 4)).toEqual(['Team · late (7)', 'Asif (3)', '  Beta Co', '    - Build the booking page · behind since Mon 1 PM · no ETA given'])
     expect(text.at(-1)).toBe('Updated 3:00 PM')
     // with nobody late: no group, no heading
     expect(paneText(rows, 'Needs you now (1)', 'N', { team: [] })).not.toContain('Team')
@@ -3713,7 +3720,7 @@ describe('0.7.23 C (Rob, 11-05: "when a teammate\'s holding it, but it\'s late, 
       tickets: { overdue: [{ ticket_id: tid(2), project_id: CLIENT, project_name: 'Acme Legal', title: 'Send the intake form', due_at: null, due_source: null, assignee_email: ASIF, eta_needed_by: at(-3), eta_ask: ETA_ASK_TEXT }] },
     })
     const team = teamLate(buildLists(f, wed).teammate)
-    expect(teamLines(teamPane(buildLists(f, wed).teammate, wed))).toEqual(['Team · late (2)', 'Asif (2)', '  Acme Legal', '    - reply 1d late, flagged for your OK', '    - Send the intake form · late since 12 PM · no ETA given'])
+    expect(teamLines(teamPane(buildLists(f, wed).teammate, wed))).toEqual(['Team · late (2)', 'Asif (2)', '  Acme Legal', '    - reply 1d late, flagged for your OK', '    - Send the intake form · behind since 12 PM · no ETA given'])
     expect(teamLateCount(team)).toBe(2)
   })
 

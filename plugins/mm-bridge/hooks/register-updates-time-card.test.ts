@@ -3957,7 +3957,7 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
     expect(body.at).toBe(new Date(NOW).toISOString())
     const by = (pid: string) => body.items.find(i => i.project_id === pid)
     // pinned: a green light, no reason
-    expect(by(pidOf(1))).toEqual({ project_id: pidOf(1), client: nameOf(1), kind: 'task', tone: 'yellow', due_at: new Date(NOW + HOUR).toISOString(), pinned: true, why_not: null })
+    expect(by(pidOf(1))).toEqual({ project_id: pidOf(1), client: nameOf(1), kind: 'task', tone: 'yellow', due_at: new Date(NOW + HOUR).toISOString(), pinned: true, why_not: null, clock: 'client' })
     // no thread of its own; red: its reply is past due
     expect(by(BOLT)).toMatchObject({ client: 'Bolt Staffing', kind: 'reply', tone: 'red', pinned: false, why_not: 'no_thread' })
     // its thread past the app's list, and the lookup could not say
@@ -3974,12 +3974,12 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
     expect(body.extra).toEqual([{ project_id: ACME, client: 'Acme Roofing', by: 'person' }])
     // the whole of it, as OW gets it: Bolt's late reply, Dune's task, then the Willow tasks by when they are due
     const due = (h: number) => new Date(NOW + h * HOUR).toISOString()
-    const willow = (n: number, pinned: boolean) => ({ project_id: pidOf(n), client: nameOf(n), kind: 'task', tone: 'yellow', due_at: due(1 + (n - 1) * 0.25), pinned, why_not: pinned ? null : 'write_cap' })
+    const willow = (n: number, pinned: boolean) => ({ project_id: pidOf(n), client: nameOf(n), kind: 'task', tone: 'yellow', due_at: due(1 + (n - 1) * 0.25), pinned, why_not: pinned ? null : 'write_cap', clock: 'client' })
     expect(body).toEqual({
       at: '2026-10-12T15:00:00.000Z',
       items: [
-        { project_id: BOLT, client: 'Bolt Staffing', kind: 'reply', tone: 'red', due_at: '2026-10-12T13:00:00.000Z', pinned: false, why_not: 'no_thread' },
-        { project_id: DUNE, client: 'Dune Labs', kind: 'task', tone: 'yellow', due_at: due(0.75), pinned: false, why_not: 'unseen' },
+        { project_id: BOLT, client: 'Bolt Staffing', kind: 'reply', tone: 'red', due_at: '2026-10-12T13:00:00.000Z', pinned: false, why_not: 'no_thread', clock: 'client' },
+        { project_id: DUNE, client: 'Dune Labs', kind: 'task', tone: 'yellow', due_at: due(0.75), pinned: false, why_not: 'unseen', clock: 'client' },
         ...Array.from({ length: 13 }, (_, i) => willow(i + 1, i < 12)),
       ],
       extra: [{ project_id: ACME, client: 'Acme Roofing', by: 'person' }],
@@ -4006,7 +4006,7 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
       byUs: sid => sid === 'local_a',
       client: () => 'Acme Roofing',
     })
-    expect(r.items).toEqual([{ project_id: CEDAR, client: 'Cedar Dental', kind: 'task', tone: 'red', due_at: new Date(NOW - HOUR).toISOString(), pinned: true, why_not: null }])
+    expect(r.items).toEqual([{ project_id: CEDAR, client: 'Cedar Dental', kind: 'task', tone: 'red', due_at: new Date(NOW - HOUR).toISOString(), pinned: true, why_not: null, clock: 'client' }])
     expect(r.extra).toEqual([{ project_id: ACME, client: 'Acme Roofing', by: 'bridge' }])
   })
 

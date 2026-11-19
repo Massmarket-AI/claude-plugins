@@ -56,6 +56,12 @@ export type FeedMail = {
   internal?: boolean
   /** (0.5.2, R8) Our newest send to the client, when the feed gives it: what tells the bridge a reply went. */
   last_outbound_at?: string | null
+  /**
+   * ⛔ (0.7.60, one owner per client reply; Rob approved 2026-11-19 ('Yes, all five')) Who holds the project's open reply
+   * package (prepared, stale or picked up): its `picked_up_by`, else the address in its `package.assignee` (OW closeout.ts).
+   * Null or absent: nobody named, and today's rule (the project's owner) decides. See `replyHolderOf`.
+   */
+  reply_holder_email?: string | null
 }
 
 export type FeedDraft = {
@@ -92,6 +98,19 @@ export type FeedDraft = {
   checked_at?: string | null
   checked_send_at?: string | null
   last_outbound_at?: string | null
+  /** (0.7.60) As on a mail row (`FeedMail.reply_holder_email`): who holds the project's open reply package. */
+  reply_holder_email?: string | null
+}
+
+/**
+ * ⛔ (0.7.60, Rob approved 2026-11-19 ('Yes, all five'): one owner per client reply) The address the feed names as the
+ * holder of the row's project's open reply package, lower case, or '' with none. Remver, 2026-11-19: Nayan was pinned a
+ * `reply` row while Shezan held the package (`ce533126`, picked up); Asif's report carried a `ready` row for Sonya Vicars
+ * whose package (`21f9c346`) names Nayan. The holder takes the owner's place for that project's reply and ready rows.
+ */
+export function replyHolderOf(row: { reply_holder_email?: unknown } | null | undefined): string {
+  const h = row && typeof row.reply_holder_email === 'string' ? row.reply_holder_email.trim().toLowerCase() : ''
+  return /^[^\s@<>"',;]+@[^\s@<>"',;]+$/.test(h) ? h : ''
 }
 
 export type FeedTicket = {
@@ -553,6 +572,16 @@ export type QueueItem = {
   pace?: PaceRef
   /** (0.7.27) The earliest start-by of the viewer's own tickets here whose work has not started (OW status `in_progress` is the one sign it has). Past it, the client is `behind · not started`. */
   startBy?: number
+  /**
+   * ⛔ (0.7.60, Rob approved 2026-11-19 ('Yes, all five'): "Only a client date turns a thread red") Set only on a client with
+   * a ticket of the viewer's on an internal clock (INTERNAL_CLOCK_BASES, or an owed ETA): the soonest such due time, and
+   * `clientDue` / `clientOwn`, its `dueAt` and `own` without them (null in a store: none). Only the client's own turn it red or
+   * `late` (`isRed`, `leadDueOf`). Absent (every other client, and an item an older version stored): every clock of it is
+   * a client's, read exactly as before. Read `clientDueOf(it)`, `clientOwnOf(it)`.
+   */
+  internalDue?: number
+  clientDue?: number | null
+  clientOwn?: number | null
 }
 
 /**
@@ -584,13 +613,31 @@ export type AssignRef = { id: string; title: string; assignBy: number }
  * `eta` when no ETA was ever given. (0.7.23) `ok`: not a ticket but a reply package flagged for his OK that the teammate
  * holds or sends, late since its reply was due (`okLate`); its id is the package's.
  */
-export type MateRef = { by: string; id: string; title: string; lateSince: number; eta: boolean; ok?: true }
+export type MateRef = { by: string; id: string; title: string; lateSince: number; eta: boolean; ok?: true; internal?: true }
 
 /** (0.7.4, ETA asks) What a ticket that owes an ETA says, in OW's words (ETA_ASK_TEXT): the feed's own copy of it is never shown. */
 export const ETA_ASK_TEXT = '⏳ NO ETA — give one in Claude Code'
 
 /** (0.7.15, owner asks) OW's `details.commitment_basis` for H9's clock to give a handed-off ticket an owner. */
 export const ASSIGN_BY_BASIS = 'assign_by'
+
+/**
+ * ⛔ (0.7.60, Rob approved 2026-11-19 ('Yes, all five'): "Only a client date turns a thread red") The ticket clock bases
+ * that are OUR OWN clocks, never a date a client was given: OW's `details.commitment_basis` exactly `eta_owed` (an ETA we
+ * owe ourselves), `assign_by` (H9's clock to name an owner) and `assigned_by_rob` (Rob set the date inside the team).
+ * Every other value is a CLIENT clock: `client_eta`, `call_package`, `eta_commit`, `package_move`, `volunteered`,
+ * `group_settled`, `team_move` (a teammate's move of a date the client may have been told: OW ticket-assign.ts), none, and
+ * any free text: unknown counts as client, so a real promise is never hidden. A ticket listed for its owed ETA
+ * (`eta_needed_by`) is on an internal clock too.
+ * An internal clock is never red and never `late`: before its due time it reads as today, and past it it keeps pinning as
+ * `behind` (yellow), with no `Nh late` / `Nd late` count (Rob 2026-11-19: "i dont want it to stop showbin behind").
+ * ⛔ OW keeps the same list in src/lib/team-ops/clock-basis.ts (INTERNAL_CLOCK_BASES): the plugin cannot import OW, so the
+ * two are changed together.
+ */
+export const INTERNAL_CLOCK_BASES: readonly string[] = ['eta_owed', 'assign_by', 'assigned_by_rob']
+
+/** (0.7.60) Whether a ticket's `commitment_basis` is one of our own clocks (INTERNAL_CLOCK_BASES); anything else, or none, is a client's. */
+export const isInternalClockBasis = (basis: unknown): boolean => typeof basis === 'string' && INTERNAL_CLOCK_BASES.includes(basis)
 
 /** (0.7.15, owner asks) What a ticket on an `assign_by` clock says, the bridge's own words: OW prints none. */
 export const ASSIGN_ASK_TEXT = 'Needs an owner: name one in Claude Code, or take it and give the ETA'
@@ -741,6 +788,41 @@ export const heldInternal = (it: Pick<QueueItem, 'projectId' | 'asks' | 'interna
 
 /** (R17) Whether a client has a due time at all (an item stored by the bridge keeps Infinity as null). */
 export const hasDue = (it: Pick<QueueItem, 'dueAt'>): boolean => typeof it.dueAt === 'number' && Number.isFinite(it.dueAt)
+
+/**
+ * (0.7.60, Rob approved 2026-11-19 ('Yes, all five')) The soonest CLIENT due time (`QueueItem.clientDue`), Infinity with
+ * none. An item an older version stored has no `clientDue`: every clock of it is a client's, as it was read then.
+ */
+export function clientDueOf(it: Pick<QueueItem, 'dueAt' | 'clientDue' | 'internalDue'>): number {
+  if (typeof it.internalDue !== 'number') return hasDue(it) ? it.dueAt : Infinity
+  return typeof it.clientDue === 'number' ? it.clientDue : Infinity
+}
+
+/** (0.7.60) The soonest act-by a CLIENT clock asks of the viewer (`QueueItem.clientOwn`); an older item: `ownActBy`. */
+export function clientOwnOf(it: Pick<QueueItem, 'dueAt' | 'actBy' | 'own' | 'clientOwn' | 'internalDue'>): number {
+  if (typeof it.internalDue !== 'number') return ownActBy(it)
+  return typeof it.clientOwn === 'number' ? it.clientOwn : Infinity
+}
+
+/**
+ * ⛔ (0.7.60, Rob approved 2026-11-19 ('Yes, all five'): "Only a client date turns a thread red") When the client's soonest
+ * due time is one of the viewer's internal clocks and it has passed: that time, else NaN. The client then reads `behind`
+ * (yellow) since then, never `late`, and keeps pinning (Rob 2026-11-19: "i dont want it to stop showbin behind and all
+ * those other kinds of 'should be working on now' alerts either"). Worked out at `now`, so a stored item whose internal
+ * clock passes between two syncs never reads `late` either.
+ */
+export function internalBehindAt(it: Pick<QueueItem, 'dueAt' | 'clientDue' | 'internalDue'>, now: number): number {
+  const due = hasDue(it) ? it.dueAt : Infinity
+  return due < now && due < clientDueOf(it) ? due : NaN
+}
+
+/**
+ * (0.7.60) The due time a client's clock text is worked from: its due time, unless that is an internal clock that has
+ * passed (`internalBehindAt`), then the client's own soonest due time (Infinity: none, and no clock is shown).
+ */
+export function leadDueOf(it: Pick<QueueItem, 'dueAt' | 'clientDue' | 'internalDue'>, now: number): number {
+  return Number.isFinite(internalBehindAt(it, now)) ? clientDueOf(it) : hasDue(it) ? it.dueAt : Infinity
+}
 
 /** (0.7.24) The client's follow-up steps that wait for a go, checked again (an item an older version stored, or a store edited by hand, is read as data); null with none. */
 export function goOf(it: Pick<QueueItem, 'go'>): GoRef | null {
@@ -1243,6 +1325,8 @@ export type ClientStatus = {
   words: string
   at: number
   why: string
+  /** (0.7.60) An internal clock past its due time (`internalBehindAt`): `behind`, yellow, with no late count. */
+  internal?: true
 }
 
 const PACE_STATES: readonly string[] = ['late', 'overbooked', 'behind', 'on_track']
@@ -1334,7 +1418,8 @@ export function paceStatus(p: PaceRef, now: number): ClientStatus {
  */
 function namedRank(it: QueueItem, now: number): number {
   if (!Number.isFinite(ownActBy(it))) return goMine(it) ? RANK.behind - 0.5 : Infinity
-  const due = hasDue(it) ? it.dueAt : Infinity
+  // ⛔ (0.7.60) only a client clock is ever `late` here: an internal clock past its time is the `behind` status's
+  const due = leadDueOf(it, now)
   const rank = due < now ? RANK.late : Number.isFinite(due) && isToday(due, now) ? RANK.dueToday : pinsNow({ dueAt: Infinity, actBy: ownActBy(it) }, now) ? RANK.dueSoon : Infinity
   const owed = (it.kind !== 'task' && it.kind !== 'pace' && it.kind !== 'queue') || openAsks(it).length > 0 || goMine(it)
   if (!owed) return rank
@@ -1354,6 +1439,10 @@ export function statusOf(it: QueueItem, now: number): ClientStatus | null {
   if (p) found.push(paceStatus(p, now))
   const startBy = it.startBy
   if (typeof startBy === 'number' && Number.isFinite(startBy) && startBy <= now) found.push({ kind: 'behind', dot: '🟡', rank: RANK.behind, words: notStartedWords(startBy, now), at: hasDue(it) ? it.dueAt : NaN, why: '' })
+  // ⛔ (0.7.60, Rob 2026-11-19: "i dont want it to stop showbin behind") an internal clock past its due time: `behind`,
+  // yellow, pinned, never `late` and never a late count. After a not-started start-by of the same rank, whose words win.
+  const behind = internalBehindAt(it, now)
+  if (Number.isFinite(behind)) found.push({ kind: 'behind', dot: '🟡', rank: RANK.behind, words: `behind · due ${dueWhen(behind, now)}`, at: behind, why: `Pinned for you, behind since ${dueWhen(behind, now)}: ${ownReason(it)}.`, internal: true })
   if (!found.length) return null
   const worst = found.reduce((a, b) => (b.rank < a.rank ? b : a))
   return namedRank(it, now) <= worst.rank ? null : worst
@@ -1457,7 +1546,14 @@ export function pinReason(it: QueueItem, now: number): string {
   const status = statusOf(it, now)
   if (ownPins(it, now)) {
     if (status?.why) return status.why
-    const own = ownActBy(it)
+    let own = ownActBy(it)
+    // ⛔ (0.7.60) what pins is an internal clock that has passed: `behind`, never `late`. Where a client clock pins too, the
+    // sentence is the client clock's.
+    const clientOwn = clientOwnOf(it)
+    if (own <= now && own < clientOwn) {
+      if (pinsNow({ dueAt: Infinity, actBy: clientOwn }, now)) own = clientOwn
+      else if (!(own < it.dueAt && committedCount(it) > 0 && it.messages === 0)) return `Pinned for you, behind since ${dueWhen(own, now)}: ${ownReason(it)}.`
+    }
     // (0.7.37) pinned with no time to count from, as the viewer's own go on follow-up steps whose first step OW could not
     // date (`go_first_at` null): there is no due time to print, and formatting Infinity threw a RangeError (Invalid Date)
     if (!Number.isFinite(own)) return `Pinned for you, no due date: ${ownReason(it)}.`
@@ -1621,7 +1717,7 @@ export function teamLate(items: readonly QueueItem[]): TeamLate[] {
       const by = cleanText(r.by, 40) || 'a teammate'
       const clients = people.get(by) ?? new Map<string, { projectId: string; client: string; refs: MateRef[] }>()
       const at = clients.get(it.projectId) ?? { projectId: it.projectId, client: cleanName(it.client) || cleanName(it.projectName) || 'a client', refs: [] }
-      at.refs.push({ by, id: r.id, title, lateSince: r.lateSince, eta: r.eta === true, ...(r.ok === true ? { ok: true as const } : {}) })
+      at.refs.push({ by, id: r.id, title, lateSince: r.lateSince, eta: r.eta === true, ...(r.ok === true ? { ok: true as const } : {}), ...(r.internal === true ? { internal: true as const } : {}) })
       clients.set(it.projectId, at)
       people.set(by, clients)
     }
@@ -1647,10 +1743,11 @@ export const teamLateWho = (team: readonly Pick<TeamLate, 'by' | 'count'>[]): st
  * time (`dueWhen`: `3 PM` today, `Mon 3 PM` this week, `Oct 14` before that, never a weekend day), and why it is late:
  * `no ETA given` (its ETA was needed by then and none came), else `past its ETA`.
  */
-export function teamLateLine(r: Pick<MateRef, 'title' | 'lateSince' | 'eta' | 'ok'>, now: number): string {
+export function teamLateLine(r: Pick<MateRef, 'title' | 'lateSince' | 'eta' | 'ok' | 'internal'>, now: number): string {
   // (0.7.23) a teammate's late package flagged for his OK: how late its reply is, `reply 1d late, flagged for your OK`
   if (r.ok === true) return `reply ${clockLead(r.lateSince, now)}, flagged for your OK`
-  return `${cleanText(r.title, MATE_TITLE_MAX)} · late since ${dueWhen(r.lateSince, now)} · ${r.eta ? 'no ETA given' : 'past its ETA'}`
+  // ⛔ (0.7.60, Rob approved 2026-11-19 ('Yes, all five')) a ticket on an internal clock is `behind`, never `late`
+  return `${cleanText(r.title, MATE_TITLE_MAX)} · ${r.internal === true ? 'behind' : 'late'} since ${dueWhen(r.lateSince, now)} · ${r.eta ? 'no ETA given' : 'past its ETA'}`
 }
 
 /** (0.7.21) What the status line adds after `· P pinned`: ` · 5 late with the team`, or '' with none (every viewer but the founder). */
@@ -2171,10 +2268,16 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
   const soonest = (into: Map<string, number>, it: QueueItem, at: number): void => {
     if (Number.isFinite(at)) into.set(it.projectId, Math.min(into.get(it.projectId) ?? Infinity, at))
   }
-  /** (0.7.18) An act-by of the viewer's own. */
-  const mine = (it: QueueItem, at: number): void => {
+  // ⛔ (0.7.60, Rob approved 2026-11-19 ('Yes, all five')) the same two without the viewer's tickets on an internal clock
+  // (INTERNAL_CLOCK_BASES, or an owed ETA): what only a client clock asks, the one thing that turns a client red or late.
+  // An internal ticket's due time waits in `internalDue` and joins `dueAt` at the end, so `dueAt` until then is the client's.
+  const clientAct = new Map<string, number>()
+  const internalDue = new Map<string, number>()
+  /** (0.7.18) An act-by of the viewer's own. (0.7.60) `internal`: of a ticket on an internal clock. */
+  const mine = (it: QueueItem, at: number, internal = false): void => {
     act(it, at)
     soonest(ownAct, it, at)
+    if (!internal) soonest(clientAct, it, at)
   }
 
   const viewer = typeof feed.member === 'string' ? feed.member.toLowerCase() : ''
@@ -2202,10 +2305,27 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     it.mail.push({ at: m.received_at, sender: m.sender ?? '?', subject: m.subject ?? '', snippet: m.snippet ?? '' })
     seen(it, 'mail', ms(m.received_at))
   }
+  /**
+   * ⛔ (0.7.60, one owner per client reply; Rob approved 2026-11-19 ('Yes, all five')) The client messages of a project whose
+   * open reply package a teammate holds (`replyHolderOf`): theirs, not the viewer's. Noted here and counted only where
+   * nothing else of the viewer's lists the client, under With a teammate and never pinned (as R1's stale package for the
+   * founder, B1): where something of the viewer's does, the row is for that and never reads `reply`.
+   */
+  const heldMail = new Map<string, { name: string; mail: Array<{ m: FeedMail; due: number }> }>()
   for (const m of feed.mail ?? []) {
     if (m.reply_status !== 'unanswered' || !m.project_id || !m.project_name) continue
     if (!usable(m.project_id, m.project_name)) continue
-    if (!isMine(m.project_owner_email, feed)) continue
+    // (0.7.60) the holder of the client's open package answers its mail; nobody named: the owner, as before
+    const holder = replyHolderOf(m)
+    if (holder !== '' && holder !== viewer) {
+      const due = replyDue(m)
+      if (due !== Infinity && !inWindow(due)) continue
+      const held = heldMail.get(m.project_id) ?? { name: holderName(holder), mail: [] }
+      held.mail.push({ m, due })
+      heldMail.set(m.project_id, held)
+      continue
+    }
+    if (holder === '' && !isMine(m.project_owner_email, feed)) continue
     const due = replyDue(m)
     if (due === Infinity) {
       const it = item(m.project_id, m.project_name)
@@ -2265,15 +2385,20 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     const inReach = noDue || !tooOld(due)
     // `by`: the teammate who holds it; for the founder, also the teammate a stale package is with (R1), so
     // that its pane names them instead of inviting him to pick it up
+    // ⛔ (0.7.60, one owner per client reply; Rob approved 2026-11-19 ('Yes, all five')) who the feed says holds the client's
+    // open package: they take the owner's place for its `ready` row; a teammate named there holds it, picked up or not
+    const replyHolder = replyHolderOf(d)
+    const ownerOk = replyHolder !== '' ? replyHolder === me : isMine(d.project_owner_email, feed)
+    const heldElsewhere = !held && replyHolder !== '' && replyHolder !== me
     const open = (state: OpenPackage['state']): OpenPackage => ({
-      id: d.package_id, state, by: state === 'held_by_other' ? holderName(holder) : state === 'stale' && staleTheirsHere ? holderName(sender) : '',
+      id: d.package_id, state, by: state === 'held_by_other' ? holderName(holder || replyHolder) : state === 'stale' && staleTheirsHere ? holderName(sender) : '',
       at: held ? d.picked_up_at ?? null : null, unsent: held ? unsent : ready, newer: 0,
       ...(noReply ? { noReply: true as const } : {}),
     })
     // ⛔ The holder is asked first, the owner second: a package the viewer holds is theirs to finish whoever
     // owns the client (Rob, 2026-10-12: a client owned by a teammate, picked up and sent by the founder,
     // never appeared on the founder's list). A prepared one is theirs when the client is.
-    const readyForMe = d.status === 'prepared' && (holder === '' || holder === me) && isMine(d.project_owner_email, feed) && inReach
+    const readyForMe = d.status === 'prepared' && (holder === '' || holder === me) && ownerOk && inReach
     if (heldByMe || readyForMe) {
       it.kind = 'ready'
       it.packageId = d.package_id
@@ -2300,12 +2425,12 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     // later package of the client's that is not flagged (or that a teammate sends and is stale, R1) does not
     // take its place on the row, in the pane or in the kickoff (B4, 2026-10-13).
     if (it.kind === 'ok' && !forOk) continue
-    it.open = open(held ? 'held_by_other' : d.status === 'stale' ? 'stale' : 'prepared')
+    it.open = open(held || heldElsewhere ? 'held_by_other' : d.status === 'stale' ? 'stale' : 'prepared')
     // (0.5.2, R8) A stale package of the viewer's own (nobody holds it, the client is theirs, no teammate sends
     // it): while our latest send waits for the server's check, or the check left something open, the client is
     // listed by it, so its thread is named for that and pins again on what is still open. Otherwise it changes
     // nothing here, as before (M1: a stale package alone lists nothing).
-    if (d.status === 'stale' && !held && !staleTheirsHere && !forOk && isMine(d.project_owner_email, feed)) {
+    if (d.status === 'stale' && !held && !heldElsewhere && !staleTheirsHere && !forOk && ownerOk) {
       const c = checkOf(d)
       it.check = c
       if (fastOf(c, it.lastOut ?? 0, now) && inReach) {
@@ -2385,7 +2510,9 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
         const title = cleanText(tk.title, MATE_TITLE_MAX)
         if (!title) continue
         const late = lateMates.get(tk.project_id) ?? { name: tk.project_name, refs: [] }
-        if (!late.refs.some(r => r.id === tk.ticket_id)) late.refs.push({ by: holderName(assignee), id: tk.ticket_id, title, lateSince: due, eta: etaAsk })
+        // (0.7.60) on an internal clock (an owed ETA, or INTERNAL_CLOCK_BASES): its line reads `behind`, never `late`
+        const internalRef = etaAsk || isInternalClockBasis(tk.commitment_basis)
+        if (!late.refs.some(r => r.id === tk.ticket_id)) late.refs.push({ by: holderName(assignee), id: tk.ticket_id, title, lateSince: due, eta: etaAsk, ...(internalRef ? { internal: true as const } : {}) })
         lateMates.set(tk.project_id, late)
         continue
       }
@@ -2404,13 +2531,18 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
       if (typeof tk.ticket_id === 'string') counting.add(tk.ticket_id)
       const it = item(tk.project_id, tk.project_name)
       it.tasks += 1
-      it.dueAt = Math.min(it.dueAt, due)
+      // ⛔ (0.7.60, Rob approved 2026-11-19 ('Yes, all five'): "Only a client date turns a thread red") a ticket on an
+      // internal clock (an owed ETA, or INTERNAL_CLOCK_BASES): listed and pinned exactly as before, but its time is kept
+      // apart from the client's (`clientDue`, `clientOwn`), so it is never red and past it reads `behind`, never `late`
+      const internalClock = etaAsk || (!undatedRow && isInternalClockBasis(tk.commitment_basis))
+      if (internalClock) soonest(internalDue, it, due)
+      else it.dueAt = Math.min(it.dueAt, due)
       // R1: a task acts by its start-by time when the feed gives one (OW's `start_by_at`, from the ticket's
       // estimate), else by its due time. (0.7.15) An owner ask acts by its clock: the estimate is the work's, not the
       // assigning's. ⛔ (0.7.32, Rob 2026-11-06: "a ticket with no due date never pins") An undated ticket has no start-by:
       // one on the row would otherwise pin it, and name it `behind · not started`, against a due time of Infinity.
       const startBy = assignAsk || (undatedRow && !etaAsk) ? NaN : ms(tk.start_by_at)
-      mine(it, Number.isFinite(startBy) && startBy < due ? startBy : due)
+      mine(it, Number.isFinite(startBy) && startBy < due ? startBy : due, internalClock)
       // (0.7.27) past it with no sign the work started, the client is `behind · not started` (`statusOf`)
       if (Number.isFinite(startBy) && startBy < due && tk.status !== 'in_progress') it.startBy = Math.min(it.startBy ?? Infinity, startBy)
       if (undatedRow && !etaAsk) undated(it)
@@ -2643,6 +2775,26 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     if (nothingOwn) it.theirs = g.by
   }
 
+  // ⛔ (0.7.60, one owner per client reply; Rob approved 2026-11-19 ('Yes, all five')) The client messages of a project
+  // whose open package a teammate holds: where nothing of the viewer's own lists the client, it lists under With a
+  // teammate, named for the holder, never pinned and never a pin reason; where something does, its row is for that alone.
+  const heldTheirs = new Set<string>()
+  for (const [pid, held] of heldMail) {
+    const had = byProject.get(pid)
+    const ownHere = had !== undefined && (had.tasks > 0 || had.messages > 0 || Boolean(had.packageId) || had.kind !== 'task' || openAsks(had).length > 0 || queuedOf(had).length > 0 || goMine(had) || paceOf(had) !== null)
+    if (ownHere) continue
+    const it = had ?? item(pid, held.mail[0]?.m.project_name ?? '')
+    for (const { m, due } of held.mail) {
+      if (counted.has(m)) continue
+      countMail(it, m, due)
+      if (due === Infinity) undated(it)
+    }
+    if (it.messages > 0) {
+      heldTheirs.add(pid)
+      if (!it.theirs) it.theirs = held.name
+    }
+  }
+
   // (0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you, not when something has a timer left for a
   // teammate to answer") Whose each part is, now that the pass knows: the client's messages are a teammate's to answer when
   // a teammate holds the drafts (or, for the founder, R1's stale package is theirs), and a package that waits for his OK is
@@ -2650,11 +2802,19 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
   for (const it of byProject.values()) {
     const pid = it.projectId
     const o = it.open ?? null
-    const mailTheirs = o?.state === 'held_by_other' || staleTheirs.has(pid)
+    const mailTheirs = o?.state === 'held_by_other' || staleTheirs.has(pid) || heldTheirs.has(pid)
     const okIsTheirs = it.kind === 'ok' && Boolean(it.theirs)
     const mail = mailAct.get(pid) ?? Infinity
     const ok = okAct.get(pid) ?? Infinity
     it.own = Math.min(ownAct.get(pid) ?? Infinity, mailTheirs ? Infinity : mail, okIsTheirs ? Infinity : ok)
+    // (0.7.60) with an internal-clock ticket: the client's clocks alone kept, then its due time joins the client's
+    const inner = internalDue.get(pid)
+    if (inner !== undefined) {
+      it.internalDue = inner
+      it.clientOwn = Math.min(clientAct.get(pid) ?? Infinity, mailTheirs ? Infinity : mail, okIsTheirs ? Infinity : ok)
+      it.clientDue = it.dueAt
+      it.dueAt = Math.min(it.dueAt, inner)
+    }
   }
 
   // (R17) a client with nothing dated is listed too, last
@@ -2738,7 +2898,10 @@ export function whenText(due: number, now: number): string {
 export function isRed(it: QueueItem, now: number): boolean {
   // (R17) nothing due: never red
   if (!hasDue(it)) return false
-  return it.dueAt < now || etParts(it.dueAt).date === etParts(now).date
+  // ⛔ (0.7.60, Rob approved 2026-11-19 ('Yes, all five'): "Only a client date turns a thread red") the client's own due
+  // time alone: a ticket on an internal clock is never red, late or due today
+  const due = clientDueOf(it)
+  return Number.isFinite(due) && (due < now || etParts(due).date === etParts(now).date)
 }
 
 /** A moment as the pane writes times: `3 PM` when it is today in New York, `Fri 3 PM` when it is not. */
@@ -2797,8 +2960,12 @@ function taskWhat(it: QueueItem): string {
 
 /** What is due for a client and when, in words: `reply ready due tomorrow 8 AM`. */
 export function dueLine(it: QueueItem, now: number): string {
+  // (0.7.60) an internal clock past its time: `behind`, never `overdue`
+  const due = leadDueOf(it, now)
+  if (Number.isFinite(due)) return `${whatOf(it)} ${whenText(due, now)}`
+  const behind = internalBehindAt(it, now)
   // (R17) nothing due: what it is, and no clock
-  return hasDue(it) ? `${whatOf(it)} ${whenText(it.dueAt, now)}` : whatOf(it)
+  return Number.isFinite(behind) ? `${whatOf(it)} behind, due ${dueWhen(behind, now)}` : whatOf(it)
 }
 
 /** A client and what is due, as a chip says it: `Acme Legal · reply ready due 7 PM · 3 new`, and who holds its drafts when a teammate does. */
@@ -2862,7 +3029,9 @@ export function titleFor(it: QueueItem, now: number): string {
   // (`your draft` for a package the viewer holds, and `with <Name>` when a teammate holds it: 0.4.1; for the
   // founder, the teammate it is with when it is theirs to see through: 0.5.1)
   // (R17) nothing due: `🟡 <client> · <what>`, no clock and never red; (0.7.12) and `no due date` after it
-  const lead = theirs ? `🟡 with ${it.theirs ?? it.open?.by ?? ''}` : hasDue(it) ? `${isRed(it, now) ? '🔴' : '🟡'} ${clockAndDue(it.dueAt, now)}` : ''
+  // (0.7.60) the clock from the client's own due time once an internal one has passed (`leadDueOf`): never `late` for it
+  const leadDue = leadDueOf(it, now)
+  const lead = theirs ? `🟡 with ${it.theirs ?? it.open?.by ?? ''}` : Number.isFinite(leadDue) ? `${isRed(it, now) ? '🔴' : '🟡'} ${clockAndDue(leadDue, now)}` : ''
   // (0.7.27) the worst status names it, when it is more urgent than what is due: `🟡 Acme Legal · behind · needs 2.4 h/day, paid 1.5 · due Mon Nov 30`
   const status = theirs ? null : statusOf(it, now)
   const parts = status ? [`${status.dot} ${it.client}`, status.words] : lead ? [lead, it.client, whatOf(it)] : [`🟡 ${it.client}`, whatOf(it), ...(saysNoDue(it, theirs) ? [NO_DUE_DATE] : [])]
@@ -2885,9 +3054,12 @@ export function titleFor(it: QueueItem, now: number): string {
  */
 export function rowLine(it: QueueItem, now: number, opts: { fresh?: boolean; pins?: boolean } = {}): string {
   const theirs = withTeammate(it)
-  const due = !theirs && hasDue(it)
+  // (0.7.60) the clock from the client's own due time once an internal one has passed (`leadDueOf`)
+  const leadDue = leadDueOf(it, now)
+  const due = !theirs && Number.isFinite(leadDue)
   const what = whatOf(it)
-  const red = opts.pins === true || (due && isRed(it, now))
+  // ⛔ (0.7.60) R4's red for a client with no thread that pins now: never when only an internal clock pins it
+  const red = (opts.pins === true && !internalPinOnly(it, now)) || (due && isRed(it, now))
   // (0.7.27, the PM) a teammate's part to check on: what pins the row when nothing of his own does, its status's words
   const mate = checkNow(it, now)
   const check = mate && !ownPins(it, now) ? mate : null
@@ -2896,7 +3068,7 @@ export function rowLine(it: QueueItem, now: number, opts: { fresh?: boolean; pin
   const named = check ? [`${checkDot(check, now)} ${it.client}`, checkWords(check, now)] : status ? [`${status.dot} ${it.client}`, status.words] : null
   const parts = named ?? [`${red ? '🔴' : '🟡'} ${it.client}`, what === 'needs your OK' ? 'your OK' : what]
   // (0.7.12) once late, when it was due as well (`6h late, due Mon 3 PM`); nothing dated, `no due date`
-  if (!named && due) parts.push(clockAndDue(it.dueAt, now))
+  if (!named && due) parts.push(clockAndDue(leadDue, now))
   else if (!named && saysNoDue(it, theirs)) parts.push(NO_DUE_DATE)
   if (it.messages > 1) parts.push(`${it.messages} new`)
   // (0.7.27, the PM) from the teammate's pin report: `pinned for Asif` or `not pinned for Asif`; neither with no report to read
@@ -2908,6 +3080,14 @@ export function rowLine(it: QueueItem, now: number, opts: { fresh?: boolean; pin
   if (it.flagged) parts.push('flagged')
   if (opts.fresh) parts.push('no thread')
   return parts.join(' · ')
+}
+
+/**
+ * (0.7.60) Whether only the viewer's internal clocks pin a client now: no client clock of theirs pins it, no go of theirs,
+ * no pace row. Such a pin is yellow, never red (Rob approved 2026-11-19 ('Yes, all five')).
+ */
+export function internalPinOnly(it: QueueItem, now: number): boolean {
+  return !goMine(it) && !pacePins(it, now) && !pinsNow({ dueAt: Infinity, actBy: clientOwnOf(it) }, now)
 }
 
 /**
@@ -3306,7 +3486,8 @@ const UNDATED_SHOWN_MAX = 10
 export function etaMarkdown(it: QueueItem, now: number): string {
   const asks = etaAsksOf(it).filter(a => a && isUuid(a.id) && Number.isFinite(a.neededBy))
   if (!asks.length) return ''
-  const lines = asks.map(a => `- ${cleanText(a.title, MATE_TITLE_MAX)} (ticket ${a.id.slice(0, 8)}) · ${a.neededBy < now ? `ETA was needed by ${clockText(a.neededBy, now)}, ${lateText(a.neededBy, now)}` : `ETA needed by ${clockText(a.neededBy, now)}`}`)
+  // ⛔ (0.7.60) an owed ETA is an internal clock: past it, `behind`, never a late count
+  const lines = asks.map(a => `- ${cleanText(a.title, MATE_TITLE_MAX)} (ticket ${a.id.slice(0, 8)}) · ${a.neededBy < now ? `ETA was needed by ${clockText(a.neededBy, now)}, behind` : `ETA needed by ${clockText(a.neededBy, now)}`}`)
   return [`### ${ETA_ASK_TEXT}`, '', ...lines].join('\n')
 }
 
@@ -3314,7 +3495,8 @@ export function etaMarkdown(it: QueueItem, now: number): string {
 export function assignMarkdown(it: QueueItem, now: number): string {
   const asks = assignAsksOf(it).filter(a => a && isUuid(a.id) && Number.isFinite(a.assignBy))
   if (!asks.length) return ''
-  const lines = asks.map(a => `- ${cleanText(a.title, MATE_TITLE_MAX)} (ticket ${a.id.slice(0, 8)}) · ${a.assignBy < now ? `owner was needed by ${clockText(a.assignBy, now)}, ${lateText(a.assignBy, now)}` : `owner needed by ${clockText(a.assignBy, now)}`}`)
+  // ⛔ (0.7.60) `assign_by` is an internal clock: past it, `behind`, never a late count
+  const lines = asks.map(a => `- ${cleanText(a.title, MATE_TITLE_MAX)} (ticket ${a.id.slice(0, 8)}) · ${a.assignBy < now ? `owner was needed by ${clockText(a.assignBy, now)}, behind` : `owner needed by ${clockText(a.assignBy, now)}`}`)
   return [`### ${ASSIGN_ASK_TEXT}`, '', ...lines].join('\n')
 }
 
@@ -3322,7 +3504,8 @@ export function assignMarkdown(it: QueueItem, now: number): string {
 export function matesMarkdown(it: QueueItem, now: number): string {
   const refs = matesOf(it).filter(r => r && isUuid(r.id) && Number.isFinite(r.lateSince))
   if (!refs.length) return ''
-  const lines = refs.map(r => `- ${cleanText(r.by, 40)} · ${cleanText(r.title, MATE_TITLE_MAX)} (ticket ${r.id.slice(0, 8)}) · ${r.eta ? 'no ETA given' : 'past its ETA'}, ${lateText(r.lateSince, now)}`)
+  // ⛔ (0.7.60) a teammate's ticket on an internal clock reads `behind since`, never a late count
+  const lines = refs.map(r => `- ${cleanText(r.by, 40)} · ${cleanText(r.title, MATE_TITLE_MAX)} (ticket ${r.id.slice(0, 8)}) · ${r.eta ? 'no ETA given' : 'past its ETA'}, ${r.internal === true ? `behind since ${dueWhen(r.lateSince, now)}` : lateText(r.lateSince, now)}`)
   return [`### Late with a teammate (${refs.length})`, '', ...lines].join('\n')
 }
 
