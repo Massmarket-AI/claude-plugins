@@ -7,6 +7,10 @@ Entries before 0.11.0 are reconstructed from the git history rather than written
 at the time, so they are summaries of what a release did, not the release notes it
 shipped with.
 
+## 0.11.6
+
+- An item on one of our own clocks (the feed marks it `clock: "internal"`) never reads OVERDUE or "N days late". Once its date passes it says "behind", with no day count, in the Next up line, the item row, the card tag and the card's one-line date. Client items still read OVERDUE. Where items sit and their colour are unchanged. Rob approved 2026-11-19 ("Yes, all five"): "I think we should fix the small gaps."
+
 ## 0.11.5
 
 - The tracker updates itself. When a newer version is put in the folder Chrome loads it from, it switches to it within 5 minutes, with no reload button to press. What it has recorded is sent first (or kept and sent after, if you are offline), and you stay signed in.
