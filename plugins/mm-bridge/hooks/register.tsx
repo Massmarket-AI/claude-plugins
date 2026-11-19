@@ -244,7 +244,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.78'
+export const VERSION = '0.7.79'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -4579,6 +4579,56 @@ let earlierLooked = false
  * and its card drawn again on this computer (about 4 s, after the pickup read). Past it with no card, the thread is told (CARD_NOT_SHOWN).
  */
 export const EARLIER_WAIT_MS = 30_000
+
+/**
+ * (0.7.79) Where a reply that names the live call's tag was written, as the transcript holds it: after the call (it may take the
+ * call's card), at or before it (an older reply of the same tag: it never takes a newer call's card), not in the transcript yet
+ * (`pending`: still streaming; drawn again at the turn's end), or the transcript could not say (`unread`: the 0.7.48 rule stands).
+ *
+ * Agency Acquisition thread, 2026-11-18 (Package 8840c9137e2e, asked at 12:04 PM ET and again at 4:02 PM ET): the app shut the
+ * thread's process down at 12:34 PM after 30 minutes idle, and the process that answered the 4:02 call had never drawn the 12:04
+ * line, so nothing bound that line to the 12:04 call (`callOfLine` lives in the process). The 12:04 line ends with the same
+ * `Package 8840c9137e2e.` as the 4:03 one, and the app draws a transcript top down, so the 12:04 line was bound to the 4:02 call and
+ * took its card, four hours up the thread; the 4:03 line found the card taken and drew none. The check then counted the card as
+ * shown (`lineOfCall`) and told nothing. Rob saw no card and had to ask for the page twice.
+ */
+type LineWritten = 'after' | 'before' | 'pending' | 'unread'
+/** (0.7.79) By `<row>\n<tool_use_id>`: a reply row already placed after or before that call. At most ROWS_MAX, the oldest dropped first. */
+const lineWrittenOf = new Map<string, 'after' | 'before'>()
+
+/** (0.7.79) Text as compared with the transcript's: runs of white space as one space, trimmed. */
+const flat = (text: string): string => text.replace(/\s+/g, ' ').trim()
+
+/**
+ * (0.7.79) Where this reply was written against the call `toolUseId` (`LineWritten`). The whole reply's text is looked for in the
+ * transcript's assistant messages; where the surface drew it otherwise than the transcript holds it, the words leading up to the tag
+ * stand for it, and those found on both sides of the call (two lines that end alike) count as before: no card, so the check tells the
+ * thread to print the page. Reads only. Never throws.
+ */
+async function lineWritten($: EngineInterface, toolUseId: string, label: string, text: string): Promise<LineWritten> {
+  try {
+    const messages = await $.session.messages()
+    if (!Array.isArray(messages)) return 'unread'
+    const at = messages.findIndex(m => m.role === 'assistant' && (m.toolUses ?? []).some(u => u.tool_use_id === toolUseId))
+    if (at < 0) return 'unread'
+    const said = messages.map(m => (m.role === 'assistant' ? flat(String(m.text ?? '')) : ''))
+    const sides = (words: string) => ({
+      before: said.slice(0, at + 1).some(s => s.includes(words)),
+      after: said.slice(at + 1).some(s => s.includes(words)),
+    })
+    const whole = flat(text)
+    let found = whole ? sides(whole) : { before: false, after: false }
+    if (!found.before && !found.after) {
+      const tag = `Package ${label}`
+      const end = whole.lastIndexOf(tag)
+      if (end >= 0) found = sides(whole.slice(Math.max(0, end - 120), end + tag.length))
+    }
+    if (found.before) return 'before'
+    return found.after ? 'after' : 'pending'
+  } catch {
+    return 'unread'
+  }
+}
 /** (0.7.48) When a surface last drew this thread: its band, or one of its reply rows. */
 let threadDrawnAt = 0
 /** (0.7.48) When this thread's current turn of the main conversation began; null until one has in this process. */
@@ -4628,7 +4678,11 @@ async function forgetLine($: EngineInterface, row: string): Promise<void> {
   await keepShown($, rec => (rec?.line === row ? { asked: rec.asked, told: rec.told } : rec))
 }
 
-/** (0.7.48) A turn of the main conversation ended with an answer: the ready answer it got, if any, is owed to the screen. */
+/**
+ * (0.7.48) A turn of the main conversation ended with an answer: the ready answer it got, if any, is owed to the screen. (0.7.79) The
+ * rows are asked to draw again first: the thread's line was in the transcript only once it had streamed (`lineWritten`'s `pending`),
+ * so a draw from before that took no card.
+ */
 async function owe($: EngineInterface): Promise<void> {
   const asked = await liveAsked($)
   if (!asked || turnBeganAt === null || asked.at < turnBeganAt) {
@@ -4638,6 +4692,11 @@ async function owe($: EngineInterface): Promise<void> {
   }
   if (lineOfCall.has(asked.toolUseId) || drawFailTold.has(asked.label)) return
   owedCard = { toolUseId: asked.toolUseId, packageId: asked.packageId, label: asked.label, since: asked.at, armed: false }
+  try {
+    $.ui.invalidate('ui.render')
+  } catch {
+    // the rows draw again at the next draw
+  }
   armShown($)
 }
 
@@ -4770,6 +4829,7 @@ export function resetShown(): void {
   callOfLine.clear()
   drawnRows.clear()
   drawFailTold.clear()
+  lineWrittenOf.clear()
 }
 
 /** (0.7.40) This row fell back to the engine's: unlisted, and a row that was listed asks for one redraw, so its answer shows again. */
@@ -12673,6 +12733,17 @@ export const register: Register = on => {
     try {
       const asked = await liveAsked($)
       if (!asked || !text.includes(`Package ${asked.label}`)) return next(e)
+      // (0.7.79) only a reply written after the live call takes its card: an older reply of the same tag never does (`lineWritten`)
+      const placed = `${row}\n${asked.toolUseId}`
+      let written: LineWritten | undefined = lineWrittenOf.get(placed)
+      if (!written) {
+        written = await lineWritten($, asked.toolUseId, asked.label, text)
+        if (written === 'after' || written === 'before') {
+          lineWrittenOf.set(placed, written)
+          trimRows(lineWrittenOf)
+        }
+      }
+      if (written === 'before' || written === 'pending') return next(e)
       if (!callOfLine.has(row)) {
         callOfLine.set(row, asked.toolUseId)
         trimRows(callOfLine)
