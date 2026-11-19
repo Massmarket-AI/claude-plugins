@@ -21,7 +21,7 @@ import type { MmRow, MmTeam } from '../types'
 import {
   MAY_NEED_OK, NOBODY, assignAsksOf, assignOnly, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, committedCount, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
   checkNow, clientDueOf, internalBehindAt, leadDueOf, newestFirst, olderTotal, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, tasksBesidesUndated, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
-  TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine,
+  TEAM_BEHIND, TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine, teamLateSplit,
   goOf, goOnly, goWithMail, stepWord,
   NO_REPLY_WHAT, afterPackage, checkDot, noReplyNow, owesNoReply, paceOf, paceOnly, paceStatus, paceWord, statusOf,
 } from './queue'
@@ -1980,7 +1980,7 @@ export type TeamPane = MmTeam
  * ticket one line (`teamLateLine`). Empty for every viewer but the founder.
  */
 export function teamPane(items: readonly QueueItem[], now: number): TeamPane[] {
-  return teamLate(items).map(p => ({ by: p.by, count: p.count, clients: p.clients.map(c => ({ client: c.client, lines: c.refs.map(r => teamLateLine(r, now)) })) }))
+  return teamLate(items).map(p => ({ by: p.by, count: p.count, ...(p.behind > 0 ? { behind: p.behind } : {}), clients: p.clients.map(c => ({ client: c.client, lines: c.refs.map(r => teamLateLine(r, now)) })) }))
 }
 
 /** (0.7.21) Team · late as the pane stores it, each part checked again: a pane an older version stored has none. */
@@ -2005,7 +2005,11 @@ export function teamOf(v: unknown): TeamPane[] {
 export const teamCount = (team: readonly TeamPane[]): number => teamLateCount(team)
 
 /** (0.7.21) Team · late's heading, with how many tickets it holds: `Team · late (5)`. */
-export const teamHeading = (team: readonly TeamPane[]): string => `${TEAM_LATE} (${teamCount(team)})`
+export const teamHeading = (team: readonly TeamPane[]): string => {
+  // (0.7.61, Rob approved 2026-11-19 ('Yes, all five')) `Team · behind` when every ref is on an internal clock, else `Team · late`
+  const { late, behind } = teamLateSplit(team)
+  return `${late === 0 && behind > 0 ? TEAM_BEHIND : TEAM_LATE} (${teamCount(team)})`
+}
 
 /** (0.7.21) A teammate's heading in it: `Asif (3)`. */
 export const teamPerson = (p: Pick<TeamPane, 'by' | 'count'>): string => `${p.by} (${p.count})`

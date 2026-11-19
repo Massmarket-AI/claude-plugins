@@ -1675,7 +1675,7 @@ export function fmtDue(iso) {
  * that is what someone triaging actually needs to know, and everything else drops
  * the weekday and the minutes.
  */
-export function fmtDueShort(iso, now = Date.now()) {
+export function fmtDueShort(iso, now = Date.now(), internal = false) {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;
@@ -1694,7 +1694,8 @@ export function fmtDueShort(iso, now = Date.now()) {
   if (days === 0) return `today${time}`;
   if (days === 1) return `tomorrow${time}`;
   if (days === -1) return `yesterday${time}`;
-  if (days < 0) return `${Math.abs(days)}d overdue`;
+  // Rob approved 2026-11-19 ('Yes, all five'): an internal clock reads "behind", no count.
+  if (days < 0) return internal ? 'behind' : `${Math.abs(days)}d overdue`;
   // Inside the working fortnight a weekday reads faster than a date.
   if (days <= 6) return `${d.toLocaleDateString([], { weekday: 'short' })}${time}`;
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
@@ -1719,7 +1720,7 @@ function itemLine(m, nextFingerprint) {
     tags.appendChild(el('span', 'mm-tag next', '▶ NEXT UP'));
   }
   if (m._state === 'reply_24h') tags.appendChild(el('span', 'mm-tag red', 'DUE < 24H'));
-  if (m._state === 'overdue') tags.appendChild(el('span', 'mm-tag amber', 'OVERDUE'));
+  if (m._state === 'overdue') tags.appendChild(el('span', 'mm-tag amber', m._clock === 'internal' ? 'BEHIND' : 'OVERDUE'));
   if (needsEta(m)) tags.appendChild(el('span', 'mm-tag eta', 'ETA NEEDED'));
   if (m._type === 'job_card') tags.appendChild(el('span', 'mm-tag', 'UNCLAIMED'));
   // ⛔ SAY WHY THIS CLIENT IS HERE. A `ticket_queue` row is the ONLY kind that
@@ -1876,7 +1877,8 @@ export function cardSummaryLine(card) {
   // The date that put this card in its band, so the headline never contradicts it —
   // the same rule the long meta line already followed.
   const dateFor = card.state === 'reply_24h' && card.replyDue ? card.replyDue : card.due;
-  const due = fmtDueShort(dateFor);
+  const dueItem = card.items.find((m) => m.due === dateFor);
+  const due = fmtDueShort(dateFor, Date.now(), dueItem?._clock === 'internal');
   if (due) bits.push(card.state === 'reply_24h' ? `due ${due}` : `by ${due}`);
 
   return bits.join(' · ');
@@ -2154,7 +2156,13 @@ function buildCard(card, handlers) {
     tags.appendChild(el('span', 'mm-tag red', card.reply24Count === 1 ? 'DUE < 24H' : `DUE < 24H (${card.reply24Count})`));
   }
   if (card.overdueCount) {
-    tags.appendChild(el('span', 'mm-tag amber', card.overdueCount === 1 ? 'OVERDUE' : `OVERDUE (${card.overdueCount})`));
+    // Rob approved 2026-11-19 ('Yes, all five'); 'I think we should fix the small gaps.'
+    // Internal clocks read BEHIND, client clocks OVERDUE; same amber tag, same count of items.
+    const behind = card.behindCount || 0;
+    const late = card.overdueCount - behind;
+    const part = (n, word) => (n === 1 && behind + late === n ? word : `${word} (${n})`);
+    if (late) tags.appendChild(el('span', 'mm-tag amber', part(late, 'OVERDUE')));
+    if (behind) tags.appendChild(el('span', 'mm-tag amber', part(behind, 'BEHIND')));
   }
   if (card.etaNeeded) {
     tags.appendChild(

@@ -159,6 +159,8 @@ const FINGERPRINT_PREFIX = {
   // tickets rather than standing for one. That is what keeps the fingerprint
   // stable across refreshes. Keep in sync with chip-feed.ts.
   ticket_queue: 'tickets',
+  // H9's lane (OW next-task-pace-lane.ts, 2026-11-05). Keep in sync with chip-feed.ts.
+  pace_flag: 'pace',
 };
 
 export function fingerprintFor(item) {
@@ -180,6 +182,10 @@ export function urgencyPhrase(item, now) {
   if (!Number.isFinite(due)) return 'no date set';
   const deltaMs = due - now;
   if (deltaMs < 0) {
+    // Rob approved 2026-11-19 ('Yes, all five'); 'I think we should fix the small gaps.'
+    // An internal clock (the feed's `clock: "internal"`, OW chip-feed.ts) is never OVERDUE:
+    // past its time it is "behind", with no day count. Client clocks are unchanged.
+    if (item.clock === 'internal') return 'behind';
     const days = Math.floor(-deltaMs / 86400000);
     if (days >= 1) return `OVERDUE by ${days} day${days === 1 ? '' : 's'}`;
     return 'OVERDUE (today)';
@@ -217,6 +223,8 @@ export function memberFromItem(item, now) {
     _action: item.action,
     _logged_hours: item.logged_hours,
     _rank_bucket: item.rank_bucket,
+    // 'internal' when the feed says the date is one of our own clocks (labels only).
+    _clock: item.clock === 'internal' ? 'internal' : null,
   };
 }
 
@@ -602,6 +610,8 @@ export function buildCards(feedData, now = Date.now()) {
     card.ticketOnly = card.items.length > 0 && card.items.every((m) => m._type === 'ticket_queue');
     card.reply24Count = card.items.filter((m) => m._state === 'reply_24h').length;
     card.overdueCount = card.items.filter((m) => m._state === 'overdue').length;
+    // Of those, the ones on an internal clock read "behind" (label only; state is unchanged).
+    card.behindCount = card.items.filter((m) => m._state === 'overdue' && m._clock === 'internal').length;
     // The date that actually put this card in the 24-hour band. `card.due` is the
     // earliest date across ALL items, which on a mixed card is an overdue one —
     // showing that as the headline of a 24-hour card reads as a contradiction.
