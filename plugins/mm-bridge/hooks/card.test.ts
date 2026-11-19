@@ -2836,6 +2836,250 @@ describe('0.7.52 a line the app shows as a summary gives the card back, and the 
   })
 })
 
+describe('0.7.60 the card goes under the newest line, and a card an earlier process drew is not lost silently', () => {
+  type Hook = ($: unknown, e: Record<string, unknown>, next: (e: unknown) => unknown) => Promise<unknown>
+  const lineHook = hooks['ui.render:{"component":"AssistantMessage"}'] as Hook
+  const rowHook = hooks['ui.render:{"component":"ToolUse"}'] as Hook
+  const bandHook = hooks['ui.render:{"component":"AbovePrompt"}'] as Hook
+  const startHook = hooks['turn.start'] as Hook
+  const endHook = hooks['turn.complete'] as Hook
+  const PKG = SMS_TREE.package_id as string
+  const ENGINE = { engine: 'drawing' }
+  const engine = () => ENGINE
+  const pass = async (e: unknown) => e
+  /** Tags of this block's own: the tags told are kept for the session, once a tag. */
+  const tag = (n: number) => `abcdef${String(200 + n).padStart(6, '0')}`
+  const MM = 'mcp__mm-bridge__mm'
+  const ready = (label: string) => `card ready: Package ${label}. The whole package is checked and drawn in this thread, under the one line you print now; the side pane draws it too when this thread is open on a screen.`
+  type Msg = { role: 'user' | 'assistant'; text: string; toolUses: Array<{ tool_use_id: string; tool: string; input: Record<string, unknown>; text?: string }> }
+  const said = (text: string): Msg => ({ role: 'assistant', text, toolUses: [] })
+  const asked = (text: string, id: string, answer: string, args = `card ${PKG}`): Msg => ({ role: 'assistant', text, toolUses: [{ tool_use_id: id, tool: MM, input: { args }, text: answer }] })
+  const person = (text: string): Msg => ({ role: 'user', text, toolUses: [] })
+  /** The 2026-11-18 thread's two lines, each ending with the same sentence and tag. */
+  const OLD = (label: string) => `- I didn't take the package. Nobody holds it, so the team can still pick it up.\n\nThe card is below, and the go comes from its box. Say "print the page" if you can't see it or any part doesn't show. Package ${label}.`
+  const NEW = (label: string) => `**Why this thread is pinned:** Kory's reply package is waiting for your go.\n\nThe card is below, and the go comes from its box. Say "print the page" if you can't see it or any part doesn't show. Package ${label}.\n\nOne more thing: another thread's reply is due Thursday.`
+  const watching = (label: string, opts: { live?: boolean; listed?: boolean } = {}) => {
+    resetShown()
+    const t = thread()
+    const asks: string[] = []
+    const invalidated: string[] = []
+    const messages: Msg[] = []
+    ;(t.$ as unknown as Record<string, unknown>).ui = {
+      resolve: () => ({ Box: 'Box', Text: 'Text', Button: 'Button', Link: 'Link', Svg: 'Svg', Input: 'Input', Markdown: 'Markdown' }),
+      invalidate: (event: string) => void invalidated.push(event),
+    }
+    ;(t.$ as unknown as { prompt: Record<string, unknown> }).prompt.submit = async (input: { text: string }) => {
+      asks.push(input.text)
+      return { text: input.text }
+    }
+    ;(t.$ as unknown as { session: Record<string, unknown> }).session.messages = async () => messages.map(m => ({ ...m, toolUses: [...m.toolUses] }))
+    // the last sync: the package still waiting (listed), or sent and gone from every list
+    ;(t.$ as unknown as Record<string, unknown>).store = { get: async (key: string) => (key === 'mm.last' ? { items: opts.listed === false ? [] : [{ projectId: SMS_TREE.project_id, packageId: PKG, kind: 'ready' }] } : undefined) }
+    if (opts.live !== false) {
+      t.state.set('card', cardOf({ tree: { ...tree(), label } }))
+      t.state.set('cardChecked', { [label]: 0 })
+      t.state.set('view', { text: '## Example Dental · reply package', heading: '' })
+    }
+    return { ...t, asks, invalidated, messages }
+  }
+  const line = (id: string, text: string) => ({ surface: 'desktop', component: 'AssistantMessage', requestId: id, props: { text, isFirstOfReply: true } })
+  const useRow = (id: string, label: string) => ({
+    surface: 'desktop', component: 'ToolUse', requestId: id,
+    props: { tool_use_id: id, tool: MM, input: { args: `card ${PKG}` }, isRunning: false, isErrored: false, isInterrupted: false, output: ready(label) },
+  })
+  const band = () => ({ surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false } })
+  const begin = (t: { $: unknown }) => startHook(t.$, { turnId: 't1' }, pass)
+  const end = (t: { $: unknown }) => endHook(t.$, { answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' }, pass)
+  const settle = async () => {
+    for (let i = 0; i < 50; i++) await Promise.resolve()
+  }
+  const CARD = 'One go sends 1 item. Package '
+
+  test('the 2026-11-18 thread: an older line that ends with the same tag keeps its words, and the newest line takes the card', async () => {
+    const label = tag(1)
+    const t = watching(label)
+    // 12:04: the first ask and its line; 4:01: the person asks; 4:02: the thread asks again and prints its new line
+    t.messages.push(asked('', 'toolu_n1a', ready(label)), said(OLD(label)), person('Can you show the package if there is one?'))
+    t.messages.push(asked("Package is still unsent, so I'm asking the bridge to draw it again:", 'toolu_n1b', ready(label)), said(NEW(label)))
+    await begin(t)
+    await t.advance(1_000)
+    await noteAsked(t.$, { packageId: PKG, label, toolUseId: 'toolu_n1b' })
+    // a new process binds no row to any call yet, and the app draws top down: the 12:04 line first
+    expect(await lineHook(t.$, line('msg_n1_old', OLD(label)), engine)).toBe(ENGINE)
+    expect(texts(await rowHook(t.$, useRow('toolu_n1b', label), engine)).join('\n')).toContain(CARD)
+    expect(texts(await lineHook(t.$, line('msg_n1_new', NEW(label)), engine)).join('\n')).toContain(CARD)
+    expect(texts(await rowHook(t.$, useRow('toolu_n1b', label), engine))).toEqual([ROW_BELOW(label)])
+    // drawn again, in either order: the older line never takes it
+    expect(await lineHook(t.$, line('msg_n1_old', OLD(label)), engine)).toBe(ENGINE)
+    expect(texts(await lineHook(t.$, line('msg_n1_new', NEW(label)), engine)).join('\n')).toContain(CARD)
+    await end(t)
+    // after the turn too: the older line keeps its words, the newest line keeps the card
+    expect(await lineHook(t.$, line('msg_n1_old', OLD(label)), engine)).toBe(ENGINE)
+    expect(texts(await lineHook(t.$, line('msg_n1_new', NEW(label)), engine)).join('\n')).toContain(CARD)
+    await bandHook(t.$, band(), engine)
+    await t.advance(SHOWN_WAIT_MS * 2)
+    await settle()
+    expect(t.asks).toEqual([])
+  })
+
+  test('the newest line drawn before the transcript holds it takes no card yet; the turn\'s end draws the rows again and it takes the card then', async () => {
+    const label = tag(2)
+    const t = watching(label)
+    t.messages.push(asked('', 'toolu_n2', ready(label)))
+    await begin(t)
+    await t.advance(1_000)
+    await noteAsked(t.$, { packageId: PKG, label, toolUseId: 'toolu_n2' })
+    // still streaming: the transcript has not stored the line
+    expect(await lineHook(t.$, line('msg_n2', NEW(label)), engine)).toBe(ENGINE)
+    t.messages.push(said(NEW(label)))
+    const before = t.invalidated.length
+    await end(t)
+    expect(t.invalidated.length).toBeGreaterThan(before)
+    expect(texts(await lineHook(t.$, line('msg_n2', NEW(label)), engine)).join('\n')).toContain(CARD)
+    await t.advance(SHOWN_WAIT_MS * 2)
+    await settle()
+    expect(t.asks).toEqual([])
+  })
+
+  test('no line written after the call takes the card: the thread is told, as any card not shown', async () => {
+    const label = tag(3)
+    const t = watching(label)
+    t.messages.push(said(OLD(label)), asked('', 'toolu_n3', ready(label)))
+    await begin(t)
+    await t.advance(1_000)
+    await noteAsked(t.$, { packageId: PKG, label, toolUseId: 'toolu_n3' })
+    expect(await lineHook(t.$, line('msg_n3_old', OLD(label)), engine)).toBe(ENGINE)
+    await end(t)
+    await t.advance(SHOWN_WAIT_MS)
+    await settle()
+    expect(t.asks).toEqual([CARD_NOT_SHOWN(label)])
+  })
+
+  test('drawn otherwise than the transcript holds it: the words before the tag stand for the line, and words found on both sides of the call take no card', async () => {
+    // the surface drew a link as plain words: the whole reply is not in the transcript, its last words are, after the call alone
+    const first = tag(4)
+    const t = watching(first)
+    const tail = `The card is below, and the go comes from its box. Say "print the page" if you can't see it or any part doesn't show. Package ${first}.`
+    t.messages.push(asked('', 'toolu_n4', ready(first)), said(`Read [the plan](https://example.com/plan) first.\n\n${tail}`))
+    await begin(t)
+    await noteAsked(t.$, { packageId: PKG, label: first, toolUseId: 'toolu_n4' })
+    expect(texts(await lineHook(t.$, line('msg_n4', `Read the plan first.\n\n${tail}`), engine)).join('\n')).toContain(CARD)
+    // the same, where an older line before the call ends in the same words: neither takes it, and the thread is told
+    const second = tag(5)
+    const u = watching(second)
+    // longer than the 120 characters looked at before the tag, so those characters are the same in both lines
+    const same = `Nothing has been sent yet. The card is below, and the go comes from its box. Say "print the page" if you can't see it or any part doesn't show. Package ${second}.`
+    expect(same.indexOf(`Package ${second}`)).toBeGreaterThan(120)
+    u.messages.push(said(`Earlier [notes](https://example.com/a).\n\n${same}`), asked('', 'toolu_n5', ready(second)), said(`Read [the plan](https://example.com/plan) first.\n\n${same}`))
+    await begin(u)
+    await u.advance(1_000)
+    await noteAsked(u.$, { packageId: PKG, label: second, toolUseId: 'toolu_n5' })
+    expect(await lineHook(u.$, line('msg_n5', `Read the plan first.\n\n${same}`), engine)).toBe(ENGINE)
+    await end(u)
+    await u.advance(SHOWN_WAIT_MS)
+    await settle()
+    expect(u.asks).toEqual([CARD_NOT_SHOWN(second)])
+  })
+
+  test('a transcript that cannot be read leaves the 0.7.48 rule: the first line naming the tag takes the card', async () => {
+    const label = tag(6)
+    const t = watching(label)
+    ;(t.$ as unknown as { session: Record<string, unknown> }).session.messages = async () => {
+      throw new Error('no transcript here')
+    }
+    await begin(t)
+    await noteAsked(t.$, { packageId: PKG, label, toolUseId: 'toolu_n6' })
+    expect(texts(await lineHook(t.$, line('msg_n6', NEW(label)), engine)).join('\n')).toContain(CARD)
+    // and a call the transcript does not hold (older than its newest 4096 entries) is the same
+    const other = tag(7)
+    const u = watching(other)
+    u.messages.push(said(NEW(other)))
+    await begin(u)
+    await noteAsked(u.$, { packageId: PKG, label: other, toolUseId: 'toolu_n7' })
+    expect(texts(await lineHook(u.$, line('msg_n7', NEW(other)), engine)).join('\n')).toContain(CARD)
+  })
+
+  test('the 2026-11-18 12:04 card: a new process opened later, with no live call, tells the thread once it has been drawn', async () => {
+    const label = tag(8)
+    // the process that drew it is gone: no card, no live call, nothing of the turn
+    const t = watching(label, { live: false })
+    t.messages.push(asked('', 'toolu_n8', ready(label)), said(OLD(label)))
+    await bandHook(t.$, band(), engine)
+    await settle()
+    await t.advance(SHOWN_WAIT_MS - 1)
+    await settle()
+    expect(t.asks).toEqual([])
+    await t.advance(1)
+    await settle()
+    expect(t.asks).toEqual([CARD_NOT_SHOWN(label)])
+    // once a tag: later draws tell nothing more
+    await bandHook(t.$, band(), engine)
+    await t.advance(SHOWN_WAIT_MS * 2)
+    await settle()
+    expect(t.asks).toHaveLength(1)
+  })
+
+  test('a lost card waits out a turn under way and is owed no more once the thread asks for the card again', async () => {
+    const label = tag(9)
+    const t = watching(label, { live: false })
+    t.messages.push(asked('', 'toolu_n9a', ready(label)), said(OLD(label)))
+    // the person typed as the thread opened: the turn is under way
+    await begin(t)
+    await bandHook(t.$, band(), engine)
+    await settle()
+    await t.advance(SHOWN_WAIT_MS * 2)
+    await settle()
+    expect(t.asks).toEqual([])
+    // the thread asks again and gets ready: the newer call is this process's, and only it is owed
+    t.state.set('card', cardOf({ tree: { ...tree(), label } }))
+    t.state.set('cardChecked', { [label]: 0 })
+    t.state.set('view', { text: '## Example Dental · reply package', heading: '' })
+    t.messages.push(person('Can you show the package if there is one?'), asked('', 'toolu_n9b', ready(label)), said(NEW(label)))
+    await t.advance(1_000)
+    await noteAsked(t.$, { packageId: PKG, label, toolUseId: 'toolu_n9b' })
+    expect(await lineHook(t.$, line('msg_n9_old', OLD(label)), engine)).toBe(ENGINE)
+    expect(texts(await lineHook(t.$, line('msg_n9_new', NEW(label)), engine)).join('\n')).toContain(CARD)
+    await end(t)
+    await t.advance(SHOWN_WAIT_MS * 2)
+    await settle()
+    expect(t.asks).toEqual([])
+  })
+
+  test('a lost card held back by a turn that asked for no card is told at the turn\'s end', async () => {
+    const label = tag(10)
+    const t = watching(label, { live: false })
+    t.messages.push(asked('', 'toolu_n10', ready(label)), said(OLD(label)))
+    await begin(t)
+    await bandHook(t.$, band(), engine)
+    await settle()
+    await t.advance(SHOWN_WAIT_MS * 2)
+    await settle()
+    expect(t.asks).toEqual([])
+    await end(t)
+    await t.advance(SHOWN_WAIT_MS)
+    await settle()
+    expect(t.asks).toEqual([CARD_NOT_SHOWN(label)])
+  })
+
+  test('nothing lost is owed after a go, after a note for its tag, when the newest ask was not ready, or for a package no longer waiting', async () => {
+    const cases: Array<{ label: string; build: (label: string) => Msg[]; listed?: boolean }> = [
+      { label: tag(11), build: l => [asked('', 'toolu_n11', ready(l)), said(OLD(l)), person(`Send package ${l}`)] },
+      { label: tag(12), build: l => [asked('', 'toolu_n12', ready(l)), said(OLD(l)), person(`The mm-bridge plugin sent a message:\n${CARD_NOT_SHOWN(l)}`)] },
+      { label: tag(13), build: l => [asked('', 'toolu_n13a', ready(l)), said(OLD(l)), asked('', 'toolu_n13b', 'card not ready: a newer client message waits. Print the whole page.')] },
+      { label: tag(14), build: l => [asked('', 'toolu_n14', ready(l)), said(OLD(l))], listed: false },
+    ]
+    for (const c of cases) {
+      const t = watching(c.label, { live: false, listed: c.listed })
+      t.messages.push(...c.build(c.label))
+      await bandHook(t.$, band(), engine)
+      await settle()
+      await t.advance(SHOWN_WAIT_MS * 2)
+      await settle()
+      expect(t.asks).toEqual([])
+    }
+  })
+})
+
 describe('0.7.43 the quote view: each row of a quote PDF on one line of four cells, on every surface', () => {
   type El = { type?: unknown; props?: Record<string, unknown>; children?: unknown }
   /** The elements directly under one, nested arrays read through. */
