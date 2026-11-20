@@ -4396,6 +4396,33 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await u.unmount()
     })
 
+    test('(0.7.65) the pane showing another client: `mm card` puts this thread\'s client back in it first, as `mm view` does, and answers ready', async ($, on) => {
+      // Spotlight Dentistry thread, 2026-11-19 at 1:02 PM ET: answered not ready because nothing had put the client in the pane yet
+      const w = world(on, own)
+      const u = await shown($)
+      await u.press({ key: `drafts:${BOLT}` })
+      const other = (await lines(u)).join('\n')
+      expect(other).not.toContain('Hi! Is the new booking link live yet?')
+      expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn'))).toBe(false)
+      const renders = w.renders.length
+      const calls = w.calls.length
+      // ready, in either of its forms: the pane may not have drawn the card again yet within `mm card`'s wait (before 0.7.65: not ready)
+      expect([READY, OFF_SCREEN]).toContain(await tool($, `card ${PKG}`))
+      // this thread's client is in the pane again: the card is drawn there, read from OW and the renderer as `mm view` reads it
+      expect((await lines(u)).join('\n')).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
+      expect(w.renders.length).toBeGreaterThan(renders)
+      // it sends, starts, fills and notes nothing: the only app call is the one that learns this thread's id
+      expect(w.fills).toEqual([])
+      expect(w.prompts).toEqual([])
+      expect(w.minted()).toEqual([])
+      expect(sends(w)).toEqual([])
+      expect(w.calls.slice(calls).filter(c => c.tool !== 'get_session')).toEqual([])
+      // a package that is not this thread's client's is still not ready, and the pane keeps this thread's client
+      expect(await tool($, 'card 99999999-9999-4999-8999-999999999999')).toBe(notReady('the side pane is not showing this package'))
+      expect((await lines(u)).join('\n')).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
+      await u.unmount()
+    })
+
     test('(0.7.36) the pane behind another tab: ready, and it says the card is waiting rather than on screen', async ($, on) => {
       const w = world(on, own)
       const u = await shown($)
