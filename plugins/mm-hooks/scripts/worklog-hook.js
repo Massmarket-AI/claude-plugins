@@ -58,6 +58,15 @@
  * client has a line the work can count to, and prints one more line when it has
  * none. Short timeout, silent on any failure. See NO OPEN LINE.
  *
+ * Chips only for a typed session (0.13.2, 2026-11-20, OW ticket c0f6608d): the
+ * server records a serve the moment it answers the chip feed, so the feed is
+ * asked for only by a session a person starts and types into. Never on a
+ * SessionStart that is a resume or a compaction, never in an sdk or unattended
+ * run, and, once this computer's UserPromptSubmit registration has been seen,
+ * at the session's first prompt instead of its start, and only when that prompt
+ * is typed: not a scheduled task, not a bridge kickoff, not the app's own event.
+ * See CHIPS ONLY FOR A TYPED SESSION.
+ *
  * Turn origin (0.11.5, 2026-10-12): every worklog POST also says who started the
  * work it belongs to, `person` or `auto`, read from the stamp Claude Code writes
  * on the turn's opening entry in the session's transcript. A turn the system
@@ -187,7 +196,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.13.1";
+const HOOK_VERSION = "0.13.2";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -320,7 +329,9 @@ const FETCH_TIMEOUT_MS = 10000;
 
 // ⛔ HARD-EXIT BUDGETS (2026-09-29) — main() arms one of these before anything
 // else on the event path runs; see the block there. SessionStart gets the long
-// one because its chip-feed request alone may use CHIP_FETCH_TIMEOUT_MS (10 s).
+// one because its chip-feed request alone may use CHIP_FETCH_TIMEOUT_MS (10 s),
+// and so does UserPromptSubmit (0.13.2), which makes that request at a typed
+// session's first prompt.
 const HARD_EXIT_SESSION_START_MS = 12000;
 const HARD_EXIT_DEFAULT_MS = 6000;
 /** When the armed hard exit fires (epoch ms). 0 until main() arms it. */
@@ -410,6 +421,15 @@ const DEBUG_LOG = STATE_DIR ? path.join(STATE_DIR, "debug.log") : null;
 const SESSION_STATE_DIR = (() => {
   const root = stateRootDir();
   return root ? path.join(root, "sessions") : null;
+})();
+/**
+ * The chip lane's per-session "serve at the first typed prompt" files (0.13.2):
+ * `<homedir>/.claude/mm-hooks/state/chip-lane/<session id>.pending`. Plain
+ * files, pruned like every other state file. See CHIPS ONLY FOR A TYPED SESSION.
+ */
+const CHIP_LANE_DIR = (() => {
+  const root = stateRootDir();
+  return root ? path.join(root, "chip-lane") : null;
 })();
 
 /**
@@ -884,6 +904,7 @@ function writeDeclarationRecord(sessionId, state, previous) {
 function pruneOldState(event) {
   pruneStateFiles(STATE_DIR);
   pruneStateFiles(SESSION_STATE_DIR);
+  pruneStateFiles(CHIP_LANE_DIR);
   if (event === "SessionStart") pruneDeclarationRecords();
 }
 
@@ -11096,6 +11117,229 @@ async function handleStop(payload) {
   ]);
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// CHIPS ONLY FOR A TYPED SESSION (0.13.2, 2026-11-20; OW ticket c0f6608d,
+// invariant R42 "No active member keeps being served chips that never reach
+// them"; the fix Rob approved).
+//
+// The server writes `minted` the moment it answers GET /api/ext/chip-feed
+// (serve = minted), and a card reaches a person only when the model in the
+// session that fetched it puts it on screen. So every fetch by a session nobody
+// reads spends a serve, and after MAX_UNCLAIMED_RESURFACES of them the task is
+// hidden until someone acts. Measured 2026-11-20: has9@'s serves landed seconds
+// before scheduled tasks started ("Daily ETA self-assessment", "Revision
+// insights (weekly)") and in bursts on resumed and compacted sessions; none was
+// delivered after 11-11, and four of his tasks sat hidden at the ceiling.
+//
+// So the feed is asked for only by a session a person starts and types into:
+//
+//   1. Never on a SessionStart whose `source` is `resume` or `compact`: that
+//      session already had its start. A pending first-prompt serve for it is
+//      withdrawn.
+//   2. Never in a run no person is at: an sdk entrypoint (the `claude -p`
+//      runners) or MM_UNATTENDED=1 (isPersonSession).
+//   3. A SessionStart payload carries no prompt, so it cannot tell a scheduled
+//      task or a bridge kickoff from a person's thread. Once this computer's
+//      UserPromptSubmit registration has been SEEN (promptHookLive: this hook
+//      ran on UserPromptSubmit here within PROMPT_HOOK_LIVE_MS), a startup or
+//      clear SessionStart serves nothing and leaves a pending file. The
+//      session's FIRST UserPromptSubmit takes that file (an atomic rename, so
+//      a double registration still serves once) and serves only when the
+//      prompt is typed (chipPromptVerdict): not a scheduled task, not a prompt
+//      holding the bridge's `[mm-link <uuid>]` marker, not an event the app
+//      wrote, not a thread another session started. The chip text goes out as
+//      that prompt's additionalContext.
+//   4. Until that registration is seen (a hook the plugin updated before the
+//      plugin registered UserPromptSubmit, a computer on the installer alone),
+//      a startup SessionStart serves exactly as before, with 1 and 2 applied,
+//      so no member is left without chips while the rollout is half done.
+//
+// Everything else SessionStart does is unchanged: the token warning, the
+// settings self-check, the token backfill, the setup report, and the tracking
+// instruction first, every time (the built-in copy when no feed was fetched).
+// A feed fetched at the first prompt puts any notice its `session_text` carries
+// in front of the chip text (promptLeadFor), never the instruction a second time.
+//
+// ⛔ FAIL-QUIET LIKE THE REST OF THE LANE. Every file step here is best-effort:
+// a pending file that cannot be written means no chips this session (the next
+// one tries again), never a failed hook. The prompt's words are read for the
+// verdict and nothing else: never kept, sent or logged.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** SessionStart `source` values whose session already had its start: never served. */
+const CHIP_SKIP_START_SOURCES = ["resume", "compact"];
+
+/** This computer's UserPromptSubmit registration counts as live this long after its last run. */
+const PROMPT_HOOK_LIVE_MS = 14 * 86400000;
+
+/** The seen marker is rewritten at most this often, so an ordinary prompt costs one stat. */
+const PROMPT_HOOK_SEEN_REFRESH_MS = 60 * 60 * 1000;
+
+/** At the state ROOT, so the 48-hour prune of the state folders never takes it. */
+const PROMPT_HOOK_SEEN_FILE = (() => {
+  const root = stateRootDir();
+  return root ? path.join(root, "prompt-hook-seen.json") : null;
+})();
+
+/** The bridge's marker ANYWHERE in a prompt (TURN_ORIGIN_MARKER_RE is anchored at the start). */
+const CHIP_BRIDGE_MARKER_ANYWHERE_RE =
+  /\[mm-link [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\]/;
+
+/**
+ * A first prompt the app wrote, by how it opens: a background task reporting
+ * back, the app waking the session, another session's message, the
+ * pull-request watch. (A scheduled task's wrapper is TURN_ORIGIN_SCHEDULED_TASK_RE.)
+ * Both are read by the OPENING alone, looser than isScheduledTaskPrompt on
+ * purpose: a person's prompt read as not typed costs one session without chips;
+ * an app's prompt read as typed costs a serve nobody sees.
+ */
+const CHIP_APP_PROMPT_RE =
+  /^<(?:task-notification|side-sessions-event|cross-session-message|ci-monitor-event)[\s>]/;
+
+/** The SessionStart payload's `source`, lower case; "" when it has none (an older Claude Code). */
+function sessionStartSource(payload) {
+  return payload && typeof payload.source === "string" ? payload.source.trim().toLowerCase() : "";
+}
+
+/** A person is at this run: not an sdk entrypoint (isInteractiveSession), not MM_UNATTENDED=1. */
+function isPersonSession(env) {
+  const e = env || process.env;
+  if (e.MM_UNATTENDED === "1") return false;
+  return isInteractiveSession(e);
+}
+
+/** Has this hook run on UserPromptSubmit on this computer within PROMPT_HOOK_LIVE_MS? Never throws. */
+function promptHookLive(now) {
+  if (!PROMPT_HOOK_SEEN_FILE) return false;
+  try {
+    const st = fs.statSync(PROMPT_HOOK_SEEN_FILE);
+    const at = typeof now === "number" ? now : Date.now();
+    return st.isFile() && at - st.mtimeMs < PROMPT_HOOK_LIVE_MS;
+  } catch {
+    return false;
+  }
+}
+
+/** Note that UserPromptSubmit reaches this hook here: at most one write an hour. Never throws. */
+function markPromptHookSeen() {
+  if (!PROMPT_HOOK_SEEN_FILE) return;
+  try {
+    try {
+      const st = fs.statSync(PROMPT_HOOK_SEEN_FILE);
+      if (st.isFile() && Date.now() - st.mtimeMs < PROMPT_HOOK_SEEN_REFRESH_MS) return;
+    } catch {
+      /* not there yet */
+    }
+    fs.mkdirSync(path.dirname(PROMPT_HOOK_SEEN_FILE), { recursive: true });
+    fs.writeFileSync(
+      PROMPT_HOOK_SEEN_FILE,
+      JSON.stringify({ v: 1, hook_version: HOOK_VERSION, at: new Date().toISOString() }),
+      "utf8",
+    );
+  } catch {
+    /* best-effort: the next prompt tries again */
+  }
+}
+
+/**
+ * What a SessionStart does with the chip lane: `skip_resumed` (a resume or a
+ * compaction), `skip_no_person` (sdk or unattended), `defer` (wait for the
+ * first typed prompt) or `serve_now` (the fallback while UserPromptSubmit has
+ * not been seen here). Pure but for the seen marker's stat. Never throws.
+ */
+function chipLanePlanAtStart(payload, env, now) {
+  if (CHIP_SKIP_START_SOURCES.indexOf(sessionStartSource(payload)) !== -1) return "skip_resumed";
+  if (!isPersonSession(env)) return "skip_no_person";
+  return promptHookLive(now) ? "defer" : "serve_now";
+}
+
+/** This session's pending file, or null when the session has no id. */
+function chipLanePendingPath(sessionId) {
+  if (!CHIP_LANE_DIR || !isSessionKey(sessionId)) return null;
+  return path.join(CHIP_LANE_DIR, `${String(sessionId).replace(/[^a-zA-Z0-9_-]/g, "_")}.pending`);
+}
+
+/** Leave this session's first prompt the chip lane. Never throws. */
+function markChipLanePending(sessionId, source) {
+  const file = chipLanePendingPath(sessionId);
+  if (!file) return;
+  try {
+    fs.mkdirSync(CHIP_LANE_DIR, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ v: 1, source: source || null, at: new Date().toISOString() }), "utf8");
+  } catch {
+    /* no chips this session; the next one tries again */
+  }
+}
+
+/** Withdraw any first-prompt serve for this session. Never throws. */
+function clearChipLanePending(sessionId) {
+  const file = chipLanePendingPath(sessionId);
+  if (!file) return;
+  try {
+    fs.unlinkSync(file);
+  } catch {
+    /* none was pending */
+  }
+}
+
+/**
+ * Take this session's pending file: true for exactly one caller. The rename is
+ * atomic, so two runs for the same prompt (the plugin's registration and one
+ * in settings.json) cannot both serve. Never throws.
+ */
+function takeChipLanePending(sessionId) {
+  const file = chipLanePendingPath(sessionId);
+  if (!file) return false;
+  const taken = `${file}.taken-${process.pid}-${Date.now().toString(36)}`;
+  try {
+    fs.renameSync(file, taken);
+  } catch {
+    return false;
+  }
+  try {
+    fs.unlinkSync(taken);
+  } catch {
+    /* the prune takes it */
+  }
+  return true;
+}
+
+/**
+ * Who wrote a session's first prompt, by its own words: `typed`, or why not
+ * (`empty`, `bridge`, `scheduled`, `app_event`, `side_session`). Read after the
+ * app's notes in front of the text. Never throws; the text is never kept.
+ */
+function chipPromptVerdict(prompt) {
+  if (typeof prompt !== "string" || !prompt.trim()) return "empty";
+  if (CHIP_BRIDGE_MARKER_ANYWHERE_RE.test(prompt)) return "bridge";
+  const text = turnEntryAfterLeadingNotes(prompt.replace(/^\s+/, "")).replace(/^\s+/, "");
+  if (TURN_ORIGIN_SCHEDULED_TASK_RE.test(text)) return "scheduled";
+  if (CHIP_APP_PROMPT_RE.test(text)) return "app_event";
+  if (text.startsWith(TURN_ORIGIN_SIDE_FRESH_PREFIX) || text.startsWith(TURN_ORIGIN_SIDE_FORK_PREFIX)) {
+    return "side_session";
+  }
+  return "typed";
+}
+
+/**
+ * What a feed fetched at the first prompt puts in front of its chip text: ""
+ * when its `session_text` is the instruction SessionStart already gave (the
+ * built-in copy), the notice alone when it is a notice in front of that
+ * instruction (sessionTextFor), and the whole text otherwise.
+ */
+function promptLeadFor(feed) {
+  const full = trackingInstructionFor(feed);
+  if (full === TRACKING_INSTRUCTION_FALLBACK) return "";
+  const after = `\n\n${TRACKING_INSTRUCTION_FALLBACK}`;
+  if (full.endsWith(after)) return full.slice(0, full.length - after.length).replace(/\s+$/, "");
+  return full;
+}
+
+/** The first prompt's additionalContext: lead, chip block, tail, blank lines between, none empty. */
+function composePromptContext(lead, block, tail) {
+  return [lead, block, tail].filter((part) => typeof part === "string" && part !== "").join("\n\n");
+}
+
 async function handleSessionStart(payload) {
   // Warn-only verification (per spec: "warns/blocks if not" — we warn, since
   // the real enforcement is the server-side presence watchdog, not a local
@@ -11164,7 +11408,40 @@ async function handleSessionStart(payload) {
   // outcome. See SAME SETUP AS ROB.
   const setupReport = sendSetupReport(payload);
 
+  // ── Chips bridge (0.13.2): only for a session a person starts and types ──
+  // into. A resume, a compaction, an sdk or unattended run: no fetch at all.
+  // Once this computer's UserPromptSubmit registration has been seen, a fresh
+  // start serves nothing here and the session's first typed prompt does. Until
+  // then a fresh start fetches here, as before. See CHIPS ONLY FOR A TYPED
+  // SESSION.
+  const chipPlan = chipLanePlanAtStart(payload);
+  const sessionId = payload && payload.session_id;
+  if (chipPlan === "defer") markChipLanePending(sessionId, sessionStartSource(payload));
+  else clearChipLanePending(sessionId);
+  if (chipPlan !== "serve_now") debugLog(`chip lane at SessionStart: ${chipPlan}`);
+
   // ── Chips bridge: fetch + verify + inject. Entirely fail-open. ──────────
+  const feed = chipPlan === "serve_now" ? await fetchChipFeedForSession("SessionStart") : null;
+
+  // ── Task announcing (SPEC-task-announcing-v2 §2.1) ─────────────────────
+  // ⛔ The tracking instruction goes FIRST, on EVERY SessionStart the consent
+  // gate lets through — the feed off, failed, empty or not fetched included.
+  // It is the verified feed's `session_text`, or this file's own copy; the chip
+  // text below comes from the verified feed and from nothing else. (A terminal
+  // list may put the built-in copy first instead, so that "start task
+  // <number>" stays inside the preview — see renderTerminalTasks.)
+  const lane = renderChipLane(feed, trackingInstructionFor(feed));
+  const emitted = await emitSessionContext(composeSessionContext(lane.instruction, lane.block, lane.tail));
+  await recordChipLane(payload, feed, lane, emitted);
+  await setupReport;
+}
+
+/**
+ * The chip-feed request for a session that may be served (SessionStart's
+ * fallback path, or a typed first prompt): the verified payload, or null.
+ * Entirely fail-open. `label` names the event in the debug log only.
+ */
+async function fetchChipFeedForSession(label) {
   let feed = null;
   try {
     const result = await fetchChipFeed();
@@ -11187,57 +11464,88 @@ async function handleSessionStart(payload) {
     }
   } catch (err) {
     feed = null;
-    debugLog(`chip bridge SessionStart failed: ${err && err.stack}`);
+    debugLog(`chip bridge ${label} failed: ${err && err.stack}`);
   }
+  return feed;
+}
 
-  // ── Task announcing (SPEC-task-announcing-v2 §2.1) ─────────────────────
-  // ⛔ The tracking instruction goes FIRST, on EVERY SessionStart the consent
-  // gate lets through — the feed off, failed or empty included. It is the
-  // verified feed's `session_text`, or this file's own copy; the chip text
-  // below comes from the verified feed and from nothing else. (A terminal
-  // list may put the built-in copy first instead, so that "start task
-  // <number>" stays inside the preview — see renderTerminalTasks.)
-  let instruction = trackingInstructionFor(feed);
-  let block = "";
-  let tail = "";
-  let deliveries = [];
-  if (feed) {
-    try {
-      if (isDesktopSession()) {
-        // Desktop: the chip block, byte-identical to before, below the instruction.
-        block = renderChipContext(feed);
-      } else {
-        // Every other surface: the text list (SPEC-terminal-chip-fallback).
-        const text = renderTerminalTasks(feed, instruction);
-        instruction = text.instruction;
-        block = text.shortList;
-        tail = text.packets;
-        deliveries = text.deliveries;
-      }
-    } catch (err) {
-      // A render that fails injects no chip text at all — never half a block.
-      block = "";
-      tail = "";
-      deliveries = [];
-      debugLog(`chip render failed: ${err && err.stack}`);
+/**
+ * The chip text for a verified feed: `{instruction, block, tail, deliveries}`.
+ * `instruction` is what goes first (renderTerminalTasks may swap in the
+ * built-in copy); no feed, or a render that fails, gives no chip text at all —
+ * never half a block.
+ */
+function renderChipLane(feed, instruction) {
+  const out = { instruction, block: "", tail: "", deliveries: [] };
+  if (!feed) return out;
+  try {
+    if (isDesktopSession()) {
+      // Desktop: the chip block, byte-identical to before, below the instruction.
+      out.block = renderChipContext(feed);
+    } else {
+      // Every other surface: the text list (SPEC-terminal-chip-fallback).
+      const text = renderTerminalTasks(feed, instruction);
+      out.instruction = text.instruction;
+      out.block = text.shortList;
+      out.tail = text.packets;
+      out.deliveries = text.deliveries;
     }
+  } catch (err) {
+    out.instruction = instruction;
+    out.block = "";
+    out.tail = "";
+    out.deliveries = [];
+    debugLog(`chip render failed: ${err && err.stack}`);
   }
-  const emitted = await emitSessionContext(composeSessionContext(instruction, block, tail));
+  return out;
+}
 
-  if (feed && block) {
+/** Record what a rendered chip lane served, once its context write is known. */
+async function recordChipLane(payload, feed, lane, emitted) {
+  const sessionId = payload && payload.session_id;
+  if (feed && lane.block) {
     // ⛔ Record what was ACTUALLY served, from the same verified payload that
     // drove the render. This set is the cross-check that makes the PostToolUse
     // `delivered_chip` ack deterministic instead of a guess — see the
     // producer block above. Written AFTER the render so a render failure can
     // never leave us acking chips nobody was shown.
-    recordServedChips(payload && payload.session_id, servedChipsFromPayload(feed));
+    recordServedChips(sessionId, servedChipsFromPayload(feed));
   }
-  if (deliveries.length > 0 && emitted) {
+  if (lane.deliveries.length > 0 && emitted) {
     // Terminal: the list is the surface, so its delivery to the session IS the
     // delivery — recorded only once the context write is confirmed.
-    await recordSessionDeliveries(payload && payload.session_id, deliveries, postToolUseDeadline());
+    await recordSessionDeliveries(sessionId, lane.deliveries, postToolUseDeadline());
   }
-  await setupReport;
+}
+
+/**
+ * UserPromptSubmit (0.13.2): the chip lane at a typed session's FIRST prompt.
+ * Every run notes that the registration reaches this hook (promptHookLive).
+ * Only the run that takes this session's pending file goes on, and it serves
+ * only a person's typed prompt; every other prompt costs one failed rename.
+ * Prints nothing unless it has chip text for the session.
+ */
+async function handleUserPromptSubmit(payload) {
+  markPromptHookSeen();
+  if (!TOKEN) return;
+  const sessionId = payload && payload.session_id;
+  if (!takeChipLanePending(sessionId)) return;
+  if (!isPersonSession()) {
+    debugLog("chip lane at first prompt: no person at this run, nothing served");
+    return;
+  }
+  const verdict = chipPromptVerdict(payload && payload.prompt);
+  if (verdict !== "typed") {
+    debugLog(`chip lane at first prompt: ${verdict}, nothing served`);
+    return;
+  }
+  const feed = await fetchChipFeedForSession("UserPromptSubmit");
+  if (!feed) return;
+  const lane = renderChipLane(feed, promptLeadFor(feed));
+  const text = composePromptContext(lane.instruction, lane.block, lane.tail);
+  if (!text) return;
+  const emitted = await emitHookContext("UserPromptSubmit", text);
+  await recordChipLane(payload, feed, lane, emitted);
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -11785,15 +12093,15 @@ async function noOpenLineNotice(env) {
 
 /**
  * The hard-exit budget for the event in this payload: HARD_EXIT_SESSION_START_MS
- * for SessionStart, whose chip-feed request alone may use 10 s, and
- * HARD_EXIT_DEFAULT_MS for every other event — including a payload whose event
- * cannot be read at all.
+ * for SessionStart and UserPromptSubmit, either of which may make the chip-feed
+ * request (10 s alone), and HARD_EXIT_DEFAULT_MS for every other event —
+ * including a payload whose event cannot be read at all.
  */
 function hardExitMsFor(raw) {
   try {
     const parsed = safeJsonParse(raw);
     if (parsed && parsed.hook_event_name === SKILL_REPAIR_EVENT) return SKILL_REPAIR_HARD_EXIT_MS;
-    return parsed && parsed.hook_event_name === "SessionStart"
+    return parsed && (parsed.hook_event_name === "SessionStart" || parsed.hook_event_name === "UserPromptSubmit")
       ? HARD_EXIT_SESSION_START_MS
       : HARD_EXIT_DEFAULT_MS;
   } catch {
@@ -11964,6 +12272,10 @@ async function main() {
       await handleStop(payload);
     } else if (event === "SessionStart") {
       await handleSessionStart(payload);
+    } else if (event === "UserPromptSubmit") {
+      // ⛔ The chip lane at a typed session's first prompt (0.13.2). Registered
+      // by the mm-hooks plugin; every other prompt is one failed rename and out.
+      await handleUserPromptSubmit(payload);
     } else if (event === "SubagentStart") {
       handleSubagentStart(payload);
     } else if (event === "PreToolUse") {
