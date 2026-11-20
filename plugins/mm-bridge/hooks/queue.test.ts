@@ -4,7 +4,7 @@ import { businessMsBetween, subtractBusinessMs } from './business-time'
 import {
   CUTOFF_WINDOW_MS, LIST_FLOOR_MS, NO_DUE_DATE, NOBODY, THREAD_TITLE_MAX, WINDOW_AHEAD_MS, buildLists, clockAndDue, dueWhen, listCutoff, rowLine, shownDue, buildQueue, cleanName, cleanText, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockLead, clockText, draftsLine, dueLine, holdBanner,
   CHECK_WAIT_MS, checkingTitle, fastState, internalProjects, whenText, holdSentence, holderName, isClosingRoute, isDraftDone, isUuid, mailLookbackHours, needsLine, noteText, pinsNow, shortName, stillOpenTitle, threadTitle, titleFor, titleNames, withTeammate,
-  ROUTE_PAGE, dateText, peopleRows, routeChoices, routePage, routedText, seesPeople, shownText, sourceLink, waitedText,
+  ROUTE_PAGE, dateText, peopleRows, routeChoices, routeGuess, routeLabel, routePage, routePageOf, routeSearch, routedText, searchFold, seesPeople, shownText, sourceLink, waitedText,
   INTERNAL_OPS, INTERNAL_PROJECTS, askLine, asksMarkdown, feedClients, heldInternal, internalAskThread, openAsks,
   QUEUE_SHOWN_MAX, internalQueueThread, ownQueueRows, queueMarkdown, queueTotal, queuedOf,
   QUEUE_OLDER_MAX, newestFirst, olderHeading, olderMarkdown, olderOf, olderTotal, ownOlderRows, queueWhen, shownOlder,
@@ -1924,6 +1924,145 @@ describe('New people: who wrote to us with no project matched (founder and PMs o
     expect(seesPeople({ role: 'founder' })).toBe(true)
     expect(seesPeople({ role: 'pm' })).toBe(true)
     expect(seesPeople({ role: 'member' })).toBe(false)
+  })
+
+  // (0.7.66, Rob 2026-11-20) the Route picker's search: the client's name or the company's, misspelt or not
+  const pid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`
+  /** Made-up projects, as routeChoices gives them: named after the company or the person, the other in `client`. */
+  const COOL = { projectId: pid(1), name: 'Cool Calc', client: 'Wes Fairfax' }
+  const NORTH = { projectId: pid(2), name: 'Northwind Interiors', client: 'Dana Whitfield' }
+  const PRIYA_P = { projectId: pid(3), name: 'Priya Raman', client: 'Fabrikam Health' }
+  const HARBOR = { projectId: pid(4), name: 'Harbor Society', client: 'Lena Okafor', aliases: ['Wavecrest Rx'] }
+  const CALC = { projectId: pid(5), name: 'Calc Partners' }
+  const BOLT_P = { projectId: pid(6), name: 'Bolt Staffing (Sam)' }
+  const PICK = [BOLT_P, CALC, COOL, HARBOR, NORTH, PRIYA_P]
+  const found = (q: string) => routeSearch(PICK, q)
+  const names = (q: string) => found(q).items.map(p => p.name)
+
+  test('the search folds as the time tracker does: Kool Kalk and Cool Calc are the same letters', async () => {
+    expect(searchFold('Kool Kalk')).toBe('coolcalc')
+    expect(searchFold('Cool Calc')).toBe('coolcalc')
+    expect(searchFold('Phoenix Lock & Key')).toBe('foenixloccey')
+    expect(searchFold('Fraser-Zane, LLC')).toBe('frasersanellc')
+    // accents go too, and anything that is not text is nothing
+    expect(searchFold('José Núñez')).toBe('josenunes')
+    expect(searchFold(null)).toBe('')
+    expect(searchFold(42)).toBe('')
+  })
+
+  test('"Kool Kalk" finds "Cool Calc", and as plain words, not a near spelling', async () => {
+    expect(found('Kool Kalk')).toEqual({ items: [COOL], close: false })
+    expect(names('kool')).toEqual(['Cool Calc'])
+    // each word anywhere, in any order
+    expect(names('kalk kool')).toEqual(['Cool Calc'])
+  })
+
+  test('a company-name search finds the project, whether the company is its name or its client', async () => {
+    expect(names('Northwind')).toEqual(['Northwind Interiors'])
+    expect(names('fabrikam health')).toEqual(['Priya Raman'])
+    expect(names('bolt staffing')).toEqual(['Bolt Staffing (Sam)'])
+  })
+
+  test('a client-name search finds the project, whether the person is its client or its name', async () => {
+    expect(names('Dana Whitfield')).toEqual(['Northwind Interiors'])
+    expect(names('whitfield dana')).toEqual(['Northwind Interiors'])
+    expect(names('fairfax')).toEqual(['Cool Calc'])
+    expect(names('Priya')).toEqual(['Priya Raman'])
+    // a person and a company together
+    expect(names('wes cool')).toEqual(['Cool Calc'])
+  })
+
+  test('an alias search finds a project by the other name it goes by', async () => {
+    expect(names('Wavecrest')).toEqual(['Harbor Society'])
+    expect(names('wave crest rx')).toEqual(['Harbor Society'])
+    // a word of the alias with a word of the name
+    expect(names('harbor wavecrest')).toEqual(['Harbor Society'])
+  })
+
+  test('a misspelt name is forgiven when nothing has the words as typed, the closest first', async () => {
+    expect(found('Fairfacks')).toEqual({ items: [COOL], close: true })
+    expect(found('Whitfeild')).toEqual({ items: [NORTH], close: true })
+    expect(found('Okafur')).toEqual({ items: [HARBOR], close: true })
+    expect(found('Wavecrst')).toEqual({ items: [HARBOR], close: true })
+    expect(names('Norhtwind Interirs')).toEqual(['Northwind Interiors'])
+    // one word exact, one misspelt
+    expect(names('dana whitfeild')).toEqual(['Northwind Interiors'])
+    // the closest first: one edit before two
+    expect(routeSearch([{ projectId: pid(7), name: 'Harbr Societi' }, HARBOR], 'Harbor Sociiety').items.map(p => p.name)).toEqual(['Harbor Society', 'Harbr Societi'])
+  })
+
+  test('words as typed beat near spellings, a short word is never guessed at, and nothing typed lists every project as given', async () => {
+    // "calc" is in two names: those two, not every name a letter away
+    expect(found('calc')).toEqual({ items: [CALC, COOL], close: false })
+    expect(found('xyz')).toEqual({ items: [], close: false })
+    expect(found('bol')).toEqual({ items: [BOLT_P], close: false })
+    expect(found('blt')).toEqual({ items: [], close: false })
+    expect(found('Zebra Fintech')).toEqual({ items: [], close: false })
+    expect(found('')).toEqual({ items: PICK, close: false })
+    expect(found('   ')).toEqual({ items: PICK, close: false })
+    expect(found(undefined as never)).toEqual({ items: PICK, close: false })
+    // a project from an OW that sends no client or aliases: its name alone
+    expect(routeSearch([{ projectId: pid(8), name: 'Acme Roofing Pat' }], 'akme pat').items.map(p => p.name)).toEqual(['Acme Roofing Pat'])
+  })
+
+  test("OW's guess picks the one project it names, and none when it names none or several", async () => {
+    expect(routeGuess(PICK, 'Northwind')).toEqual(NORTH)
+    expect(routeGuess(PICK, 'Kool Kalk')).toEqual(COOL)
+    expect(routeGuess(PICK, 'Cool Calk')).toEqual(COOL)
+    expect(routeGuess(PICK, 'Wavecrest Rx')).toEqual(HARBOR)
+    // a guess with more words than the project's names: the one project whose name, client or alias it holds whole
+    expect(routeGuess(PICK, 'Wavecrest Rx store')).toEqual(HARBOR)
+    expect(routeGuess(PICK, 'the Northwind Interiors office')).toEqual(NORTH)
+    // a name of under 5 letters is not enough to pick by
+    expect(routeGuess([{ projectId: pid(10), name: 'Bolt' }], 'Bolt Labs Inc')).toBeUndefined()
+    expect(routeGuess(PICK, 'Calc')).toBeUndefined()
+    expect(routeGuess(PICK, 'HNWRx')).toBeUndefined()
+    for (const none of ['unknown', 'None', 'N/A', 'no project', '', '  ', null, undefined, 7]) expect(routeGuess(PICK, none)).toBeUndefined()
+    expect(routeGuess([], 'Northwind')).toBeUndefined()
+  })
+
+  test('the picker lists a project with its client when its name does not hold it, and finds the page a project is on', async () => {
+    expect(routeLabel(COOL)).toBe('Cool Calc · Wes Fairfax')
+    expect(routeLabel(CALC)).toBe('Calc Partners')
+    expect(routeLabel({ projectId: pid(9), name: 'Goldberg Centre Yehuda Goldberg', client: 'Goldberg Centre' })).toBe('Goldberg Centre Yehuda Goldberg')
+    const list = Array.from({ length: 120 }, (_, i) => ({ projectId: pid(i + 1), name: `Client ${String(i + 1).padStart(3, '0')}` }))
+    expect(routePageOf(list, pid(1))).toBe(0)
+    expect(routePageOf(list, pid(50))).toBe(0)
+    expect(routePageOf(list, pid(51))).toBe(1)
+    expect(routePageOf(list, pid(120))).toBe(2)
+    expect(routePageOf(list, 'nope')).toBe(0)
+  })
+
+  test("Route's projects carry the client's name and aliases when the feed gives them, cleaned, and only then", async () => {
+    const choices = routeChoices(feed({
+      role: 'founder',
+      route_projects: [
+        { id: pid(1), name: 'Cool Calc', client_name: 'Wes\nFairfax', aliases: ['Kool Kalk', 'Cool Calc', '  ', 'Kool Kalk', 42 as never, '<<>>'] },
+        { id: pid(2), name: 'Northwind Interiors', client_name: null, aliases: null },
+        { id: pid(3), name: 'Harbor Society', client_name: 'Harbor Society', aliases: Array.from({ length: 30 }, (_, i) => `Alias ${i + 1}`) },
+      ],
+    }))
+    expect(choices[0]).toEqual({ projectId: pid(1), name: 'Cool Calc', client: 'Wes Fairfax', aliases: ['Kool Kalk'] })
+    expect(choices[2]).toEqual({ projectId: pid(2), name: 'Northwind Interiors' })
+    expect(choices[1]?.client).toBe('Harbor Society')
+    expect(choices[1]?.aliases).toHaveLength(20)
+    // an OW that sends id and name only: exactly as before
+    expect(routeChoices(feed({ role: 'pm', route_projects: [{ id: pid(1), name: 'Cool Calc' }] }))).toEqual([{ projectId: pid(1), name: 'Cool Calc' }])
+  })
+
+  test("a row carries OW's guess at the project, one cleaned line, and a Directory lead's row none", async () => {
+    const rows = peopleRows(feed({
+      role: 'founder',
+      person_alerts: [
+        { ...alerts[0]!, project_guess: 'Northwind\nInteriors' },
+        { ...alerts[1]!, project_guess: 'Marcus Co' },
+        { ...alerts[2]!, project_guess: 'x'.repeat(200) },
+      ],
+    }), thu)
+    expect(rows.map(r => [r.id, r.guess])).toEqual([[A2, undefined], [A3, `${'x'.repeat(79)}…`], [A1, 'Northwind Interiors']])
+    // none given: no key at all
+    expect(peopleRows(feed({ role: 'founder', person_alerts: [{ ...alerts[0]!, project_guess: null }] }), thu)[0]).not.toHaveProperty('guess')
+    expect(peopleRows(feed({ role: 'founder', person_alerts: alerts }), thu).every(r => !('guess' in r))).toBe(true)
   })
 })
 

@@ -203,6 +203,12 @@ export type FeedPersonAlert = {
   relationship_summary?: string | null
   source_link?: string | null
   shadow_bootstrap_candidate?: boolean | null
+  /**
+   * (0.7.66) OW's guess at the project the person wrote about (`inbound_person_alerts.haiku_project_guess`), as a model
+   * read it from their email: the picker pre-picks the one route project it matches, and draws it as text. ⛔ It comes
+   * from a stranger's email, so it is drawn and matched, never handed to Claude. Absent on an OW that does not send it yet.
+   */
+  project_guess?: string | null
 }
 
 /**
@@ -359,8 +365,12 @@ export type FeedFollowups = {
  */
 export type GoRef = { packageId: string; steps: number; firstAt: number | null; firstKind: string; by: string; mine: boolean; coversThrough?: number }
 
-/** (New people) One project OW's resolve route accepts for `route`: the feed's `route_projects` (founder and PMs, uncapped). */
-export type FeedRouteProject = { id: string; name: string }
+/**
+ * (New people) One project OW's resolve route accepts for `route`: the feed's `route_projects` (founder and PMs, uncapped).
+ * (0.7.66) `client_name` and `aliases` are what the picker's search also reads (the client's or the company's name, and
+ * any other names the project goes by). Absent on an OW that does not send them yet: the search reads the name alone.
+ */
+export type FeedRouteProject = { id: string; name: string; client_name?: string | null; aliases?: string[] | null }
 
 export type Feed = {
   member: string
@@ -2147,6 +2157,8 @@ export function peopleRows(feed: Feed, now: number): MmPerson[] {
       id: a.id, name, title, subject: subject ? `Subject: ${subject}` : '(no subject)', when, warnings, known: known ? `We know them: ${known}` : '', link: sourceLink(a.source_link),
       // (a Directory lead has no email: OW refuses route and bootstrap for it, so its row offers Mark handled and Not client mail only)
       ...(directory ? { directory: true as const } : {}),
+      // (0.7.66) OW's guess at the project, one cleaned line: what the picker pre-picks from (never for a Directory lead, which is not routed)
+      ...(!directory && shownText(a.project_guess, 80) ? { guess: shownText(a.project_guess, 80) } : {}),
     }
     rows.push({ at: Number.isFinite(at) ? at : -Infinity, row })
   }
@@ -2161,15 +2173,147 @@ export function peopleRows(feed: Feed, now: number): MmPerson[] {
  */
 export function routeChoices(feed: Feed): MmProject[] {
   if (!seesPeople(feed)) return []
-  const rows: Array<{ id: unknown; name: unknown }> = Array.isArray(feed.route_projects)
-    ? feed.route_projects.map(p => ({ id: p?.id, name: p?.name }))
+  const rows: Array<{ id: unknown; name: unknown; client?: unknown; aliases?: unknown }> = Array.isArray(feed.route_projects)
+    ? feed.route_projects.map(p => ({ id: p?.id, name: p?.name, client: p?.client_name, aliases: p?.aliases }))
     : Array.isArray(feed.projects) ? feed.projects.map(p => ({ id: p?.project_id, name: p?.name })) : []
   const out = new Map<string, MmProject>()
   for (const p of rows) {
     if (!isUuid(p.id) || out.has(p.id) || cleanName(p.name) === '') continue
-    out.set(p.id, { projectId: p.id, name: cleanName(p.name) })
+    // (0.7.66) what the search reads besides the name: the client's name and the project's aliases, cleaned, when the feed gives them
+    const name = cleanName(p.name)
+    const client = cleanName(p.client)
+    const aliases = (Array.isArray(p.aliases) ? p.aliases : [])
+      .map(a => cleanName(a))
+      .filter((a, i, all) => a !== '' && all.indexOf(a) === i && a !== name && a !== client)
+      .slice(0, ROUTE_ALIASES_MAX)
+    out.set(p.id, { projectId: p.id, name, ...(client ? { client } : {}), ...(aliases.length ? { aliases } : {}) })
   }
   return [...out.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/** (0.7.66) The most aliases of one project the picker's search reads (a project carries a handful at most). */
+export const ROUTE_ALIASES_MAX = 20
+
+/**
+ * (0.7.66, Rob 2026-11-20: "sometimes I'm going to search by the client's name, sometimes the company name. I might
+ * misspell the company name or the client name.") A text folded for the Route picker's search, as the time tracker's
+ * project search folds it (popup.js `normalizeForSearch`): accents dropped, lower case, nothing but letters and digits,
+ * then ph to f, ck to c, k to c and z to s, so `Kool Kalk` and `Cool Calc` both fold to `coolcalc`.
+ */
+export function searchFold(text: unknown): string {
+  return (typeof text === 'string' ? text : '')
+    .normalize('NFD')
+    .replace(/\p{M}+/gu, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '')
+    .replace(/ph/g, 'f')
+    .replace(/ck/g, 'c')
+    .replace(/k/g, 'c')
+    .replace(/z/g, 's')
+}
+
+/** (0.7.66) The words of a search, each folded (`searchFold`), the empty ones gone. */
+function searchWords(query: unknown): string[] {
+  return (typeof query === 'string' ? query : '').split(/\s+/).map(searchFold).filter(Boolean)
+}
+
+/**
+ * (0.7.66) How many edits a folded word may be from a project's text and still find it, by its length: none up to 3
+ * letters (too many projects are one edit from a short word), one from 4, two from 8.
+ */
+function editsAllowed(word: string): number {
+  return word.length >= 8 ? 2 : word.length >= 4 ? 1 : 0
+}
+
+/**
+ * (0.7.66) The fewest edits (a letter added, dropped, changed, or two side by side swapped) that turn `word` into some
+ * run of letters inside `text`, both folded; stops early past `cap` (the answer is then cap + 1).
+ */
+function editsWithin(word: string, text: string, cap: number): number {
+  const m = word.length
+  const n = text.length
+  if (!m) return 0
+  // rows i-2, i-1 and i of the table: row 0 is all zeros, a match may start anywhere in `text`
+  let back2: number[] = []
+  let back = new Array<number>(n + 1).fill(0)
+  for (let i = 1; i <= m; i++) {
+    const row = new Array<number>(n + 1)
+    row[0] = i
+    let least = row[0]
+    for (let j = 1; j <= n; j++) {
+      const same = word[i - 1] === text[j - 1]
+      let d = Math.min(back[j]! + 1, row[j - 1]! + 1, back[j - 1]! + (same ? 0 : 1))
+      if (i > 1 && j > 1 && word[i - 1] === text[j - 2] && word[i - 2] === text[j - 1]) d = Math.min(d, back2[j - 2]! + 1)
+      row[j] = d
+      if (d < least) least = d
+    }
+    if (least > cap) return cap + 1
+    back2 = back
+    back = row
+  }
+  return Math.min(cap + 1, ...back)
+}
+
+/** (0.7.66) What the search reads of a project, each folded: its name, the client's name and its aliases. */
+function searchTexts(p: MmProject): string[] {
+  return [p.name, p.client ?? '', ...(p.aliases ?? [])].map(searchFold).filter(Boolean)
+}
+
+/**
+ * (0.7.66) The Route picker's search, as the time tracker's (popup.js `filterProjects`): every word typed must be found in
+ * the project's name, the client's name or one of its aliases, in any order, all of them folded (`searchFold`). When no
+ * project has every word, the search forgives spelling: each word may then be a few edits from the text it finds
+ * (`editsAllowed`), and the closest come first. Nothing typed: every project, as given. `close` says the projects are
+ * the forgiving kind.
+ */
+export function routeSearch(projects: readonly MmProject[], query: unknown): { items: MmProject[]; close: boolean } {
+  const words = searchWords(query)
+  if (!words.length) return { items: [...projects], close: false }
+  const texts = projects.map(searchTexts)
+  const exact = projects.filter((_, i) => words.every(w => texts[i]!.some(t => t.includes(w))))
+  if (exact.length) return { items: exact, close: false }
+  const scored: Array<{ p: MmProject; edits: number; at: number }> = []
+  projects.forEach((p, at) => {
+    let edits = 0
+    for (const w of words) {
+      const cap = editsAllowed(w)
+      const best = Math.min(cap + 1, ...texts[at]!.map(t => (t.includes(w) ? 0 : editsWithin(w, t, cap))))
+      if (best > cap) return
+      edits += best
+    }
+    scored.push({ p, edits, at })
+  })
+  return { items: scored.sort((x, y) => x.edits - y.edits || x.at - y.at).map(s => s.p), close: scored.length > 0 }
+}
+
+/** (0.7.66) Guesses that name no project: never matched. */
+const NO_GUESS = new Set(['none', 'unknown', 'na', 'null', 'noproject', 'nomatch', 'notsure', 'unclear'])
+
+/** (0.7.66) The shortest name, client name or alias a guess may hold whole and pick its project by (`routeGuess`). */
+const GUESS_HOLDS_MIN = 5
+
+/**
+ * (0.7.66) The project OW's guess names (the alert's `project_guess`, `MmPerson.guess`): the one route project the
+ * search finds for it, as if it were typed; or, when the search finds none, the one project whose name, client name or
+ * alias (5 letters or more, folded) the guess holds whole, so `HNWRx store` names the project known as `HNWRx`. None when
+ * it finds none, or more than one, or the guess names no project (`unknown`, `none`).
+ */
+export function routeGuess(projects: readonly MmProject[], guess: unknown): MmProject | undefined {
+  const folded = searchFold(guess)
+  if (!folded || NO_GUESS.has(folded)) return undefined
+  const { items } = routeSearch(projects, guess)
+  if (items.length) return items.length === 1 ? items[0] : undefined
+  const held = projects.filter(p => searchTexts(p).some(t => t.length >= GUESS_HOLDS_MIN && folded.includes(t)))
+  return held.length === 1 ? held[0] : undefined
+}
+
+/**
+ * (0.7.66) A project as the picker lists it: its name, then ` · ` and the client's name when the name does not already
+ * hold it (as the time tracker's `projectLabel`, which never draws a project named after its client with the client twice).
+ */
+export function routeLabel(p: MmProject): string {
+  if (!p.client || searchFold(p.name).includes(searchFold(p.client))) return p.name
+  return `${p.name} · ${p.client}`
 }
 
 /**
@@ -2189,6 +2333,12 @@ export function routePage(projects: readonly MmProject[], page: number): { page:
   const at = Math.min(pages - 1, Math.max(0, Number.isInteger(page) ? page : 0))
   const slice = (n: number): MmProject[] => projects.slice(n * ROUTE_PAGE, (n + 1) * ROUTE_PAGE)
   return { page: at, pages, from: at * ROUTE_PAGE, items: slice(at), prev: at > 0 ? slice(at - 1) : null, next: at < pages - 1 ? slice(at + 1) : null }
+}
+
+/** (0.7.66) The page of the Route picker a project is on (`routePage`), or the first when it is not listed. */
+export function routePageOf(projects: readonly MmProject[], projectId: unknown): number {
+  const at = projects.findIndex(p => p.projectId === projectId)
+  return at < 0 ? 0 : Math.floor(at / ROUTE_PAGE)
 }
 
 /**

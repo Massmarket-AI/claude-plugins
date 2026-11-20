@@ -164,17 +164,35 @@ export type MmPerson = {
    * any other row.
    */
   directory?: true
+  /**
+   * (0.7.66) OW's guess at the project they wrote about (the feed's `project_guess`), one cleaned line: the picker
+   * pre-picks the one route project it matches, and draws it as text. ⛔ Read from a stranger's email: never handed to
+   * Claude. Absent when OW gives none, and on a Directory lead's row.
+   */
+  guess?: string
 }
 
-/** (New people) A project Route to project can send someone to. */
-export type MmProject = { projectId: string; name: string }
+/**
+ * (New people) A project Route to project can send someone to. (0.7.66) `client` and `aliases`: the client's name and
+ * the other names the project goes by, as the feed's `route_projects` gives them, for the picker's search; absent when
+ * the feed gives none.
+ */
+export type MmProject = { projectId: string; name: string; client?: string; aliases?: string[] }
 
 /**
  * (New people) What this thread's pane shows of the person's own presses on `New people`: whose project picker is
  * open, which of its pages it shows and what is picked in it, which rows have a press in flight (since when), and what OW answered a press that
  * did not go through, by alert id.
  */
-export type MmPeople = { open?: string; pick?: string; page?: number; busy?: Record<string, number>; errors?: Record<string, string> }
+export type MmPeople = {
+  open?: string
+  pick?: string
+  page?: number
+  /** (0.7.66) What is typed in the open picker's search field: the projects it lists are the ones it finds (`routeSearch`). */
+  query?: string
+  busy?: Record<string, number>
+  errors?: Record<string, string>
+}
 
 /** Which of the groups under the list the person has opened. ((0.7.12) No `older`: that group is gone.) */
 export type MmFolds = {

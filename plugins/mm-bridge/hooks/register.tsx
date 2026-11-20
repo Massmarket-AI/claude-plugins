@@ -4,7 +4,7 @@ import type { MmBand, MmBrowser, MmBrowserAsk, MmBrowserChoice, MmCard, MmFolds,
 
 import {
   INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients,
-  peopleRows, routeChoices, routePage, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
+  peopleRows, routeChoices, routeGuess, routeLabel, routePage, routePageOf, routeSearch, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
   asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, newestFirst, olderHeading, olderMarkdown, olderOf, olderTotal, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText,
   hasDue, clientActivity, isRecent, mayStart,
   leadDueOf, pinsFor, pinTitle, threadWhy,
@@ -239,7 +239,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.64'
+export const VERSION = '0.7.66'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -439,6 +439,8 @@ const PICK_PREV = 'page-prev'
 const PICK_NEXT = 'page-next'
 /** (New people) The surfaces whose element table has a Select (the engine's `Elements`): the mobile app's has none yet. */
 const PICKER_SURFACES: ReadonlySet<string> = new Set(['terminal', 'desktop', 'vscode'])
+/** (0.7.66) The most of a search the picker keeps: more than any name it could find. */
+const QUERY_MAX = 200
 /**
  * (New people) What a person can do with someone under `New people`, as OW's resolve route names it: `route`,
  * `bootstrap` and `not_client` for an email; `handled` and `not_client` for a HighLevel Directory lead (OW refuses
@@ -8063,6 +8065,8 @@ async function peopleShown($: EngineInterface, people: unknown, now: number): Pr
       id: p.id, name: text(p.name) || p.title, title: p.title, subject: text(p.subject), when: text(p.when),
       warnings: Array.isArray(p.warnings) ? p.warnings.filter((w): w is string => typeof w === 'string') : [], known: text(p.known), link: sourceLink(p.link),
       ...(p.directory === true ? { directory: true as const } : {}),
+      // (0.7.66) OW's guess, cleaned again: a value an older version stored, or none
+      ...(p.directory !== true && shownText(p.guess, 80) ? { guess: shownText(p.guess, 80) } : {}),
     }))
 }
 
@@ -8072,15 +8076,44 @@ async function peopleUi($: EngineInterface): Promise<MmPeople> {
   return value && typeof value === 'object' ? value : {}
 }
 
-/** Route to project: this row's project picker opens (any other row's closes), nothing picked yet. Nothing is fetched or sent. Never for a Directory lead. */
+/**
+ * Route to project: this row's project picker opens (any other row's closes), its search empty. (0.7.66) Picked already:
+ * the one project OW's guess names (`routeGuess`), on the page it is on; else nothing. Nothing is fetched or sent.
+ * Never for a Directory lead.
+ */
 async function openRoute($: EngineInterface, id: string): Promise<void> {
   try {
     const { value: queue } = await $.state.get(QUEUE)
-    if ((queue?.people ?? []).find(p => p.id === id)?.directory) return
+    const person = (queue?.people ?? []).find(p => p.id === id)
+    if (!person || person.directory) return
+    const routeTo = queue?.routeTo ?? []
+    const guessed = routeGuess(routeTo, person.guess)
     const ui = await peopleUi($)
-    await $.state.set(PEOPLE, { ...ui, open: id, pick: '', page: 0 } satisfies MmPeople)
+    await $.state.set(PEOPLE, { ...ui, open: id, pick: guessed?.projectId ?? '', page: guessed ? routePageOf(routeTo, guessed.projectId) : 0, query: '' } satisfies MmPeople)
   } catch {
     // a picker that does not open is not worth an error
+  }
+}
+
+/**
+ * (0.7.66) Typing in the open picker's search field: the picker lists the projects the text finds (`routeSearch`), from
+ * its first page. What was picked stays picked while the search still finds it; one project found is picked. On Enter
+ * (`submit`), the first project found is picked. Nothing is fetched or sent.
+ */
+async function searchRoute($: EngineInterface, id: string, text: string, submit: boolean): Promise<void> {
+  try {
+    const ui = await peopleUi($)
+    if (ui.open !== id) return
+    const { value: queue } = await $.state.get(QUEUE)
+    const query = (typeof text === 'string' ? text : '').slice(0, QUERY_MAX)
+    const found = routeSearch(queue?.routeTo ?? [], query).items
+    const kept = (found.some(p => p.projectId === ui.pick) && ui.pick) || ''
+    // (a search, not an empty field: Enter on nothing typed does not pick the first project of all)
+    const typed = query.trim() !== ''
+    const pick = kept || (typed && (submit || found.length === 1) && found[0] ? found[0].projectId : '')
+    await $.state.set(PEOPLE, { ...ui, query, pick, page: routePageOf(found, pick) } satisfies MmPeople)
+  } catch {
+    // as above
   }
 }
 
@@ -8095,8 +8128,10 @@ async function pickProject($: EngineInterface, id: string, value: string): Promi
     const { value: queue } = await $.state.get(QUEUE)
     const routeTo = queue?.routeTo ?? []
     if (value === PICK_PREV || value === PICK_NEXT) {
-      const at = routePage(routeTo, Number(ui.page) || 0).page
-      await $.state.set(PEOPLE, { ...ui, pick: '', page: routePage(routeTo, at + (value === PICK_NEXT ? 1 : -1)).page } satisfies MmPeople)
+      // (0.7.66) the pages of what the search finds
+      const found = routeSearch(routeTo, ui.query).items
+      const at = routePage(found, Number(ui.page) || 0).page
+      await $.state.set(PEOPLE, { ...ui, pick: '', page: routePage(found, at + (value === PICK_NEXT ? 1 : -1)).page } satisfies MmPeople)
       return
     }
     const offered = routeTo.some(p => p.projectId === value)
@@ -8109,7 +8144,7 @@ async function pickProject($: EngineInterface, id: string, value: string): Promi
 /** Cancel: the picker closes. */
 async function closeRoute($: EngineInterface): Promise<void> {
   try {
-    const { open: _open, pick: _pick, page: _page, ...rest } = await peopleUi($)
+    const { open: _open, pick: _pick, page: _page, query: _query, ...rest } = await peopleUi($)
     await $.state.set(PEOPLE, rest)
   } catch {
     // as above
@@ -10663,6 +10698,8 @@ export const register: Register = on => {
     const { Box, Button, Link, Markdown, Text } = $.ui.resolve(e)
     // (New people) a picker only where the surface draws one: the mobile app's table has no Select
     const Select = PICKER_SURFACES.has(String(e.surface)) ? ($.ui.resolve(e) as Partial<Pick<Elements['desktop'], 'Select'>>).Select : undefined
+    // (0.7.66) and its search field, where the surface draws the picker
+    const Input = Select ? ($.ui.resolve(e) as Partial<Pick<Elements['desktop'], 'Input'>>).Input : undefined
     const { value: queue } = await $.state.get(QUEUE)
     const { value: notice } = await $.state.get(NOTICE)
     const { value: folds } = await $.state.get(FOLDS)
@@ -10752,9 +10789,19 @@ export const register: Register = on => {
       const routable = Boolean(Select) && !p.directory
       const picking = routable && ui.open === p.id
       const picked = picking ? routeTo.find(r => r.projectId === ui.pick) : undefined
+      // (0.7.66) what the search finds: every project while nothing is typed
+      const query = picking && typeof ui.query === 'string' ? ui.query : ''
+      const searched = query.trim() !== ''
+      const found = picking ? routeSearch(routeTo, query) : { items: routeTo, close: false }
+      // (0.7.66) OW's guess, and the project it names when it names exactly one (`routeGuess`): what opened picked
+      const guessed = picking && p.guess ? routeGuess(routeTo, p.guess) : undefined
       // (a page of the picker at a time: the engine refuses a Select of more than 64 options, and a feed can offer more projects)
-      const pg = routePage(routeTo, Number(ui.page) || 0)
+      const pg = routePage(found.items, Number(ui.page) || 0)
       const span = (list: readonly MmProject[]) => `${list[0]?.name ?? ''} to ${list[list.length - 1]?.name ?? ''}`
+      const many = (n: number) => `${n} project${n === 1 ? '' : 's'}`
+      const pickLabel = !searched
+        ? pg.pages > 1 ? `Project (${pg.from + 1} to ${pg.from + pg.items.length} of ${routeTo.length})` : 'Project'
+        : `${pg.pages > 1 ? `Project (${pg.from + 1} to ${pg.from + pg.items.length} of ${many(found.items.length)} found` : `Project (${many(found.items.length)} found`}${found.close ? ', close spellings' : ''})`
       return (
         <Box flexDirection="column" marginTop={1}>
           <Text>{`• ${p.title}`}</Text>
@@ -10775,21 +10822,41 @@ export const register: Register = on => {
             <Text dimColor>Working…</Text>
           ) : picking && Select ? (
             <Box flexDirection="column">
-              {routeTo.length ? (
+              {/* (0.7.66) OW's guess, as text: picked below when it names exactly one project */}
+              {p.guess && routeTo.length ? (
+                <Text dimColor>
+                  {!guessed ? `OW's guess: ${p.guess}. No single project matches it.` : picked?.projectId === guessed.projectId ? `OW's guess: ${p.guess}. Picked below.` : `OW's guess: ${p.guess} (${guessed.name}).`}
+                </Text>
+              ) : null}
+              {/* (0.7.66) type the client's or the company's name, misspelt or not: the list below narrows to what it finds */}
+              {routeTo.length && Input ? (
+                <Input
+                  key={`mm-person:search:${p.id}`}
+                  label="Search"
+                  placeholder="Client or company name"
+                  submitLabel="pick"
+                  value={query}
+                  onInput={value => void searchRoute($, p.id, value, false)}
+                  onSubmit={value => void searchRoute($, p.id, value, true)}
+                />
+              ) : null}
+              {!routeTo.length ? (
+                <Text dimColor>No project in your feed to route to.</Text>
+              ) : !found.items.length ? (
+                <Text dimColor>No project matches that. Try part of the client or company name.</Text>
+              ) : (
                 <Select
                   key={`mm-person:pick:${p.id}`}
-                  label={pg.pages > 1 ? `Project (${pg.from + 1} to ${pg.from + pg.items.length} of ${routeTo.length})` : 'Project'}
+                  label={pickLabel}
                   options={[
                     { value: PICK_NONE, label: 'Choose a project' },
                     ...(pg.prev ? [{ value: PICK_PREV, label: `◂ Earlier: ${span(pg.prev)}` }] : []),
-                    ...pg.items.map(r => ({ value: r.projectId, label: r.name })),
+                    ...pg.items.map(r => ({ value: r.projectId, label: routeLabel(r) })),
                     ...(pg.next ? [{ value: PICK_NEXT, label: `More: ${span(pg.next)} ▸` }] : []),
                   ]}
                   value={picked && pg.items.some(r => r.projectId === picked.projectId) ? picked.projectId : PICK_NONE}
                   onSelect={value => void pickProject($, p.id, value)}
                 />
-              ) : (
-                <Text dimColor>No project in your feed to route to.</Text>
               )}
               <Box flexDirection="row" gap={1}>
                 {picked ? <Button key={`mm-person:send:${p.id}`} label={`Route to ${picked.name}`} variant="primary" onPress={() => void resolvePerson($, p.id, 'route')} /> : null}
