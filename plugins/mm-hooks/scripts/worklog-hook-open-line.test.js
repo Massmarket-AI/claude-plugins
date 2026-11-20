@@ -20,6 +20,8 @@ const path = require("path");
 const { spawnSync } = require("child_process");
 
 const HOOK = path.join(__dirname, "worklog-hook.js");
+// The client header carries the copied hook's own version, read from the file so a release never breaks this test.
+const HOOK_VERSION = /^const HOOK_VERSION = "([^"]+)";$/m.exec(fs.readFileSync(HOOK, "utf8"))[1];
 const TOKEN = "test-tracker-token-open-line";
 const API_BASE = "https://ow.test.invalid";
 const SESSION = "0d6b2c1e-4a5f-4c3b-9e8d-7f6a5b4c3d2e";
@@ -99,7 +101,7 @@ test("no open line: the notice follows `Task noted:`, from one GET for the sessi
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, `${API_BASE}/api/ext/open-line?skill=acme-project`);
   assert.equal(calls[0].headers.Authorization, `Bearer ${TOKEN}`);
-  assert.equal(calls[0].headers["X-MM-Client"], "mm-hook/0.13.1");
+  assert.equal(calls[0].headers["X-MM-Client"], `mm-hook/${HOOK_VERSION}`);
 });
 
 for (const [name, extra] of [
