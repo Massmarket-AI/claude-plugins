@@ -67,6 +67,13 @@
  * is typed: not a scheduled task, not a bridge kickoff, not the app's own event.
  * See CHIPS ONLY FOR A TYPED SESSION.
  *
+ * Codex sessions (0.14.0, 2026-11-20): GPT in the Codex CLI runs this same file
+ * from ~/.codex/hooks.json with `--codex` first, and its rows reach OW with the
+ * client and task the way Claude's do: the client from a shell read of a client
+ * skill's SKILL.md, the task from `--task`, the rows under `claude-code-codex`.
+ * No chip feed, setup report or token counts from Codex, and a run Claude handed
+ * to GPT (MM_GPT_DELEGATED=1) records nothing. See CODEX SESSIONS.
+ *
  * Turn origin (0.11.5, 2026-10-12): every worklog POST also says who started the
  * work it belongs to, `person` or `auto`, read from the stamp Claude Code writes
  * on the turn's opening entry in the session's transcript. A turn the system
@@ -196,7 +203,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.13.2";
+const HOOK_VERSION = "0.14.0";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -1030,7 +1037,7 @@ async function postWorklog({ contentMd, title, source, declarations, skillLoad }
         {
           content_md: scrubText(String(contentMd == null ? "" : contentMd)).text,
           title: title ? scrubText(String(title)).text : undefined,
-          source: source || "claude-code",
+          source: source || worklogSource(),
           // ⛔ ATTRIBUTION PHASE 1 — docs/worklog-attribution-design-2026-09-02.md
           // §3.1 (Signal A) and §6 phase 1. The consent gate already answered
           // "which project is this?" when it answered "may I record this?":
@@ -5833,6 +5840,261 @@ function captureDeclaration(toolName, toolInput, toolResponse, state) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// CODEX SESSIONS (0.14.0, 2026-11-20) — GPT in the Codex CLI records like Claude.
+//
+// Rob, 2026-11-20: "I want to make sure GPT also fires hooks for the team for
+// work tracking." Since 2026-11-11 the team hands work to GPT in Codex, and may
+// switch to it when Claude runs out of usage (2026-11-19). A Codex session
+// recorded nothing.
+//
+// Codex (0.155) runs THIS file from ~/.codex/hooks.json, which the mm-hooks
+// plugin writes and trusts, with `--codex` as its first argument. Its payloads
+// have Claude Code's shape, measured 2026-11-20 (control tower
+// docs/codex-hooks-probe-2026-09-17.md, addendum): PascalCase hook_event_name,
+// session_id, cwd (also the hook process's own cwd, so the consent gate is
+// unchanged), tool_name `Bash` with tool_input.command a string, and
+// tool_response the command's output as ONE STRING, which shellStdout reads, so
+// `--task` declares exactly as it does in Claude.
+//
+// What differs, and what this file does about it:
+//   CLIENT    Codex has no Skill tool: its model loads a skill by reading the
+//             SKILL.md in the shell. A shell call declares the client when its
+//             command names `skills/<name>/SKILL.md` for a client skill AND its
+//             output carries that file's own frontmatter line `name: <name>`:
+//             what was read, not what the command said (the `--task` rule, L3).
+//             The same read is a SKILL LOAD, via "read".
+//   SOURCE    Rows carry CODEX_WORKLOG_SOURCE, inside the `claude-code%` family
+//             every time and presence reader counts, and told apart from Claude.
+//   START     The Codex tracking instruction and nothing else: no chip feed
+//             (Codex cannot show or mint a card, and OW records a serve as
+//             minted: R42), no setup report (it describes the Claude install),
+//             no token backfill, no settings.json check.
+//   PROMPT    UserPromptSubmit does nothing. ⛔ It never writes the
+//             prompt-hook-seen marker: that marker tells CLAUDE sessions their
+//             UserPromptSubmit registration is live, and a Codex run must never
+//             make Claude wait for a prompt hook it may not have.
+//   STOP      The Stop line and the skills top-up, as in Claude. No token
+//             counts: OW keeps no harness on a token row yet, and GPT's
+//             flat-plan tokens must not be added to Claude's.
+//   DELEGATED A run Claude started through gpt-delegation's gpt-task.mjs
+//             (MM_GPT_DELEGATED=1) records and prints NOTHING, on any event:
+//             the Claude thread that handed the task over is the one at work,
+//             and its own rows already count that time and name its client.
+//   ORIGIN    Codex writes no `turnOrigin` stamp, so a row's turn_origin comes
+//             from the program Codex says started the session: the
+//             `originator` on the first line of its rollout. `codex_exec` (a
+//             headless run, like `claude -p`) is "cannot tell" and the key is
+//             left out; any other (the TUI, the desktop app, the IDE extension;
+//             their agents carry the parent's originator) is "person". ⛔
+//             Without it a Codex session on a computer whose Claude rows carry
+//             origins is read by OW as one nobody typed in, and its time is
+//             dropped (measured 2026-11-20: the proof session's rows reached OW
+//             and counted no minutes). See codexTurnOrigin.
+// ⛔ FAIL-OPEN like every other path: a Codex read that cannot be parsed is no
+// declaration, never an error.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** The first argument ~/.codex/hooks.json passes this file. */
+const CODEX_FLAG = "--codex";
+
+/** The `source` a Codex session's rows carry: inside HOOK_SOURCE_PREFIX's family on OW. */
+const CODEX_WORKLOG_SOURCE = "claude-code-codex";
+
+/** True for this run when Codex started it. Set once in main(), after the consent gate. */
+let CODEX_RUN = false;
+
+/** A command longer than this is not searched for skill files. */
+const CODEX_SKILL_COMMAND_MAX = 8192;
+
+/** At most this much of a command's output is searched for a skill's name line. */
+const CODEX_SKILL_OUTPUT_MAX = 256 * 1024;
+
+/** At most this many skill files are taken from one command. */
+const CODEX_SKILL_READS_MAX = 8;
+
+/** Each `skills/<name>/SKILL.md` a shell command names (`/` or `\`, any prefix). */
+const CODEX_SKILL_FILE_RE = /(?:^|[^A-Za-z0-9._-])skills[\\/]([A-Za-z0-9][A-Za-z0-9._-]{0,126})[\\/]SKILL\.md(?![A-Za-z0-9._-])/g;
+
+/** A Codex session transcript: `<home>/.codex/sessions/.../rollout-*.jsonl`. */
+function isCodexTranscriptPath(value) {
+  return typeof value === "string" && value.length <= 4096 && /[\\/]\.codex[\\/]sessions[\\/]/.test(value);
+}
+
+/** Did Codex start this run? The `--codex` flag, or a payload only Codex sends. Never throws. */
+function isCodexRun(flagSeen, payload) {
+  if (flagSeen) return true;
+  try {
+    const p = payload && typeof payload === "object" ? payload : {};
+    return isCodexTranscriptPath(p.transcript_path) || isCodexHookPayload(p);
+  } catch {
+    return false;
+  }
+}
+
+/** A run Claude handed to GPT (gpt-delegation's gpt-task.mjs sets it). */
+function isDelegatedGptRun(env) {
+  const e = env || process.env;
+  return e.MM_GPT_DELEGATED === "1";
+}
+
+/** The `source` this run's work rows carry. */
+function worklogSource() {
+  return CODEX_RUN ? CODEX_WORKLOG_SOURCE : "claude-code";
+}
+
+/** At most this much of a rollout is read for its first line (measured: 42 KB at most over 400 rollouts). */
+const CODEX_META_READ_BYTES = 512 * 1024;
+
+/** Codex's name for a headless run. Its rows carry no origin. */
+const CODEX_HEADLESS_ORIGINATOR = "codex_exec";
+
+/**
+ * The `originator` on the first line (`session_meta`) of a Codex rollout:
+ * "codex_exec", "Codex Desktop", "codex_cli_rs", ... or null. One bounded read
+ * of the file's head; never throws.
+ */
+function codexOriginator(transcriptPath) {
+  if (!isCodexTranscriptPath(transcriptPath)) return null;
+  let fd = null;
+  try {
+    fd = fs.openSync(transcriptPath, "r");
+    const chunks = [];
+    let total = 0;
+    let end = -1;
+    while (total < CODEX_META_READ_BYTES && end < 0) {
+      const buf = Buffer.alloc(Math.min(65536, CODEX_META_READ_BYTES - total));
+      const n = fs.readSync(fd, buf, 0, buf.length, total);
+      if (n <= 0) break;
+      const piece = buf.subarray(0, n);
+      const nl = piece.indexOf(10);
+      if (nl >= 0) end = total + nl;
+      chunks.push(piece);
+      total += n;
+    }
+    if (end < 0) return null;
+    const line = Buffer.concat(chunks, total).subarray(0, end).toString("utf8");
+    const meta = JSON.parse(line);
+    const o = meta && meta.type === "session_meta" && meta.payload ? meta.payload.originator : null;
+    return typeof o === "string" && o.trim() && o.length <= 120 ? o.trim() : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // nothing to do
+      }
+    }
+  }
+}
+
+/** A Codex row's turn_origin: "person" unless the session is headless or its originator cannot be read (null). */
+function codexTurnOrigin(payload) {
+  const o = codexOriginator(payload && payload.transcript_path);
+  if (!o || o === CODEX_HEADLESS_ORIGINATOR) return null;
+  return "person";
+}
+
+/** Does this output show the skill's own frontmatter line `name: <name>`? A line number in front is allowed. */
+function skillNameLineShown(output, name) {
+  if (typeof output !== "string" || !output || !name) return false;
+  const esc = String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`^[ \\t]*(?:\\d+[\\t:][ \\t]*)?name:[ \\t]*["']?${esc}["']?[ \\t]*\\r?$`, "m");
+  return re.test(output.slice(0, CODEX_SKILL_OUTPUT_MAX));
+}
+
+/**
+ * The skills a Codex shell call read, `[{name, via: "read"}]` in the order the
+ * command names them: each named `skills/<name>/SKILL.md` whose name line is in
+ * the call's output. Empty for any other run, tool or call. Never throws.
+ */
+function codexSkillReads(toolName, toolInput, toolResponse) {
+  try {
+    if (!CODEX_RUN || TASK_DECLARATION_TOOLS.indexOf(toolName) === -1) return [];
+    const input =
+      toolInput && typeof toolInput === "object" && !Array.isArray(toolInput) ? toolInput : {};
+    const command =
+      typeof input.command === "string" ? input.command : typeof input.cmd === "string" ? input.cmd : "";
+    if (!command || command.length > CODEX_SKILL_COMMAND_MAX) return [];
+    const output = shellStdout(toolResponse);
+    if (!output) return [];
+    const names = [];
+    const re = new RegExp(CODEX_SKILL_FILE_RE.source, "g");
+    let m;
+    while ((m = re.exec(command)) !== null && names.length < CODEX_SKILL_READS_MAX) {
+      if (names.indexOf(m[1]) === -1) names.push(m[1]);
+    }
+    return names.filter((name) => skillNameLineShown(output, name)).map((name) => ({ name, via: "read" }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Record the client a Codex shell call declared (the last client skill it read)
+ * in the session state, and say "client"; null when it read none. Last writer
+ * wins, as captureDeclaration. Never throws.
+ */
+function captureCodexClient(reads, state) {
+  try {
+    let name = "";
+    (Array.isArray(reads) ? reads : []).forEach((r) => {
+      if (r && isClientProjectSkill(r.name)) name = r.name;
+    });
+    if (!name) return null;
+    state.declared_skill = scrubText(name).text;
+    state.declared_skill_at = new Date().toISOString();
+    return "client";
+  } catch (err) {
+    debugLog(`captureCodexClient failed: ${err && err.message}`);
+    return null;
+  }
+}
+
+/** The load a Codex call's row names: the client skill it read, else its first read; null for none. */
+function codexRowSkillLoad(reads) {
+  if (!Array.isArray(reads) || reads.length === 0) return null;
+  const client = reads.filter((r) => isClientProjectSkill(r.name));
+  const pick = client.length ? client[client.length - 1] : reads[0];
+  return { name: pick.name, via: "read" };
+}
+
+/**
+ * VERBATIM — Opus, 2026-11-20. The tracking instruction a Codex session starts
+ * with: the Claude copy (TRACKING_INSTRUCTION_FALLBACK) with the skill step
+ * reworded for a harness that has no Skill tool. The `--task` lines are the
+ * Claude copy's, byte for byte.
+ */
+const CODEX_TRACKING_INSTRUCTION = [
+  "Massmarket time tracking: this Codex session's work is recorded by client and task.",
+  "- First read the client's <client>-project skill from its first line, with one shell command such as: sed -n 1,200p ~/.codex/skills/<client>-project/SKILL.md (the same file is at ~/.claude/skills/<client>-project/SKILL.md). That read is what names the client. For Massmarket's own work read massmarket-internal-ops (our systems) or massmarket-self-funnel (our marketing and sales). Personal work: skip this step.",
+  "- As soon as you know the task, declare it in a few plain words, and again whenever it changes:",
+  '  node ~/.claude/mm-hooks/worklog-hook.js --task "<task>"',
+  '  (Windows PowerShell: node "$env:USERPROFILE\\.claude\\mm-hooks\\worklog-hook.js" --task "<task>")',
+  '  Example: --task "Phase 1 nurture sequence copy"',
+  '  Working an OW ticket? Start the task with its 8-character id: --task "f779a7a0 Fix inbound router"',
+  "- Decide the task from the work; do not ask the team member. Never put secrets, passwords or personal details in the label.",
+].join("\n");
+
+/**
+ * SessionStart for Codex: the token warning or the Codex instruction, and
+ * nothing else (see CODEX SESSIONS, START). Never throws.
+ */
+async function handleCodexSessionStart() {
+  if (!TOKEN) {
+    process.stderr.write(
+      "[worklog-hook] No tracker token on this machine, so this session is not being recorded.\n" +
+        "To fix it, open Claude Code in your client-work folder, start a new thread, and paste:\n" +
+        "  Set up my Massmarket worklog hook. Follow https://onboarding-wizard.massmarket.ai/api/ext/hook-install?guide=1\n" +
+        "First time on this computer? Ask Rob for a one-time install code before you paste it.\n",
+    );
+    return;
+  }
+  await emitHookContext("SessionStart", CODEX_TRACKING_INSTRUCTION);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // SKILL LOADS (0.12.0, 2026-11-05) — which skills this session has loaded.
 //
 // Rob, 2026-11-05: "A lot of my teammates probably are also not loading the
@@ -7446,6 +7708,8 @@ function rowOriginFor(payload, state) {
  * Where it is not registered nothing changes: the first-row rule stands.
  */
 function handleSubagentStart(payload) {
+  // ⛔ CODEX SESSIONS (0.14.0): origins are read from Claude transcripts only.
+  if (CODEX_RUN) return;
   const sessionId = payload.session_id;
   const tasks = taskOriginsDirFor(sessionId);
   const agent = taskIdOf(payload.agent_id);
@@ -7565,20 +7829,30 @@ async function handlePostToolUse(payload) {
   // At most one bounded read of the transcript's tail per run (none for an
   // agent whose origin is already kept); the save at the end of this run keeps
   // the answer for the rest of the turn, and for the agent.
-  TURN_ORIGIN = rowOriginFor(payload, state);
+  // ⛔ CODEX SESSIONS (0.14.0): from the rollout's originator (ORIGIN).
+  TURN_ORIGIN = CODEX_RUN ? codexTurnOrigin(payload) : rowOriginFor(payload, state);
 
   // ⛔ TASK ANNOUNCING (SPEC v2 §2.3). A declaration made by THIS call is taken
   // into the state before anything is posted, so this call's own row already
   // carries it — and is the one row marked with `declaration_event`.
-  const declarationEvent = captureDeclaration(toolName, toolInput, payload.tool_response, state);
+  // ⛔ CODEX SESSIONS (0.14.0): in Codex a shell read of a client skill's
+  // SKILL.md is the client declaration, and every skill it read is a load.
+  const codexReads = codexSkillReads(toolName, toolInput, payload.tool_response);
+  const codexClient = captureCodexClient(codexReads, state);
+  const claudeDeclaration = captureDeclaration(toolName, toolInput, payload.tool_response, state);
+  const declarationEvent = codexClient || claudeDeclaration;
 
   // ⛔ SKILL LOADS (0.12.0). The marker the required-skill check reads, and the
   // fields this call's own row carries. The name only.
-  const skillLoad = skillLoadFrom(toolName, toolInput);
+  const skillLoad = skillLoadFrom(toolName, toolInput) || codexRowSkillLoad(codexReads);
+  const inAgent = typeof payload.agent_id === "string" && payload.agent_id !== "";
   if (skillLoad) {
-    skillLoad.inAgent = typeof payload.agent_id === "string" && payload.agent_id !== "";
+    skillLoad.inAgent = inAgent;
     markSkillLoaded(sessionId, skillLoad);
   }
+  codexReads.forEach((read) => {
+    if (!skillLoad || read.name !== skillLoad.name) markSkillLoaded(sessionId, { name: read.name, via: "read", inAgent });
+  });
 
   // ⛔ UNDECLARED-SESSION REMINDER (0.11.11). Decided after the declaration
   // capture, so the call that loads a client skill is never counted. The write
@@ -7597,7 +7871,7 @@ async function handlePostToolUse(payload) {
     postWorklog(
       {
         contentMd: `- ${describeToolCall(toolName, toolInput)}`,
-        source: "claude-code",
+        source: worklogSource(),
         declarations: declarationFields(sessionId, state, declarationEvent),
         skillLoad,
       },
@@ -7738,7 +8012,7 @@ function undeclaredReminderApplies(payload, env) {
   if (!TOKEN) return false;
   if (e.MM_UNATTENDED === "1") return false;
   if (!isInteractiveSession(e)) return false;
-  if (isCodexHookPayload(payload)) return false;
+  if (CODEX_RUN || isCodexHookPayload(payload)) return false;
   return !(typeof payload.agent_id === "string" && payload.agent_id);
 }
 
@@ -9871,7 +10145,7 @@ function skillCheckApplies(payload, env) {
   if (e.MM_UNATTENDED === "1") return false;
   if (e.LANE2_RUN_ID || e.MM_RUN_SESSION) return false;
   if (!isInteractiveSession(e)) return false;
-  if (isCodexHookPayload(payload)) return false;
+  if (CODEX_RUN || isCodexHookPayload(payload)) return false;
   if (isPluginToolCall(payload)) return false;
   return true;
 }
@@ -11083,7 +11357,8 @@ async function handleStop(payload) {
   const turnOriginBefore = state.turn_origin;
   const turnPromptBefore = state.turn_origin_prompt_id;
   const turnChainBefore = state.turn_chain_origin;
-  TURN_ORIGIN = rowOriginFor(payload, state);
+  // ⛔ CODEX SESSIONS (0.14.0): from the rollout's originator (ORIGIN).
+  TURN_ORIGIN = CODEX_RUN ? codexTurnOrigin(payload) : rowOriginFor(payload, state);
   const turnOriginChanged =
     state.turn_origin !== turnOriginBefore ||
     state.turn_origin_prompt_id !== turnPromptBefore ||
@@ -11109,11 +11384,12 @@ async function handleStop(payload) {
   await Promise.allSettled([
     postWorklog({
       contentMd: `🛑 Session ended. ${state.toolCallCount} tool call(s) streamed.`,
-      source: "claude-code",
+      source: worklogSource(),
       declarations: declarationFields(sessionId, state, null),
     }),
     syncRegistrySkills(),
-    reportSessionTokens(payload),
+    // ⛔ CODEX SESSIONS (0.14.0): no token counts from a Codex run.
+    CODEX_RUN ? Promise.resolve() : reportSessionTokens(payload),
   ]);
 }
 
@@ -11526,6 +11802,8 @@ async function recordChipLane(payload, feed, lane, emitted) {
  * Prints nothing unless it has chip text for the session.
  */
 async function handleUserPromptSubmit(payload) {
+  // ⛔ CODEX SESSIONS (0.14.0): nothing in Codex, and never the marker (PROMPT).
+  if (CODEX_RUN) return;
   markPromptHookSeen();
   if (!TOKEN) return;
   const sessionId = payload && payload.session_id;
@@ -12110,9 +12388,12 @@ function hardExitMsFor(raw) {
 }
 
 async function main() {
+  // ⛔ CODEX SESSIONS (0.14.0): ~/.codex/hooks.json runs this file with
+  // `--codex` first. It marks the run, and is taken off before the CLI branches.
+  const codexFlag = process.argv[2] === CODEX_FLAG;
   // ⛔ Management path first. Only a `--consent*` argv reaches it, and the hook
-  // itself is always invoked with no arguments.
-  const argv = process.argv.slice(2);
+  // itself is always invoked with no arguments (Codex: `--codex` alone).
+  const argv = process.argv.slice(codexFlag ? 3 : 2);
   if (argv.length > 0 && String(argv[0]).indexOf("--consent") === 0) {
     // ⛔ `process.exitCode` + return, NOT process.exit(). stdout to a PIPE is
     // asynchronous in node, and process.exit() truncates whatever has not
@@ -12183,6 +12464,11 @@ async function main() {
   }
 
   const raw = readStdin();
+
+  // ⛔ CODEX SESSIONS (0.14.0), DELEGATED: a run Claude handed to GPT records
+  // and prints nothing, on every event. Decided from the environment and this
+  // check's own parse, before the gate below, because it touches no disk.
+  if (isDelegatedGptRun() && isCodexRun(codexFlag, safeJsonParse(raw))) process.exit(0);
 
   // ═════════════════════════════════════════════════════════════════════════
   // ⛔ THE HARD EXIT (2026-09-29). Armed before anything else on the event
@@ -12256,6 +12542,9 @@ async function main() {
     sessionCwd = "";
   }
   CONSENT_CWD_REL = CONSENT_ROOT ? cwdRelativeToRoot(CONSENT_ROOT, sessionCwd) : null;
+  // ⛔ CODEX SESSIONS (0.14.0): which harness this run answers. Read after the
+  // gate, from the flag and the payload; nothing here touches the disk.
+  CODEX_RUN = isCodexRun(codexFlag, payload);
 
   const event = payload.hook_event_name || "";
   // Kept in this session's declarations record so the prune can tell whether
@@ -12271,7 +12560,9 @@ async function main() {
     } else if (event === "Stop") {
       await handleStop(payload);
     } else if (event === "SessionStart") {
-      await handleSessionStart(payload);
+      // ⛔ CODEX SESSIONS (0.14.0): Codex gets its instruction and nothing else.
+      if (CODEX_RUN) await handleCodexSessionStart();
+      else await handleSessionStart(payload);
     } else if (event === "UserPromptSubmit") {
       // ⛔ The chip lane at a typed session's first prompt (0.13.2). Registered
       // by the mm-hooks plugin; every other prompt is one failed rename and out.
