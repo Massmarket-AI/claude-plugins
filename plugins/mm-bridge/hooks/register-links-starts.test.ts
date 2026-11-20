@@ -7601,11 +7601,268 @@ describe('New people: the founder and a PM route, start or dismiss someone no pr
   })
 
   test('nothing of theirs reaches Claude: the mm tool and /mm say what they said before', async ($, on) => {
-    world(on, { feed: founderFeed() })
+    // (0.7.66) OW's guess, read from their email, neither
+    world(on, { feed: founderFeed({ person_alerts: ALERTS.map(a => ({ ...a, project_guess: 'Quillfeather Labs', suggested_project: { id: ACME, name: 'Acme Roofing', rule: 'guess-match', reason: 'Quillfeather matched' } })) }) })
     const said = await mm($, '')
-    expect(said).not.toMatch(/Dana|Marcus|Priya|Northwind|Fabrikam/)
-    expect(await tool($, '')).not.toMatch(/Dana|Marcus|Priya|Northwind|Fabrikam/)
-    expect(await tool($, 'status')).not.toMatch(/Dana|Marcus|Priya|Northwind|Fabrikam/)
+    expect(said).not.toMatch(/Dana|Marcus|Priya|Northwind|Fabrikam|Quillfeather/)
+    expect(await tool($, '')).not.toMatch(/Dana|Marcus|Priya|Northwind|Fabrikam|Quillfeather/)
+    expect(await tool($, 'status')).not.toMatch(/Dana|Marcus|Priya|Northwind|Fabrikam|Quillfeather/)
+  })
+
+  // ------------------------------------------------------------ (0.7.66) the picker's search and OW's guess
+  // Rob, 2026-11-20: "It would also be good if I could type the name of the client to search it the same way we can in
+  // the extension ... sometimes I'm going to search by the client's name, sometimes the company name. I might misspell
+  // the company name or the client name." Every project here is made up.
+  const sid = (n: number) => `b0b0b0b0-0000-4000-8000-${String(n).padStart(12, '0')}`
+  const COOL_ID = sid(1)
+  const CALC_ID = sid(2)
+  const HARBOR_ID = sid(3)
+  const NORTH_ID = sid(4)
+  /** Four projects the search tells apart, among 100 others (so the picker pages), as an OW that sends client_name and aliases gives them. */
+  const SEARCHABLE: NonNullable<Feed['route_projects']> = [
+    { id: COOL_ID, name: 'Cool Calc', client_name: 'Wes Fairfax', aliases: [] },
+    { id: CALC_ID, name: 'Calc Partners', client_name: null, aliases: null },
+    { id: HARBOR_ID, name: 'Harbor Society', client_name: 'Lena Okafor', aliases: ['Wavecrest Rx'] },
+    { id: NORTH_ID, name: 'Northwind Interiors', client_name: 'Dana Whitfield' },
+    ...routeProjects(100),
+  ]
+  const SEARCH = `mm-person:search:${PRIYA}`
+  const PICKER = `mm-person:pick:${PRIYA}`
+  type Picker = { label: string; options: Array<{ value: string; label: string }>; value: string }
+  const pickerOf = async (ui: Drawing & { find: (q: { type?: string; key?: string }) => Promise<{ props: unknown } | undefined> }) => (await ui.find({ key: PICKER }))?.props as Picker | undefined
+  const sendOf = async (ui: Drawing) => (await peopleButtons(ui)).filter(([k]) => k === `mm-person:send:${PRIYA}`)
+
+  test('Search: "Kool Kalk" narrows the picker to Cool Calc and picks it, and Route sends that project', async ($, on) => {
+    const w = world(on, { feed: founderFeed({ route_projects: SEARCHABLE }), resolve: routed(1) })
+    await mm($, '')
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ plugin: 'mm-bridge', surface, component: 'Pane', requestId: 'mm-queue', props: PANE })
+      if (surface === 'terminal') await ui.press({ key: PEOPLE })
+      await ui.press({ key: `mm-person:route:${PRIYA}` })
+      // the field, empty, above the whole list, paged
+      const field = await ui.find({ key: SEARCH })
+      expect(field?.type).toBe('Input')
+      expect(field?.props).toMatchObject({ label: 'Search', placeholder: 'Client or company name', value: '' })
+      expect((await pickerOf(ui))?.label).toBe('Project (1 to 50 of 104)')
+      await ui.input({ key: SEARCH, text: 'Kool Kalk', kind: 'change' })
+      const narrowed = await pickerOf(ui)
+      expect(narrowed?.label).toBe('Project (1 project found)')
+      expect(narrowed?.options).toEqual([
+        { value: 'none', label: 'Choose a project' },
+        { value: COOL_ID, label: 'Cool Calc · Wes Fairfax' },
+      ])
+      // one project found: it is picked
+      expect(narrowed?.value).toBe(COOL_ID)
+      expect(await sendOf(ui)).toEqual([[`mm-person:send:${PRIYA}`, 'Route to Cool Calc']])
+      expect((await ui.find({ key: SEARCH }))?.props).toMatchObject({ value: 'Kool Kalk' })
+      expect(w.resolves).toEqual([])
+      if (surface === 'terminal') {
+        await ui.press({ key: `mm-person:cancel:${PRIYA}` })
+        await ui.unmount()
+        continue
+      }
+      await ui.press({ key: `mm-person:send:${PRIYA}` })
+      expect(w.resolves.map(r => r.body)).toEqual([{ alert_id: PRIYA, action: 'route', project_id: COOL_ID }])
+      expect(await lines(ui)).toContain('Routed to Cool Calc. 1 email filed.')
+      await ui.unmount()
+    }
+  })
+
+  test('Search finds a project by the company, by the client, by an alias, and misspelt; several found are listed for a pick, none picked', async ($, on) => {
+    world(on, { feed: founderFeed({ route_projects: SEARCHABLE }) })
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: PEOPLE })
+    await ui.press({ key: `mm-person:route:${PRIYA}` })
+    const listed = async (text: string) => {
+      await ui.input({ key: SEARCH, text, kind: 'change' })
+      return { picker: await pickerOf(ui), send: await sendOf(ui) }
+    }
+    // the company
+    expect((await listed('northwind')).picker?.options.map(o => o.label)).toEqual(['Choose a project', 'Northwind Interiors · Dana Whitfield'])
+    // the client, words in any order
+    expect((await listed('whitfield dana')).picker?.value).toBe(NORTH_ID)
+    expect((await listed('Lena')).picker?.value).toBe(HARBOR_ID)
+    // an alias
+    expect((await listed('Wavecrest')).picker?.value).toBe(HARBOR_ID)
+    // misspelt: the close spellings, said so
+    const close = await listed('Okafur')
+    expect(close.picker?.label).toBe('Project (1 project found, close spellings)')
+    expect(close.picker?.value).toBe(HARBOR_ID)
+    expect(close.send).toEqual([[`mm-person:send:${PRIYA}`, 'Route to Harbor Society']])
+    // two found: both listed, nothing picked, until one is
+    const two = await listed('calc')
+    expect(two.picker?.label).toBe('Project (2 projects found)')
+    expect(two.picker?.options.map(o => o.value)).toEqual(['none', CALC_ID, COOL_ID])
+    expect(two.picker?.value).toBe('none')
+    expect(two.send).toEqual([])
+    await ui.select({ key: PICKER, value: CALC_ID })
+    expect(await sendOf(ui)).toEqual([[`mm-person:send:${PRIYA}`, 'Route to Calc Partners']])
+    // a search that still finds the pick keeps it; one that does not lets it go
+    expect((await listed('calc partners')).picker?.value).toBe(CALC_ID)
+    await ui.input({ key: SEARCH, text: 'calc', kind: 'change' })
+    expect((await pickerOf(ui))?.value).toBe(CALC_ID)
+    await ui.input({ key: SEARCH, text: 'wavecrest', kind: 'change' })
+    expect((await pickerOf(ui))?.value).toBe(HARBOR_ID)
+    // cleared: the whole list again, the pick kept, on the page it is on (Harbor Society sorts after the 100 Client rows)
+    await ui.input({ key: SEARCH, text: '', kind: 'change' })
+    expect((await pickerOf(ui))?.label).toBe('Project (101 to 104 of 104)')
+    expect((await pickerOf(ui))?.value).toBe(HARBOR_ID)
+    await ui.unmount()
+  })
+
+  test('Search: Enter picks the first project found; a search that finds none says so, with no list and no Route', async ($, on) => {
+    const w = world(on, { feed: founderFeed({ route_projects: SEARCHABLE }) })
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: PEOPLE })
+    await ui.press({ key: `mm-person:route:${PRIYA}` })
+    await ui.input({ key: SEARCH, text: 'calc' })
+    expect((await pickerOf(ui))?.value).toBe(CALC_ID)
+    expect(await sendOf(ui)).toEqual([[`mm-person:send:${PRIYA}`, 'Route to Calc Partners']])
+    await ui.input({ key: SEARCH, text: 'Zebra Fintech', kind: 'change' })
+    expect(await pickerOf(ui)).toBeUndefined()
+    expect(await lines(ui)).toContain('No project matches that. Try part of the client or company name.')
+    expect(await sendOf(ui)).toEqual([])
+    // Enter on nothing found, or on nothing typed, picks nothing
+    await ui.input({ key: SEARCH, text: 'Zebra Fintech' })
+    expect(await sendOf(ui)).toEqual([])
+    await ui.input({ key: SEARCH, text: '   ' })
+    expect((await pickerOf(ui))?.value).toBe('none')
+    expect(await sendOf(ui)).toEqual([])
+    // Cancel forgets the search: opened again, the field is empty and the list whole
+    await ui.press({ key: `mm-person:cancel:${PRIYA}` })
+    await ui.press({ key: `mm-person:route:${PRIYA}` })
+    expect((await ui.find({ key: SEARCH }))?.props).toMatchObject({ value: '' })
+    expect((await pickerOf(ui))?.label).toBe('Project (1 to 50 of 104)')
+    expect(w.resolves).toEqual([])
+    await ui.unmount()
+  })
+
+  test('the search pages what it finds past 50, and an OW that sends no client_name or aliases is searched by name', async ($, on) => {
+    world(on, { feed: founderFeed({ route_projects: routeProjects(150) }) })
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: PEOPLE })
+    await ui.press({ key: `mm-person:route:${PRIYA}` })
+    await ui.input({ key: SEARCH, text: 'client 1', kind: 'change' })
+    // every word anywhere: the 70 numbers with a 1 in them (001, 010 to 019, 021 to 091, 100 to 150), a page of 50 at a time
+    let shown = await pickerOf(ui)
+    expect(shown?.label).toBe('Project (1 to 50 of 70 projects found)')
+    expect(shown?.options.at(-1)).toEqual({ value: 'page-next', label: 'More: Client 131 to Client 150 ▸' })
+    await ui.select({ key: PICKER, value: 'page-next' })
+    shown = await pickerOf(ui)
+    expect(shown?.label).toBe('Project (51 to 70 of 70 projects found)')
+    expect(shown?.options.map(o => o.label).slice(1, 3)).toEqual(['◂ Earlier: Client 001 to Client 130', 'Client 131'])
+    await ui.input({ key: SEARCH, text: 'Clinet 042', kind: 'change' })
+    shown = await pickerOf(ui)
+    expect(shown?.options.map(o => o.label)).toEqual(['Choose a project', 'Client 042'])
+    expect(shown?.label).toBe('Project (1 project found, close spellings)')
+    await ui.unmount()
+  })
+
+  test("OW's guess: the one project it names is picked when the picker opens, on its page, and the guess is drawn as text", async ($, on) => {
+    const guessed = (guess: string | null) => founderFeed({ route_projects: SEARCHABLE, person_alerts: ALERTS.map(a => (a.id === PRIYA ? { ...a, project_guess: guess } : a)) })
+    const w = world(on, { feed: guessed('Cool Calk'), resolve: routed(2) })
+    // a guess misspelt, or with more words than the project's names, still names one; a pick of another keeps the guess drawn
+    for (const [n, [guess, id, name]] of ([['Cool Calk', COOL_ID, 'Cool Calc'], ['Wavecrest Rx store', HARBOR_ID, 'Harbor Society']] as const).entries()) {
+      w.setFeed(guessed(guess))
+      await mm($, '')
+      const ui = await pane($)
+      // (New people stays open in this thread once opened)
+      if (n === 0) await ui.press({ key: PEOPLE })
+      await ui.press({ key: `mm-person:route:${PRIYA}` })
+      expect((await pickerOf(ui))?.value).toBe(id)
+      expect(await sendOf(ui)).toEqual([[`mm-person:send:${PRIYA}`, `Route to ${name}`]])
+      await ui.input({ key: SEARCH, text: 'calc partners', kind: 'change' })
+      expect(await lines(ui)).toContain(`OW's guess: ${guess} (${name}).`)
+      await ui.press({ key: `mm-person:cancel:${PRIYA}` })
+      await ui.unmount()
+    }
+    w.setFeed(guessed('Northwind'))
+    await mm($, '')
+    const ui = await pane($)
+    // nothing of the guess on the row until the picker opens
+    expect((await lines(ui)).some(l => l.startsWith("OW's guess"))).toBe(false)
+    await ui.press({ key: `mm-person:route:${PRIYA}` })
+    expect(await lines(ui)).toContain("OW's guess: Northwind. Picked below.")
+    // Northwind Interiors sorts after the 100 Client rows: page 3 of the whole list, picked there
+    expect((await pickerOf(ui))?.label).toBe('Project (101 to 104 of 104)')
+    expect((await pickerOf(ui))?.value).toBe(NORTH_ID)
+    expect(await sendOf(ui)).toEqual([[`mm-person:send:${PRIYA}`, 'Route to Northwind Interiors']])
+    // the field stays empty: routing is one press
+    expect((await ui.find({ key: SEARCH }))?.props).toMatchObject({ value: '' })
+    expect(w.resolves).toEqual([])
+    await ui.press({ key: `mm-person:send:${PRIYA}` })
+    expect(w.resolves.map(r => r.body)).toEqual([{ alert_id: PRIYA, action: 'route', project_id: NORTH_ID }])
+    expect(await lines(ui)).toContain('Routed to Northwind Interiors. 2 emails filed.')
+    await ui.unmount()
+  })
+
+  test("OW's guess that names no project, or several, picks nothing and says so; none drawn when OW gives none", async ($, on) => {
+    const guessed = (guess: string | null) => founderFeed({ route_projects: SEARCHABLE, person_alerts: ALERTS.map(a => (a.id === PRIYA ? { ...a, project_guess: guess } : a)) })
+    const w = world(on, { feed: guessed('HNWRx') })
+    for (const [n, guess] of ['HNWRx', 'Calc', 'unknown'].entries()) {
+      w.setFeed(guessed(guess))
+      await mm($, '')
+      const ui = await pane($)
+      if (n === 0) await ui.press({ key: PEOPLE })
+      await ui.press({ key: `mm-person:route:${PRIYA}` })
+      expect(await lines(ui)).toContain(`OW's guess: ${guess}. No single project matches it.`)
+      expect((await pickerOf(ui))?.value).toBe('none')
+      expect(await sendOf(ui)).toEqual([])
+      await ui.press({ key: `mm-person:cancel:${PRIYA}` })
+      await ui.unmount()
+    }
+    w.setFeed(guessed(null))
+    await mm($, '')
+    const ui = await pane($)
+    await ui.press({ key: `mm-person:route:${PRIYA}` })
+    expect((await lines(ui)).some(l => l.startsWith("OW's guess"))).toBe(false)
+    expect((await pickerOf(ui))?.value).toBe('none')
+    expect(w.resolves).toEqual([])
+    await ui.unmount()
+  })
+
+  test("OW's own pick (suggested_project) is picked before its guess, with its reason drawn; one that is not a route project falls back to the guess", async ($, on) => {
+    const suggested = (id: string, guess: string) =>
+      founderFeed({
+        route_projects: SEARCHABLE,
+        person_alerts: ALERTS.map(a => (a.id === PRIYA ? { ...a, project_guess: guess, suggested_project: { id, name: 'Harbor Society', rule: 'thread-continuity', reason: 'Same Gmail thread as an email filed to it' } } : a)),
+      })
+    const w = world(on, { feed: suggested(HARBOR_ID, 'Northwind'), resolve: routed(1) })
+    await mm($, '')
+    let ui = await pane($)
+    await ui.press({ key: PEOPLE })
+    await ui.press({ key: `mm-person:route:${PRIYA}` })
+    expect(await lines(ui)).toContain('OW suggests Harbor Society (Same Gmail thread as an email filed to it). Picked below.')
+    expect((await lines(ui)).some(l => l.startsWith("OW's guess"))).toBe(false)
+    expect((await pickerOf(ui))?.value).toBe(HARBOR_ID)
+    expect(await sendOf(ui)).toEqual([[`mm-person:send:${PRIYA}`, 'Route to Harbor Society']])
+    // a search that picks another keeps the line, without "Picked below"
+    await ui.input({ key: SEARCH, text: 'calc partners', kind: 'change' })
+    expect(await lines(ui)).toContain('OW suggests Harbor Society (Same Gmail thread as an email filed to it).')
+    await ui.press({ key: `mm-person:cancel:${PRIYA}` })
+    await ui.unmount()
+    // OW's pick is not a project route accepts: the guess picks
+    w.setFeed(suggested('e0e0e0e0-0000-4000-8000-000000000009', 'Northwind'))
+    await mm($, '')
+    ui = await pane($)
+    await ui.press({ key: `mm-person:route:${PRIYA}` })
+    expect(await lines(ui)).toContain("OW's guess: Northwind. Picked below.")
+    expect((await lines(ui)).some(l => l.startsWith('OW suggests'))).toBe(false)
+    expect((await pickerOf(ui))?.value).toBe(NORTH_ID)
+    expect(w.resolves).toEqual([])
+    await ui.unmount()
+  })
+
+  test('the mobile app has no search field, as it has no picker', async ($, on) => {
+    world(on, { feed: founderFeed({ route_projects: SEARCHABLE }) })
+    await mm($, '')
+    const ui = await $.ui.mount({ plugin: 'mm-bridge', surface: 'mobile', component: 'Pane', requestId: 'mm-queue', props: PANE })
+    await ui.press({ key: PEOPLE })
+    expect(await ui.findAll({ type: 'Input' })).toEqual([])
+    await ui.unmount()
   })
 })
 
