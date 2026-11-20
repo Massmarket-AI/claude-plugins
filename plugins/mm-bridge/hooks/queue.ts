@@ -336,7 +336,26 @@ export type FeedMemberPins = { member_email: string; reported_at: string; items:
 export type PaceRef = { state: PaceState; need: number; paid: number; logged: number | null; short: number; date: number }
 
 /** One of the feed's projects (OW's `projects`; for the founder and a PM, every active project they may see). */
-export type FeedProject = { project_id: string; name: string; followups?: FeedFollowups | null }
+/**
+ * A project the feed lists. (0.7.67) `owner_private`: true on the founder's own private project, on his own feed only (OW
+ * closeout.ts `CloseoutProject.owner_private`, 2026-11-20): a thread can be linked to it while no ticket is open there.
+ */
+export type FeedProject = { project_id: string; name: string; followups?: FeedFollowups | null; owner_private?: boolean | null }
+
+/**
+ * (0.7.67) The founder's own private projects his feed marks (`owner_private === true`), each once, by id and name. None on
+ * any feed but the founder's, whatever a row says: OW marks them on his feed alone, and the bridge does not take a mark
+ * from anyone else's.
+ */
+export function ownerPrivateProjects(feed: Pick<Feed, 'role' | 'projects'>): Array<{ projectId: string; projectName: string }> {
+  if (feed.role !== 'founder' || !Array.isArray(feed.projects)) return []
+  const out = new Map<string, { projectId: string; projectName: string }>()
+  for (const p of feed.projects) {
+    if (p?.owner_private !== true || !isUuid(p.project_id) || out.has(p.project_id) || cleanName(p.name) === '') continue
+    out.set(p.project_id, { projectId: p.project_id, projectName: cleanName(p.name) })
+  }
+  return [...out.values()]
+}
 
 /**
  * (0.7.24) A feed project's `followups` (OW closeout.ts `CloseoutFollowups`, migration 299 and R7 2026-10-21): the client's
@@ -2049,6 +2068,8 @@ export function feedClients(feed: Feed): KnownClient[] {
   // (0.7.3, internal queue) and the internal-ops project when the viewer has a queue there: `/mm link Massmarket AI`
   const home = queueHome(feed)
   if (home) add(home.projectId, home.projectName)
+  // (0.7.67) and the founder's own private projects, so `/mm link Data licensing` links while no ticket is open there
+  for (const p of ownerPrivateProjects(feed)) add(p.projectId, p.projectName)
   return [...out.values()]
 }
 

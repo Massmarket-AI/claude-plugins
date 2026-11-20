@@ -3,7 +3,7 @@ import type { Elements, EngineInterface, Register, RenderElement } from 'claude-
 import type { MmBand, MmBrowser, MmBrowserAsk, MmBrowserChoice, MmCard, MmFolds, MmTeamNow, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTeam, MmTrack, MmTrackLine, MmView } from '../types'
 
 import {
-  INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients,
+  INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, ownerPrivateProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients,
   peopleRows, routeChoices, routeLabel, routePage, routePageOf, routePrePick, routeSearch, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
   asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, newestFirst, olderHeading, olderMarkdown, olderOf, olderTotal, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText,
   hasDue, clientActivity, isRecent, mayStart,
@@ -239,7 +239,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.66'
+export const VERSION = '0.7.67'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -1258,6 +1258,8 @@ function feedProjects(feed: Feed): string[] {
   // (0.7.3, internal queue) the internal-ops project when the viewer has a queue there: its kickoff's marker links too
   const home = queueHome(feed)
   if (home) add(home.projectId)
+  // (0.7.67) the founder's own private projects: their kickoff's marker links, and so does `/mm link <id>`
+  for (const p of ownerPrivateProjects(feed)) add(p.projectId)
   return [...ids]
 }
 
