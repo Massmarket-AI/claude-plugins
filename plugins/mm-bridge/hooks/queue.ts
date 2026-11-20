@@ -209,6 +209,13 @@ export type FeedPersonAlert = {
    * from a stranger's email, so it is drawn and matched, never handed to Claude. Absent on an OW that does not send it yet.
    */
   project_guess?: string | null
+  /**
+   * (0.7.66) OW's own pick of the project (OW ticket 549944b0, the auto-triage session's contract, 2026-11-20): the project
+   * its rules matched (`rule` `exact-contact`, `thread-continuity`, `candidate-contact` or `guess-match`) and one short
+   * neutral line saying why. The picker pre-picks it when it is one of the route projects, before any match of
+   * `project_guess`. Absent or null on an OW that does not send it, or when no rule matched.
+   */
+  suggested_project?: { id?: string | null; name?: string | null; rule?: string | null; reason?: string | null } | null
 }
 
 /**
@@ -2159,6 +2166,8 @@ export function peopleRows(feed: Feed, now: number): MmPerson[] {
       ...(directory ? { directory: true as const } : {}),
       // (0.7.66) OW's guess at the project, one cleaned line: what the picker pre-picks from (never for a Directory lead, which is not routed)
       ...(!directory && shownText(a.project_guess, 80) ? { guess: shownText(a.project_guess, 80) } : {}),
+      // (0.7.66) and OW's own pick, by id, with its reason as one cleaned line: picked first when it is a route project
+      ...(!directory && a.suggested_project && isUuid(a.suggested_project.id) ? { suggested: { projectId: a.suggested_project.id, reason: shownText(a.suggested_project.reason, 120) } } : {}),
     }
     rows.push({ at: Number.isFinite(at) ? at : -Infinity, row })
   }
@@ -2305,6 +2314,17 @@ export function routeGuess(projects: readonly MmProject[], guess: unknown): MmPr
   if (items.length) return items.length === 1 ? items[0] : undefined
   const held = projects.filter(p => searchTexts(p).some(t => t.length >= GUESS_HOLDS_MIN && folded.includes(t)))
   return held.length === 1 ? held[0] : undefined
+}
+
+/**
+ * (0.7.66) The project the picker opens with picked: OW's own pick (`MmPerson.suggested`) when it is one of the route
+ * projects, else the one project OW's guess names (`routeGuess`), else none. `from` says which, for the line drawn above it.
+ */
+export function routePrePick(projects: readonly MmProject[], person: { suggested?: { projectId: string } | undefined; guess?: string | undefined }): { project: MmProject; from: 'suggested' | 'guess' } | undefined {
+  const suggested = person.suggested ? projects.find(p => p.projectId === person.suggested?.projectId) : undefined
+  if (suggested) return { project: suggested, from: 'suggested' }
+  const guessed = person.guess ? routeGuess(projects, person.guess) : undefined
+  return guessed ? { project: guessed, from: 'guess' } : undefined
 }
 
 /**

@@ -7602,7 +7602,7 @@ describe('New people: the founder and a PM route, start or dismiss someone no pr
 
   test('nothing of theirs reaches Claude: the mm tool and /mm say what they said before', async ($, on) => {
     // (0.7.66) OW's guess, read from their email, neither
-    world(on, { feed: founderFeed({ person_alerts: ALERTS.map(a => ({ ...a, project_guess: 'Quillfeather Labs' })) }) })
+    world(on, { feed: founderFeed({ person_alerts: ALERTS.map(a => ({ ...a, project_guess: 'Quillfeather Labs', suggested_project: { id: ACME, name: 'Acme Roofing', rule: 'guess-match', reason: 'Quillfeather matched' } })) }) })
     const said = await mm($, '')
     expect(said).not.toMatch(/Dana|Marcus|Priya|Northwind|Fabrikam|Quillfeather/)
     expect(await tool($, '')).not.toMatch(/Dana|Marcus|Priya|Northwind|Fabrikam|Quillfeather/)
@@ -7820,6 +7820,38 @@ describe('New people: the founder and a PM route, start or dismiss someone no pr
     await ui.press({ key: `mm-person:route:${PRIYA}` })
     expect((await lines(ui)).some(l => l.startsWith("OW's guess"))).toBe(false)
     expect((await pickerOf(ui))?.value).toBe('none')
+    expect(w.resolves).toEqual([])
+    await ui.unmount()
+  })
+
+  test("OW's own pick (suggested_project) is picked before its guess, with its reason drawn; one that is not a route project falls back to the guess", async ($, on) => {
+    const suggested = (id: string, guess: string) =>
+      founderFeed({
+        route_projects: SEARCHABLE,
+        person_alerts: ALERTS.map(a => (a.id === PRIYA ? { ...a, project_guess: guess, suggested_project: { id, name: 'Harbor Society', rule: 'thread-continuity', reason: 'Same Gmail thread as an email filed to it' } } : a)),
+      })
+    const w = world(on, { feed: suggested(HARBOR_ID, 'Northwind'), resolve: routed(1) })
+    await mm($, '')
+    let ui = await pane($)
+    await ui.press({ key: PEOPLE })
+    await ui.press({ key: `mm-person:route:${PRIYA}` })
+    expect(await lines(ui)).toContain('OW suggests Harbor Society (Same Gmail thread as an email filed to it). Picked below.')
+    expect((await lines(ui)).some(l => l.startsWith("OW's guess"))).toBe(false)
+    expect((await pickerOf(ui))?.value).toBe(HARBOR_ID)
+    expect(await sendOf(ui)).toEqual([[`mm-person:send:${PRIYA}`, 'Route to Harbor Society']])
+    // a search that picks another keeps the line, without "Picked below"
+    await ui.input({ key: SEARCH, text: 'calc partners', kind: 'change' })
+    expect(await lines(ui)).toContain('OW suggests Harbor Society (Same Gmail thread as an email filed to it).')
+    await ui.press({ key: `mm-person:cancel:${PRIYA}` })
+    await ui.unmount()
+    // OW's pick is not a project route accepts: the guess picks
+    w.setFeed(suggested('e0e0e0e0-0000-4000-8000-000000000009', 'Northwind'))
+    await mm($, '')
+    ui = await pane($)
+    await ui.press({ key: `mm-person:route:${PRIYA}` })
+    expect(await lines(ui)).toContain("OW's guess: Northwind. Picked below.")
+    expect((await lines(ui)).some(l => l.startsWith('OW suggests'))).toBe(false)
+    expect((await pickerOf(ui))?.value).toBe(NORTH_ID)
     expect(w.resolves).toEqual([])
     await ui.unmount()
   })

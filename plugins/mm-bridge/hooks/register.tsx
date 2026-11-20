@@ -4,7 +4,7 @@ import type { MmBand, MmBrowser, MmBrowserAsk, MmBrowserChoice, MmCard, MmFolds,
 
 import {
   INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients,
-  peopleRows, routeChoices, routeGuess, routeLabel, routePage, routePageOf, routeSearch, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
+  peopleRows, routeChoices, routeLabel, routePage, routePageOf, routePrePick, routeSearch, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
   asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, newestFirst, olderHeading, olderMarkdown, olderOf, olderTotal, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText,
   hasDue, clientActivity, isRecent, mayStart,
   leadDueOf, pinsFor, pinTitle, threadWhy,
@@ -8067,6 +8067,9 @@ async function peopleShown($: EngineInterface, people: unknown, now: number): Pr
       ...(p.directory === true ? { directory: true as const } : {}),
       // (0.7.66) OW's guess, cleaned again: a value an older version stored, or none
       ...(p.directory !== true && shownText(p.guess, 80) ? { guess: shownText(p.guess, 80) } : {}),
+      ...(p.directory !== true && p.suggested && typeof p.suggested === 'object' && isUuid(p.suggested.projectId)
+        ? { suggested: { projectId: p.suggested.projectId, reason: shownText(p.suggested.reason, 120) } }
+        : {}),
     }))
 }
 
@@ -8077,9 +8080,9 @@ async function peopleUi($: EngineInterface): Promise<MmPeople> {
 }
 
 /**
- * Route to project: this row's project picker opens (any other row's closes), its search empty. (0.7.66) Picked already:
- * the one project OW's guess names (`routeGuess`), on the page it is on; else nothing. Nothing is fetched or sent.
- * Never for a Directory lead.
+ * Route to project: this row's project picker opens (any other row's closes), its search empty. (0.7.66) Picked already,
+ * on the page it is on: OW's own pick when it is a route project, else the one project OW's guess names (`routePrePick`);
+ * else nothing. Nothing is fetched or sent. Never for a Directory lead.
  */
 async function openRoute($: EngineInterface, id: string): Promise<void> {
   try {
@@ -8087,9 +8090,9 @@ async function openRoute($: EngineInterface, id: string): Promise<void> {
     const person = (queue?.people ?? []).find(p => p.id === id)
     if (!person || person.directory) return
     const routeTo = queue?.routeTo ?? []
-    const guessed = routeGuess(routeTo, person.guess)
+    const first = routePrePick(routeTo, person)?.project
     const ui = await peopleUi($)
-    await $.state.set(PEOPLE, { ...ui, open: id, pick: guessed?.projectId ?? '', page: guessed ? routePageOf(routeTo, guessed.projectId) : 0, query: '' } satisfies MmPeople)
+    await $.state.set(PEOPLE, { ...ui, open: id, pick: first?.projectId ?? '', page: first ? routePageOf(routeTo, first.projectId) : 0, query: '' } satisfies MmPeople)
   } catch {
     // a picker that does not open is not worth an error
   }
@@ -10793,8 +10796,14 @@ export const register: Register = on => {
       const query = picking && typeof ui.query === 'string' ? ui.query : ''
       const searched = query.trim() !== ''
       const found = picking ? routeSearch(routeTo, query) : { items: routeTo, close: false }
-      // (0.7.66) OW's guess, and the project it names when it names exactly one (`routeGuess`): what opened picked
-      const guessed = picking && p.guess ? routeGuess(routeTo, p.guess) : undefined
+      // (0.7.66) what opened picked: OW's own pick when it is a route project, else the one project its guess names (`routePrePick`)
+      const first = picking ? routePrePick(routeTo, p) : undefined
+      const reason = first?.from === 'suggested' && p.suggested?.reason ? ` (${p.suggested.reason})` : ''
+      const kept = first && picked?.projectId === first.project.projectId
+      const prePickLine = first?.from === 'suggested'
+        ? kept ? `OW suggests ${first.project.name}${reason}. Picked below.` : `OW suggests ${first.project.name}${reason}.`
+        : first ? kept ? `OW's guess: ${p.guess}. Picked below.` : `OW's guess: ${p.guess} (${first.project.name}).`
+        : p.guess ? `OW's guess: ${p.guess}. No single project matches it.` : ''
       // (a page of the picker at a time: the engine refuses a Select of more than 64 options, and a feed can offer more projects)
       const pg = routePage(found.items, Number(ui.page) || 0)
       const span = (list: readonly MmProject[]) => `${list[0]?.name ?? ''} to ${list[list.length - 1]?.name ?? ''}`
@@ -10822,12 +10831,8 @@ export const register: Register = on => {
             <Text dimColor>Working…</Text>
           ) : picking && Select ? (
             <Box flexDirection="column">
-              {/* (0.7.66) OW's guess, as text: picked below when it names exactly one project */}
-              {p.guess && routeTo.length ? (
-                <Text dimColor>
-                  {!guessed ? `OW's guess: ${p.guess}. No single project matches it.` : picked?.projectId === guessed.projectId ? `OW's guess: ${p.guess}. Picked below.` : `OW's guess: ${p.guess} (${guessed.name}).`}
-                </Text>
-              ) : null}
+              {/* (0.7.66) OW's pick or guess, as text: picked below when it names one route project */}
+              {prePickLine && routeTo.length ? <Text dimColor>{prePickLine}</Text> : null}
               {/* (0.7.66) type the client's or the company's name, misspelt or not: the list below narrows to what it finds */}
               {routeTo.length && Input ? (
                 <Input

@@ -170,6 +170,12 @@ export type MmPerson = {
    * Claude. Absent when OW gives none, and on a Directory lead's row.
    */
   guess?: string
+  /**
+   * (0.7.66) OW's own pick of the project (the feed's `suggested_project`): its id and why, one cleaned line ('' when OW
+   * gives no reason). The picker opens with it picked when it is a route project, before the guess. Absent when OW gives
+   * none, and on a Directory lead's row.
+   */
+  suggested?: { projectId: string; reason: string }
 }
 
 /**

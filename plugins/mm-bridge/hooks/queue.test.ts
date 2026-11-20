@@ -4,7 +4,7 @@ import { businessMsBetween, subtractBusinessMs } from './business-time'
 import {
   CUTOFF_WINDOW_MS, LIST_FLOOR_MS, NO_DUE_DATE, NOBODY, THREAD_TITLE_MAX, WINDOW_AHEAD_MS, buildLists, clockAndDue, dueWhen, listCutoff, rowLine, shownDue, buildQueue, cleanName, cleanText, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockLead, clockText, draftsLine, dueLine, holdBanner,
   CHECK_WAIT_MS, checkingTitle, fastState, internalProjects, whenText, holdSentence, holderName, isClosingRoute, isDraftDone, isUuid, mailLookbackHours, needsLine, noteText, pinsNow, shortName, stillOpenTitle, threadTitle, titleFor, titleNames, withTeammate,
-  ROUTE_PAGE, dateText, peopleRows, routeChoices, routeGuess, routeLabel, routePage, routePageOf, routeSearch, routedText, searchFold, seesPeople, shownText, sourceLink, waitedText,
+  ROUTE_PAGE, dateText, peopleRows, routeChoices, routeGuess, routeLabel, routePage, routePageOf, routePrePick, routeSearch, routedText, searchFold, seesPeople, shownText, sourceLink, waitedText,
   INTERNAL_OPS, INTERNAL_PROJECTS, askLine, asksMarkdown, feedClients, heldInternal, internalAskThread, openAsks,
   QUEUE_SHOWN_MAX, internalQueueThread, ownQueueRows, queueMarkdown, queueTotal, queuedOf,
   QUEUE_OLDER_MAX, newestFirst, olderHeading, olderMarkdown, olderOf, olderTotal, ownOlderRows, queueWhen, shownOlder,
@@ -2048,6 +2048,38 @@ describe('New people: who wrote to us with no project matched (founder and PMs o
     expect(choices[1]?.aliases).toHaveLength(20)
     // an OW that sends id and name only: exactly as before
     expect(routeChoices(feed({ role: 'pm', route_projects: [{ id: pid(1), name: 'Cool Calc' }] }))).toEqual([{ projectId: pid(1), name: 'Cool Calc' }])
+  })
+
+  test("the picker opens with OW's own pick when it is a route project, else the project its guess names, else nothing", async () => {
+    // OW's pick wins over the guess
+    expect(routePrePick(PICK, { suggested: { projectId: HARBOR.projectId }, guess: 'Northwind' })).toEqual({ project: HARBOR, from: 'suggested' })
+    // a pick that is not a route project: the guess
+    expect(routePrePick(PICK, { suggested: { projectId: pid(99) }, guess: 'Northwind' })).toEqual({ project: NORTH, from: 'guess' })
+    expect(routePrePick(PICK, { guess: 'Kool Kalk' })).toEqual({ project: COOL, from: 'guess' })
+    expect(routePrePick(PICK, { suggested: { projectId: pid(99) } })).toBeUndefined()
+    expect(routePrePick(PICK, { guess: 'Calc' })).toBeUndefined()
+    expect(routePrePick(PICK, {})).toBeUndefined()
+    expect(routePrePick([], { suggested: { projectId: HARBOR.projectId } })).toBeUndefined()
+  })
+
+  test("a row carries OW's own pick by id with its reason cleaned; a pick with no uuid is none, and a Directory lead's row has none", async () => {
+    const SUG = 'e0e0e0e0-0000-4000-8000-000000000001'
+    const rows = peopleRows(feed({
+      role: 'founder',
+      person_alerts: [
+        { ...alerts[0]!, suggested_project: { id: SUG, name: 'Cool Calc', rule: 'thread-continuity', reason: 'Same Gmail\nthread as an email filed to it' } },
+        { ...alerts[1]!, suggested_project: { id: SUG, name: 'Cool Calc', rule: 'exact-contact', reason: 'x' } },
+        { ...alerts[2]!, suggested_project: { id: 'COOL', name: 'Cool Calc', rule: 'guess-match', reason: 'x' } },
+      ],
+    }), thu)
+    expect(rows.map(r => [r.id, r.suggested])).toEqual([
+      [A2, undefined],
+      [A3, undefined],
+      [A1, { projectId: SUG, reason: 'Same Gmail thread as an email filed to it' }],
+    ])
+    // no reason: an empty one; null or absent: none
+    expect(peopleRows(feed({ role: 'pm', person_alerts: [{ ...alerts[0]!, suggested_project: { id: SUG } }] }), thu)[0]?.suggested).toEqual({ projectId: SUG, reason: '' })
+    expect(peopleRows(feed({ role: 'pm', person_alerts: [{ ...alerts[0]!, suggested_project: null }] }), thu)[0]).not.toHaveProperty('suggested')
   })
 
   test("a row carries OW's guess at the project, one cleaned line, and a Directory lead's row none", async () => {
