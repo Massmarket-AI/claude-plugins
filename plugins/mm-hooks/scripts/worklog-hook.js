@@ -203,7 +203,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.14.0";
+const HOOK_VERSION = "0.14.1";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -9813,6 +9813,45 @@ function segmentRuns(seg) {
   return true;
 }
 
+/** Words that run the script named after them: a Python interpreter, or `uv run` / `pipx run` / `poetry run`. */
+const SCRIPT_RUNNER_RE = /^(?:python(?:3(?:\.\d+)?)?|pypy3?|run)$/;
+
+/**
+ * Does this segment RUN the script `name`, rather than only name it? (2026-11-22.)
+ * It does when the script is the segment's first word (`./send_package.py`,
+ * `$S/send_package.py`), or when the word before it, past options and the values
+ * of `-X` / `-W`, is a Python interpreter or `run` (`python3 -u x.py`,
+ * `uv run x.py`, `timeout 600 python3 x.py`, `bash -c 'python3 x.py'`).
+ * A segment that only names it is not a run: `for f in …/send_package.py`, or the
+ * tail of `grep -n "a\|b" …/send_package.py`, which the quote-blind split cuts
+ * off at the `|` inside the pattern. Before this, any running segment holding the
+ * name matched, so a read of the file or a `for` loop over it was stopped as a
+ * client send.
+ */
+function runsScript(seg, name) {
+  const want = String(name).toLowerCase();
+  const words = seg.text.split(/\s+/).filter(Boolean).map((w) => w.replace(/^["'(]+|["';)]+$/g, ""));
+  const base = (w) => w.split(/[\\/]/).pop().toLowerCase();
+  for (let i = 0; i < words.length; i++) {
+    if (base(words[i]) !== want) continue;
+    if (i === 0) return true;
+    let j = i - 1;
+    while (j >= 0) {
+      if (/^-/.test(words[j])) {
+        j--;
+        continue;
+      }
+      if (j >= 1 && /^-[XW]$/.test(words[j - 1])) {
+        j -= 2;
+        continue;
+      }
+      break;
+    }
+    if (j >= 0 && SCRIPT_RUNNER_RE.test(base(words[j]))) return true;
+  }
+  return false;
+}
+
 /** A write call in an HTTP command: curl with a write method or a body, or mm-api with a write verb. */
 const HTTP_WRITE_RE = /(?:\s-X\s*["']?(?:POST|PUT|PATCH|DELETE)\b|\s--request\s+["']?(?:POST|PUT|PATCH|DELETE)\b|\s(?:-d|--data(?:-raw|-binary|-urlencode)?|--json|-F|--form)\s|mm-api\.mjs["']?\s+\w+\s+["']?(?:POST|PUT|PATCH|DELETE)\b)/;
 
@@ -9862,12 +9901,12 @@ const SKILL_CHECK_RULES = [
   // ── a client reply: draft, package, send ──
   {
     id: "reply.send_package", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
-    bash: (seg) => /(^|[\s/])send_package\.py\b/.test(seg.text) && !/--dry-run\b/.test(seg.text),
+    bash: (seg) => runsScript(seg, "send_package.py") && !/--dry-run\b/.test(seg.text),
   },
   {
     id: "reply.send_client_email", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
     bash: (seg) =>
-      /(^|[\s/])send-client-email\.py\b/.test(seg.text) &&
+      runsScript(seg, "send-client-email.py") &&
       /(^|\s)--send\b/.test(seg.text) &&
       !onlyInternalAddresses(seg.text) &&
       !messageFileIsInternal(seg.text),
@@ -9884,7 +9923,7 @@ const SKILL_CHECK_RULES = [
   },
   {
     id: "reply.inline_image", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
-    bash: (seg) => /(^|[\s/])stage_inline_image\.py\b/.test(seg.text),
+    bash: (seg) => runsScript(seg, "stage_inline_image.py"),
   },
   {
     id: "reply.gmail_draft", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
