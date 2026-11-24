@@ -18,7 +18,7 @@ import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
   LABEL, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, secondThreadSentence, startKickoff, threadLink, titleLooksLike, titleSuggestion,
-  REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, chipTitle, ownPackage, seenNow, selfUpdateAt, selfUpdateText, updatePace, waitingText,
+  REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, chipTitle, ownPackage, readyPackage, seenNow, selfUpdateAt, selfUpdateText, updatePace, waitingText,
   FRESH_THREAD_BYTES, draftsComing, freshParagraph, prepDue, replacedBy,
   buildHeading, buildMore, buildOf, buildShown,
   teamCount, teamHeading, teamOf, teamPane, teamPerson,
@@ -6599,8 +6599,9 @@ async function selfLiner(
   const links = pass.links ?? (await storeGet<Record<string, string>>($, 'mm.links', {}))
   const sent = pass.sent ?? (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))
   const seen = await storeGet<Record<string, FirstSeen>>($, 'mm.firstSeen', {})
-  // (0.7.69) the same pace the send keeps (`updatePace`): a finished package this thread lacks says it goes shortly
-  const knows = await knowsBuilding($, now)
+  // (0.7.69) the same pace the send keeps (`updatePace`): a finished package this thread lacks says it goes shortly. From
+  // this process's own copy (`pulseSeenAt`), never another store read here: the line is words, the send asks the store
+  const knows = pulseSeenAt > 0 && pulseSeenAt <= now && now - pulseSeenAt <= PULSE_KNOWN_MS
   return (it, rec) => {
     const pid = it.projectId
     const pick = autoUpdateTarget(rec, links[pid])
@@ -6669,8 +6670,10 @@ async function autoUpdates($: EngineInterface): Promise<void> {
   const sent = await storeGet<Record<string, Sent>>($, 'mm.sent', {})
   const chips = await chipsOf($, now)
   const starting = await storeGet<Record<string, { until?: number }>>($, 'mm.starting', {})
-  // (0.7.69) an OW that says when a package is still being built: a finished package this thread lacks goes at once
-  const knows = await knowsBuilding($, now)
+  // (0.7.69) an OW that says when a package is still being built: read only once a ready package needs it (`paceOf`)
+  let knows: boolean | undefined
+  const paceOf = async (it: QueueItem, given: Sent | undefined, sid: string) =>
+    readyPackage(it) ? updatePace(it, given, sid, (knows ??= await knowsBuilding($, now))) : updatePace(it, given, sid, false)
   for (const it of last.items.slice().sort(byDue)) {
     const pid = it.projectId
     // (0.7.14) the thread has this, sent while its drafts could still come, and none came: it is asked for prep now
@@ -6698,7 +6701,7 @@ async function autoUpdates($: EngineInterface): Promise<void> {
       await ownWork($, it, sid, signature, given, now)
       continue
     }
-    if (!autoUpdateDue(was, now, updatePace(it, given, sid, knows))) continue
+    if (!autoUpdateDue(was, now, await paceOf(it, given, sid))) continue
     const hook = await hookCountsAuto($, now)
     if (!hook.ok) {
       if (!hookLogged.has(`hook\n${hook.why}`)) {
@@ -10154,6 +10157,7 @@ async function pulsePass($: EngineInterface, now: number): Promise<boolean> {
         p.missingUntil = now + PULSE_MISSING_MS
         delete p.okAt
       })
+      pulseSeenAt = 0
       return false
     }
     if (r.status < 200 || r.status >= 300) return false
@@ -10168,6 +10172,7 @@ async function pulsePass($: EngineInterface, now: number): Promise<boolean> {
       p.synced = key
       delete p.missingUntil
     })
+    pulseSeenAt = now
     return moved
   } catch {
     // the next tick asks again; the five-minute sync carries on as before
@@ -10179,8 +10184,12 @@ async function pulsePass($: EngineInterface, now: number): Promise<boolean> {
 async function knowsBuilding($: EngineInterface, now: number): Promise<boolean> {
   const kept = await storeGet<PulseKept>($, 'mm.pulse', {})
   const okAt = Number(kept.okAt)
+  pulseSeenAt = Number.isFinite(okAt) ? okAt : 0
   return Number.isFinite(okAt) && okAt <= now && now - okAt <= PULSE_KNOWN_MS
 }
+
+/** (0.7.69) When this process last saw a pulse answered (`mm.pulse.okAt`, as `pulsePass` or `knowsBuilding` had it): 0, none. */
+let pulseSeenAt = 0
 
 /** (0.7.34) What the bridge keeps of Team now (`mm.team`): the last good read, when it was asked, and, while OW has no such route, until when not to ask. */
 type TeamKept = { asked?: number; got?: number; team?: TeamNow; seen?: TeamSeen; missingUntil?: number }
