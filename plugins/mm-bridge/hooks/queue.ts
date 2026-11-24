@@ -1635,14 +1635,20 @@ export function pinReason(it: QueueItem, now: number): string {
  * pinned it back after the person took its pin off while the client still needed them (`Pin.again`). '' with nothing to
  * say: a clear client with no name on record.
  */
-export function threadWhy(it: QueueItem | undefined, client: string, now: number, pin: { person?: boolean; again?: boolean } = {}): string {
+// ⛔ (0.7.68, Rob 2026-11-23: "we can probably come up with some rules around what types of questions need answering") `pin.answer`:
+// the thread's own declaration that it waits on the person (`mm waiting`), while that declaration pins it. Its sentence
+// (`answerWhy`) stands only where the feed's own does not start `Pinned`: a sentence that names a due time wins.
+export function threadWhy(it: QueueItem | undefined, client: string, now: number, pin: { person?: boolean; again?: boolean; answer?: { type: AnswerType; ask: string } } = {}): string {
+  const answered = pin.answer && isAnswerType(pin.answer.type) && pin.answer.ask ? answerWhy(pin.answer.type, pin.answer.ask) : ''
   if (!it) {
+    if (answered) return answered
     const name = cleanName(client)
     if (!name) return ''
     return `No pin needed: nothing of ${name}'s waits on you.${pin.person ? ' You pinned it yourself, so it stays until you unpin it.' : ''}`
   }
   const why = pinReason(it, now)
   if (why.startsWith('Pinned')) return pin.again ? `${why} You took its pin off, and it still needs you.` : why
+  if (answered) return answered
   return pin.person ? `${why} You pinned it yourself, so it stays until you unpin it.` : why
 }
 
@@ -3364,6 +3370,40 @@ export function lateWord(refs: readonly Pick<MateRef, 'internal'>[]): string {
 export function clearedTitle(client: string, now: number): string {
   return `✓ ${client} · clear ${etParts(now).time}`
 }
+
+// ---------------------------------------------------------------- 0.7.68: a thread waits on the person's answer
+
+/**
+ * ⛔ (0.7.68, Rob 2026-11-23: "it depends on what the question is and how important it is I answer it. you almost always end
+ * with a question. we can probably come up with some rules around what types of questions need answering.") The four kinds of
+ * question a client's thread may say it waits on (`mm waiting <type> -- <question>`), as Claude recommended them and Rob
+ * approved them ("Yes, build it"; the four kinds are the approved recommendation, not his words). Only the thread knows what
+ * its question is about, so the thread declares it: the app's own `blocked` status pinned 82 of 309 threads in a week.
+ *   send      a go on something that reaches a client, prospect or the team
+ *   money     a price off the price book, a discount, credit or refund that needs them, or spend over $10
+ *   only-you  something only they can do
+ *   risk      a client relationship at risk, client data or privacy, or a security problem
+ */
+export const ANSWER_TYPES = ['send', 'money', 'only-you', 'risk'] as const
+export type AnswerType = (typeof ANSWER_TYPES)[number]
+export const isAnswerType = (v: unknown): v is AnswerType => typeof v === 'string' && (ANSWER_TYPES as readonly string[]).includes(v)
+
+/** (0.7.68) Each kind as the pin's sentence names it. Opus-authored, placed verbatim. */
+export const ANSWER_LABEL: Readonly<Record<AnswerType, string>> = {
+  send: 'a go to send',
+  money: 'money',
+  'only-you': 'only you can do this',
+  risk: 'a risk',
+}
+
+/**
+ * (0.7.68) Why a thread is pinned when its own declaration alone pins it: the kind and the thread's question, as the thread
+ * gave it (`cutAsk`). ⛔ Shown in that thread's band only: the question never leaves this computer.
+ */
+export const answerWhy = (type: AnswerType, ask: string): string => `Pinned for you: this thread needs your answer (${ANSWER_LABEL[type]}): "${ask}".`
+
+/** (0.7.68) The name of a thread its declaration pins while its client is on none of the lists: never `✓ … clear` while it waits. */
+export const answerTitle = (client: string): string => `🟡 ${client} · waiting on you`
 
 /**
  * The client a thread name of the bridge's names, whichever shape it has: today's

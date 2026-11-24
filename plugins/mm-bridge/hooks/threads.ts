@@ -19,13 +19,14 @@
 import type { MmRow, MmTeam } from '../types'
 
 import {
+  ANSWER_LABEL, isAnswerType,
   MAY_NEED_OK, NOBODY, assignAsksOf, assignOnly, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, committedCount, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
   checkNow, clientDueOf, internalBehindAt, leadDueOf, newestFirst, olderTotal, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, tasksBesidesUndated, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
   TEAM_BEHIND, TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine, teamLateSplit,
   goOf, goOnly, goWithMail, stepWord,
   NO_REPLY_WHAT, afterPackage, checkDot, noReplyNow, owesNoReply, paceOf, paceOnly, paceStatus, paceWord, statusOf,
 } from './queue'
-import type { AskRef, FeedThread, QueueItem, StatusDot } from './queue'
+import type { AnswerType, AskRef, FeedThread, QueueItem, StatusDot } from './queue'
 
 const TZ = 'America/New_York'
 
@@ -1458,6 +1459,76 @@ export function recordLooksFinished(record: unknown): boolean {
   return !(LEFT_OPEN.test(detail) && !NOTHING_LEFT.test(detail))
 }
 
+// ---------------------------------------------------------------- (0.7.68) a client's thread says it waits on the person
+
+/**
+ * ⛔ (0.7.68, Rob 2026-11-23: "it depends on what the question is and how important it is I answer it. you almost always end
+ * with a question. we can probably come up with some rules around what types of questions need answering." Then, of Claude's
+ * recommended four kinds: "Yes, build it".) What a client's thread declared through `mm waiting <type> -- <question>`, by
+ * thread (`mm.waiting`): the kind (`ANSWER_TYPES`), the question as the thread put it (`cutAsk`), and when. It stands until the
+ * first of: the person's own prompt in that thread at or after `at`; `mm waiting clear` there; a newer declaration there; the
+ * thread archived, gone or unlinked. ⛔ LOCAL ONLY: the question and the kind never leave this computer (the pin report sends
+ * kind `waiting`, never either).
+ */
+export type Declared = { type: AnswerType; ask: string; at: number }
+
+/** (0.7.68) The most characters of a thread's question the bridge keeps, cut on a word boundary. */
+export const ASK_MAX = 140
+
+/**
+ * (0.7.68) A thread's question as the bridge keeps and shows it: control characters and line breaks become spaces, runs of
+ * spaces collapse, a double quote becomes a single one (the sentence quotes it), and past ASK_MAX characters it is cut at the
+ * last space (or at ASK_MAX when there is none past half of it) with `…`. '' for nothing.
+ */
+export function cutAsk(raw: unknown): string {
+  const text = (typeof raw === 'string' ? raw : '').normalize('NFC').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ').replace(/"/g, "'").replace(/\s+/g, ' ').trim()
+  const chars = [...text]
+  if (chars.length <= ASK_MAX) return text
+  const head = chars.slice(0, ASK_MAX - 1).join('')
+  const space = head.lastIndexOf(' ')
+  return `${(space > ASK_MAX / 2 ? head.slice(0, space) : head).replace(/[\s.,;:!?-]+$/u, '')}…`
+}
+
+/** (0.7.68) The declarations on record, each checked again (a thread id, a known kind, a question, a time): a damaged entry is none. */
+export function declaredOf(raw: unknown): Record<string, Declared> {
+  const out: Record<string, Declared> = {}
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out
+  for (const [sid, d] of Object.entries(raw as Record<string, unknown>)) {
+    if (!THREAD_ID.test(sid) || !d || typeof d !== 'object') continue
+    const { type, ask, at } = d as { type?: unknown; ask?: unknown; at?: unknown }
+    if (!isAnswerType(type) || typeof ask !== 'string' || ask === '' || typeof at !== 'number' || !Number.isFinite(at)) continue
+    out[sid] = { type, ask, at }
+  }
+  return out
+}
+
+/**
+ * ⛔ (0.7.68) The mm tool's own words for `waiting`, verbatim as the coordinator gave them for Rob's approved recommendation:
+ * when a thread may say it waits on the person, and the never-list.
+ */
+export const ANSWER_TOOL_TEXT = `"waiting <send|money|only-you|risk> -- <question>" says this thread's work stops until the person answers that question, and pins the thread until they answer: send = a go on something that reaches a client, prospect or the team (email, text, LinkedIn, follow-up schedule, reply package, Discord post); money = a price off the price book, a discount, credit or refund that needs them, or spend over $10; only-you = something only they can do (sign in, a fact or promise only they have, a call only they take); risk = a client relationship at risk, client data or privacy, or a security problem. Never for a go to merge, migrate or deploy our own code, housekeeping, a choice you can make yourself, or anything that can wait. "waiting clear" takes it back.`
+
+/** (0.7.68) What `mm waiting` answers for a kind it does not know, or no question: one line, naming the four kinds. */
+export const ANSWER_REFUSED = 'Not recorded: say "waiting <type> -- <question>" with type send, money, only-you or risk and the question itself, or "waiting clear".'
+/** (0.7.68) What it answers in a thread that is no client's linked thread here: nothing is stored. */
+export const ANSWER_CLIENTS_ONLY = "Not recorded: the bridge pins client threads only, and this thread is not linked to a client's project here."
+/** (0.7.68) What it answers once the declaration is on record. */
+export const answerNoted = (type: AnswerType): string =>
+  `Recorded: this thread waits on the person's answer (${ANSWER_LABEL[type]}). The bridge pins it at its next sync and keeps it pinned until they answer here or you call "waiting clear".`
+/** (0.7.68) What `waiting clear` answers, whether there was a declaration or not. */
+export const ANSWER_CLEARED = 'Cleared: this thread no longer says it waits on the person. Its pin follows the usual rules from the next sync.'
+
+/** (0.7.68) `mm waiting <type> -- <question>`, or `mm waiting clear`: what it asks for, or ANSWER_REFUSED. */
+export function answerArgs(arg: string): { clear: true } | { type: AnswerType; ask: string } | string {
+  const text = arg.trim()
+  if (/^clear$/i.test(text)) return { clear: true }
+  const m = /^(\S+)\s+--\s*([\s\S]*)$/.exec(text) ?? /^(\S+)--\s*([\s\S]*)$/.exec(text)
+  const type = m?.[1]?.toLowerCase()
+  const ask = cutAsk(m?.[2])
+  if (!isAnswerType(type) || !ask) return ANSWER_REFUSED
+  return { type, ask }
+}
+
 /** (0.5.25) One thread for the model to start: the client, and start_session's arguments exactly as the bridge would pass them. */
 export type Kickoff = { client: string; args: Record<string, unknown> }
 
@@ -2223,6 +2294,12 @@ export function pinReport(o: {
   refused?: ReadonlyMap<string, string>
   /** (0.7.23) The clients (project ids) whose thread the pass named through the checking loop (R8). */
   checkedOff?: ReadonlySet<string>
+  /**
+   * ⛔ (0.7.68) The client threads whose own declaration (`mm waiting`) should pin them this pass, the feed not pinning them:
+   * project id → thread. Each is an item of kind `waiting`, with no due time. ⛔ Only the ids go in: the thread's question and
+   * its kind never reach the report.
+   */
+  waiting?: ReadonlyMap<string, string>
   byUs: (sid: string) => boolean
   client: (projectId: string, sid: string) => string | undefined
 }): PinReport {
@@ -2273,6 +2350,42 @@ export function pinReport(o: {
       why_not: whyNot,
       ...(whyText ? { why_text: whyText } : {}),
       clock: internal ? 'internal' : 'client',
+    })
+  }
+  // ⛔ (0.7.68, Rob 2026-11-23) a thread that waits on the person's answer by its own declaration, the feed not pinning it: kind
+  // `waiting`, yellow, no due time and so no clock of a client's (`clock: 'internal'`: OW never draws it red or late). Its why
+  // when not pinned is as for any item: `person_unpinned` while the person's unpin stands for that declaration (`stayedOff`).
+  // (a client listed but not pinned by the feed is not an item yet: `seen` holds every listed client, so the items are asked)
+  const reported = new Set(items.map(i => i.project_id))
+  for (const [pid, sid] of o.waiting ?? []) {
+    // (OW refuses a whole report with an item that names no client: one with no name on record is left out)
+    const name = cleanText(o.client(pid, sid) ?? '', 80)
+    if (!isUuid(pid) || reported.has(pid) || !name) continue
+    reported.add(pid)
+    const s = o.thread(sid)
+    const pinned = s?.pinned === true
+    const whyNot: PinWhyNot | null = pinned
+      ? null
+      : !s
+        ? o.hidden(sid) ? 'unseen' : 'unknown'
+        : o.stayedOff.has(sid)
+          ? 'person_unpinned'
+          : o.refused?.has(sid)
+            ? 'refused'
+            : o.capped.has(sid)
+              ? 'write_cap'
+              : 'unknown'
+    const whyText = whyNot === 'refused' ? cleanText(o.refused?.get(sid), PIN_REPORT_WHY_TEXT_MAX) : ''
+    items.push({
+      project_id: pid,
+      client: capText(name, 80),
+      kind: 'waiting',
+      tone: 'yellow',
+      due_at: null,
+      pinned,
+      why_not: whyNot,
+      ...(whyText ? { why_text: whyText } : {}),
+      clock: 'internal',
     })
   }
   const inItems = new Set(items.map(i => i.project_id))
