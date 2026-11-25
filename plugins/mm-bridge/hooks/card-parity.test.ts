@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import type { MmCardNode, MmCardRun, MmCardTree } from '../types'
 import { readTree } from './card'
-import { STRUCTURAL, contentPieces, drawnText, holdsImage, pageGap, squash } from './card-parity'
+import { STRUCTURAL, sampleNotBuilt, contentPieces, drawnText, holdsImage, pageGap, squash } from './card-parity'
 import { SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
 import { CARD_PAIRS } from './card-pairs.test-helper'
 
@@ -817,5 +817,17 @@ describe('0.7.33 the normalising and the frame', () => {
   test('drawnText is what the pane draws: never a link\'s address behind its words, never a button', () => {
     const nodes: MmCardNode[] = [{ r: [{ s: 'the plan', href: 'https://example.com/plan' }] }, { btn: 'Read it', ask: 'x' }]
     expect(drawnText(nodes)).toBe('the plan')
+  })
+})
+
+describe('0.7.69 sampleNotBuilt', () => {
+  const L = '- Sample not built: 1 lead sample(s) this package promises.'
+  test('only a line of the Findings section counts', () => {
+    expect(sampleNotBuilt(`## T\n\n### Findings\n\n${L}\n\n### Links\n`)).toBe(true)
+    expect(sampleNotBuilt(`### Findings\n\n- x\n${L}`)).toBe(true)
+    expect(sampleNotBuilt(`### Client reply\n\n${L}\n\n### Findings\n\n- x`)).toBe(false)
+    expect(sampleNotBuilt(`### Findings\n\n- x\n\n### Links\n\n${L}`)).toBe(false)
+    expect(sampleNotBuilt(`### Findings\n\n  ${L}`)).toBe(false)
+    expect(sampleNotBuilt(null)).toBe(false)
   })
 })

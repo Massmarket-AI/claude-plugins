@@ -4303,6 +4303,44 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await u.unmount()
     })
 
+    describe('0.7.69 a lead sample the package promises is not built', () => {
+      const SAMPLE_LINE = '- Sample not built: 1 lead sample(s) this package promises. Recommend: build it before the go (client-reply-prep §9.2a step 2), then read the package again.'
+      const SAMPLE_ANSWER =
+        'card not ready: a lead sample this package promises is not built yet. Build it first (client-reply-prep §9.2a step 2), then ask mm card again. Do not ask for the go on this package until then.'
+      const withFindings = (first: string[]) => `${PAGE}\n\n### Findings\n\n${first.join('\n')}\n\n### Links\n\n- none`
+
+      test('(a) first finding: the exact answer, the box closed, the pane says why', async ($, on) => {
+        const w = world(on, { ...own, pickup: { ...PICKUP, markdown: withFindings([SAMPLE_LINE, '- Another finding.']) } })
+        const u = await shown($)
+        expect(await tool($, `card ${PKG}`)).toBe(SAMPLE_ANSWER)
+        expect(SAMPLE_ANSWER).not.toContain('Print the whole page')
+        expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn'))).toBe(false)
+        expect((await lines(u)).join('\n')).toContain('This package promises a lead sample that is not built yet')
+        await u.unmount()
+      })
+
+      test('(d) not the first finding: still refuses', async ($, on) => {
+        const w = world(on, { ...own, pickup: { ...PICKUP, markdown: withFindings(['- A first finding.', SAMPLE_LINE]) } })
+        const u = await shown($)
+        expect(await tool($, `card ${PKG}`)).toBe(SAMPLE_ANSWER)
+        await u.unmount()
+      })
+
+      test('(b) the same text outside Findings (a draft body): this rule does not refuse', async ($, on) => {
+        const w = world(on, { ...own, pickup: { ...PICKUP, markdown: `${PAGE}\n\n### Client reply\n\n${SAMPLE_LINE}\n\n### Findings\n\n- A finding.` } })
+        const u = await shown($)
+        expect(await tool($, `card ${PKG}`)).not.toBe(SAMPLE_ANSWER)
+        await u.unmount()
+      })
+
+      test('(c) no such line: unchanged', async ($, on) => {
+        const w = world(on, { ...own, pickup: PICKUP })
+        const u = await shown($)
+        expect(await tool($, `card ${PKG}`)).toBe(READY)
+        await u.unmount()
+      })
+    })
+
     test('the package moved on since the pane read it: not ready, and the box closes', async ($, on) => {
       const w = world(on, { ...own, pickup: PICKUP })
       const u = await shown($)
