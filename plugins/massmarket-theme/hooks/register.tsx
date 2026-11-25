@@ -1,4 +1,4 @@
-import type { EngineInterface, Register, ThemeColors, ThemeSetArgs } from 'claude-code'
+import type { EngineInterface, Register, ThemeColors, ThemeSetArgs, TurnUsage } from 'claude-code'
 
 import { makeColors } from './make-colors.js'
 
@@ -21,6 +21,12 @@ const BRAND = {
   sceneId: 'hero-mesh',
   sceneAlt: 'A slow cream and gray mesh drifting over a faint grid',
   roles: { accent: '#ff3d00', danger: '#c2203a', success: '#2e7d4f', warning: '#b7791f', pro: '#5b5f97' },
+  // Your messages in a solid square box, Claude's words with no box (Rob, 2026-11-25). `match`: your box the page's
+  // own color, white by day and black at night. `flip`: the reverse, black by day and cream at night.
+  boxes: {
+    match: { light: { bg: '#ffffff', text: '#0a0a0a' }, dark: { bg: '#000000', text: '#f2efe8' } },
+    flip: { light: { bg: '#0a0a0a', text: '#f2efe8' }, dark: { bg: '#f2efe8', text: '#0a0a0a' } },
+  },
   light: {
     anchors: {
       'surface-0': '#ede9e0',
@@ -30,7 +36,6 @@ const BRAND = {
       'text-secondary': '#2a2a2a',
       'text-muted': '#5f646b',
     },
-    messages: { userBg: '#0a0a0a', userText: '#f2efe8', replyBg: '#f7f5ef', replyText: '#0a0a0a' },
     scene: { base: '#f2efe8', blooms: ['#d9d4c7', '#bebab0', '#f7f5ef', '#9e998f', '#787d85'], grid: '#0a0a0a', gridOpacity: 0.16, meshOpacity: [1, 1, 1, 1] },
   },
   dark: {
@@ -43,8 +48,6 @@ const BRAND = {
       'text-secondary': '#d9d4c7',
       'text-muted': '#a9a397',
     },
-    // Night flips the boxes too: your messages cream with ink words, replies black with cream words.
-    messages: { userBg: '#f2efe8', userText: '#0a0a0a', replyBg: '#000000', replyText: '#f2efe8' },
     // Night flips day: the same cream and grays as a light mesh on black.
     scene: { base: '#0a0a0a', blooms: ['#d9d4c7', '#bebab0', '#000000', '#f2efe8', '#9e998f'], grid: '#f2efe8', gridOpacity: 0.12, meshOpacity: [0.2, 0.28, 0.36, 0.46] },
   },
@@ -61,26 +64,25 @@ const { theme, problems } = makeColors({
   dark: { gray: { anchors: BRAND.dark.anchors } },
 })
 
-// Message colors by mode, on solid fills, so words never sit on the moving scene.
-const colors: ThemeColors = {
-  ...theme,
-  inputs: {
-    ...theme.inputs,
-    light: {
-      ...theme.inputs.light,
-      'bg-user-message': BRAND.light.messages.userBg,
-      'text-user-message': BRAND.light.messages.userText,
-      'bg-assistant-message': BRAND.light.messages.replyBg,
-      'text-assistant-message': BRAND.light.messages.replyText,
+/** match: your box in the page's own color (white by day, black at night); flip: the reverse. */
+export type Boxes = 'match' | 'flip'
+const BOXES: readonly Boxes[] = ['match', 'flip']
+
+/**
+ * Your messages' colors by mode, on a solid fill. Claude's get no message colors, so its words have no box and sit
+ * on the scene in the page's own text color, as the app draws a reply with no theme.
+ */
+function colorsFor(boxes: Boxes): ThemeColors {
+  const b = BRAND.boxes[boxes]
+
+  return {
+    ...theme,
+    inputs: {
+      ...theme.inputs,
+      light: { ...theme.inputs.light, 'bg-user-message': b.light.bg, 'text-user-message': b.light.text },
+      dark: { ...theme.inputs.dark, 'bg-user-message': b.dark.bg, 'text-user-message': b.dark.text },
     },
-    dark: {
-      ...theme.inputs.dark,
-      'bg-user-message': BRAND.dark.messages.userBg,
-      'text-user-message': BRAND.dark.messages.userText,
-      'bg-assistant-message': BRAND.dark.messages.replyBg,
-      'text-assistant-message': BRAND.dark.messages.replyText,
-    },
-  },
+  }
 }
 
 // Five soft blooms drifting on long loops over the hero's grid: by day a
@@ -89,10 +91,10 @@ const colors: ThemeColors = {
 // follows the switch below. Each bloom rests where the markup puts it, so it
 // looks finished with motion turned off.
 //
-// The thread's fill sets the level, 0 to 3: as the thread nears the point
-// where it compacts, the same mesh grows and deepens, in its own colors and
-// nothing new (Rob, 2026-11-24: flip the colors "instead of adding new colors
-// like white or red"). Level 3 breathes slowly (9 s), well under any flashing.
+// What the thread costs to keep going sets the level, 0 to 3 (levelFor, below):
+// the same mesh grows and deepens, in its own colors and nothing new (Rob,
+// 2026-11-24: flip the colors "instead of adding new colors like white or
+// red"). Level 3 breathes slowly (9 s), well under any flashing.
 const L = BRAND.light.scene
 const D = BRAND.dark.scene
 const DEPTH = [1, 1.4, 1.8, 2.2] as const
@@ -161,42 +163,88 @@ function sceneFor(level: Level): string {
 </svg>`
 }
 
-/** How full the thread is, as a share of the point where it compacts, to a level. */
-export function levelFor(fill: number | undefined): Level {
-  if (fill === undefined || !(fill >= 0.5)) {
+// ------------------------------------------------ what the thread costs to keep going
+//
+// Rob, 2026-11-25: the glow follows "the thread cost to keep going, not only its size", without leading anyone to
+// abandon an expensive thread mid-task ("There may be some scenarios where, even though the cost is high, that's just
+// what it's going to be to complete a task of that magnitude").
+//
+// So it measures what starting fresh would save, not what this thread costs. Every model call re-reads the whole
+// thread. While its prompt cache is warm, that re-read costs a tenth of the full price; once the thread has sat idle
+// past the cache's life (an hour here, five minutes on some plans), the next message writes all of it again at full
+// price and more. A fresh thread pays its own write once, and then re-reads less on every call. Weighed over the next
+// HORIZON calls, a large thread being worked on saves little by switching (the warm cache is the point), and a large
+// thread that has gone cold saves a lot. The glow rises with that saving.
+
+/**
+ * The context a fresh thread carries once it is going: on Rob's Mac (1,569 threads, the 14 days to 2026-11-25) the
+ * median thread answered its first message over 111K tokens, its 10th call over 146K and its 30th over 190K.
+ */
+export const FRESH_TOKENS = 150_000
+/** The stretch of work weighed: the next 20 model calls, about a turn or two of real work. */
+const HORIZON = 20
+/** Prompt cache prices as a share of the full input price: a read, and a write for each cache life. */
+const READ = 0.1
+export type CacheLife = '1h' | '5m'
+const WRITE: Record<CacheLife, number> = { '1h': 2, '5m': 1.25 }
+export const LIFE_MS: Record<CacheLife, number> = { '1h': 3_600_000, '5m': 300_000 }
+
+/**
+ * The share of the next HORIZON calls' input cost that a fresh thread would save, 0 to 1: `tokens` is the context
+ * this thread re-reads each call, `isCold` whether its cache has lapsed, so its next call writes it all again.
+ */
+export function savingFor(tokens: number, isCold: boolean, life: CacheLife = '1h'): number {
+  const rest = (HORIZON - 1) * READ
+  const here = tokens * ((isCold ? WRITE[life] : READ) + rest)
+  const fresh = FRESH_TOKENS * (WRITE[life] + rest)
+
+  return here > 0 ? Math.max(0, 1 - fresh / here) : 0
+}
+
+/**
+ * The glow level for what a fresh thread would save. With an hour's cache that is, for a thread being worked on,
+ * level 1 from 390K tokens and 2 from 488K; for one gone cold, 1 from 200K, 2 from 250K and 3 from 334K.
+ */
+export function levelFor(saving: number | undefined): Level {
+  if (saving === undefined || !(saving >= 0.25)) {
     return 0
   }
-  if (fill < 0.7) {
+  if (saving < 0.4) {
     return 1
   }
-  if (fill < 0.85) {
+  if (saving < 0.55) {
     return 2
   }
 
   return 3
 }
 
-// Square corners, the app's sans for reading, mono for tool rows, semibold
-// small headings. The app takes only generic font families.
-const BASE_STYLE: NonNullable<ThemeSetArgs['style']> = {
+// The app's sans for reading, mono for tool rows, semibold small headings.
+// The app takes only generic font families. Only your messages have a box:
+// plain and square on a solid fill (Rob tried feathered edges, 2026-11-24, and
+// liked it better without). Claude's words and its tool rows have none, so
+// nothing of Claude's is boxed in one place and bare in another (Rob,
+// 2026-11-25: "I kind of like it better with Claude's messages having the
+// transparent background and mine having the solid white or solid cream").
+const TYPE_STYLE = {
   Text: { fontFamily: ['sans'], fontSize: 15, lineHeight: 24 },
   Heading: { fontFamily: ['sans'], fontWeight: 'semibold', letterSpacing: -0.2 },
-  UserMessage: { radius: 0, paddingX: 16, paddingY: 12, shadow: 'none' },
-  AssistantMessage: { radius: 0, paddingX: 18, paddingY: 14, shadow: 'none' },
-  ToolUse: { fontFamily: ['mono'], backgroundColor: 'surface-1', radius: 0, paddingX: 10 },
-}
+  ToolUse: { fontFamily: ['mono'] },
+} as const satisfies NonNullable<ThemeSetArgs['style']>
 
-// Plain square boxes on solid fills (Rob tried feathered edges, 2026-11-24,
-// and liked it better without).
-function styleFor(_scheme: 'light' | 'dark' | undefined): ThemeSetArgs['style'] {
-  return BASE_STYLE
+const USER_BOX = { radius: 0, paddingX: 16, paddingY: 12, shadow: 'none' } as const
+
+function styleFor(boxes: Boxes): ThemeSetArgs['style'] {
+  // In the page's own color the box needs an edge to read as one (white on cream, black on black): a hairline in the
+  // app's border gray, which follows the mode.
+  return { ...TYPE_STYLE, UserMessage: boxes === 'match' ? { ...USER_BOX, borderColor: 'border', borderWidth: 1 } : USER_BOX }
 }
 
 // The app frosts its own panels (the side panel, the thread list) over the
 // scene with no blur (any blur wipes out the grid's 1px lines) and a veil of
 // 40%, so the grid and mesh read through while their words stay legible.
-function lookFor(scheme: 'light' | 'dark' | undefined, level: Level): ThemeSetArgs {
-  const look: ThemeSetArgs = { colors, backdrop: { scene: `${BRAND.sceneId}-${level}`, glass: { blur: 0, opacity: 0.4 } }, style: styleFor(scheme) }
+function lookFor(scheme: 'light' | 'dark' | undefined, level: Level, boxes: Boxes): ThemeSetArgs {
+  const look: ThemeSetArgs = { colors: colorsFor(boxes), backdrop: { scene: `${BRAND.sceneId}-${level}`, glass: { blur: 0, opacity: 0.4 } }, style: styleFor(boxes) }
 
   return scheme ? { ...look, overrideColorScheme: scheme } : look
 }
@@ -209,10 +257,11 @@ export type Mode = 'auto' | 'light' | 'dark' | 'app'
  * In auto, what day means: `sun`, sunrise to sunset where this computer's time
  * zone is (so it follows the seasons), or `hours`, fixed hours the person set.
  * `glow`: whether the scene deepens and glows as the thread nears compacting.
+ * `boxes`: your messages' box, in the page's own color or the reverse.
  */
-export type Prefs = { mode: Mode; schedule: 'sun' | 'hours'; lightFrom: number; darkFrom: number; glow: boolean }
+export type Prefs = { mode: Mode; schedule: 'sun' | 'hours'; lightFrom: number; darkFrom: number; glow: boolean; boxes: Boxes }
 
-const DEFAULTS: Prefs = { mode: 'auto', schedule: 'sun', lightFrom: 7, darkFrom: 19, glow: true }
+const DEFAULTS: Prefs = { mode: 'auto', schedule: 'sun', lightFrom: 7, darkFrom: 19, glow: true, boxes: 'match' }
 const PREFS_KEY = `${PLUGIN}.prefs`
 const MODES: readonly Mode[] = ['auto', 'light', 'dark', 'app']
 
@@ -346,8 +395,9 @@ async function readPrefs($: EngineInterface): Promise<Prefs> {
   const lightFrom = raw && isHour(raw.lightFrom) ? raw.lightFrom : DEFAULTS.lightFrom
   const darkFrom = raw && isHour(raw.darkFrom) && raw.darkFrom !== lightFrom ? raw.darkFrom : DEFAULTS.darkFrom
   const glow = raw && typeof raw.glow === 'boolean' ? raw.glow : DEFAULTS.glow
+  const boxes = raw && BOXES.includes(raw.boxes as Boxes) ? (raw.boxes as Boxes) : DEFAULTS.boxes
 
-  return { mode, schedule, lightFrom, darkFrom: darkFrom === lightFrom ? DEFAULTS.darkFrom : darkFrom, glow }
+  return { mode, schedule, lightFrom, darkFrom: darkFrom === lightFrom ? DEFAULTS.darkFrom : darkFrom, glow, boxes }
 }
 
 function clockMinutes(hours: number): string {
@@ -373,49 +423,126 @@ function timeZoneName(): string {
   }
 }
 
-/** The token count at which this thread compacts, read once per copy of the mod. */
-let compactAt: number | undefined
-let compactRead = false
+/**
+ * Each thread's last model activity on this computer, by session id: when (`at`), its cache's life and the context
+ * its last call re-read. Kept in the store so a thread reopened after a restart still knows how long it sat.
+ */
+type Seen = { at: number; life: CacheLife; tokens?: number }
+const SEEN_KEY = `${PLUGIN}.threads`
+const SEEN_MAX = 300
+const SEEN_DAYS_MS = 14 * 86_400_000
 
-async function compactPoint($: EngineInterface, window: number): Promise<number> {
-  if (!compactRead) {
-    compactRead = true
-    try {
-      // `summary` estimates locally and sends nothing.
-      const b = (await $.session.usage({ breakdown: 'summary' })).context.breakdown
-      compactAt = b?.autoCompactThreshold ?? b?.rawMaxTokens
-    } catch {
-      compactAt = undefined
-    }
-    if (!(compactAt && compactAt > 0)) {
-      const env = Number(await $.env.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW'))
-      compactAt = env > 0 ? env : undefined
+async function readSeen($: EngineInterface): Promise<Record<string, Seen>> {
+  const raw = (await $.store.get(SEEN_KEY)) as Record<string, Partial<Seen>> | null | undefined
+  const out: Record<string, Seen> = {}
+
+  if (raw && typeof raw === 'object') {
+    for (const [sid, v] of Object.entries(raw)) {
+      if (v && typeof v.at === 'number' && (v.life === '1h' || v.life === '5m')) {
+        out[sid] = { at: v.at, life: v.life, ...(typeof v.tokens === 'number' && v.tokens > 0 ? { tokens: v.tokens } : {}) }
+      }
     }
   }
 
-  return compactAt && compactAt > 0 ? compactAt : window
+  return out
 }
 
-/** How far the thread is toward compacting, 0 to 1 and over; undefined before its first reply. */
-async function fillNow($: EngineInterface): Promise<number | undefined> {
+async function sessionId($: EngineInterface): Promise<string | undefined> {
   try {
-    const { context } = await $.session.usage()
-
-    if (context.tokens === undefined) {
-      return undefined
-    }
-
-    return context.tokens / (await compactPoint($, context.window))
+    return await $.session.id()
   } catch {
     return undefined
   }
 }
 
-/** The last look this copy drew (mode and level): a tick that finds the same sets nothing. */
+/**
+ * Notes model activity in this thread now: at a turn's start (its calls keep the cache warm from then on) and at its
+ * end, with the cache life the turn's writes named and the context its last call re-read.
+ */
+async function noteActivity($: EngineInterface, usage?: TurnUsage): Promise<void> {
+  const sid = await sessionId($)
+
+  if (sid === undefined) {
+    return
+  }
+  const all = await readSeen($)
+  const prev = all[sid]
+  const now = await $.clock.now()
+  const life: CacheLife = usage?.ephemeral_1h_input_tokens ? '1h' : usage?.ephemeral_5m_input_tokens ? '5m' : (prev?.life ?? '1h')
+  let tokens = prev?.tokens
+
+  try {
+    tokens = (await $.session.usage()).context.tokens ?? tokens
+  } catch {
+    // Keep the last reading.
+  }
+  all[sid] = { at: now, life, ...(tokens !== undefined ? { tokens } : {}) }
+  const kept = Object.entries(all)
+    .filter(([, v]) => now - v.at < SEEN_DAYS_MS)
+    .sort(([, a], [, b]) => b.at - a.at)
+    .slice(0, SEEN_MAX)
+  await $.store.set(SEEN_KEY, Object.fromEntries(kept))
+}
+
+/** What this thread costs to keep going: undefined before it has a reading. */
+export type Cost = { tokens: number; life: CacheLife; at?: number; isCold: boolean; saving: number }
+
+async function costNow($: EngineInterface): Promise<Cost | undefined> {
+  const sid = await sessionId($)
+  const seen = sid === undefined ? undefined : (await readSeen($))[sid]
+  let tokens: number | undefined
+
+  try {
+    tokens = (await $.session.usage()).context.tokens
+  } catch {
+    tokens = undefined
+  }
+  tokens = tokens ?? seen?.tokens
+  if (tokens === undefined) {
+    return undefined
+  }
+  const life = seen?.life ?? '1h'
+  // A thread with no activity noted (one that started before this version) counts as warm: never a nudge it can't back.
+  const isCold = seen !== undefined && (await $.clock.now()) - seen.at > LIFE_MS[life]
+
+  return { tokens, life, at: seen?.at, isCold, saving: savingFor(tokens, isCold, life) }
+}
+
+function ago(ms: number): string {
+  const min = Math.round(ms / 60_000)
+
+  if (min < 1) {
+    return 'just now'
+  }
+  if (min < 90) {
+    return `${min} minute${min === 1 ? '' : 's'} ago`
+  }
+  const h = Math.round(min / 60)
+
+  return h < 48 ? `${h} hours ago` : `${Math.round(h / 24)} days ago`
+}
+
+function costWords(cost: Cost | undefined, now: number): string {
+  if (cost === undefined) {
+    return 'Thread glow: on. It shows what a fresh thread would save; this thread has no reading yet.'
+  }
+  const k = (n: number): string => `${Math.round(n / 1000)}K`
+  const level = levelFor(cost.saving)
+  const life = cost.life === '1h' ? 'an hour' : 'five minutes'
+  const pct = Math.round(cost.saving * 100)
+  const size = `Each step here re-reads ${k(cost.tokens)} tokens; a fresh thread carries about ${k(FRESH_TOKENS)} once it is going.`
+  const state = cost.isCold
+    ? `Its cache has lapsed (last reply ${ago(now - (cost.at ?? now))}, kept for ${life}), so the next message re-reads all of it at full price: a fresh thread would save about ${pct}% of the next ${HORIZON} steps.`
+    : `Its cache is warm${cost.at === undefined ? '' : ` (last activity ${ago(now - cost.at)}, kept for ${life})`}, so a fresh thread would save about ${pct}% of the next ${HORIZON} steps${pct < 25 ? ': keep going here' : ''}.`
+
+  return `Thread glow: on, level ${level} of 3 (it shows from a 25% saving). ${size} ${state}`
+}
+
+/** The last look this copy drew (mode, level and boxes): a tick that finds the same sets nothing. */
 let drawn: string | undefined
 
-async function draw($: EngineInterface, scheme: 'light' | 'dark' | undefined, level: Level): Promise<void> {
-  const look = lookFor(scheme, level)
+async function draw($: EngineInterface, scheme: 'light' | 'dark' | undefined, level: Level, boxes: Boxes): Promise<void> {
+  const look = lookFor(scheme, level, boxes)
 
   try {
     const set = await $.theme.set(look)
@@ -435,12 +562,12 @@ async function draw($: EngineInterface, scheme: 'light' | 'dark' | undefined, le
 async function apply($: EngineInterface, force = false): Promise<void> {
   const prefs = await readPrefs($)
   const scheme = schemeNow(new Date(await $.clock.now()), prefs)
-  const level = prefs.glow ? levelFor(await fillNow($)) : 0
-  const key = `${scheme ?? 'app'}:${level}`
+  const level = prefs.glow ? levelFor((await costNow($))?.saving) : 0
+  const key = `${scheme ?? 'app'}:${level}:${prefs.boxes}`
 
   if (force || key !== drawn) {
     drawn = key
-    await draw($, scheme, level)
+    await draw($, scheme, level, prefs.boxes)
   }
 }
 
@@ -466,14 +593,14 @@ async function describe($: EngineInterface): Promise<string> {
       : prefs.mode === 'app'
         ? `${BRAND.name} look: following the app's own light or dark setting.`
         : `${BRAND.name} look: always ${prefs.mode}.`
-  const fill = await fillNow($)
-  const glow = !prefs.glow
-    ? 'Thread glow: off.'
-    : fill === undefined
-      ? 'Thread glow: on. It starts at half the way to compacting; this thread has no reading yet.'
-      : `Thread glow: on. This thread is ${Math.round(fill * 100)}% of the way to compacting (glow level ${levelFor(fill)} of 3; it starts at 50%).`
+  const glow = !prefs.glow ? 'Thread glow: off.' : costWords(await costNow($), now.getTime())
 
-  return `${where}\n${glow}\nChange it with /look auto (sunrise to sunset), /look hours 7 19 (fixed hours light and dark start, 0 to 23), /look light, /look dark, /look app, or /look glow on|off.`
+  const boxes =
+    prefs.boxes === 'match'
+      ? "Your messages: a square box in the page's own color, white by day and black at night. Claude's have no box."
+      : "Your messages: a square box in the reverse of the page's color, black by day and cream at night. Claude's have no box."
+
+  return `${where}\n${glow}\n${boxes}\nChange it with /look auto (sunrise to sunset), /look hours 7 19 (fixed hours light and dark start, 0 to 23), /look light, /look dark, /look app, /look glow on|off, or /look boxes match|flip.`
 }
 
 export const register: Register = on => {
@@ -486,7 +613,7 @@ export const register: Register = on => {
 
     await $.command.register({
       name: 'look',
-      description: `${BRAND.name} look: light from sunrise to sunset, dark at night. /look auto, hours 7 19, light, dark, app, glow on|off`,
+      description: `${BRAND.name} look: light from sunrise to sunset, dark at night. /look auto, hours 7 19, light, dark, app, glow on|off, boxes match|flip`,
     })
     await apply($, true)
 
@@ -499,9 +626,23 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // After each reply the thread's fill has moved: redraw if its level changed.
+  // A turn of the main thread keeps its cache warm from its start.
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      await noteActivity($).catch(error => $.ui.log(String(error)))
+      await apply($).catch(error => $.ui.log(String(error)))
+    }
+
+    return next(e)
+  })
+
+  // After each reply the thread has grown: note it, and redraw if its level changed.
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
+
+    if (e.agentId === undefined) {
+      await noteActivity($, e.usage).catch(error => $.ui.log(String(error)))
+    }
     await apply($).catch(error => $.ui.log(String(error)))
 
     return result
@@ -530,6 +671,8 @@ export const register: Register = on => {
       await $.store.set(PREFS_KEY, { ...prefs, mode: 'auto', schedule: 'hours', lightFrom, darkFrom })
     } else if (first === 'glow' && (words[1] === 'on' || words[1] === 'off')) {
       await $.store.set(PREFS_KEY, { ...prefs, glow: words[1] === 'on' })
+    } else if (first === 'boxes' && BOXES.includes(words[1] as Boxes)) {
+      await $.store.set(PREFS_KEY, { ...prefs, boxes: words[1] as Boxes })
     } else {
       return { text: await describe($) }
     }

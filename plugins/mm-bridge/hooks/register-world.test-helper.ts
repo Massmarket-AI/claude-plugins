@@ -163,7 +163,9 @@ export type WorldOptions = {
   scopeProposal?: (body: Record<string, unknown>) => { status: number; body?: unknown } | 'network'
   /** (0.7.34) How OW answers `GET /team-now`. Left out, 404: an OW without the route yet. */
   teamNow?: () => { status: number; body?: unknown } | 'network'
-  /** (0.7.74) How OW answers `GET /day-stats`. Left out, 404: an OW without the route yet. */
+  /** (0.7.76) How OW answers `GET /drafts-pulse`. Left out, 404: an OW without the route yet. */
+  draftsPulse?: () => { status: number; body?: unknown } | 'network'
+  /** (0.7.77) How OW answers `GET /day-stats`. Left out, 404: an OW without the route yet. */
   dayStats?: () => { status: number; body?: unknown } | 'network'
   /** (0.7.53) How OW answers `GET /browser-now`. Left out, 404: an OW without the route yet. */
   browserNow?: () => { status: number; body?: unknown } | 'network'
@@ -338,6 +340,8 @@ export function world(on: On, opts: WorldOptions = {}) {
       if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
       return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: JSON.stringify(answer.body ?? {}) } }
     }
+    if (e.url.endsWith('/api/ext/drafts-pulse')) {
+      const answer = opts.draftsPulse ? opts.draftsPulse() : { status: 404, body: { error: 'not_found' } }
     if (e.url.endsWith('/api/ext/day-stats')) {
       const answer = opts.dayStats ? opts.dayStats() : { status: 404, body: { error: 'not_found' } }
       if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
@@ -1005,9 +1009,10 @@ export const trackPart = (drawn: string[]): string[] => {
 /** Every fetch the bridge made is a read of one of its own GET routes: never a pickup, a hold or a resolve. */
 // (0.7.23) and the sync's pin report (`/bridge-pins`): what is pinned and what should be, never a pickup, a hold or a claim
 // (0.7.53) and Working manually in browser (`/browser-now`): its read records a new stretch's question, never an answer
-// (0.7.74) and today's numbers (`/day-stats`), read-only
+// (0.7.76) and the drafts pulse (`/drafts-pulse`): a key, nothing else
+// (0.7.77) and today's numbers (`/day-stats`), read-only
 export const onlyReads = (w: { fetched: string[] }) =>
-  w.fetched.every(u => /\/api\/ext\/(?:closeout\?|skill-map$|client-time\?project_ids=|reply-package\?package_id=[0-9a-f-]+&format=pickup$|team-ask\?|bridge-pins$|team-now$|browser-now$|day-stats$)/.test(u))
+  w.fetched.every(u => /\/api\/ext\/(?:closeout\?|skill-map$|client-time\?project_ids=|reply-package\?package_id=[0-9a-f-]+&format=pickup$|team-ask\?|bridge-pins$|team-now$|browser-now$|drafts-pulse$|day-stats$)/.test(u))
 export const skill = async ($: Engine, name: string, over: Record<string, unknown> = {}) => $.tool.call({ tool: 'Skill', skill: name, ...over } as never)
 export const person = async ($: Engine, text: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
 /** Everything a mounted drawing shows, in order: each Text, and each Button as `[label]`. */
