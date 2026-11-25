@@ -183,6 +183,11 @@ export type WorldOptions = {
   renderer?: 'tree'
   /** (0.7.26) What the reply-package pickup read answers, when not the plain page. */
   pickup?: Record<string, unknown>
+  /**
+   * (0.7.71) How `git` and `gh` answer in this thread's folder (the band's Ship row): an exit code and what they print, or `throws` (not
+   * on this computer). Left out, or undefined for a command: exit 128, `not a git repository`. Kept apart from `ran`.
+   */
+  git?: (argv: string[], cwd: string | undefined) => { exitCode: number; stdout?: string; stderr?: string } | 'throws' | undefined
 }
 
 /** (0.5.11, review of PR #15, F4) The parts of the time-tracking hook's text the bridge reads: 0.11.7's, and 0.11.4's. */
@@ -432,6 +437,8 @@ export function world(on: On, opts: WorldOptions = {}) {
   })
   /** Every program the bridge started. */
   const ran: string[] = []
+  /** (0.7.71) Every git and gh command the bridge ran, and in which folder. */
+  const gitRuns: Array<{ argv: string[]; cwd: string | undefined }> = []
   /** (0.7.26) Every reply-package card the bridge drew on this computer: the renderer, apart from the programs above. */
   const renders: string[] = []
   /** (0.7.33) What the renderer draws now. */
@@ -450,6 +457,14 @@ export function world(on: On, opts: WorldOptions = {}) {
       if (opts.renderer === 'tree') return { value: { exitCode: 0, stdout: treeNow, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
       // a renderer from before --tree: the pane shows the page alone, as before 0.7.26
       return { value: { exitCode: 2, stdout: '', stderr: 'render_visual.py: error: unrecognized arguments: --tree -', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    // (0.7.71) git and gh, for the band's Ship row: kept apart from `ran`
+    if (e.argv[0] === 'git' || e.argv[0] === 'gh') {
+      gitRuns.push({ argv: e.argv.map(String), cwd: (e as { cwd?: string }).cwd ?? (e as { init?: { cwd?: string } }).init?.cwd })
+      const said = opts.git?.(e.argv.map(String), gitRuns.at(-1)?.cwd)
+      if (said === 'throws') return { deny: `spawn ${String(e.argv[0])} ENOENT` }
+      const r = said ?? { exitCode: 128, stderr: 'fatal: not a git repository (or any of the parent directories): .git' }
+      return { value: { exitCode: r.exitCode, stdout: r.stdout ?? '', stderr: r.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     ran.push(JSON.stringify(e))
     if (opts.opener === 'missing') return { deny: `spawn ${String(e.argv[0])} ENOENT` }
@@ -544,7 +559,7 @@ export function world(on: On, opts: WorldOptions = {}) {
   /** The chips this session asked the app for. */
   const minted = () => calls.filter(c => c.tool === 'spawn_task')
   return {
-    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, notices, ran, renders, shell, box, fills, resolves, statuses, closes, scopePosts, pinPosts, browserPosts,
+    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, notices, ran, renders, shell, box, fills, resolves, statuses, closes, scopePosts, pinPosts, browserPosts, gitRuns,
     /** The app calls that change a thread: a rename, a pin, a message, a chip. (Reading this session's own usage, and withdrawing a chip, change none.) */
     writes: () => calls.filter(c => !['get_session', 'list_sessions', 'get_usage', 'dismiss_task'].includes(c.tool)).map(c => [c.tool, c.args.session_id ?? '', c.args.title ?? c.args.pinned ?? ''].join(' | ')),
     /** The chips this session asked the app to withdraw, by their ids. */

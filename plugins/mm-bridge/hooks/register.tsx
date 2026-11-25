@@ -243,7 +243,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.70'
+export const VERSION = '0.7.71'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -266,6 +266,8 @@ const TRACK = { plugin: 'mm-bridge', key: 'track' } as const
 const SESS = { plugin: 'mm-bridge', key: 'sess' } as const
 /** (0.6.0) The band's line for a thread not tracked to a client yet. */
 const NUDGE = { plugin: 'mm-bridge', key: 'nudge' } as const
+/** (0.7.71) The band's Ship row (ship.ts). */
+const SHIP = { plugin: 'mm-bridge', key: 'ship' } as const
 /** (0.7.0) The band's line for a client's thread whose work matches no line on the quote. */
 const LINE = { plugin: 'mm-bridge', key: 'lineAsk' } as const
 const PANE_VIEW = 'mm-view'
@@ -592,6 +594,8 @@ type Last = {
   rowPins?: Record<string, RowPin>
   /** The clients that need the person now: what pins, and what the header and the band count. */
   items: QueueItem[]
+  /** (0.7.71) What this computer has alerted for, or recorded quietly (alerts.ts `Alerted`): kept on the sync record, read as data. */
+  alerted?: unknown
   /** Clients whose reply drafts a teammate holds: listed, never pinned, never counted. ((0.7.12) No `older` any more: a record an older version stored with one is read without it.) */
   teammate?: QueueItem[]
   /** (0.5.2, R8) Clients whose package waits for the server's check of our newer send: off the list, not pinned, not counted. */
@@ -2065,7 +2069,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     const recs: Record<string, Recommendation> = {}
     for (const it of [...items, ...quiet, ...checking]) recs[it.projectId] = quietened(it, carried(it, true))
     // (0.7.11) with no list, where each client's thread is cannot be told: the away clients the last sync found are kept
-    const last: Last = { at: now, member, items, ...also, ...founderMark, pinned: before?.pinned ?? 0, recs, projects, ...newPeople, ...(Array.isArray(before?.away) && before.away.length ? { away: before.away } : {}) }
+    const last: Last = { at: now, member, items, ...also, ...founderMark, pinned: before?.pinned ?? 0, recs, projects, ...newPeople, ...(Array.isArray(before?.away) && before.away.length ? { away: before.away } : {}), ...(before?.alerted !== undefined ? { alerted: before.alerted } : {}) }
     await storeLast($, feed, last)
     const rowsOf = (list: readonly QueueItem[], needsYou = false): Row[] => list.map(it => rowFor(it, recs[it.projectId] as Recommendation, now, { needsYou }))
     // (0.7.21) a client listed by the founder's teammates' late tickets alone is Team · late's, not With a teammate's
@@ -3088,7 +3092,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // (`Unpinned.at` later than `Declared.at`) keeps the pin off, and is kept on record while it stands; a newer declaration pins
   // the thread again. ⛔ The same on every computer: the thread is in that person's profile, so its question is theirs.
   /** (0.7.68) The threads a declaration pins this pass: thread → its client, the declaration and the name it gets. */
-  const asking = new Map<string, { pid: string; d?: Declared; title: string; name: string }>()
+  const asking = new Map<string, { pid: string; d?: Declared; title: string; name: string; /** (0.7.71) a missed run's: since when it is missed, for its alert */ missed?: number }>()
   /** (0.7.68) The threads whose declaration the person's unpin holds off: named as before, never pinned for it. */
   const askHeld = new Set<string>()
   /** (0.7.68) The name of each client a declaration pins or would pin, for the pin report. */
@@ -3141,7 +3145,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       continue
     }
     const listedIt = listedNow.get(m.pid)
-    asking.set(sid, { pid: m.pid, title: listedIt ? `${titleFor(listedIt, now)} · ${runWaitSuffix(m.st, now)}` : runMissedTitle(name), name })
+    asking.set(sid, { pid: m.pid, title: listedIt ? `${titleFor(listedIt, now)} · ${runWaitSuffix(m.st, now)}` : runMissedTitle(name), name, missed: m.st.since })
     named.delete(sid)
     stayedOff.delete(sid)
     delete unpinned[sid]
@@ -3364,6 +3368,11 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
 
   /** (0.7.23) The threads this pass wanted pinned and had no writes left for: the pin report's `write_cap`. */
   const outOfWrites = new Set<string>()
+  /**
+   * (0.7.71) The threads this pass pinned just now for the person: the feed's own pins and the threads that say they wait on them, never
+   * one pinned again over the person's unpin (`back`) or one a handover carried. `alertPlan` decides which are new and alerts once.
+   */
+  const newPins: NewPin[] = []
   for (const [sid, it] of want) {
     const s = live.get(sid)
     if (s && writes >= MAX_WRITES) outOfWrites.add(sid)
@@ -3396,6 +3405,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       }
       s.pinned = true
       writes++
+      if (!back) newPins.push({ pid: it.projectId, sid, client: it.client, sig: pinSig(it.kind, it.actBy ?? it.dueAt), text: pinAlertText(title) })
     }
   }
 
@@ -3421,6 +3431,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       }
       s.pinned = true
       writes++
+      // (0.7.71) a declaration's pin says its question; a missed run's (no declaration) is a pin like the feed's, once per miss
+      newPins.push({ pid: a.pid, sid, client: a.name, sig: a.d ? waitingSig(a.d.type, a.d.at) : `run-missed:${a.missed ?? now}`, text: a.d ? waitingAlertText(a.title, a.d.ask) : pinAlertText(a.title) })
     }
   }
 
@@ -3838,6 +3850,13 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // (0.6.0) each thread's current project, from what this pass read and the links it wrote (once per feed)
   // (0.7.28) a scheduled task's run is `gone` to the links and pins alone: its current project is left as it is
   if (!known) await currentPass($, { now, links, was: was.links, moved: moves, live, gone: new Set([...gone].filter(sid => !Object.hasOwn(runs, sid))), feedThreads, pairs, complete: listed.complete, lookups: asked }).catch(() => {})
+  // (0.7.71) what this pass alerts for, on the record it writes: a new pin's notification, a landed package's sound
+  const alerts = await alertPlan($, { now, before, pins: newPins, ready: readyPackages(items) }).catch(err => {
+    void noteFailure($, 'alerts', err)
+    return null
+  })
+  if (alerts) last.alerted = alerts.next
+  else if (before?.alerted !== undefined) last.alerted = before.alerted
   await storeLast($, feed, last)
   // (0.7.11) a sync in another profile than the last one: the person switched Claude profiles now (`awayNote` tells
   // Claude once a switch). Written after the sync record, so the switch is never seen before its away clients.
@@ -3847,6 +3866,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     await $.store.set('mm.profile', { dir: own, since: now, ...from }).catch(() => undefined)
   }
   await showQueue($, member, items, rows, last.pinned, now, folds, now, last)
+  // (0.7.71) a new pin for the person: one notification each and one quiet sound; a reply package of theirs that landed: the sound alone
+  await alertsAfter($, alerts, now).catch(err => noteFailure($, 'alerts', err))
   // (0.7.23) the pin report last, once every pin, name and record of this pass is written and the pane is drawn
   if (report) await sendPinReport($, report, now)
   return { last, live, pairs, listed: true, unseen }
@@ -4101,8 +4122,12 @@ import { ANSWER_INTERNAL, ANSWER_PERSONAL, ASK_HEADING, BROWSER_HEADING, CONFIRM
 import type { BrowserRead } from './browser'
 import type { TeamNow, TeamSeen } from './team'
 import { sampleNotBuilt } from './card-parity'
-import { agentListReadable, askedOf, busyOf, cardDrawable, cardHooks, cardOf, cardVerdict, checkMissOf, checkedOf, clearCard, currentOf, drawCard, feedbackOf, isOnScreen, marksOf, noteAsked, noteDrawn, notePending, noteVersion, onWindows, prepareCard, pressAsk, pressCheck, pressFeedback, pressSign, refreshCard, resetCard, showKept, togglePage, turnBegan, turnEnded, turnMark, type Els, type PageRead } from './card'
+import { agentListReadable, askedOf, busyOf, cardDrawable, cardHooks, cardOf, cardVerdict, checkMissOf, checkedOf, clearCard, currentOf, drawCard, feedbackOf, fillWords, isOnScreen, marksOf, noteAsked, noteDrawn, notePending, noteVersion, onWindows, prepareCard, pressAsk, pressCheck, pressFeedback, pressSign, refreshCard, resetCard, showKept, togglePage, turnBegan, turnEnded, turnMark, type Els, type PageRead } from './card'
 import { holderName } from './queue'
+import { ALERTS_DUE, ALERTS_EVERY_MS, ALERTS_SWITCH, ALERT_GAP_MS, ALERT_TITLE, SOUND_ASSET, SOUND_GAIN, alertedOf, alertsOn, claimDue, moreAlertText, pinAlertText, pinSig, planAlerts, waitingAlertText, waitingSig } from './alerts'
+import type { AlertDue, AlertPlan, NewPin } from './alerts'
+import { SHIP_BUTTON, SHIP_DRAFT, SHIP_EVERY_MS, SHIP_TYPE, SHIP_WORDS, shipState, shipText } from './ship'
+import type { Run as ShipRun } from './ship'
 
 /**
  * The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that
@@ -5336,6 +5361,135 @@ async function rcFollowsPin($: EngineInterface): Promise<void> {
     }
   } finally {
     rcPassing.delete(id)
+  }
+}
+
+// ---------------------------------------------------------------- (0.7.71) the band's Ship row
+
+/** (0.7.71) The sessions whose look at their folder is under way: one at a time each. */
+const shipLooking = new Set<string>()
+
+/**
+ * (0.7.71) Looks at this thread's folder (ship.ts `shipState`) and keeps the row in this session's state, where the band reads it. In a
+ * person's session alone (never a `-p` run, nor where MM_UNATTENDED=1 is set). Written only when it changed. Never throws.
+ */
+async function shipPass($: EngineInterface): Promise<void> {
+  let id = ''
+  try {
+    const sess = await sessOf($)
+    if (sess.interactive !== true || sess.unattended === true) return
+    id = await instanceId($)
+    if (shipLooking.has(id)) return
+    shipLooking.add(id)
+    const cwd = await $.session.cwd()
+    const { value: had } = await $.state.get(SHIP)
+    const run: ShipRun = async (argv, dir, timeoutMs) => {
+      const r = await $.process.run(argv, { cwd: dir, timeoutMs })
+      return { exitCode: r.exitCode ?? 1, stdout: String(r.stdout ?? ''), stderr: String(r.stderr ?? '') }
+    }
+    const now = await $.clock.now()
+    const ship = await shipState(run, cwd, now, had && typeof had === 'object' ? had : null)
+    if (!had || !sameValue({ ...had, at: 0 }, { ...ship, at: 0 }) || (ship.show && had.at !== ship.at)) await $.state.set(SHIP, ship)
+  } catch {
+    // the row stays as it was
+  } finally {
+    if (id) shipLooking.delete(id)
+  }
+}
+
+/**
+ * (0.7.71) Ship, pressed: exactly `/ship` in the prompt box, no Enter (`fillWords`: a draft of the person's is never written over). ⛔ Never
+ * `$.command.run`, never a submit: only a line the person sends starts /ship. A box with a draft, or one that cannot be filled: a toast
+ * says what to type.
+ */
+async function pressShip($: EngineInterface): Promise<void> {
+  const filled = await fillWords($, SHIP_WORDS)
+  if (filled === 'draft') $.ui.toast(SHIP_DRAFT)
+  else if (filled === 'none') $.ui.toast(SHIP_TYPE)
+}
+
+// ---------------------------------------------------------------- (0.7.71) alerts: a new pin notifies, a pin or a package sounds
+
+/** (0.7.71) What `/mm alerts on` and `/mm alerts off` answer. */
+export const ALERTS_ON_SAID = 'Alerts are on on this computer: a thread newly pinned for you raises one notification and a quiet sound, and a reply package of yours landing plays the sound.'
+export const ALERTS_OFF_SAID = 'Alerts are off on this computer: no notification and no sound. Pins and packages still show in the sidebar and the pane.'
+
+/** (0.7.71) Whether this session may alert: a person's, never a `-p` run, never one where MM_UNATTENDED=1 is set. */
+async function mayAlert($: EngineInterface): Promise<boolean> {
+  const sess = await sessOf($)
+  return !(sess.interactive === false || sess.unattended === true || (await $.env.get('MM_UNATTENDED')) === '1')
+}
+
+/**
+ * (0.7.71) The alerts of one pass (alerts.ts, which says why and when), worked out from the sync record before it (`before`): the record
+ * rides on the sync record this pass writes (`last.alerted`), so two threads that sync one after the other alert once, and a pass that
+ * has nothing to raise makes no store call of its own. The switch (`/mm alerts off`) is read only when the pass could alert; off, the
+ * record is still kept. Null in a session that never alerts (a `-p` run, MM_UNATTENDED=1): the record before it is carried as it was.
+ */
+async function alertPlan($: EngineInterface, o: { now: number; before: Last | null; pins: readonly NewPin[]; ready: readonly string[] }): Promise<AlertPlan | null> {
+  if (!(await mayAlert($))) return null
+  const had = alertedOf(o.before?.alerted)
+  const quiet = !o.before || typeof o.before.at !== 'number' || o.now - o.before.at > ALERT_GAP_MS
+  const on = had !== null && !quiet ? alertsOn(await $.store.get(ALERTS_SWITCH)) : true
+  return planAlerts(had, { now: o.now, quiet, on, pins: o.pins, ready: o.ready })
+}
+
+/**
+ * (0.7.71) A pass's alerts, once its record is written. Each new pin's notification (at most ALERT_MAX) is handed to its own thread
+ * (`ALERTS_DUE`), and this thread raises what is its own at once (`deliverAlerts`); the line for the rest, and the sound, come from here,
+ * now. A notification or a sound the engine refuses is let go: the pin and the record stand. ⛔ Nothing goes to a client or a teammate.
+ */
+async function alertsAfter($: EngineInterface, plan: AlertPlan | null, now: number): Promise<void> {
+  if (!plan) return
+  const handed = plan.notify
+  if (handed.length) {
+    await patchStore<Record<string, AlertDue>>($, ALERTS_DUE, {}, fresh => {
+      for (const pin of handed) fresh[pin.sid] = { text: pin.text, key: `pin:${pin.pid}`, at: now }
+    })
+    await deliverAlerts($)
+  }
+  if (plan.more > 0) await notifyOnce($, moreAlertText(plan.more), 'pins:more')
+  if (plan.sound) playArrival($)
+}
+
+/**
+ * (0.7.71) Raises the notifications handed to this thread (`claimDue`): its own at once, and any other thread's that nobody has raised
+ * HANDOFF_MS after it was handed over (that thread is not running here). Taken off the store before they are raised, so each is
+ * raised once whichever threads look. Run by every running thread every ALERTS_EVERY_MS, and by the thread that synced right after
+ * it hands them over. With alerts off on this computer they are dropped unraised.
+ */
+async function deliverAlerts($: EngineInterface): Promise<void> {
+  if (!(await mayAlert($))) return
+  const me = await knownSelf($)
+  const now = await $.clock.now()
+  let mine: AlertDue[] = []
+  await patchStore<Record<string, AlertDue>>($, ALERTS_DUE, {}, (fresh, stored) => {
+    if (!stored || !Object.keys(fresh).length) return false
+    const claimed = claimDue(fresh, me, now)
+    if (Object.keys(claimed.keep).length === Object.keys(fresh).length) return false
+    mine = claimed.mine
+    for (const k of Object.keys(fresh)) delete fresh[k]
+    Object.assign(fresh, claimed.keep)
+  })
+  if (!mine.length || !alertsOn(await $.store.get(ALERTS_SWITCH))) return
+  for (const a of mine) await notifyOnce($, a.text, a.key)
+}
+
+/** (0.7.71) One notification through the person's own channel (`$.ui.notify`); one the engine refuses, or cannot raise, is let go. */
+async function notifyOnce($: EngineInterface, text: string, key: string): Promise<void> {
+  try {
+    await $.ui.notify(text, { title: ALERT_TITLE, key })
+  } catch {
+    // no channel here, or a hook refused it: the pin stands
+  }
+}
+
+/** (0.7.71) The bridge's own sound, once, not waited for: a clip that cannot play on this computer plays nothing. */
+function playArrival($: EngineInterface): void {
+  try {
+    void Promise.resolve($.audio.play({ asset: SOUND_ASSET }, { gain: SOUND_GAIN })).catch(() => {})
+  } catch {
+    // no player here
   }
 }
 
@@ -8555,6 +8709,74 @@ async function toggleTask($: EngineInterface, key: string): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------- (0.7.71) the right-click menu's rows
+
+/** (0.7.71) The right-click menu's words. */
+export const MENU_UPDATE = 'Update this thread'
+export const MENU_VIEW = 'Open in pane'
+export const MENU_LINK = 'Link to client'
+export const MENU_LINK_TO = (client: string): string => `Link to ${client}`
+export const MENU_UPDATE_SUB = (client: string): string => `What is waiting for ${client} goes into this thread`
+export const MENU_VIEW_SUB = (client: string | undefined): string => (client ? `${client} in the side pane` : 'What needs you, in the side pane')
+export const MENU_LINK_SUB = 'Make this thread that client\'s'
+export const MENU_LINK_TYPE = 'Puts /mm link in the prompt box: type the client\'s name'
+/** (0.7.71) Said when the prompt box holds a draft, so the words could not go in. */
+export const MENU_LINK_DRAFT = 'Your prompt box holds a draft, so type: /mm link <client>'
+
+/** (0.7.71) One row of the menu: its key, its words, the line under them, and what a press does. */
+type MenuRow = { key: string; label: string; sub: string; press: () => Promise<void> }
+
+/**
+ * (0.7.71) The rows the menu adds in this thread (see the `ContextMenu` hook), from the store and this session's state alone: none in a
+ * session that is not a person's, while paused, where this thread's id is not known yet (`knownSelf`, no app call), or in a scheduled
+ * task's run. `selection`: the text the person had selected, which may name the client to link.
+ */
+async function menuRows($: EngineInterface, selection: string | undefined): Promise<MenuRow[]> {
+  const sess = await sessOf($)
+  if (sess.interactive === false || sess.unattended === true) return []
+  if (await $.store.get('mm.paused')) return []
+  const me = await knownSelf($)
+  if (!me || Object.hasOwn(await storeGet<Record<string, number>>($, 'mm.scheduled', {}), me)) return []
+  const pid = ownerOf(me, await storeGet<Record<string, string>>($, 'mm.links', {}))
+  const { value: queue } = await $.state.get(QUEUE)
+  const listed = Array.isArray(queue?.rows) ? queue.rows : []
+  const view: MenuRow = { key: 'mm-menu-view', label: MENU_VIEW, sub: '', press: () => openDrafts($) }
+  if (pid) {
+    const row = listed.find(r => r.projectId === pid && r.target === me && r.state !== 'start' && !r.note)
+    const client = row?.client || (await storeGet<Record<string, Pin>>($, 'mm.pins', {}))[me]?.client || ''
+    const out: MenuRow[] = []
+    if (row) out.push({ key: 'mm-menu-update', label: MENU_UPDATE, sub: MENU_UPDATE_SUB(row.client), press: () => press($, 'update', row) })
+    out.push({ ...view, sub: MENU_VIEW_SUB(client || undefined) })
+    return out
+  }
+  const named = selection?.trim() ? clientsNamed(selection, listedIn(await storeGet<Last | null>($, 'mm.last', null))) : []
+  const { value: nudge } = await $.state.get(NUDGE)
+  const picks: Array<{ pid: string; client: string }> =
+    named.length === 1 && named[0]
+      ? [{ pid: named[0].projectId, client: named[0].client }]
+      : (Array.isArray(nudge?.suggest) ? nudge.suggest : []).slice(0, 2).map(sg => ({ pid: sg.pid, client: sg.client }))
+  const links: MenuRow[] = picks
+    .filter(c => isUuid(c.pid) && c.client)
+    .map(c => ({ key: `mm-menu-link:${c.pid}`, label: MENU_LINK_TO(shownText(c.client, 40)), sub: MENU_LINK_SUB, press: () => menuLink($, c.pid) }))
+  if (!links.length) links.push({ key: 'mm-menu-link', label: MENU_LINK, sub: MENU_LINK_TYPE, press: () => menuLinkWords($) })
+  return [...links, { ...view, sub: MENU_VIEW_SUB(undefined) }]
+}
+
+/** (0.7.71) Link to <client>, pressed: `/mm link <project id>` as the person typed it; what it says, above the list and in a toast. */
+async function menuLink($: EngineInterface, pid: string): Promise<void> {
+  try {
+    await say($, await runCommand($, `link ${pid}`, 'person', true))
+  } catch (err) {
+    await say($, errorText(err)).catch(() => {})
+  }
+  await refreshBand($).catch(() => {})
+}
+
+/** (0.7.71) Link to client, pressed with no client to name: `/mm link ` in an empty prompt box; a draft there is never written over. */
+async function menuLinkWords($: EngineInterface): Promise<void> {
+  if ((await fillWords($, '/mm link ')) === 'draft') $.ui.toast(MENU_LINK_DRAFT)
+}
+
 /** The band's second button, in a waiting client's thread: the pane with that client's part on top, as /mm view opens it (a press: S2). Sends nothing. */
 async function openDrafts($: EngineInterface): Promise<void> {
   try {
@@ -8615,6 +8837,12 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       ? 'Remote Control follows the pin on this computer: a pinned thread gets Remote Control, and loses it again when it is unpinned if the bridge turned it on.'
       : 'Remote Control no longer follows the pin on this computer. Threads keep the Remote Control they have now.'
   }
+  // (0.7.71) whether a new pin raises one notification and a quiet sound on this computer, and a reply package landing the sound (on unless turned off)
+  if (verb === 'alerts') {
+    if (arg !== 'on' && arg !== 'off') return `Alerts are ${alertsOn(await $.store.get(ALERTS_SWITCH)) ? 'on' : 'off'} on this computer. Type /mm alerts on or /mm alerts off.`
+    await $.store.set(ALERTS_SWITCH, { on: arg === 'on' })
+    return arg === 'on' ? ALERTS_ON_SAID : ALERTS_OFF_SAID
+  }
   if (verb === 'status') {
     const last = await storeGet<Last | null>($, 'mm.last', null)
     const lease = await storeGet<{ owner: string; until: number } | null>($, 'mm.lease', null)
@@ -8636,6 +8864,7 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       `pins you took off: ${off}`,
       `poller: ${lease?.owner === (await instanceId($)) ? 'this thread' : 'another thread'}`,
       `paused: ${Boolean(await $.store.get('mm.paused'))}`,
+      `alerts (a notification for a new pin, a sound for a pin or a package): ${alertsOn(await $.store.get(ALERTS_SWITCH)) ? 'on' : 'off'}`,
       `auto-update: ${(await autoStartOn($)) ? 'on' : 'off'}`,
       `remote control follows the pin: ${(await rcPinOn($)) ? 'on' : 'off'}`,
       `last error: ${last?.error ?? 'none'}`,
@@ -10815,16 +11044,22 @@ export const register: Register = on => {
       $.clock.every(CHIPS_PASS_MS, () => void chipsPass($))
       // (0.7.19) the lease's holder keeps it between ticks: the lease alone, never a sync
       $.clock.every(LEASE_RENEW_MS, () => void renewLease($))
+      // (0.7.71) a notification handed to this thread for its new pin is raised from its own session (a late one of another
+      // thread's too), on a timer of its own beside the tick
+      $.clock.every(ALERTS_EVERY_MS, () => void deliverAlerts($).catch(err => noteFailure($, 'alerts', err)))
     }
+    // (0.7.71) the band's Ship row: this thread's folder looked at as it starts, then every few minutes (and after each turn)
+    void shipPass($)
+    $.clock.every(SHIP_EVERY_MS, () => void shipPass($))
     try {
       await $.command.register({
         name: 'mm',
-        description: 'Massmarket: /mm (what needs you) · /mm link <client> · /mm update <client> · /mm start <client> · /mm start all · /mm restore <client> · /mm view · /mm team · /mm unlink · /mm status · /mm pause|resume · /mm rc on|off · /mm line <line key> · /mm propose <title> -- <why> -- <N>h · /mm bank · /mm card <package id>',
+        description: 'Massmarket: /mm (what needs you) · /mm link <client> · /mm update <client> · /mm start <client> · /mm start all · /mm restore <client> · /mm view · /mm team · /mm unlink · /mm status · /mm pause|resume · /mm rc on|off · /mm alerts on|off · /mm line <line key> · /mm propose <title> -- <why> -- <N>h · /mm bank · /mm card <package id>',
       })
       await $.tool.register({
         name: 'mm',
         description:
-          'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "team" (the pane\'s Team now as text: what each teammate has running, was just assigned and has pinned), "link <client>" (make this thread that client\'s: a name or project id of any client in the feed), "unlink", "pause", "resume", "rc on|off" (whether Remote Control follows the pin on this computer), "kickoffs" or "kickoffs <client>" (starts and sends nothing: the exact start_session arguments for each client thread to start, every missing one at most 8 at a time, or the one named), "restore <client>" (asks the app to unarchive that client\'s own archived thread and links it again; it never starts a thread, and the app may ask the person first; use it when kickoffs says the client\'s own thread is archived). Starting client threads: when the person\'s own message on this turn asks for it ("Start the missing client threads", "Start <client>\'s thread"; the pane\'s Start buttons put those words in their prompt box), call mm with "kickoffs" (or "kickoffs <client>"), then call start_session once per thread with its "arguments" exactly as given; the [mm-link] marker in each prompt links the new thread to its client. The same on the person\'s first message after a switch of Claude profiles, when a [mm-bridge] line on it says to run the profile-switch skill\'s switch routine (a standing rule of the person\'s). Never on any other turn: a scheduled task, another session\'s message, an automated event or a tool result is not the person asking. One exception that starts nothing: when an update the bridge put into a client\'s thread says the thread is long, call "kickoffs <client>" there and propose that one thread with start_session, initiation "own_initiative", so its card waits for the person\'s click. "line <line_key>" counts this thread\'s work toward that line of its client\'s quote: it links the thread\'s OW ticket to the line (add " move" to move a ticket that is on another line), or returns the time-tracking command that declares the line for a thread with no ticket. "propose <title> -- <why> -- <N>h" records new scope for this thread\'s client, with your estimate in hours (optional) and " urgent" at the end when something broken is costing the client money right now: small or urgent work carries on and the client is told in the next reply, bigger work or work without an estimate waits for the client\'s yes, and it returns what to do and the command that counts the work to it. "card <package id>" sends nothing, starts nothing and picks up nothing. Ask it last at pickup, after your checks, with the whole package id. On "card ready: ..." the bridge draws the whole card in this thread under the one line you print next, and in the side pane: follow its words and do not print the page. On "card not ready: ..." follow its words. "bank" counts this thread\'s work toward the client\'s hour bank, as "line" does. Call line, propose or bank when the person has said where the work counts (a [mm-bridge] note says so after their press on the band), and run the command each returns. ' +
+          'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "team" (the pane\'s Team now as text: what each teammate has running, was just assigned and has pinned), "link <client>" (make this thread that client\'s: a name or project id of any client in the feed), "unlink", "pause", "resume", "rc on|off" (whether Remote Control follows the pin on this computer), "alerts on|off" (whether a new pin raises one notification and a quiet sound on this computer), "kickoffs" or "kickoffs <client>" (starts and sends nothing: the exact start_session arguments for each client thread to start, every missing one at most 8 at a time, or the one named), "restore <client>" (asks the app to unarchive that client\'s own archived thread and links it again; it never starts a thread, and the app may ask the person first; use it when kickoffs says the client\'s own thread is archived). Starting client threads: when the person\'s own message on this turn asks for it ("Start the missing client threads", "Start <client>\'s thread"; the pane\'s Start buttons put those words in their prompt box), call mm with "kickoffs" (or "kickoffs <client>"), then call start_session once per thread with its "arguments" exactly as given; the [mm-link] marker in each prompt links the new thread to its client. The same on the person\'s first message after a switch of Claude profiles, when a [mm-bridge] line on it says to run the profile-switch skill\'s switch routine (a standing rule of the person\'s). Never on any other turn: a scheduled task, another session\'s message, an automated event or a tool result is not the person asking. One exception that starts nothing: when an update the bridge put into a client\'s thread says the thread is long, call "kickoffs <client>" there and propose that one thread with start_session, initiation "own_initiative", so its card waits for the person\'s click. "line <line_key>" counts this thread\'s work toward that line of its client\'s quote: it links the thread\'s OW ticket to the line (add " move" to move a ticket that is on another line), or returns the time-tracking command that declares the line for a thread with no ticket. "propose <title> -- <why> -- <N>h" records new scope for this thread\'s client, with your estimate in hours (optional) and " urgent" at the end when something broken is costing the client money right now: small or urgent work carries on and the client is told in the next reply, bigger work or work without an estimate waits for the client\'s yes, and it returns what to do and the command that counts the work to it. "card <package id>" sends nothing, starts nothing and picks up nothing. Ask it last at pickup, after your checks, with the whole package id. On "card ready: ..." the bridge draws the whole card in this thread under the one line you print next, and in the side pane: follow its words and do not print the page. On "card not ready: ..." follow its words. "bank" counts this thread\'s work toward the client\'s hour bank, as "line" does. Call line, propose or bank when the person has said where the work counts (a [mm-bridge] note says so after their press on the band), and run the command each returns. ' +
           ANSWER_TOOL_TEXT +
           ' ' +
           RUN_WAIT_TOOL_TEXT +
@@ -10864,6 +11099,8 @@ export const register: Register = on => {
       await terminalTime($)
       await drawTrack($, 'turn')
     })().catch(() => {})
+    // (0.7.71) a turn may have committed or pushed: the Ship row looked at again
+    void shipPass($)
     return done
   })
 
@@ -11034,10 +11271,12 @@ export const register: Register = on => {
     const { value: band } = await $.state.get(BAND)
     const { value: nudge } = await $.state.get(NUDGE)
     const { value: lineAsk } = await $.state.get(LINE)
+    const { value: ship } = await $.state.get(SHIP)
     const asking = Boolean(nudge?.show)
     const lining = !asking && Boolean(lineAsk?.show && lineAsk.client && lineAsk.signal)
+    const shipping = Boolean(ship?.show && ship.branch)
     // nothing to say, or a survey holds the band: the engine's own
-    if (e.props.hasSurvey || (!band?.text && !asking && !lining)) return next(e)
+    if (e.props.hasSurvey || (!band?.text && !asking && !lining && !shipping)) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e) as Partial<ReturnType<typeof $.ui.resolve>> & Pick<ReturnType<typeof $.ui.resolve>, 'Box' | 'Text'>
     const missing = Number(band?.missing) || 0
     // a surface that draws no button there says how to open the list instead
@@ -11098,16 +11337,23 @@ export const register: Register = on => {
       </Box>
     )
     const asks = ask ?? lineRow
-    if (line && asks) {
+    // (0.7.71) the Ship row, last: a press puts `/ship` in the prompt box and nothing else; the person presses Enter
+    const shipRow = !shipping || !ship ? null : (
+      <Box key="mm-ship" flexDirection="row" gap={1}>
+        <Text>{shipText(ship)}</Text>
+        {Button ? <Button key="mm-ship-btn" label={SHIP_BUTTON} variant="primary" onPress={() => void pressShip($)} /> : <Text dimColor>{SHIP_TYPE}</Text>}
+      </Box>
+    )
+    if ([line, asks, shipRow].filter(Boolean).length > 1) {
       return (
         <Box flexDirection="column">
           {line}
           {asks}
+          {shipRow}
         </Box>
       )
     }
-    if (line) return line
-    return asks ?? next(e)
+    return line ?? asks ?? shipRow ?? next(e)
   })
 
   // The pane an older version opened for a client's drafts: a thread that still has it open sees the
@@ -11524,6 +11770,36 @@ export const register: Register = on => {
     return drawn
   })
 
+  // (0.7.71) The desktop app's right-click menu on this thread's transcript: Link to client, Update this thread, Open in pane. Each row is
+  // the person's own act and goes where its typed form goes: `/mm link <client>` (`menuLink`), the pane's Update for the row whose
+  // thread this is (`press`), and `/mm view` (`openDrafts`). Which rows (`menuRows`): a thread linked to a client gets Update (when the
+  // list has a row for that client whose button acts on this thread) and Open in pane; a thread linked to none gets Link to <client> for
+  // a selection that names exactly one client the last sync knows, else the band's suggestions (at most two), else Link to client, which
+  // puts `/mm link ` in an empty prompt box for the person to finish; and Open in pane. The engine's own rows, and nothing of ours, where
+  // the menu is on code or a link, in a thread the bridge does not know (no id learnt for it yet, a scheduled task's run), in a session
+  // that is not a person's, or while the bridge is paused. It reads only what is stored (no app call, no feed), so it answers before the
+  // menu opens. ⛔ No row sends anything to a client.
+  on('ui.render', { component: 'ContextMenu' }, async ($, e, next) => {
+    try {
+      if (e.surface !== 'desktop' || e.props.code || e.props.link) return next(e)
+      const rows = await menuRows($, e.props.selection?.text)
+      const { Box, Button, Text } = $.ui.resolve(e) as Partial<ReturnType<typeof $.ui.resolve>> & Pick<ReturnType<typeof $.ui.resolve>, 'Box' | 'Text'>
+      if (!rows.length || !Button) return next(e)
+      return (
+        <Box flexDirection="column">
+          {rows.map(r => (
+            <Button key={r.key} label={r.label} onPress={() => r.press()}>
+              {r.label}
+              <Text dimColor>{r.sub}</Text>
+            </Button>
+          ))}
+        </Box>
+      )
+    } catch {
+      return next(e)
+    }
+  })
+
   // (0.7.40) The card in the thread (Rob, 2026-11-09: "I want to push that so it's the way reply packages are always shown, even inside
   // the thread, instead of just the side panel."). The row of the thread's own `mm card <package id>` call, once it has answered ready,
   // is the whole card: drawn by `drawLiveCard`, the pane's own drawing, from the same state, so its box opens and closes exactly as the
@@ -11533,8 +11809,15 @@ export const register: Register = on => {
   //   package the pane does not draw now (`cardDrawable`, the pane's own test), or with no live call on record, says so. One dim line
   //   each, no tree, no box.
   // - Anything else is the engine's row, untouched: another tool, another command, a not-ready answer, a call still running, errored or
-  //   interrupted, and every surface but the desktop's. ⛔ A draw that throws is the engine's row too, with one line in bridge-notices.log.
+  //   interrupted, and every surface but the desktop's and (0.7.71) the phone's. ⛔ A draw that throws is the engine's row too, with one
+  //   line in bridge-notices.log.
   // - A row that drew its own tree is listed (`drawnRows`), and the answer under it is hidden (the `ToolResult` hook); a fallback unlists it.
+  // - (0.7.71, Rob 2026-11-24: approve reply packages from the phone) In the mobile app the row is kept (`next(e)`) and the card is drawn
+  //   under it in a Box with a border: the mobile app draws a tree that keeps a tool row as one quiet line, and as a card under the row only
+  //   when the Box that holds the row and the rest carries `borderStyle` or `backgroundColor`. The same drawing, the same box, the same
+  //   press as the desktop's (`drawLiveCard`): one press puts `Send package <12>` into the thread, and the send gate decides as it always
+  //   has. The phone has no reply line taking the card (`AssistantMessage` is the desktop's), so this row draws the card there whatever
+  //   the desktop's line holds. A line in place of the card is the row and that line, with no border: a quiet line.
   // Reads only: a render hook never writes.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const p = e.props
@@ -11544,7 +11827,8 @@ export const register: Register = on => {
       forgetRow($, row)
       return next(e)
     }
-    if (e.surface !== 'desktop' || p.tool !== 'mcp__mm-bridge__mm' || p.isRunning || p.isErrored || p.isInterrupted) return pass()
+    const mobile = e.surface === 'mobile'
+    if ((e.surface !== 'desktop' && !mobile) || p.tool !== 'mcp__mm-bridge__mm' || p.isRunning || p.isErrored || p.isInterrupted) return pass()
     const packageId = cardAskOf((p.input as { args?: unknown } | null | undefined)?.args)
     if (!packageId) return pass()
     const out = rowText(p.output)
@@ -11565,8 +11849,8 @@ export const register: Register = on => {
       // (0.7.42) a newer version this thread has drawn below, or one only the side pane has drawn so far
       else if (card.tree.label !== label) tree = <Text dimColor>{asked.label === card.tree.label ? ROW_REPLACED(label, card.tree.label) : ROW_REPLACED_PANE(label, card.tree.label)}</Text>
       else if (asked.toolUseId !== (p.tool_use_id || e.requestId)) tree = <Text dimColor>{ROW_AGAIN(label)}</Text>
-      // (0.7.48) the thread's line under this call has taken the card, where it is drawn at its whole height
-      else if (lineOfCall.has(asked.toolUseId)) {
+      // (0.7.48) the thread's line under this call has taken the card, where it is drawn at its whole height (the desktop's line alone)
+      else if (!mobile && lineOfCall.has(asked.toolUseId)) {
         tree = <Text dimColor>{ROW_BELOW(label)}</Text>
         kind = 'below'
       } else {
@@ -11583,7 +11867,20 @@ export const register: Register = on => {
         kind = 'card'
       }
       noteRow($, row, kind)
-      return tree
+      if (!mobile) return tree
+      // (0.7.71) the phone: the engine's row, and under it the card, in the bordered Box that asks the mobile app for a card
+      const own = await next(e)
+      return kind === 'card' ? (
+        <Box key={`mm-card-phone:${packageId}`} flexDirection="column" borderStyle="round" borderColor="suggestion" paddingX={1}>
+          {own}
+          {tree}
+        </Box>
+      ) : (
+        <Box key={`mm-card-phone-line:${packageId}`} flexDirection="column">
+          {own}
+          {tree}
+        </Box>
+      )
     } catch (err) {
       const why = (err instanceof Error ? err.message : String(err)).slice(0, 160)
       if (firstRowFailure(`${packageId}\n${why}`)) {
@@ -11694,9 +11991,10 @@ export const register: Register = on => {
   // (0.7.40) A run of calls the desktop folds into one count line holds its `ToolUse` rows unseen: a group that holds the live `mm card`
   // call is unfolded, so the card is drawn where the thread asked for it. Every other group, and every other surface, is as the engine
   // draws it. Reads the live call (`askedOf`), so a group drawn before the answer is drawn again once it lands.
+  // (0.7.71) The phone's too, where it folds calls: the card is drawn under the live call's row there.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     try {
-      if (e.surface !== 'desktop' || e.props.isExpanded) return next(e)
+      if ((e.surface !== 'desktop' && e.surface !== 'mobile') || e.props.isExpanded) return next(e)
       const asked = await askedOf($)
       if (asked && e.props.calls.some(c => c.tool_use_id === asked.toolUseId)) return next({ ...e, props: { ...e.props, isExpanded: true } })
     } catch {
