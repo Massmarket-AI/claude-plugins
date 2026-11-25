@@ -11825,7 +11825,7 @@ async function openTracked($: EngineInterface, sid: string): Promise<void> {
   if (typeof found !== 'object') return
   // (0.7.80) a press that did nothing said nothing until now: the toast says why
   const opened = await openThread($, found, 'a row of Threads today')
-  if (!opened.ok) $.ui.toast(OPEN_FAILED(cleanTitle(found.title), openWhyWords(opened.why, OPEN_WAIT_MS)))
+  if (!opened.ok) $.ui.toast(OPEN_FAILED(cleanTitle(found.title) || 'that thread', openWhyWords(opened.why, OPEN_WAIT_MS)))
 }
 
 /** (0.6.0) /mm unlink: this thread has no current project any more. */
