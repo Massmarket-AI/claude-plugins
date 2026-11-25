@@ -21,6 +21,12 @@ const BRAND = {
   sceneId: 'hero-mesh',
   sceneAlt: 'A slow cream and gray mesh drifting over a faint grid',
   roles: { accent: '#ff3d00', danger: '#c2203a', success: '#2e7d4f', warning: '#b7791f', pro: '#5b5f97' },
+  // Your messages in a solid square box, Claude's words with no box (Rob, 2026-11-25). `match`: your box the page's
+  // own color, white by day and black at night. `flip`: the reverse, black by day and cream at night.
+  boxes: {
+    match: { light: { bg: '#ffffff', text: '#0a0a0a' }, dark: { bg: '#000000', text: '#f2efe8' } },
+    flip: { light: { bg: '#0a0a0a', text: '#f2efe8' }, dark: { bg: '#f2efe8', text: '#0a0a0a' } },
+  },
   light: {
     anchors: {
       'surface-0': '#ede9e0',
@@ -30,7 +36,6 @@ const BRAND = {
       'text-secondary': '#2a2a2a',
       'text-muted': '#5f646b',
     },
-    messages: { userBg: '#0a0a0a', userText: '#f2efe8', replyBg: '#f7f5ef', replyText: '#0a0a0a' },
     scene: { base: '#f2efe8', blooms: ['#d9d4c7', '#bebab0', '#f7f5ef', '#9e998f', '#787d85'], grid: '#0a0a0a', gridOpacity: 0.16, meshOpacity: [1, 1, 1, 1] },
   },
   dark: {
@@ -43,8 +48,6 @@ const BRAND = {
       'text-secondary': '#d9d4c7',
       'text-muted': '#a9a397',
     },
-    // Night flips the boxes too: your messages cream with ink words, replies black with cream words.
-    messages: { userBg: '#f2efe8', userText: '#0a0a0a', replyBg: '#000000', replyText: '#f2efe8' },
     // Night flips day: the same cream and grays as a light mesh on black.
     scene: { base: '#0a0a0a', blooms: ['#d9d4c7', '#bebab0', '#000000', '#f2efe8', '#9e998f'], grid: '#f2efe8', gridOpacity: 0.12, meshOpacity: [0.2, 0.28, 0.36, 0.46] },
   },
@@ -61,26 +64,25 @@ const { theme, problems } = makeColors({
   dark: { gray: { anchors: BRAND.dark.anchors } },
 })
 
-// Message colors by mode, on solid fills, so words never sit on the moving scene.
-const colors: ThemeColors = {
-  ...theme,
-  inputs: {
-    ...theme.inputs,
-    light: {
-      ...theme.inputs.light,
-      'bg-user-message': BRAND.light.messages.userBg,
-      'text-user-message': BRAND.light.messages.userText,
-      'bg-assistant-message': BRAND.light.messages.replyBg,
-      'text-assistant-message': BRAND.light.messages.replyText,
+/** match: your box in the page's own color (white by day, black at night); flip: the reverse. */
+export type Boxes = 'match' | 'flip'
+const BOXES: readonly Boxes[] = ['match', 'flip']
+
+/**
+ * Your messages' colors by mode, on a solid fill. Claude's get no message colors, so its words have no box and sit
+ * on the scene in the page's own text color, as the app draws a reply with no theme.
+ */
+function colorsFor(boxes: Boxes): ThemeColors {
+  const b = BRAND.boxes[boxes]
+
+  return {
+    ...theme,
+    inputs: {
+      ...theme.inputs,
+      light: { ...theme.inputs.light, 'bg-user-message': b.light.bg, 'text-user-message': b.light.text },
+      dark: { ...theme.inputs.dark, 'bg-user-message': b.dark.bg, 'text-user-message': b.dark.text },
     },
-    dark: {
-      ...theme.inputs.dark,
-      'bg-user-message': BRAND.dark.messages.userBg,
-      'text-user-message': BRAND.dark.messages.userText,
-      'bg-assistant-message': BRAND.dark.messages.replyBg,
-      'text-assistant-message': BRAND.dark.messages.replyText,
-    },
-  },
+  }
 }
 
 // Five soft blooms drifting on long loops over the hero's grid: by day a
@@ -176,27 +178,32 @@ export function levelFor(fill: number | undefined): Level {
   return 3
 }
 
-// Square corners, the app's sans for reading, mono for tool rows, semibold
-// small headings. The app takes only generic font families.
-const BASE_STYLE: NonNullable<ThemeSetArgs['style']> = {
+// The app's sans for reading, mono for tool rows, semibold small headings.
+// The app takes only generic font families. Only your messages have a box:
+// plain and square on a solid fill (Rob tried feathered edges, 2026-11-24, and
+// liked it better without). Claude's words and its tool rows have none, so
+// nothing of Claude's is boxed in one place and bare in another (Rob,
+// 2026-11-25: "I kind of like it better with Claude's messages having the
+// transparent background and mine having the solid white or solid cream").
+const TYPE_STYLE = {
   Text: { fontFamily: ['sans'], fontSize: 15, lineHeight: 24 },
   Heading: { fontFamily: ['sans'], fontWeight: 'semibold', letterSpacing: -0.2 },
-  UserMessage: { radius: 0, paddingX: 16, paddingY: 12, shadow: 'none' },
-  AssistantMessage: { radius: 0, paddingX: 18, paddingY: 14, shadow: 'none' },
-  ToolUse: { fontFamily: ['mono'], backgroundColor: 'surface-1', radius: 0, paddingX: 10 },
-}
+  ToolUse: { fontFamily: ['mono'] },
+} as const satisfies NonNullable<ThemeSetArgs['style']>
 
-// Plain square boxes on solid fills (Rob tried feathered edges, 2026-11-24,
-// and liked it better without).
-function styleFor(_scheme: 'light' | 'dark' | undefined): ThemeSetArgs['style'] {
-  return BASE_STYLE
+const USER_BOX = { radius: 0, paddingX: 16, paddingY: 12, shadow: 'none' } as const
+
+function styleFor(boxes: Boxes): ThemeSetArgs['style'] {
+  // In the page's own color the box needs an edge to read as one (white on cream, black on black): a hairline in the
+  // app's border gray, which follows the mode.
+  return { ...TYPE_STYLE, UserMessage: boxes === 'match' ? { ...USER_BOX, borderColor: 'border', borderWidth: 1 } : USER_BOX }
 }
 
 // The app frosts its own panels (the side panel, the thread list) over the
 // scene with no blur (any blur wipes out the grid's 1px lines) and a veil of
 // 40%, so the grid and mesh read through while their words stay legible.
-function lookFor(scheme: 'light' | 'dark' | undefined, level: Level): ThemeSetArgs {
-  const look: ThemeSetArgs = { colors, backdrop: { scene: `${BRAND.sceneId}-${level}`, glass: { blur: 0, opacity: 0.4 } }, style: styleFor(scheme) }
+function lookFor(scheme: 'light' | 'dark' | undefined, level: Level, boxes: Boxes): ThemeSetArgs {
+  const look: ThemeSetArgs = { colors: colorsFor(boxes), backdrop: { scene: `${BRAND.sceneId}-${level}`, glass: { blur: 0, opacity: 0.4 } }, style: styleFor(boxes) }
 
   return scheme ? { ...look, overrideColorScheme: scheme } : look
 }
@@ -209,10 +216,11 @@ export type Mode = 'auto' | 'light' | 'dark' | 'app'
  * In auto, what day means: `sun`, sunrise to sunset where this computer's time
  * zone is (so it follows the seasons), or `hours`, fixed hours the person set.
  * `glow`: whether the scene deepens and glows as the thread nears compacting.
+ * `boxes`: your messages' box, in the page's own color or the reverse.
  */
-export type Prefs = { mode: Mode; schedule: 'sun' | 'hours'; lightFrom: number; darkFrom: number; glow: boolean }
+export type Prefs = { mode: Mode; schedule: 'sun' | 'hours'; lightFrom: number; darkFrom: number; glow: boolean; boxes: Boxes }
 
-const DEFAULTS: Prefs = { mode: 'auto', schedule: 'sun', lightFrom: 7, darkFrom: 19, glow: true }
+const DEFAULTS: Prefs = { mode: 'auto', schedule: 'sun', lightFrom: 7, darkFrom: 19, glow: true, boxes: 'match' }
 const PREFS_KEY = `${PLUGIN}.prefs`
 const MODES: readonly Mode[] = ['auto', 'light', 'dark', 'app']
 
@@ -346,8 +354,9 @@ async function readPrefs($: EngineInterface): Promise<Prefs> {
   const lightFrom = raw && isHour(raw.lightFrom) ? raw.lightFrom : DEFAULTS.lightFrom
   const darkFrom = raw && isHour(raw.darkFrom) && raw.darkFrom !== lightFrom ? raw.darkFrom : DEFAULTS.darkFrom
   const glow = raw && typeof raw.glow === 'boolean' ? raw.glow : DEFAULTS.glow
+  const boxes = raw && BOXES.includes(raw.boxes as Boxes) ? (raw.boxes as Boxes) : DEFAULTS.boxes
 
-  return { mode, schedule, lightFrom, darkFrom: darkFrom === lightFrom ? DEFAULTS.darkFrom : darkFrom, glow }
+  return { mode, schedule, lightFrom, darkFrom: darkFrom === lightFrom ? DEFAULTS.darkFrom : darkFrom, glow, boxes }
 }
 
 function clockMinutes(hours: number): string {
@@ -411,11 +420,11 @@ async function fillNow($: EngineInterface): Promise<number | undefined> {
   }
 }
 
-/** The last look this copy drew (mode and level): a tick that finds the same sets nothing. */
+/** The last look this copy drew (mode, level and boxes): a tick that finds the same sets nothing. */
 let drawn: string | undefined
 
-async function draw($: EngineInterface, scheme: 'light' | 'dark' | undefined, level: Level): Promise<void> {
-  const look = lookFor(scheme, level)
+async function draw($: EngineInterface, scheme: 'light' | 'dark' | undefined, level: Level, boxes: Boxes): Promise<void> {
+  const look = lookFor(scheme, level, boxes)
 
   try {
     const set = await $.theme.set(look)
@@ -436,11 +445,11 @@ async function apply($: EngineInterface, force = false): Promise<void> {
   const prefs = await readPrefs($)
   const scheme = schemeNow(new Date(await $.clock.now()), prefs)
   const level = prefs.glow ? levelFor(await fillNow($)) : 0
-  const key = `${scheme ?? 'app'}:${level}`
+  const key = `${scheme ?? 'app'}:${level}:${prefs.boxes}`
 
   if (force || key !== drawn) {
     drawn = key
-    await draw($, scheme, level)
+    await draw($, scheme, level, prefs.boxes)
   }
 }
 
@@ -473,7 +482,12 @@ async function describe($: EngineInterface): Promise<string> {
       ? 'Thread glow: on. It starts at half the way to compacting; this thread has no reading yet.'
       : `Thread glow: on. This thread is ${Math.round(fill * 100)}% of the way to compacting (glow level ${levelFor(fill)} of 3; it starts at 50%).`
 
-  return `${where}\n${glow}\nChange it with /look auto (sunrise to sunset), /look hours 7 19 (fixed hours light and dark start, 0 to 23), /look light, /look dark, /look app, or /look glow on|off.`
+  const boxes =
+    prefs.boxes === 'match'
+      ? "Your messages: a square box in the page's own color, white by day and black at night. Claude's have no box."
+      : "Your messages: a square box in the reverse of the page's color, black by day and cream at night. Claude's have no box."
+
+  return `${where}\n${glow}\n${boxes}\nChange it with /look auto (sunrise to sunset), /look hours 7 19 (fixed hours light and dark start, 0 to 23), /look light, /look dark, /look app, /look glow on|off, or /look boxes match|flip.`
 }
 
 export const register: Register = on => {
@@ -486,7 +500,7 @@ export const register: Register = on => {
 
     await $.command.register({
       name: 'look',
-      description: `${BRAND.name} look: light from sunrise to sunset, dark at night. /look auto, hours 7 19, light, dark, app, glow on|off`,
+      description: `${BRAND.name} look: light from sunrise to sunset, dark at night. /look auto, hours 7 19, light, dark, app, glow on|off, boxes match|flip`,
     })
     await apply($, true)
 
@@ -530,6 +544,8 @@ export const register: Register = on => {
       await $.store.set(PREFS_KEY, { ...prefs, mode: 'auto', schedule: 'hours', lightFrom, darkFrom })
     } else if (first === 'glow' && (words[1] === 'on' || words[1] === 'off')) {
       await $.store.set(PREFS_KEY, { ...prefs, glow: words[1] === 'on' })
+    } else if (first === 'boxes' && BOXES.includes(words[1] as Boxes)) {
+      await $.store.set(PREFS_KEY, { ...prefs, boxes: words[1] as Boxes })
     } else {
       return { text: await describe($) }
     }
