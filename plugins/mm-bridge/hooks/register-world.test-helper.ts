@@ -342,6 +342,9 @@ export function world(on: On, opts: WorldOptions = {}) {
     }
     if (e.url.endsWith('/api/ext/drafts-pulse')) {
       const answer = opts.draftsPulse ? opts.draftsPulse() : { status: 404, body: { error: 'not_found' } }
+      if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
+      return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: JSON.stringify(answer.body ?? {}) } }
+    }
     if (e.url.endsWith('/api/ext/day-stats')) {
       const answer = opts.dayStats ? opts.dayStats() : { status: 404, body: { error: 'not_found' } }
       if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
