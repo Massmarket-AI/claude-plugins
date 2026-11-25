@@ -98,9 +98,12 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 20
     env:
-      # Pinned so a run is reproducible. Bump it when the bridge needs a newer
-      # Claude Code (npm view @anthropic-ai/claude-code dist-tags).
-      CLAUDE_CODE_VERSION: "2.1.308"
+      # Pinned so a run is reproducible. Bump it when a plugin needs a newer
+      # Claude Code (npm view @anthropic-ai/claude-code dist-tags). 2.1.330
+      # since 2026-11-24: the theme's tests need $.theme, which 2.1.308's test
+      # harness does not provide; 2.1.330 is what that release ran all three
+      # suites on.
+      CLAUDE_CODE_VERSION: "2.1.330"
       DISABLE_AUTOUPDATER: "1"
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
