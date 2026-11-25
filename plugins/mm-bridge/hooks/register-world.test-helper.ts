@@ -167,6 +167,8 @@ export type WorldOptions = {
   browserNow?: () => { status: number; body?: unknown } | 'network'
   /** (0.7.53) How OW answers `POST /browser-answer`. Left out, 404. */
   browserAnswer?: (body: Record<string, unknown>) => { status: number; body?: unknown } | 'network'
+  /** (0.7.70) How OW answers `GET /ticket-status?ticket_id=<id>` (a scheduled wait's report): a status and a body, or no answer at all. Left out, 404. */
+  ticketStatus?: (url: string) => { status: number; body?: unknown } | 'network'
   /** (0.7.23) How OW answers the sync's pin report (`POST /bridge-pins`): a status, or no answer at all. Left out, 404: an OW without the route yet. */
   bridgePins?: (body: PinReport) => { status: number; body?: unknown } | 'network'
   /** (0.7.59) Threads the app refuses to pin or unpin, with its words (as outside Bypass permissions mode). Read at each call. */
@@ -361,6 +363,12 @@ export function world(on: On, opts: WorldOptions = {}) {
       const answer = route ? route(e.url) : { status: 404, body: { error: 'not_found' } }
       if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
       return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: typeof answer.body === 'string' ? answer.body : JSON.stringify(answer.body ?? {}) } }
+    }
+    // (0.7.70) one ticket's state, as OW's ticket-status GET answers it
+    if (e.url.includes('/api/ext/ticket-status?')) {
+      const answer = opts.ticketStatus ? opts.ticketStatus(e.url) : { status: 404, body: { error: 'Ticket not found.' } }
+      if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
+      return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: JSON.stringify(answer.body ?? {}) } }
     }
     if (e.url.includes('/closeout') && opts.fetchTakesMs) {
       const ms = opts.fetchTakesMs(++feedReads)

@@ -27,6 +27,7 @@ import {
   NO_REPLY_WHAT, afterPackage, checkDot, noReplyNow, owesNoReply, paceOf, paceOnly, paceStatus, paceWord, statusOf,
 } from './queue'
 import type { AnswerType, AskRef, FeedThread, QueueItem, StatusDot } from './queue'
+import { wallTime } from './business-time'
 
 const TZ = 'America/New_York'
 
@@ -1527,6 +1528,201 @@ export function answerArgs(arg: string): { clear: true } | { type: AnswerType; a
   const ask = cutAsk(m?.[2])
   if (!isAnswerType(type) || !ask) return ANSWER_REFUSED
   return { type, ask }
+}
+
+// ---------------------------------------------------------------- (0.7.70) a thread waits on a scheduled run
+
+/**
+ * ⛔ (0.7.70, Rob 2026-11-24: "When we're waiting for a scheduled run before something needs me again, it should probably unpin
+ * and then only repin after the run goes or it fails. This is something that could help clear up my pin list and everybody
+ * else's system-wide. It doesn't need my attention between now and then, and I'm constantly checking it as I'm clicking through
+ * all the different threads and having to bring my head back to the fact that I'm just waiting on a run." Then, the same day:
+ * "we set up the watchdogs to make sure outreach is running right in all channels for clients. If something is not running
+ * properly, it's supposed to pin itself ... But if everything I need to do is already scheduled and we're waiting for the send
+ * to know that it's been fixed, I think we can unpin until we know there's an issue again that I need to do something with.")
+ * What a linked thread declared through `mm waiting scheduled <when>[, <when>] ticket <id> -- <what>`, by thread
+ * (`mm.runwait`): what the runs check (`what`, cut as a question is), the OW ticket every run notes its result on (`ticket`),
+ * when it was declared (`at`), each run's due time and, once the bridge found it, when its report was stamped (`seen`), and
+ * what the client had for the viewer then (`base`). ⛔ LOCAL ONLY, as a declaration is: the pin report sends no part of it.
+ */
+export type RunWait = { what: string; ticket: string; at: number; runs: WaitRun[]; base: RunBaseline; project?: string; repinned?: number }
+// (0.7.70) `project`: the project the thread was linked to when it declared the wait, absent for a thread linked to none (an
+// internal thread of the person's own): that one unpins itself, and the bridge only pins it again for a missed run (`repinned`,
+// when it did) and takes that pin off once the run's note lands.
+
+/** (0.7.70) One scheduled run: when it is due, and (`seen`) the stamp of the first note on the wait's ticket at or after then. */
+export type WaitRun = { at: number; seen?: number }
+
+/**
+ * (0.7.70) What the client had for the viewer when the wait began (`baselineOf`): the newest time of each kind (`newest`) and
+ * the ids of the viewer's own tickets (`taskIds`). Anything past it is something new (`newSince`), and ends the wait.
+ */
+export type RunBaseline = { mail: number; pkg: number; task: number; ids: string[] }
+
+/**
+ * (0.7.70) How long after its due time a run has to note its ticket before the bridge reads it as failed and pins the thread
+ * again: two hours (a check that waits for an idle runner can take one, and launchd runs a missed time on wake). Claude's
+ * recommendation in the build, not Rob's number.
+ */
+export const RUN_GRACE_MS = 2 * 60 * 60_000
+/** (0.7.70) The furthest ahead a run may be: a wait is for a run that is set up and near, never for "some day". */
+export const RUN_AHEAD_MAX_MS = 14 * 24 * 60 * 60_000
+/** (0.7.70) The most runs one wait holds (a day-one and a day-three check is two). */
+export const RUN_WAIT_RUNS_MAX = 6
+/**
+ * (0.7.70) How long a wait whose runs all reported stands, the client still listed and nothing new: 21 days after its last run,
+ * the three weeks after which a quiet ticket closes. Past it the usual rules act on the thread again (quiet is never done).
+ */
+export const RUN_DONE_KEEP_MS = 21 * 24 * 60 * 60_000
+
+/** (0.7.70) What the client has for the viewer now, as a wait's baseline. No item: nothing. */
+export function baselineOf(it: Pick<QueueItem, 'newest' | 'taskIds'> | undefined): RunBaseline {
+  const n = it?.newest
+  const ids = Array.isArray(it?.taskIds) ? [...new Set(it.taskIds.filter(isUuid).map(id => id.toLowerCase()))] : []
+  return { mail: Number(n?.mail) || 0, pkg: Number(n?.pkg) || 0, task: Number(n?.task) || 0, ids }
+}
+
+/**
+ * ⛔ (0.7.70) Whether the client has something for the viewer that it did not have when the wait began: a newer message, package
+ * or task or ask, or a ticket of the viewer's own that opened or reopened since (a watchdog's ticket, a run's "short" ticket).
+ * That is a result that needs the person, and it ends the wait. No item (the client is on none of the lists): nothing new.
+ */
+export function newSince(it: Pick<QueueItem, 'newest' | 'taskIds'> | undefined, base: RunBaseline): boolean {
+  if (!it) return false
+  const now = baselineOf(it)
+  if (now.mail > base.mail || now.pkg > base.pkg || now.task > base.task) return true
+  const had = new Set(base.ids)
+  return now.ids.some(id => !had.has(id))
+}
+
+/**
+ * (0.7.70) Where a wait stands: `waiting` for its next run (due `due`); `missed`, a run past its due time and RUN_GRACE_MS with no
+ * report (since `since`), which pins the thread again; `done`, every run reported (the last due `last`). Runs are read in order:
+ * a later run's report never stands for an earlier one's.
+ */
+export type RunState = { kind: 'waiting'; due: number } | { kind: 'missed'; due: number; since: number } | { kind: 'done'; last: number }
+export function runState(w: Pick<RunWait, 'runs' | 'at'>, now: number): RunState {
+  const runs = [...w.runs].sort((a, b) => a.at - b.at)
+  const open = runs.find(r => !Number.isFinite(r.seen))
+  if (!open) return { kind: 'done', last: runs.length ? (runs[runs.length - 1] as WaitRun).at : w.at }
+  const since = open.at + RUN_GRACE_MS
+  return now >= since ? { kind: 'missed', due: open.at, since } : { kind: 'waiting', due: open.at }
+}
+
+/**
+ * (0.7.70) The stamp of the first note on a ticket at or after `after`, from its `resolution_notes` as OW's ticket-status GET
+ * gives them: every OW change and note is a line that opens `[<ISO time>] <who>: ...` (OW `composeResolutionNote`). Undefined
+ * with none.
+ */
+export function reportedAt(notes: unknown, after: number): number | undefined {
+  if (typeof notes !== 'string' || !Number.isFinite(after)) return undefined
+  let best: number | undefined
+  for (const m of notes.matchAll(/^\[(\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:?\d{2}))\]/gm)) {
+    const t = Date.parse(m[1] as string)
+    if (Number.isFinite(t) && t >= after && (best === undefined || t < best)) best = t
+  }
+  return best
+}
+
+/** (0.7.70) The waits on record, each checked again (a thread id, a ticket id, a time, one to RUN_WAIT_RUNS_MAX runs): a damaged entry is none. */
+export function runWaitsOf(raw: unknown): Record<string, RunWait> {
+  const out: Record<string, RunWait> = {}
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out
+  for (const [sid, w] of Object.entries(raw as Record<string, unknown>)) {
+    if (!THREAD_ID.test(sid) || !w || typeof w !== 'object') continue
+    const { what, ticket, at, runs, base } = w as Record<string, unknown>
+    if (typeof what !== 'string' || !what || !isUuid(ticket) || typeof at !== 'number' || !Number.isFinite(at)) continue
+    if (!Array.isArray(runs) || runs.length < 1 || runs.length > RUN_WAIT_RUNS_MAX) continue
+    const kept: WaitRun[] = []
+    for (const r of runs) {
+      const t = r && typeof r === 'object' ? (r as { at?: unknown }).at : undefined
+      const seen = r && typeof r === 'object' ? (r as { seen?: unknown }).seen : undefined
+      if (typeof t !== 'number' || !Number.isFinite(t)) continue
+      kept.push({ at: t, ...(typeof seen === 'number' && Number.isFinite(seen) ? { seen } : {}) })
+    }
+    if (kept.length !== runs.length) continue
+    const b = base && typeof base === 'object' ? (base as Record<string, unknown>) : {}
+    const ids = Array.isArray(b.ids) ? b.ids.filter(isUuid) : []
+    const { project, repinned } = w as Record<string, unknown>
+    out[sid] = {
+      what, ticket, at, runs: kept.sort((x, y) => x.at - y.at), base: { mail: Number(b.mail) || 0, pkg: Number(b.pkg) || 0, task: Number(b.task) || 0, ids },
+      ...(isUuid(project) ? { project } : {}), ...(typeof repinned === 'number' && Number.isFinite(repinned) ? { repinned } : {}),
+    }
+  }
+  return out
+}
+
+/** (0.7.70) The mm tool's words for a scheduled wait, after the four kinds. */
+export const RUN_WAIT_TOOL_TEXT = `"waiting scheduled <when>[, <when>] ticket <ticket id> -- <what the run checks>" says this thread waits only on scheduled runs that are already set up (a launchd one-shot, a runner's check), each <when> as YYYY-MM-DD HH:MM New York time (or an ISO time with its offset) within 14 days, every run noting its result on that OW ticket: the bridge takes its own pin off and keeps it off, whatever is due for the client then, until a run's result needs the person (anything new for the client: a ticket, a message, a package) or a run has not noted the ticket within 2 hours of its time, and then pins it again. Never for a run that is not set up yet, or while anything else in the thread still needs the person.`
+
+/** (0.7.70) What it answers for words it cannot read. */
+export const RUN_WAIT_REFUSED = 'Not recorded: say "waiting scheduled <when>[, <when>] ticket <ticket id> -- <what the run checks>", each <when> as YYYY-MM-DD HH:MM New York time (or an ISO time with its offset), no earlier than 2 hours ago and within 14 days, at most 6 runs, and the full id of the OW ticket the runs note their results on.'
+
+/** (0.7.70) What it answers once the wait is on record. */
+export function runWaitNoted(w: Pick<RunWait, 'runs' | 'ticket'>): string {
+  const times = w.runs.map(r => dueText(r.at)).join(', ')
+  const n = w.runs.length
+  return `Recorded: this thread waits on ${n === 1 ? 'a scheduled run' : `${n} scheduled runs`} (${times}), each noting ticket ${w.ticket.slice(0, 8)}. The bridge takes its own pin off at its next sync and keeps it off until a run's result needs the person (anything new for this client) or a run has not noted the ticket within 2 hours of its time; then it pins the thread again. "waiting clear" takes it back.`
+}
+
+/** (0.7.70) What `mm waiting scheduled` answers in a thread that is no linked thread here: nothing is stored. */
+export const RUN_WAIT_NO_THREAD = 'Not recorded: the bridge could not tell which thread this is.'
+
+/**
+ * (0.7.70) What it answers in a thread linked to no project here (an internal thread of the person's own): the bridge has no pin
+ * of its own on it to take off, so the thread unpins itself; the bridge pins it again only for a missed run.
+ */
+export function runWaitNotedUnlinked(w: Pick<RunWait, 'runs' | 'ticket'>): string {
+  const times = w.runs.map(r => dueText(r.at)).join(', ')
+  const n = w.runs.length
+  return `Recorded: this thread waits on ${n === 1 ? 'a scheduled run' : `${n} scheduled runs`} (${times}), each noting ticket ${w.ticket.slice(0, 8)}. It is linked to no project here, so unpin it yourself now (mcp__ccd_sidebar__set_pinned with pinned false). The bridge pins it again if a run has not noted the ticket within 2 hours of its time, and takes that pin off once the note lands. "waiting clear" takes it back.`
+}
+
+/** (0.7.70) The end of a thread's name while it waits on a run: ` · waits on a run Wed 4:15 PM`, and once one is missed ` · run missed`. */
+export const runWaitSuffix = (s: RunState, now: number): string =>
+  s.kind === 'missed' ? 'run missed' : s.kind === 'waiting' ? `waits on a run ${runWhen(s.due, now)}` : 'runs reported'
+
+/** (0.7.70) When a run is due, short: `4:15 PM` today, `Fri 4:15 PM` within the week, else `Nov 30 4:15 PM`. New York time. */
+export function runWhen(t: number, now: number): string {
+  const time = fmt(t, { hour: 'numeric', minute: '2-digit' }).replace(':00', '')
+  const day = (x: number) => fmt(x, { year: 'numeric', month: '2-digit', day: '2-digit' })
+  if (day(t) === day(now)) return time
+  return t - now < 6 * 24 * 60 * 60_000 && t > now ? `${fmt(t, { weekday: 'short' })} ${time}` : `${monthDay(t)} ${time}`
+}
+
+/** (0.7.70) The band's sentence while a wait holds the pin off, once a run is missed, and once every run reported. */
+export function runWaitWhy(w: Pick<RunWait, 'what' | 'ticket'>, s: RunState): string {
+  if (s.kind === 'missed') return `Pinned for you: a scheduled run (${w.what}) was due ${dueText(s.due)} and has not noted ticket ${w.ticket.slice(0, 8)} since. Check that it ran.`
+  if (s.kind === 'waiting') return `No pin needed until a scheduled run reports: ${w.what}, due ${dueText(s.due)}. It is pinned again if its result needs you or it has not noted ticket ${w.ticket.slice(0, 8)} by ${dueText(s.due + RUN_GRACE_MS)}.`
+  return `No pin needed: the scheduled runs (${w.what}) reported on ticket ${w.ticket.slice(0, 8)} and nothing new for you came of them.`
+}
+
+/** (0.7.70) The name of a thread a missed run pins while its client is on none of the lists. */
+export const runMissedTitle = (client: string): string => `🔴 ${client} · run missed`
+
+/** (0.7.70) `mm waiting scheduled ...`: the runs (ms, in order), the ticket and what they check, or RUN_WAIT_REFUSED. */
+export function runWaitArgs(arg: string, now: number): { runs: number[]; ticket: string; what: string } | string {
+  const m = /^scheduled\s+([\s\S]+?)\s+ticket\s+(\S+)\s*--\s*([\s\S]*)$/i.exec(arg.trim())
+  if (!m) return RUN_WAIT_REFUSED
+  const ticket = (m[2] as string).toLowerCase()
+  const what = cutAsk(m[3])
+  if (!isUuid(ticket) || !what) return RUN_WAIT_REFUSED
+  const runs: number[] = []
+  for (const part of (m[1] as string).split(/\s*,\s*/)) {
+    const t = runTime(part.trim())
+    if (!Number.isFinite(t) || t < now - RUN_GRACE_MS || t > now + RUN_AHEAD_MAX_MS) return RUN_WAIT_REFUSED
+    if (!runs.includes(t)) runs.push(t)
+  }
+  if (!runs.length || runs.length > RUN_WAIT_RUNS_MAX) return RUN_WAIT_REFUSED
+  return { runs: runs.sort((a, b) => a - b), ticket, what }
+}
+
+/** (0.7.70) One run time: `2026-11-25 16:15` (New York time, an `ET` after it allowed), or an ISO time with `Z` or an offset. NaN otherwise. */
+export function runTime(text: string): number {
+  const wall = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?:\s*(?:ET|EST|EDT))?$/i.exec(text)
+  if (wall) return wallTime(Number(wall[1]), Number(wall[2]), Number(wall[3]), Number(wall[4]), Number(wall[5]))
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/.test(text)) return Date.parse(text)
+  return NaN
 }
 
 /** (0.5.25) One thread for the model to start: the client, and start_session's arguments exactly as the bridge would pass them. */

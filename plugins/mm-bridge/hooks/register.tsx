@@ -28,7 +28,9 @@ import {
   awayHandoverText, awayPromptLine, awaySorted, carryKickoff, switchPromptLine, transcriptPath,
   DETACH_SELF_NOTE, isChildThread, recordLooksFinished, withTopLevelStep, withoutTopLevelStep,
   ANSWER_CLEARED, ANSWER_CLIENTS_ONLY, ANSWER_TOOL_TEXT, answerArgs, answerNoted, declaredOf,
+  RUN_DONE_KEEP_MS, RUN_WAIT_NO_THREAD, RUN_WAIT_TOOL_TEXT, runWaitNotedUnlinked, baselineOf, newSince, reportedAt, runMissedTitle, runState, runWaitArgs, runWaitNoted, runWaitSuffix, runWaitWhy, runWaitsOf,
 } from './threads'
+import type { RunState, RunWait } from './threads'
 import type { RowPin, AppThread, AwayClient, Declared, Fold, Kickoff, LookupSeen, Pairs, PinReport, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
 import {
   INTERNAL_NAME, INTERNAL_NOTE, NUDGE_AFTER, NUDGE_INTERNAL, NUDGE_NONE, NUDGE_TEXT, SKILL_KEY, afterPersonClose, clientName, displayName, kindOf, mergeCurrent, mergeTime, opensBySelf,
@@ -241,7 +243,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.68'
+export const VERSION = '0.7.70'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -2108,6 +2110,14 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
    */
   const declared = declaredOf(await storeGet<unknown>($, 'mm.waiting', {}))
   const declaredWas = copyOf(declared)
+  /**
+   * ⛔ (0.7.70, Rob 2026-11-24: "it should probably unpin and then only repin after the run goes or it fails") What each linked
+   * thread said it waits on: scheduled runs (`mm waiting scheduled`), as this pass read it, with each due run's report looked
+   * for on its ticket (`readRunReports`), and that read again: only what this pass changes is written back (`applyChanges`).
+   */
+  const runWaits = runWaitsOf(await storeGet<unknown>($, 'mm.runwait', {}))
+  const runWaitsWas = copyOf(runWaits)
+  await readRunReports($, runWaits, now)
 
   // ⛔ A thread missing from the app's list is not a thread that is gone: the list holds the 60 most
   // recent. Each linked or pinned thread the list left out is asked for by id. One the app shows open is a
@@ -2902,6 +2912,11 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   for (const sid of Object.keys(declared)) {
     if (gone.has(sid) || live.get(sid)?.isArchived === true || records.said(sid)?.archived === true || ownerOf(sid, links) === undefined) delete declared[sid]
   }
+  // ⛔ (0.7.70) and so does a scheduled wait
+  // (a linked thread's goes once it is no longer that project's; one linked to none stays until its runs reported)
+  for (const [sid, w] of Object.entries(runWaits)) {
+    if (gone.has(sid) || live.get(sid)?.isArchived === true || records.said(sid)?.archived === true || (w.project !== undefined && ownerOf(sid, links) !== w.project)) delete runWaits[sid]
+  }
   // ⛔ (0.7.68) The person took the pin off a thread its declaration pinned (`Pin.waiting`, ours or theirs), on any client's thread
   // here, on a list or not (the loop above reads only a listed client's, and only our pin): remembered as every unpin of theirs
   // is, so that declaration does not pin it again. A thread pinned again (by them) drops the record, as above.
@@ -3004,6 +3019,56 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     else named.set(sid, { it, unpin: unpinFor(it, 'ours'), title: threadTitle(it, now) })
   }
 
+  // ⛔ (0.7.70, Rob 2026-11-24: "When we're waiting for a scheduled run before something needs me again, it should probably unpin
+  // and then only repin after the run goes or it fails." Then: "we set up the watchdogs to make sure outreach is running right in
+  // all channels for clients. If something is not running properly, it's supposed to pin itself ... But if everything I need to do
+  // is already scheduled and we're waiting for the send to know that it's been fixed, I think we can unpin until we know there's an
+  // issue again that I need to do something with.") A LINKED THREAD THAT WAITS ONLY ON A SCHEDULED RUN IS NOT PINNED FOR WHAT ITS
+  // CLIENT ALREADY HAD. The thread declares it itself (`mm waiting scheduled`, `mm.runwait`): the runs' times, the OW ticket they
+  // note their results on, and what its client had for the viewer then (`RunWait.base`). While the wait stands, the feed's pin of
+  // that thread (R1's clock, B's pin again over the person's unpin) is set aside: the thread is named for what is due, with
+  // ` · waits on a run <when>`, and the bridge takes its OWN pin off (never the person's). The thread is pinned again on the first
+  // of: (1) anything new for the client since the wait began (`newSince`: a ticket of the viewer's that opens or reopens, as a
+  // watchdog's or a run's "short" ticket does, a client message, a package): the wait ENDS, and the usual rules act from this pass;
+  // (2) a run with no note on its ticket RUN_GRACE_MS after its time (`missed`, a run that failed or never ran: unproven is
+  // pinned): pinned as a declaration is (`asking`, `Pin.waiting`), named ` · run missed`, until its note lands (then it is held
+  // off again) or the thread clears or renews the wait. A run that reports and brings nothing new leaves the thread unpinned; once
+  // every run has reported, the wait stands while its client is listed with nothing new, at most RUN_DONE_KEEP_MS past its last
+  // run. ⛔ The person's own unpin of a missed run's pin stands, as for a declaration. Any linked thread here (a client's or an
+  // internal project's), never another profile's or one this pass cannot see.
+  /** (0.7.70) The projects whose thread a wait holds unpinned this pass: never "should be pinned" in the pin report. */
+  const runHeld = new Set<string>()
+  /** (0.7.70) The threads a missed run pins again: thread → its project, the wait and where it stands. */
+  const runMissed = new Map<string, { pid: string; w: RunWait; st: Extract<RunState, { kind: 'missed' }> }>()
+  for (const [sid, w] of Object.entries(runWaits)) {
+    if (w.project === undefined) continue
+    const pid = ownerOf(sid, links)
+    const s = live.get(sid)
+    if (!pid || !s || s.isArchived || !isUuid(pid) || away.has(sid) || unseen.has(sid) || gone.has(sid)) continue
+    if (pins[sid] !== undefined && pins[sid]?.projectId !== pid) continue
+    const it = listedNow.get(pid)
+    if (newSince(it, w.base)) {
+      delete runWaits[sid]
+      await logAuto($, `thread ${sid}: something new for its client since it began waiting on a scheduled run; the wait is over and the usual pin rules act`)
+      continue
+    }
+    const st = runState(w, now)
+    if (st.kind === 'missed') {
+      runMissed.set(sid, { pid, w, st })
+      continue
+    }
+    if (st.kind === 'done' && (!it || now > st.last + RUN_DONE_KEEP_MS)) {
+      delete runWaits[sid]
+      continue
+    }
+    if (!it) continue
+    want.delete(sid)
+    again.delete(sid)
+    const prev = named.get(sid)
+    named.set(sid, { it, unpin: prev?.unpin === 'any' ? 'any' : prev?.unpin === false ? false : 'ours', title: `${prev?.title ?? threadTitle(it, now)} · ${runWaitSuffix(st, now)}` })
+    runHeld.add(pid)
+  }
+
   // ⛔ (0.7.68, Rob 2026-11-23, of two client threads that ended their turn waiting on him and were not pinned: "why are they
   // waiting on me but not pinned? yeah you should pin them and we may need to fix something". Then: "it depends on what the
   // question is and how important it is I answer it. you almost always end with a question. we can probably come up with some
@@ -3020,7 +3085,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // (`Unpinned.at` later than `Declared.at`) keeps the pin off, and is kept on record while it stands; a newer declaration pins
   // the thread again. ⛔ The same on every computer: the thread is in that person's profile, so its question is theirs.
   /** (0.7.68) The threads a declaration pins this pass: thread → its client, the declaration and the name it gets. */
-  const asking = new Map<string, { pid: string; d: Declared; title: string; name: string }>()
+  const asking = new Map<string, { pid: string; d?: Declared; title: string; name: string }>()
   /** (0.7.68) The threads whose declaration the person's unpin holds off: named as before, never pinned for it. */
   const askHeld = new Set<string>()
   /** (0.7.68) The name of each client a declaration pins or would pin, for the pin report. */
@@ -3048,6 +3113,34 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     named.delete(sid)
     stayedOff.delete(sid)
     // pinned for this declaration: an unpin from before it is spent (left, it would keep our pin on once the declaration goes)
+    delete unpinned[sid]
+  }
+
+  // ⛔ (0.7.70) A missed run pins its thread as a declaration does, after them: the feed's own pin keeps the thread (its name gets
+  // ` · run missed`, in `want`'s loop). The person's unpin after the miss stands: one found on a pin of ours for it (`Pin.waiting`)
+  // is put on record here for any linked thread, since the loop above records it for a client's thread only.
+  for (const [sid, m] of runMissed) {
+    const s = live.get(sid)
+    if (!s || want.has(sid) || asking.has(sid)) continue
+    const fromProjects = feed.projects?.find(p => p && p.project_id === m.pid)?.name
+    const name = cleanName(pinFor(m.pid, sid, false)?.client ?? '') || (typeof fromProjects === 'string' ? cleanName(shortName(fromProjects)) : '')
+    if (!name) continue
+    askNames.set(m.pid, name)
+    const had = pins[sid]
+    if (!s.pinned && !unpinnedNow.has(sid) && had?.waiting === true && had.byUs && had.projectId === m.pid) {
+      const listedIt = listedNow.get(m.pid)
+      unpinnedNow.set(sid, { at: now, ...(listedIt ? newestOf(listedIt) : { mail: 0, pkg: 0, task: 0 }), seen: now })
+    }
+    const u = unpinnedNow.get(sid)
+    if (!s.pinned && u && Number(u.at) >= m.st.since) {
+      askHeld.add(sid)
+      if (!(sid in unpinned)) unpinned[sid] = u
+      continue
+    }
+    const listedIt = listedNow.get(m.pid)
+    asking.set(sid, { pid: m.pid, title: listedIt ? `${titleFor(listedIt, now)} · ${runWaitSuffix(m.st, now)}` : runMissedTitle(name), name })
+    named.delete(sid)
+    stayedOff.delete(sid)
     delete unpinned[sid]
   }
 
@@ -3282,7 +3375,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     // (0.7.44) a record of the person's keeps what a handover carried (`keepCarried`)
     const record = (byUs: boolean): Pin => keepCarried(sid, { ...pinOf(it, byUs), ...(back ? { again: true as const } : {}) })
     await recordPin(sid, record(s.pinned ? (pins[sid]?.byUs ?? false) : false))
-    const title = pinTitle(it, now, back)
+    // (0.7.70) a thread whose scheduled run is missed, the feed pinning it too: its name says so
+    const missedRun = runMissed.get(sid)
+    const title = missedRun ? `${pinTitle(it, now, back)} · ${runWaitSuffix(missedRun.st, now)}` : pinTitle(it, now, back)
     // (0.7.33) a name the app refused does not stand in the way of the pin. A run the refusal let go has no pin to get.
     if (s.title !== title && !(await rename(s, title)) && !live.has(sid)) continue
     if (!s.pinned) {
@@ -3324,6 +3419,35 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       s.pinned = true
       writes++
     }
+  }
+
+  // ⛔ (0.7.70) A thread linked to no project that waits on a scheduled run (an internal thread of the person's own): it unpinned
+  // itself when it declared the wait, and the bridge has no pin record on it. A missed run pins it once (`repinned`); the run's
+  // note landing later takes that pin off again, and the wait goes once every run has reported. The person's unpin of that pin
+  // stands: it is never pinned twice for one wait. Never a scheduled task's run, never one this pass cannot see.
+  for (const [sid, w] of Object.entries(runWaits)) {
+    if (w.project !== undefined) continue
+    const s = live.get(sid)
+    if (!s || s.isArchived || away.has(sid) || unseen.has(sid) || gone.has(sid) || ownerOf(sid, links) !== undefined || writes >= MAX_WRITES) continue
+    const st = runState(w, now)
+    if (st.kind === 'missed') {
+      if (w.repinned !== undefined || s.pinned) continue
+      if (await isRun(sid)) continue
+      if (!(await setPin(sid, true))) continue
+      s.pinned = true
+      writes++
+      runWaits[sid] = { ...w, repinned: now }
+      await logAuto($, `thread ${sid}: a scheduled run it waits on was due ${new Date(st.due).toISOString()} and has not noted ticket ${w.ticket.slice(0, 8)}; pinned again`)
+      continue
+    }
+    if (w.repinned !== undefined && s.pinned) {
+      if (!(await setPin(sid, false))) continue
+      s.pinned = false
+      writes++
+      const { repinned: _was, ...rest } = w
+      runWaits[sid] = rest
+    }
+    if (st.kind === 'done') delete runWaits[sid]
   }
 
   // Named, never pinned: the thread whose pin the person took off, the thread of a client whose drafts a
@@ -3534,7 +3658,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       // (0.7.59) a pin the app refused this pass, or one a refusal still holds back, by its words; never a scheduled run let go
       // (`mcpJson` puts `ccd_sidebar.set_pinned: ` before the app's own words: OW gets the app's words alone)
       refused: new Map(refused.filter(r => r.pinned && !r.why.includes(SCHEDULED_RUN)).map(r => [r.thread, r.why.replace(/^ccd_sidebar\.set_pinned:\s*/, '')])),
-      checkedOff,
+      // (0.7.70) and a client whose thread a scheduled wait holds unpinned: off the person's plate until the run says otherwise
+      checkedOff: new Set([...checkedOff, ...runHeld]),
       // ⛔ (0.7.68) the threads a declaration pins or would pin: their client and thread alone, never the question or its kind
       waiting: new Map([...asking, ...[...askHeld].map(sid => [sid, { pid: ownerOf(sid, links) ?? '' }] as const)].map(([sid, a]) => [a.pid, sid] as const)),
       byUs: sid => pins[sid]?.byUs === true,
@@ -3631,6 +3756,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   await patchStore<Record<string, number>>($, 'mm.cleared', {}, fresh => applyChanges(fresh, was.cleared, cleared))
   // (0.7.68) the declarations this pass let go (archived, gone, unlinked): only those, over a fresh copy
   await patchStore<Record<string, Declared>>($, 'mm.waiting', {}, fresh => applyChanges(fresh, declaredWas, declared))
+  // (0.7.70) and the scheduled waits: the reports this pass found, and the waits it ended or let go
+  await patchStore<Record<string, RunWait>>($, 'mm.runwait', {}, fresh => applyChanges(fresh, runWaitsWas, runWaits))
   await patchStore<Auto>($, 'mm.auto', {}, fresh => applyChanges(fresh, was.auto, auto, 'delete'))
   await patchStore<Record<string, string>>($, 'mm.titles', {}, (fresh, stored) => keepNewest(fresh, was.titles, titles) || !stored)
   for (const [pid, from] of followed) if (links[pid] !== from) await logAuto($, `profile switch: ${pid} linked to its own thread here ${links[pid]} (its thread ${from} is in another Claude profile)`)
@@ -4985,6 +5112,13 @@ async function whyHere($: EngineInterface, last: Last, pid: string, sid: string,
   const client = listed?.client ?? pin?.client ?? clientInTitle((await storeGet<Record<string, string>>($, 'mm.titles', {}))[sid] ?? '')
   // ⛔ (0.7.68) while this thread's own declaration pins it (`Pin.waiting`): its kind and its question, here and nowhere else
   const answer = pin?.waiting ? declaredOf(await storeGet<unknown>($, 'mm.waiting', {}))[sid] : undefined
+  // ⛔ (0.7.70) while this thread waits on a scheduled run: what it waits on and when it is pinned again, or that a run was missed
+  const run = runWaitsOf(await storeGet<unknown>($, 'mm.runwait', {}))[sid]
+  if (run) {
+    const st = runState(run, now)
+    const person = pin ? pin.byUs !== true : false
+    if (st.kind === 'missed' || listed) return `${runWaitWhy(run, st)}${st.kind !== 'missed' && person ? ' You pinned it yourself, so it stays until you unpin it.' : ''}`
+  }
   return threadWhy(listed, client, now, { person: pin ? pin.byUs !== true : false, again: pin?.again === true, ...(answer ? { answer } : {}) })
 }
 
@@ -8563,6 +8697,8 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       await pinAgain($, me)
       // (0.7.68) and what it said it waits on: an unlinked thread is never pinned for it
       await dropDeclared($, me)
+      // (0.7.70) nor held unpinned for a scheduled run
+      await dropRunWait($, me)
     }
     // (0.6.0) and it has no current project: nothing counts it to a client until something says so again
     await clearCurrent($, me)
@@ -10200,13 +10336,17 @@ async function proposeCommand($: EngineInterface, arg: string): Promise<string> 
  * bridge pins client threads only. ⛔ Stored on this computer alone (`mm.waiting`): the question and its kind are never sent.
  */
 async function answerCommand($: EngineInterface, arg: string): Promise<string> {
+  // (0.7.70) a thread that waits on a scheduled run, not on the person
+  if (/^scheduled\b/i.test(arg.trim())) return runWaitCommand($, arg)
   const asked = answerArgs(arg)
   if (typeof asked === 'string') return asked
   const me = await selfId($)
   if ('clear' in asked) {
     if (me) {
+      // (0.7.70) both: what it said it waits on, a question or a run
       const had = await dropDeclared($, me)
-      if (had) await askSync($).catch(() => {})
+      const hadRun = await dropRunWait($, me)
+      if (had || hadRun) await askSync($).catch(() => {})
     }
     return ANSWER_CLEARED
   }
@@ -10221,9 +10361,90 @@ async function answerCommand($: EngineInterface, arg: string): Promise<string> {
     fresh[me] = { type: asked.type, ask: asked.ask, at }
     capped(fresh)
   })
+  // (0.7.70) a question for the person replaces a wait on a run: the thread waits on them now
+  await dropRunWait($, me)
   // (the pin goes on at the sync this asks for, within the minute, not at the next five-minute one)
   await askSync($).catch(() => {})
   return answerNoted(asked.type)
+}
+
+/**
+ * ⛔ (0.7.70, Rob 2026-11-24: "When we're waiting for a scheduled run before something needs me again, it should probably unpin
+ * and then only repin after the run goes or it fails.") `mm waiting scheduled <when>[, <when>] ticket <id> -- <what>`: this linked
+ * thread (a client's or an internal project's) waits only on scheduled runs that are set up, each noting its result on that OW
+ * ticket. Stored on this computer alone (`mm.runwait`) with what its client has for the viewer now (the last sync's item,
+ * `baselineOf`), so anything newer ends it; the pin pass takes the bridge's pin off and re-pins on a needs-you result or a missed
+ * run. A newer wait replaces the one before, and replaces a question the thread declared (`mm.waiting`). `waiting clear` and an
+ * unlink take it back.
+ */
+async function runWaitCommand($: EngineInterface, arg: string): Promise<string> {
+  const now = await $.clock.now()
+  const asked = runWaitArgs(arg, now)
+  if (typeof asked === 'string') return asked
+  const me = await selfId($)
+  if (!me || !THREAD_ID.test(me)) return RUN_WAIT_NO_THREAD
+  const linkedTo = ownerOf(me, await storeGet<Record<string, string>>($, 'mm.links', {}))
+  const pid = linkedTo && isUuid(linkedTo) ? linkedTo : undefined
+  const last = await storeGet<Last | null>($, 'mm.last', null)
+  const it = pid ? listedIn(last).find(i => i && i.projectId === pid) : undefined
+  const wait: RunWait = { what: asked.what, ticket: asked.ticket, at: now, runs: asked.runs.map(at => ({ at })), base: baselineOf(it), ...(pid ? { project: pid } : {}) }
+  await patchStore<Record<string, RunWait>>($, 'mm.runwait', {}, fresh => {
+    fresh[me] = wait
+    capped(fresh)
+  })
+  await dropDeclared($, me)
+  // (the pin comes off at the sync this asks for, within the minute)
+  await askSync($).catch(() => {})
+  return pid ? runWaitNoted(wait) : runWaitNotedUnlinked(wait)
+}
+
+/** (0.7.70) A thread's scheduled wait, taken away (`waiting clear`, a question declared after it, an unlink): whether there was one. */
+async function dropRunWait($: EngineInterface, sid: string): Promise<boolean> {
+  let had = false
+  await patchStore<Record<string, unknown>>($, 'mm.runwait', {}, fresh => {
+    if (!Object.hasOwn(fresh, sid)) return false
+    delete fresh[sid]
+    had = true
+  })
+  return had
+}
+
+/** (0.7.70) The most ticket reads one pass makes for the scheduled waits' reports. */
+const RUN_READS_MAX = 6
+
+/**
+ * (0.7.70) Each wait's runs that are due and not reported yet: the first note on the wait's ticket at or after the run's time
+ * (`reportedAt`, OW's read-only `GET /api/ext/ticket-status?ticket_id=`), one read per ticket per pass, at most RUN_READS_MAX.
+ * ⛔ A read that fails finds nothing: a run past its grace whose report the bridge cannot read pins its thread again, since
+ * unproven is pinned (Rob 2026-11-18: "I want things pinned that aren't running properly until we know they are"). Never throws.
+ */
+async function readRunReports($: EngineInterface, waits: Record<string, RunWait>, now: number): Promise<void> {
+  const notes = new Map<string, string | null>()
+  for (const w of Object.values(waits)) {
+    for (const r of w.runs) {
+      if (Number.isFinite(r.seen) || r.at > now) continue
+      if (!notes.has(w.ticket)) {
+        if (notes.size >= RUN_READS_MAX) return
+        notes.set(w.ticket, await ticketNotes($, w.ticket))
+      }
+      const seen = reportedAt(notes.get(w.ticket), r.at)
+      if (seen !== undefined) r.seen = seen
+    }
+  }
+}
+
+/** (0.7.70) A ticket's `resolution_notes` as OW gives them, or null (no answer, not 200, not readable). */
+async function ticketNotes($: EngineInterface, ticket: string): Promise<string | null> {
+  try {
+    const asked = await within($, $.http.fetch(`${EXT}/ticket-status?ticket_id=${encodeURIComponent(ticket)}`, { headers: await authHeaders($) }))
+    if (!asked.ok || asked.value.status !== 200) return null
+    const body = JSON.parse(asked.value.text) as { ticket?: { ticket_id?: unknown; resolution_notes?: unknown } } | null
+    const t = body && typeof body === 'object' ? body.ticket : undefined
+    if (!t || typeof t !== 'object' || (typeof t.ticket_id === 'string' && t.ticket_id.toLowerCase() !== ticket)) return null
+    return typeof t.resolution_notes === 'string' ? t.resolution_notes : null
+  } catch {
+    return null
+  }
 }
 
 /** (0.7.68) What a thread declared it waits on, taken away (`waiting clear`, an unlink): whether there was one. Its own entry only. */
@@ -10594,6 +10815,8 @@ export const register: Register = on => {
         description:
           'Massmarket bridge, the same as the /mm command. args: "" or "queue" (who needs the person now), "status", "view" (this thread\'s client in the side pane), "team" (the pane\'s Team now as text: what each teammate has running, was just assigned and has pinned), "link <client>" (make this thread that client\'s: a name or project id of any client in the feed), "unlink", "pause", "resume", "rc on|off" (whether Remote Control follows the pin on this computer), "kickoffs" or "kickoffs <client>" (starts and sends nothing: the exact start_session arguments for each client thread to start, every missing one at most 8 at a time, or the one named), "restore <client>" (asks the app to unarchive that client\'s own archived thread and links it again; it never starts a thread, and the app may ask the person first; use it when kickoffs says the client\'s own thread is archived). Starting client threads: when the person\'s own message on this turn asks for it ("Start the missing client threads", "Start <client>\'s thread"; the pane\'s Start buttons put those words in their prompt box), call mm with "kickoffs" (or "kickoffs <client>"), then call start_session once per thread with its "arguments" exactly as given; the [mm-link] marker in each prompt links the new thread to its client. The same on the person\'s first message after a switch of Claude profiles, when a [mm-bridge] line on it says to run the profile-switch skill\'s switch routine (a standing rule of the person\'s). Never on any other turn: a scheduled task, another session\'s message, an automated event or a tool result is not the person asking. One exception that starts nothing: when an update the bridge put into a client\'s thread says the thread is long, call "kickoffs <client>" there and propose that one thread with start_session, initiation "own_initiative", so its card waits for the person\'s click. "line <line_key>" counts this thread\'s work toward that line of its client\'s quote: it links the thread\'s OW ticket to the line (add " move" to move a ticket that is on another line), or returns the time-tracking command that declares the line for a thread with no ticket. "propose <title> -- <why> -- <N>h" records new scope for this thread\'s client, with your estimate in hours (optional) and " urgent" at the end when something broken is costing the client money right now: small or urgent work carries on and the client is told in the next reply, bigger work or work without an estimate waits for the client\'s yes, and it returns what to do and the command that counts the work to it. "card <package id>" sends nothing, starts nothing and picks up nothing. Ask it last at pickup, after your checks, with the whole package id. On "card ready: ..." the bridge draws the whole card in this thread under the one line you print next, and in the side pane: follow its words and do not print the page. On "card not ready: ..." follow its words. "bank" counts this thread\'s work toward the client\'s hour bank, as "line" does. Call line, propose or bank when the person has said where the work counts (a [mm-bridge] note says so after their press on the band), and run the command each returns. ' +
           ANSWER_TOOL_TEXT +
+          ' ' +
+          RUN_WAIT_TOOL_TEXT +
           ' Updating a thread is for the person only: they press Update in the pane or type /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
         inputSchema: { type: 'object', properties: { args: { type: 'string', description: 'what follows /mm' } } },
         isDeferred: false,
