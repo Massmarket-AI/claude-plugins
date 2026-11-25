@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// mm-hooks: keeps the Massmarket plugins on this computer (mm-hooks and mm-bridge) at the version on GitHub, even
-// where Claude Code's own plugin auto-update is off.
+// mm-hooks: keeps the Massmarket plugins on this computer (mm-hooks, mm-bridge and massmarket-theme) at the version on
+// GitHub, even where Claude Code's own plugin auto-update is off, and installs massmarket-theme once.
 //
 // Why it exists (Rob, 2026-10-26): two team computers (Arch Linux, the terminal CLI) sat on old plugin versions for
 // days. Their settings.json never got extraKnownMarketplaces.massmarket.autoUpdate or env.FORCE_AUTOUPDATE_PLUGINS
@@ -16,7 +16,17 @@
 //     repository on GitHub and the user-scope install Claude Code recorded in plugins/installed_plugins.json. A plugin
 //     installed at user scope, not turned off, whose latest version is strictly higher, is due. For the due ones it
 //     runs, from the home folder and each with a 300-second deadline: claude plugin marketplace update massmarket,
-//     then claude plugin update <id> --scope user. It stops at the first command that fails.
+//     then claude plugin update <id> --scope user. It stops at the first command that fails. The child touches its
+//     lock before each command, so a run of four commands never looks stale to the next session.
+//   - Install once (Rob, 2026-11-24, his answer "Auto-install once"): where massmarket-theme has never been on this
+//     computer, the same child runs claude plugin install massmarket-theme@massmarket --scope user, last, after the
+//     marketplace update and any plugin update, under the same lock and deadline. "Never been on this computer" means:
+//     no record of it under `self_update.install_once` in plugin-sync.json, no row for it in installed_plugins.json at
+//     any scope, no folder for it in Claude Code's plugin cache, and no enabledPlugins entry for it, true or false.
+//     Whatever it finds is recorded there for good, so it never installs again: not after the person removes it, and
+//     never once they turned it off. A failed install is tried again at a later check, at most 3 times in all. The
+//     first session with no record for it checks at once instead of waiting out the 6 hours; after that the record
+//     is there and the 6 hours hold. A plugin-sync.json that does not parse installs nothing (its history is unknown).
 //   - Where Claude Code's own auto-update is fully on (autoUpdate on the massmarket marketplace in the user settings
 //     AND FORCE_AUTOUPDATE_PLUGINS on), the update is left to Claude Code: this step acts only once the same new
 //     version has been waiting 2 hours, so the two never race.
@@ -29,7 +39,10 @@
 //
 // What it never does:
 //   - install a plugin that is not installed: it only ever runs `plugin update`, for a plugin with a user-scope install.
-//   - turn on a plugin the person turned off (enabledPlugins[<id>] === false in the user settings): it is left as it is.
+//     The single exception is massmarket-theme, installed once per computer as above (Rob's go, 2026-11-24: "Auto-install
+//     once"). No other plugin is ever installed, and the theme never twice.
+//   - turn on a plugin the person turned off (enabledPlugins[<id>] === false in the user settings): it is left as it is,
+//     and a turned-off massmarket-theme is never installed.
 //   - downgrade, or act on a version that is not plain dot-separated numbers.
 //   - write any settings.json, or run the CLI while the user settings.json does not parse (the CLI writes that file).
 //   - touch the token or consent.json.
@@ -46,7 +59,14 @@ const path = require("path");
 const { updateStatus } = require("./plugin-status");
 
 const MARKETPLACE = "massmarket";
-const PLUGIN_IDS = ["mm-hooks@massmarket", "mm-bridge@massmarket"];
+const THEME_ID = "massmarket-theme@massmarket";
+const PLUGIN_IDS = ["mm-hooks@massmarket", "mm-bridge@massmarket", THEME_ID];
+// The only plugins this step may install, each once per computer (Rob, 2026-11-24: "Auto-install once").
+const INSTALL_ONCE_IDS = [THEME_ID];
+const INSTALL_MAX_ATTEMPTS = 3;
+// install_once states that end it for good: installed by this step, found (it is or was on this computer), turned off
+// by the person, or given up after INSTALL_MAX_ATTEMPTS failures. "pending", "waiting" and "failed" may still install.
+const INSTALL_FINAL = ["installed", "found", "turned-off", "gave-up"];
 const LATEST_BASE = "https://raw.githubusercontent.com/Massmarket-AI/claude-plugins/main/plugins";
 const HOUR = 60 * 60 * 1000;
 const CHECK_EVERY_MS = 6 * HOUR;
@@ -76,6 +96,7 @@ function paths(env = process.env) {
     logFile: path.join(hookDir, "plugin-update.log"),
     installedFile: path.join(claudeDir, "plugins", "installed_plugins.json"),
     settingsFile: path.join(claudeDir, "settings.json"),
+    cacheDir: path.join(claudeDir, "plugins", "cache", MARKETPLACE),
   };
 }
 
@@ -126,20 +147,65 @@ function turnedOff(settings, id) {
   return !!(e && typeof e === "object" && e[id] === false);
 }
 
-/** { ok, versions }: versions[<id>] is the version of the plugin's scope "user" entry, for our ids that have one. */
+/**
+ * { ok, versions, any }: versions[<id>] is the version of the plugin's scope "user" entry, for our ids that have one;
+ * any[<id>] is true when the plugin has an entry at any scope (user, project or local).
+ */
 function readInstalled(file) {
   const r = readJsonFile(file);
   const versions = {};
-  if (!r.ok) return { ok: false, versions };
+  const any = {};
+  if (!r.ok) return { ok: false, versions, any };
   const plugins = r.value && r.value.plugins;
-  if (plugins === undefined || plugins === null) return { ok: true, versions };
-  if (typeof plugins !== "object" || Array.isArray(plugins)) return { ok: false, versions };
+  if (plugins === undefined || plugins === null) return { ok: true, versions, any };
+  if (typeof plugins !== "object" || Array.isArray(plugins)) return { ok: false, versions, any };
   for (const id of PLUGIN_IDS) {
-    const rows = Array.isArray(plugins[id]) ? plugins[id] : [];
-    const row = rows.filter((x) => x && typeof x === "object" && x.scope === "user")[0];
+    const rows = (Array.isArray(plugins[id]) ? plugins[id] : []).filter((x) => x && typeof x === "object");
+    if (rows.length) any[id] = true;
+    const row = rows.filter((x) => x.scope === "user")[0];
     if (row) versions[id] = typeof row.version === "string" ? row.version : "";
   }
-  return { ok: true, versions };
+  return { ok: true, versions, any };
+}
+
+/** The install_once record of each plugin, from a self_update record; {} when there is none. */
+function installOnceOf(su) {
+  const o = su && typeof su === "object" ? su.install_once : null;
+  return o && typeof o === "object" && !Array.isArray(o) ? o : {};
+}
+
+/** The install-once plugins this computer has no record of at all: the first session checks for them at once. */
+function installOnceUnseen(su) {
+  const once = installOnceOf(su);
+  return INSTALL_ONCE_IDS.filter((id) => !once[id] || typeof once[id] !== "object");
+}
+
+/**
+ * Whether an install-once plugin may be installed at this check. PURE.
+ *   record      its install_once record from the last check, or undefined
+ *   installedAny it has an entry in installed_plugins.json at any scope
+ *   inCache     Claude Code's plugin cache has a folder for it (it was installed here once)
+ *   statusOk    plugin-sync.json parsed (or is missing): its history is known
+ * Returns { candidate: true } to install (once its latest version is read), or { record } to keep, or {} for nothing.
+ */
+function installOnceState({ id, record, installedAny, inCache, settings, statusOk }) {
+  if (!statusOk) return {};
+  if (record && typeof record === "object" && INSTALL_FINAL.indexOf(record.state) !== -1) return {};
+  if (turnedOff(settings, id)) return { record: { state: "turned-off" } };
+  const e = settings && settings.enabledPlugins;
+  const inSettings = !!(e && typeof e === "object" && Object.prototype.hasOwnProperty.call(e, id));
+  if (installedAny || inCache || inSettings) return { record: { state: "found", via: installedAny ? "installed_plugins.json" : inCache ? "plugin cache" : "settings.json" } };
+  const attempts = record && Number.isInteger(record.attempts) && record.attempts > 0 ? record.attempts : 0;
+  if (attempts >= INSTALL_MAX_ATTEMPTS) return { record: Object.assign({}, record, { state: "gave-up" }) };
+  return { candidate: true };
+}
+
+function cacheHas(p, id) {
+  try {
+    return fs.statSync(path.join(p.cacheDir, id.split("@")[0])).isDirectory();
+  } catch (_) {
+    return false;
+  }
 }
 
 /** The last check is far enough back (6 hours), or a waiting version's 2 hours are up (retry_at). */
@@ -179,6 +245,18 @@ function takeLock(file) {
     }
   }
   return null;
+}
+
+/** Mark the lock as fresh, if it is still this run's: a run of several 5-minute commands never looks stale. */
+function touchLock(file, mine) {
+  try {
+    if (fs.readFileSync(file, "utf8") === mine) {
+      const t = new Date();
+      fs.utimesSync(file, t, t);
+    }
+  } catch (_) {
+    // gone; the run goes on
+  }
 }
 
 function releaseLock(file, mine) {
@@ -476,7 +554,8 @@ function scrub(text, env = process.env) {
 function logLine(rec) {
   const parts = [rec.finished_at || rec.last_attempt_at, rec.result];
   for (const [id, p] of Object.entries(rec.plugins || {})) {
-    const versions = p.to ? p.from + "->" + p.to : p.latest && p.latest !== p.from ? (p.from || "?") + "->" + p.latest : p.from || "";
+    const target = p.to || (p.latest && p.latest !== p.from ? p.latest : "");
+    const versions = target ? (p.from ? p.from + "->" + target : target) : p.from || "";
     parts.push(id.split("@")[0] + ":" + p.action + (versions ? ":" + versions : ""));
   }
   if (rec.cli) parts.push("cli=" + rec.cli);
@@ -501,11 +580,16 @@ function appendLog(file, line) {
   }
 }
 
-/** One check, as data: the record for `self_update`. Runs the CLI only for what is due. */
-async function check(env, p, now) {
-  const previous = readJsonFile(p.statusFile, 1 << 20).value || {};
+/**
+ * One check, as data: the record for `self_update`. Runs the CLI only for what is due, and for an install-once plugin
+ * this computer has never had. onStep runs before each CLI command (the child keeps its lock fresh with it).
+ */
+async function check(env, p, now, onStep = () => {}) {
+  const statusRead = readJsonFile(p.statusFile, 1 << 20);
+  const previous = statusRead.value || {};
   const prev = previous.self_update && typeof previous.self_update === "object" ? previous.self_update : {};
   const rec = { last_attempt_at: new Date(now).toISOString() };
+  const nowIso = rec.last_attempt_at;
 
   const settingsRead = readJsonFile(p.settingsFile);
   const settings = settingsRead.value || {};
@@ -513,7 +597,20 @@ async function check(env, p, now) {
   if (!installed.ok) return Object.assign(rec, { result: "failed", error: "installed_plugins.json could not be read" });
   rec.auto_update = autoUpdateOn(settings, env);
 
-  const lookup = PLUGIN_IDS.filter((id) => installed.versions[id] !== undefined && !turnedOff(settings, id) && parseVersion(installed.versions[id]));
+  // Install once: what this computer's history says about each install-once plugin, kept in rec.install_once.
+  const once = Object.assign({}, installOnceOf(prev));
+  let toInstall = [];
+  for (const id of INSTALL_ONCE_IDS) {
+    const s = installOnceState({ id, record: once[id], installedAny: !!installed.any[id], inCache: cacheHas(p, id), settings, statusOk: statusRead.ok });
+    if (s.record) once[id] = Object.assign({}, s.record, { at: nowIso });
+    if (s.candidate) {
+      // Always on record from here on, so later sessions keep to the 6-hour throttle.
+      if (!once[id] || typeof once[id] !== "object") once[id] = { state: "pending", at: nowIso };
+      toInstall.push(id);
+    }
+  }
+
+  const lookup = PLUGIN_IDS.filter((id) => (installed.versions[id] !== undefined && !turnedOff(settings, id) && parseVersion(installed.versions[id])) || toInstall.indexOf(id) !== -1);
   const latest = lookup.length ? await fetchLatest(lookup, env.MM_PLUGIN_LATEST_BASE) : {};
   const d = decide({ installed: installed.versions, settings, latest, autoOn: rec.auto_update, behindSince: prev.behind_since, now });
   rec.plugins = d.plugins;
@@ -521,7 +618,21 @@ async function check(env, p, now) {
   if (d.retryAt !== null) rec.retry_at = new Date(d.retryAt).toISOString();
   const unreadableWords = () => scrub("could not read the latest version of " + d.unreadable.map((id) => id.split("@")[0] + " (" + latest[id].error + ")").join(", "), env);
 
-  if (!d.act.length) {
+  // An install-once plugin is installed only once its latest version is read from GitHub: it is published, and the
+  // network is up. Until then it waits for a later check (the record makes that the 6-hour throttle, not every session).
+  toInstall = toInstall.filter((id) => {
+    const l = latest[id];
+    if (l && !l.error && parseVersion(l.version)) {
+      rec.plugins[id] = { latest: l.version, action: "install-due" };
+      return true;
+    }
+    rec.plugins[id] = { action: "install-waiting" };
+    once[id] = Object.assign({}, once[id], { state: "waiting", at: nowIso });
+    return false;
+  });
+  if (Object.keys(once).length) rec.install_once = once;
+
+  if (!d.act.length && !toInstall.length) {
     if (d.pending.length) rec.result = "skipped-auto-update-pending";
     else if (d.unreadable.length) Object.assign(rec, { result: "failed", error: unreadableWords() });
     else rec.result = "current";
@@ -533,33 +644,69 @@ async function check(env, p, now) {
   rec.cli = cli.source;
 
   const timeoutMs = Number(env.MM_HOOK_PLUGIN_TIMEOUT_MS) > 0 ? Number(env.MM_HOOK_PLUGIN_TIMEOUT_MS) : CLI_TIMEOUT_MS;
-  const steps = [{ args: ["plugin", "marketplace", "update", MARKETPLACE] }].concat(d.act.map((id) => ({ id, args: ["plugin", "update", id, "--scope", "user"] })));
+  // The installs go last: an update that fails stops them too, and they are tried again at the next check.
+  const steps = [{ args: ["plugin", "marketplace", "update", MARKETPLACE] }]
+    .concat(d.act.map((id) => ({ id, args: ["plugin", "update", id, "--scope", "user"] })))
+    .concat(toInstall.map((id) => ({ id, install: true, args: ["plugin", "install", id, "--scope", "user"] })));
+  const errors = [];
+  const ran = [];
   for (let i = 0; i < steps.length; i++) {
+    onStep();
     const r = runClaudeCli(cli.path, steps[i].args, { cwd: p.home, env, timeoutMs });
-    if (r.ok) continue;
-    rec.result = "failed";
-    rec.error = scrub(cliFailureWords(steps[i].args, r, timeoutMs), env);
-    if (steps[i].id) rec.plugins[steps[i].id].action = "failed";
+    if (steps[i].install) {
+      const attempts = (Number.isInteger(once[steps[i].id] && once[steps[i].id].attempts) ? once[steps[i].id].attempts : 0) + 1;
+      once[steps[i].id] = { state: "failed", at: nowIso, attempts };
+    }
+    if (r.ok) {
+      if (steps[i].id) ran.push(steps[i]);
+      continue;
+    }
+    const words = scrub(cliFailureWords(steps[i].args, r, timeoutMs), env);
+    errors.push(words);
+    if (steps[i].id) rec.plugins[steps[i].id].action = steps[i].install ? "install-failed" : "failed";
+    if (steps[i].install) once[steps[i].id].error = words;
     for (const later of steps.slice(i + 1)) rec.plugins[later.id].action = "skipped-after-failure";
-    return rec;
+    break;
   }
 
-  // What Claude Code recorded after the update is the truth, not the exit code.
-  const after = readInstalled(p.installedFile).versions;
+  // What Claude Code recorded after the command is the truth, not the exit code.
+  const afterRead = readInstalled(p.installedFile);
+  const after = afterRead.versions;
   const behind = [];
-  for (const id of d.act) {
+  let updated = 0;
+  let installedNow = 0;
+  for (const step of ran) {
+    const id = step.id;
     const v = after[id];
+    if (step.install) {
+      if (parseVersion(v)) {
+        Object.assign(rec.plugins[id], { to: v, action: "installed" });
+        once[id] = { state: "installed", at: nowIso, attempts: once[id].attempts, version: v };
+        installedNow++;
+      } else {
+        rec.plugins[id].action = "install-failed";
+        once[id].error = "claude plugin install finished but " + id.split("@")[0] + " is not installed at user scope";
+        behind.push(id.split("@")[0] + " is not installed");
+      }
+      continue;
+    }
     if (parseVersion(v) && cmpVersion(v, d.plugins[id].latest) >= 0) {
       Object.assign(rec.plugins[id], { to: v, action: "updated" });
       if (rec.behind_since) delete rec.behind_since[id + "@" + d.plugins[id].latest];
+      updated++;
     } else {
       Object.assign(rec.plugins[id], { action: "still-behind" });
       behind.push(id.split("@")[0] + " is still " + (v || "not installed"));
     }
   }
+  for (const id of toInstall) {
+    if (once[id] && once[id].state === "failed" && once[id].attempts >= INSTALL_MAX_ATTEMPTS) once[id].state = "gave-up";
+  }
+  if (Object.keys(once).length) rec.install_once = once;
   if (rec.behind_since && !Object.keys(rec.behind_since).length) delete rec.behind_since;
-  if (behind.length) Object.assign(rec, { result: "failed", error: scrub("claude plugin update finished but " + behind.join(", "), env) });
-  else rec.result = "updated";
+  if (behind.length) errors.push(scrub((ran.some((s) => !s.install) ? "claude plugin update" : "claude plugin install") + " finished but " + behind.join(", "), env));
+  if (errors.length) Object.assign(rec, { result: "failed", error: scrub(errors.join("; "), env) });
+  else rec.result = updated ? "updated" : installedNow ? "installed" : "updated";
   return rec;
 }
 
@@ -573,12 +720,18 @@ async function runChild(env = process.env) {
   try {
     const now = Date.now();
     try {
-      rec = await check(env, p, now);
+      rec = await check(env, p, now, () => touchLock(p.lockFile, mine));
     } catch (err) {
       rec = { last_attempt_at: new Date(now).toISOString(), result: "failed", error: scrub((err && err.message) || err, env) };
     }
     rec.finished_at = new Date().toISOString();
-    updateStatus(p.hookDir, (current) => Object.assign({}, current, { self_update: rec }));
+    updateStatus(p.hookDir, (current) => {
+      // A check that failed before it got to the install-once records keeps the ones on file: losing them would let a
+      // removed theme be installed again.
+      const kept = installOnceOf(current.self_update);
+      const self = !rec.install_once && Object.keys(kept).length ? Object.assign({}, rec, { install_once: kept }) : rec;
+      return Object.assign({}, current, { self_update: self });
+    });
     appendLog(p.logFile, logLine(rec));
   } finally {
     releaseLock(p.lockFile, mine);
@@ -592,16 +745,25 @@ function fastPath(env = process.env, now = Date.now()) {
   const p = paths(env);
   if (!fs.existsSync(p.hookDir)) return false;
   if (lockIsLive(p.lockFile, now)) return false;
-  const status = readJsonFile(p.statusFile, 1 << 20).value || {};
-  if (!throttleAllows(status.self_update, now)) return false;
-  // Claimed under plugin-sync.json's lock, so two sessions starting together start one check.
+  const statusRead = readJsonFile(p.statusFile, 1 << 20);
+  const status = statusRead.value || {};
+  // A plugin-sync.json that does not parse never counts as "no record": its history is unknown.
+  const firstInstallCheck = (su) => statusRead.ok && installOnceUnseen(su).length > 0;
+  if (!throttleAllows(status.self_update, now) && !firstInstallCheck(status.self_update)) return false;
+  // Claimed under plugin-sync.json's lock, so two sessions starting together start one check. An install-once plugin
+  // with no record gets one ("pending") in the claim, so only this session checks before the 6 hours are up.
   let claimed = false;
   updateStatus(p.hookDir, (current) => {
     const su = current.self_update && typeof current.self_update === "object" ? current.self_update : {};
-    if (!throttleAllows(su, now)) return current;
+    const unseen = statusRead.ok ? installOnceUnseen(su) : [];
+    if (!throttleAllows(su, now) && !unseen.length) return current;
     claimed = true;
     const next = Object.assign({}, su, { last_attempt_at: new Date(now).toISOString() });
     delete next.retry_at;
+    if (unseen.length) {
+      next.install_once = Object.assign({}, installOnceOf(su));
+      for (const id of unseen) next.install_once[id] = { state: "pending", at: new Date(now).toISOString() };
+    }
     return Object.assign({}, current, { self_update: next });
   });
   if (!claimed) return false;
@@ -627,4 +789,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { PLUGIN_IDS, autoUpdateOn, cliNeedsShell, cmpVersion, decide, findClaudeCli, logLine, parseVersion, paths, scrub, throttleAllows };
+module.exports = { INSTALL_ONCE_IDS, PLUGIN_IDS, autoUpdateOn, cliNeedsShell, cmpVersion, decide, findClaudeCli, installOnceState, installOnceUnseen, logLine, parseVersion, paths, scrub, throttleAllows };

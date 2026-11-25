@@ -87,8 +87,9 @@ jobs:
           fi
 
   # What scripts/release.mjs checks before a release, run on every pull request:
-  # `claude plugin validate` on the marketplace and both plugins, then the
-  # bridge's tests (`claude plugin test`, offline; no login or API key needed).
+  # `claude plugin validate` on the marketplace and every plugin, then the
+  # bridge's and the theme's tests (`claude plugin test`, offline; no login or
+  # API key needed).
   plugins:
     name: Validate plugins and run bridge tests
     # macOS, where teammates run these plugins. The bridge's slowest tests take
@@ -117,7 +118,7 @@ jobs:
       - name: Validate marketplace and plugins
         run: |
           set -euo pipefail
-          for target in . plugins/mm-hooks plugins/mm-bridge; do
+          for target in . plugins/mm-hooks plugins/mm-bridge plugins/massmarket-theme; do
             out=$(claude plugin validate "$target" 2>&1) || { echo "$out"; exit 1; }
             echo "$out"
             if ! grep -q 'Validation passed' <<<"$out"; then
@@ -143,6 +144,24 @@ jobs:
           summary=$(grep -E '^Ran [0-9]+ tests' "$log" || true)
           if [ -z "$summary" ]; then
             echo "::error::the bridge test output has no summary line, so it is incomplete"
+            exit 1
+          fi
+          echo "::notice::$summary"
+          exit "$status"
+
+      # The theme's tests, the same way: output to a file, then the summary line.
+      - name: Theme tests
+        working-directory: plugins/massmarket-theme
+        run: |
+          log="$RUNNER_TEMP/theme-tests.log"
+          set +e
+          claude plugin test . > "$log" 2>&1
+          status=$?
+          set -e
+          cat "$log"
+          summary=$(grep -E '^Ran [0-9]+ tests' "$log" || true)
+          if [ -z "$summary" ]; then
+            echo "::error::the theme test output has no summary line, so it is incomplete"
             exit 1
           fi
           echo "::notice::$summary"
