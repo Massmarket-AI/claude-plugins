@@ -245,7 +245,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.84'
+export const VERSION = '0.7.85'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -270,6 +270,8 @@ const SESS = { plugin: 'mm-bridge', key: 'sess' } as const
 const NUDGE = { plugin: 'mm-bridge', key: 'nudge' } as const
 /** (0.7.73) The "You" strip, as this thread last worked it out. */
 const YOU = { plugin: 'mm-bridge', key: 'you' } as const
+/** (0.7.85) Today's numbers, from the store (`drawStats`). */
+const STATS = { plugin: 'mm-bridge', key: 'stats' } as const
 /** (0.7.0) The band's line for a client's thread whose work matches no line on the quote. */
 const LINE = { plugin: 'mm-bridge', key: 'lineAsk' } as const
 const PANE_VIEW = 'mm-view'
@@ -392,6 +394,10 @@ const BROWSER_ANSWERED_MS = 24 * 3_600_000
 const BROWSER_ANSWERED_MAX = 50
 /** (0.7.34) Team now on a pane whose OW has no such route yet. */
 const TEAM_MISSING = 'Team now is not available yet.'
+/** (0.7.85) How often today's numbers are read (OW works them out at most once in that time, for everyone). */
+const STATS_EVERY_MS = 10 * 60_000
+/** (0.7.85) How long an OW without `GET /day-stats` is not asked again: an hour, so the numbers come soon after OW has the route. */
+const STATS_MISSING_MS = 60 * 60_000
 /** (0.7.34) How long a client's mail with no package holds back the chip for a client with no thread: then it comes without one. */
 const CHIP_NO_DRAFTS_MS = 2 * 60 * 60_000
 /** (0.5.4, C3) A no-thread client's chip moves to the thread the person works in once they have worked elsewhere this long. */
@@ -4212,6 +4218,8 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
 
 // (0.7.26) The reply-package card: prepared on arrival, drawn natively above the page (card.tsx).
 import { teamFrom, teamHeadingNow, teamLines, teamText, withMoves } from './team'
+import { myStatsLine, myStatsSays, statsFrom, teamStatsLines, teamStatsText } from './stats'
+import type { DayStats } from './stats'
 import { ANSWER_INTERNAL, ANSWER_PERSONAL, ASK_HEADING, BROWSER_HEADING, CONFIRM_NOTE, PROFILE_TIP, SAVING, askText, blockLineText, confirmHeading, confirmText, parseBrowserNow, rowLineText, savedText, withoutAnswered } from './browser'
 import type { BrowserRead } from './browser'
 import type { TeamNow, TeamSeen } from './team'
@@ -4223,7 +4231,7 @@ import type { AlertDue, AlertPlan, NewPin } from './alerts'
 import { LEVEL_GLYPH, YOU_EVERY_MS, YOU_HEADING, compactLine, dotLabel, tierOf, youDots } from './health'
 import type { Overdue } from './health'
 import { clientDueOf, internalBehindAt } from './queue'
-import type { MmYou, MmYouRow, MmYouWait } from '../types'
+import type { MmStats, MmYou, MmYouRow, MmYouWait } from '../types'
 import { NOTHING_NEEDS_YOU, comingUpText, needsYouSet, withWaits, youPace, youPinText, youRows } from './you'
 
 /**
@@ -6081,6 +6089,8 @@ async function tick($: EngineInterface): Promise<void> {
       }
       // (0.7.34) Team now, for every thread here
       await teamPass($)
+      // (0.7.85) today's numbers, for every thread here
+      await statsPass($)
       // (0.7.53) Working manually in browser, for every thread here
       await browserPass($)
       // (0.5.19, Rob 10-20) Remote Control follows the pin while /mm rc is on: off, it asks the app nothing
@@ -6098,6 +6108,7 @@ async function tick($: EngineInterface): Promise<void> {
     // (0.6.0) this thread's Tracking part, status line and band line, from the store; the pane opens for a new project
     await drawTrack($, 'tick')
     await drawTeam($)
+    await drawStats($)
     // R5: this thread's own chips: the ones no longer wanted withdrawn, the missing ones minted
     await chipsTick($).catch(() => {})
     await refreshBand($)
@@ -8375,6 +8386,7 @@ async function chipsPass($: EngineInterface): Promise<void> {
     // (0.5.4, C2/C3) the band says where each client's chip is: drawn again from the store, as chips come and go
     await refreshBand($)
     await drawTeam($)
+    await drawStats($)
     await drawBrowser($)
   } catch {
     // the minute's tick withdraws it
@@ -9512,7 +9524,7 @@ async function resolvePerson($: EngineInterface, id: string, action: PersonActio
 }
 
 /** Opens or closes one of the groups under the list ((0.7.21) Team · late too), in this thread's pane. The person's press: nothing is fetched, called or changed. */
-async function toggleFold($: EngineInterface, key: Fold | 'people' | 'track' | 'more' | 'team' | 'confirm' | 'queueOlder'): Promise<void> {
+async function toggleFold($: EngineInterface, key: Fold | 'people' | 'track' | 'more' | 'team' | 'confirm' | 'queueOlder' | 'stats'): Promise<void> {
   try {
     const { value } = await $.state.get(FOLDS)
     await $.state.set(FOLDS, { ...(value ?? {}), [key]: !value?.[key] } satisfies MmFolds)
@@ -9657,7 +9669,11 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
   // (0.7.34) reads and starts nothing new: Team now as text, as last read (the pane's dropdown; a surface with no pane)
   if (verb === 'team') {
     await teamPass($, true)
-    return teamText((await storeGet<TeamKept>($, 'mm.team', {})).team, await $.clock.now())
+    const now = await $.clock.now()
+    // (0.7.85) and today's numbers above it, for everyone (as the pane's Team now has them)
+    const stats = teamStatsText((await storeGet<StatsKept>($, 'mm.stats', {})).stats, now)
+    const team = teamText((await storeGet<TeamKept>($, 'mm.team', {})).team, now)
+    return stats ? `${stats}\n\n${team}` : team
   }
   // (0.7.33) sends nothing, starts nothing: whether the card stands in for the page, for a thread at pickup
   if (verb === 'card') return cardCommand($, arg, ownCall)
@@ -10490,6 +10506,62 @@ async function teamPass($: EngineInterface, force = false): Promise<void> {
     await drawTeam($)
   } catch {
     // the next tick asks again; the dropdown keeps the last read
+  }
+}
+
+/** (0.7.85) What the bridge keeps of today's numbers (`mm.stats`): the last good read, when it was asked, and, while OW has no such route, until when not to ask. */
+type StatsKept = { asked?: number; got?: number; stats?: DayStats; missingUntil?: number }
+
+/**
+ * (0.7.85, Rob 2026-11-25: "maybe some of the stats from daily it support image would be cool as well so they can see their hours
+ * and parallization score maybe others like total tokens") Today's numbers from OW (`GET /api/ext/day-stats`, read-only), into the
+ * store for every thread here: on the lease holder's tick, every STATS_EVERY_MS. The person's own always; the team's when OW
+ * answers them (to everyone since OW #821). A failure keeps the last read; a 404 or 405 is not asked again for STATS_MISSING_MS.
+ * ⛔ Never throws into the tick; never sends, pins or sounds anything.
+ */
+async function statsPass($: EngineInterface): Promise<void> {
+  try {
+    const now = await $.clock.now()
+    const kept = await storeGet<StatsKept>($, 'mm.stats', {})
+    if (Number(kept.missingUntil) > now) return
+    // (a tick early by a few seconds, as the first one after a start is, does not wait ten minutes more)
+    if (now - (Number(kept.asked) || 0) < STATS_EVERY_MS - TEAM_SLACK_MS) return
+    await patchStore<StatsKept>($, 'mm.stats', {}, t => {
+      t.asked = now
+    })
+    const asked = await within($, $.http.fetch(`${EXT}/day-stats`, { headers: await authHeaders($) }))
+    if (!asked.ok) return
+    const r = asked.value
+    if (r.status === 404 || r.status === 405) {
+      await patchStore<StatsKept>($, 'mm.stats', {}, t => {
+        t.missingUntil = now + STATS_MISSING_MS
+      })
+      return
+    }
+    if (r.status < 200 || r.status >= 300) return
+    const stats = statsFrom(JSON.parse(r.text))
+    if (!stats) return
+    await patchStore<StatsKept>($, 'mm.stats', {}, t => {
+      t.asked = now
+      t.got = now
+      t.stats = stats
+      delete t.missingUntil
+    })
+    await drawStats($)
+  } catch {
+    // the next tick asks again; the pane keeps the last read
+  }
+}
+
+/** (0.7.85) This thread's pane catches up with the store's numbers: a redraw only when a newer read is there. */
+async function drawStats($: EngineInterface): Promise<void> {
+  try {
+    const kept = await storeGet<StatsKept>($, 'mm.stats', {})
+    const { value: was } = await $.state.get(STATS)
+    if ((was?.got ?? 0) === (kept.got ?? 0)) return
+    await $.state.set(STATS, { ...(kept.stats ? { stats: kept.stats } : {}), ...(kept.got ? { got: kept.got } : {}) } satisfies MmStats)
+  } catch {
+    // the next pass draws it
   }
 }
 
@@ -12546,6 +12618,12 @@ export const register: Register = on => {
     if (!you) void youPass($)
     const youShown = you && Array.isArray(you.dots) ? you.dots : []
     const youOpen = youShown.find(d => d.key === you?.open)
+    // (0.7.85) today's numbers: the person's own line under the dots (a press says what it counts), and the team's for Team now
+    const { value: statsView } = await $.state.get(STATS)
+    const dayStats = statsView?.stats ?? null
+    const statsLine = myStatsLine(dayStats, teamClock)
+    const statsOpen = folds?.stats === true
+    const teamStats = teamOpen ? teamStatsLines(dayStats, teamClock) : []
     // a list an older version stored has no You rows: its Needs you now is drawn as it was
     const youList = hasList && queue && Array.isArray(queue.you) ? withWaits(queue.you, you?.waits) : null
     // (0.7.5, the panel redesign; Rob, 2026-10-27: "queue first, one merged time list, plain numbers") Top to bottom: in
@@ -12608,6 +12686,9 @@ export const register: Register = on => {
             {youShown.map(d => <Button key={`mm-you:${d.key}`} plain label={dotLabel(d)} onPress={() => void pressYou($, d.key)} />)}
           </Box>
         ) : null}
+        {/* (0.7.85, Rob 2026-11-25: "i dont want to get overcluttered") one dim line of today's numbers; a press says what each counts */}
+        {statsLine ? <Button key="mm-stats" plain dimColor label={statsLine} onPress={() => void toggleFold($, 'stats')} /> : null}
+        {statsLine && statsOpen && dayStats ? <Text key="mm-stats-says" dimColor>{myStatsSays(dayStats, teamClock)}</Text> : null}
         {youOpen ? <Text key="mm-you-says" dimColor>{youOpen.says}</Text> : null}
         {/* (0.7.34, Rob 2026-11-07: "Beside saying 'Needs you now,' it can say if there are any threads not started and have a 'Start missing threads' button only.") */}
         {hasList && queue ? (
@@ -12681,6 +12762,16 @@ export const register: Register = on => {
         <Box key="mm-teamnow" flexDirection="column" marginTop={1}>
           <Button key="mm-teamnow-toggle" plain label={`${teamHeadingNow(teamNow?.team)}  ${teamOpen ? '▾' : '▸'}`} onPress={() => void togglePanel($, 'teamNow', teamOpen)} />
           {teamOpen && teamNow?.missing ? <Text dimColor>{TEAM_MISSING}</Text> : null}
+          {/* (0.7.85) Team now opens on today's numbers, one line a person, for everyone (Rob 2026-11-25: "no need to hide team view from anyone") */}
+          {teamStats.length ? (
+            <Box key="mm-teamstats" flexDirection="column" marginTop={1}>
+              {teamStats.map((l, n) => (
+                <Text key={`mm-teamstats-line:${n}`} bold={l.bold === true} dimColor={l.dim === true}>
+                  {l.text}
+                </Text>
+              ))}
+            </Box>
+          ) : null}
           {teamOpen && !teamNow?.team && !teamNow?.missing ? <Text dimColor>{CHECKING}</Text> : null}
           {teamOpen && teamNow?.team
             ? teamLines(teamNow.team, teamClock).map((l, n) => (
