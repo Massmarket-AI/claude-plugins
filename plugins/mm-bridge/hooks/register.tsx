@@ -243,7 +243,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.71'
+export const VERSION = '0.7.72'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -355,6 +355,14 @@ const AUTO_CHIPS_MAX = 5
 const CHIP_GEN = 4
 /** (0.5.4, C3) A thread whose tick ran no longer ago than this is running: it can hold a chip. */
 const ALIVE_MS = 5 * 60_000
+/**
+ * (0.7.72) How long a thread's claim to a no-thread client's Start card holds unless it is renewed (`claimCards`). Its holder
+ * renews it on its ticks while the card is up, so a claim outlives a thread that stopped by no more than a running thread's
+ * tick does (ALIVE_MS).
+ */
+const CLAIM_MS = ALIVE_MS
+/** (0.7.72) The store's record of those claims, by client. */
+const CLAIMS_KEY = 'mm.cardClaims'
 /** (0.7.34) How often Team now is read while its dropdown is open on this computer, and while it is closed. */
 const TEAM_OPEN_MS = 60_000
 const TEAM_CLOSED_MS = 5 * 60_000
@@ -733,6 +741,12 @@ type Chip = {
   /** (0.5.4, C2/C3) The thread it is in, as the band names it (`threadTitleShort`), from that thread's title when it was minted. */
   place?: string
 }
+/** (0.7.72) A thread's claim to put up, and keep, a no-thread client's Start card (`claimCards`): which thread, since when, and until when. */
+type CardClaim = { sid: string; at: number; until: number }
+/** (0.7.72) The claims on record (`mm.cardClaims`), by client. */
+type CardClaims = Record<string, CardClaim>
+/** (0.7.72) A chip that is a no-thread client's Start card the thread put up by itself, of this version's: the kind a claim guards. */
+const isCard = (c: Chip): boolean => Boolean(c.auto) && c.gen === CHIP_GEN && (c.need ?? 'start') === 'start'
 /**
  * A link the bridge made by itself and the person has not acted on: its thread, how many syncs in a row
  * the feed has not listed it, and when the last of those was counted.
@@ -6780,6 +6794,9 @@ const ownCheck = new Set<string>()
  * other); and when it wrote any, it looks again on a later round, up to five, until none is missing. Not a
  * record this thread withdrew (it is no longer its own), and not one whose client has since moved to another
  * thread (the tick withdraws that one). A spent record is never missing: spending marks it superseded.
+ * (0.7.72) The same write takes off a record of a chip this thread withdrew that came back, and puts back a superseded mark of
+ * this thread's that was taken off; it runs after every withdrawal too. Until 0.7.71 such a record stayed until this thread's
+ * next pass, read as a live card by every other thread.
  */
 function scheduleOwnCheck($: EngineInterface, me: string, round = 0): void {
   if (!me || (round === 0 && ownCheck.has(me))) return
@@ -6792,11 +6809,18 @@ function scheduleOwnCheck($: EngineInterface, me: string, round = 0): void {
     const own = [...ownChips.values()].filter(c => c.threadId === me)
     for (const c of own) if (chips.some(s => sameChip(s, c))) mintedHere.delete(`${c.projectId}\n${me}\n${c.signature}`)
     const lost = own.filter(c => !chips.some(s => sameChip(s, c)) && (links[c.projectId] === undefined || links[c.projectId] === c.had))
-    if (!lost.length) return
+    // (0.7.72) and the other way: a record of a chip this thread withdrew that a write of another thread's brought back (it
+    // read the record before the withdrawal and wrote after it), and a superseded mark of this thread's that such a write took off
+    const back = (f: Chip): boolean => f.threadId === me && withdrawnHere.has(chipKey(f))
+    const unmarked = (f: Chip): boolean => f.threadId === me && !f.superseded && ownChips.get(chipKey(f))?.superseded === true
+    if (!lost.length && !chips.some(f => back(f) || unmarked(f))) return
     try {
       await patchChips($, now, fresh => {
         const add = lost.filter(c => !fresh.some(f => sameChip(f, c)))
-        return add.length ? [...fresh, ...add] : false
+        const kept = fresh.filter(f => !back(f))
+        const marks = kept.filter(unmarked)
+        for (const f of marks) f.superseded = true
+        return add.length || marks.length || kept.length !== fresh.length ? [...kept, ...add] : false
       })
     } catch (err) {
       await noteFailure($, 'start: the chip record, again', err)
@@ -7415,6 +7439,8 @@ type ChipWorld = {
   poller: string
   /** (0.7.34) False when this thread runs outside the client folder: it holds no no-thread client's card. */
   home?: boolean
+  /** (0.7.72) The claims to no-thread clients' cards on record (`claimCards`): a live one names the thread that keeps its client's card. */
+  cards?: Readonly<CardClaims>
 }
 
 /**
@@ -7509,10 +7535,14 @@ function noThreadHolder(projectId: string, w: ChipWorld, now: number): string {
   for (const sid of runningIds) if (human(sid) > 0 && (!best || human(sid) > human(best))) best = sid
   // the client's chips of this version's, on record (threads that start together may each have minted one)
   const live = w.chips.filter(c => c.projectId === projectId && c.auto && c.gen === CHIP_GEN && !c.superseded && c.had === undefined && (c.need ?? 'start') === 'start')
-  // Nobody has written in a running thread yet: the thread that polls; else, the record itself says, the lowest
-  // thread that holds one (every thread reads the same record); else the lowest running thread.
-  if (!best) return (w.poller && fits(w.poller) ? w.poller : '') || live.map(c => c.threadId).filter(fits).sort()[0] || runningIds[0] || w.me
-  const held = live.find(c => c.threadId === best) ?? live.at(-1)
+  // (0.7.72) the thread whose claim to the client's card is live (`claimCards`): once the claims settle every thread reads the
+  // same one, where `mm.chips` can lack a record another thread's write took away, or hold one a withdrawal took off
+  const claim = w.cards?.[projectId]
+  const claimant = claim && typeof claim.sid === 'string' && Number(claim.until) > now && fits(claim.sid) ? claim.sid : ''
+  // Nobody has written in a running thread yet: the thread that polls; else the claimant; else, the record itself says, the
+  // lowest thread that holds one; else the lowest running thread.
+  if (!best) return (w.poller && fits(w.poller) ? w.poller : '') || claimant || live.map(c => c.threadId).filter(fits).sort()[0] || runningIds[0] || w.me
+  const held = live.find(c => c.threadId === best) ?? live.find(c => c.threadId === claimant) ?? live.at(-1)
   if (!held || held.threadId === best || !running(held.threadId)) return best
   // (a thread the person never wrote in holds it only until they write in one)
   const there = human(held.threadId)
@@ -7533,26 +7563,173 @@ async function chipsTick($: EngineInterface, atTurn = false): Promise<void> {
   const now = await $.clock.now()
   const needs = await storedNeeds($, now)
   await withdrawChips($, needs)
+  // (0.7.72) the claims to this thread's cards, renewed, and those it no longer uses given up
+  await keepClaims($, me, now).catch(err => noteFailure($, 'card claims', err))
   const id = await instanceId($)
   if (!needs || (!atTurn && now < (mintPause.get(id)?.until ?? 0))) return
   const chips = await ownChipsWritten($, me, now)
   const tools = await sessionTools($)
-  /** (C3) this thread's own name, as the band gives it, asked for once and only when a no-thread client's chip is to be minted here */
-  let place: string | undefined
-  for (const n of needs) {
+  const minted = (n: Need): boolean => {
     const key = `${n.it.projectId}\n${me}\n${n.signature}`
-    if (minting.has(key) || mintedHere.has(key)) continue
-    if (chips.some(c => c.threadId === me && c.projectId === n.it.projectId && sameNeed(c, n))) continue
-    // (0.5.7) where the app gives only start_session, a client's kickoff run in its own thread has no chip: the pane's
-    // Update does it there (`storedNeeds` holds none). (0.7.34) A client with no thread gets its card.
-    if (!tools.spawn && !tools.start) continue
-    if (n.place === undefined && place === undefined) place = await ownPlace($)
-    const made = await mintChip($, { ...n, auto: true, me, now, place: n.place ?? place })
-    if (made.made) continue
-    mintPause.set(id, { until: now + MINT_PAUSE_MS, atTurn: made.why === 'no-answer' })
-    await noteFailure($, 'auto chip', made.why === 'no-answer' ? `the app did not answer in ${APP_WAIT_MS / 1000} s` : made.text)
-    return
+    if (minting.has(key) || mintedHere.has(key)) return true
+    return [...chips, ...ownChips.values()].some(c => c.threadId === me && c.projectId === n.it.projectId && sameNeed(c, n))
   }
+  // (0.5.7) where the app gives only start_session, a client's kickoff run in its own thread has no chip: the pane's
+  // Update does it there (`storedNeeds` holds none). (0.7.34) A client with no thread gets its card.
+  const todo = tools.spawn || tools.start ? needs.filter(n => !minted(n)) : []
+  const cardIds = todo.filter(n => n.kind === 'nothread').map(n => n.it.projectId)
+  // (0.7.72) from the claim until the card's record: `keepClaims` gives none of these claims up meanwhile
+  for (const p of cardIds) claimingHere.set(`${me}\n${p}`, now)
+  try {
+    // ⛔ (0.7.72) a no-thread client's card only under this thread's own claim (`claimCards`), checked again 1 to 3 seconds on
+    const granted = await claimCards($, me, cardIds, now)
+    /** (C3) this thread's own name, as the band gives it, asked for once and only when a no-thread client's chip is to be minted here */
+    let place: string | undefined
+    for (const n of todo) {
+      if (n.kind === 'nothread' && !granted.has(n.it.projectId)) continue
+      if (n.place === undefined && place === undefined) place = await ownPlace($)
+      const made = await mintChip($, { ...n, auto: true, me, now, place: n.place ?? place })
+      if (made.made) continue
+      // a card the app refused frees its claim at once; one it has not answered yet keeps it (`minting`), as its answer may still come
+      if (n.kind === 'nothread' && made.why !== 'no-answer') await dropClaims($, me, [n.it.projectId]).catch(() => {})
+      mintPause.set(id, { until: now + MINT_PAUSE_MS, atTurn: made.why === 'no-answer' })
+      await noteFailure($, 'auto chip', made.why === 'no-answer' ? `the app did not answer in ${APP_WAIT_MS / 1000} s` : made.text)
+      return
+    }
+  } finally {
+    // a claim this tick made and did not use (the loop stopped) is given up on the next tick
+    for (const p of cardIds) claimingHere.delete(`${me}\n${p}`)
+    // the claims this tick wrote are read again once every write of this moment has landed (`scheduleClaimCheck`)
+    if (cardIds.length) scheduleClaimCheck($, me)
+  }
+}
+
+/**
+ * ⛔ (0.7.72) THE ONE GATE before a thread puts up a no-thread client's Start card by itself: its claim to the client
+ * (`mm.cardClaims`), written where it read none live, right before the card. Answers the clients it claimed. Read again 1 to 3
+ * seconds on (`scheduleClaimCheck`): a thread whose card's claim then names another thread withdraws its card.
+ *
+ * Why a claim, checked after the write (a dozen threads that ticked at once each kept a card for the same client: seeds 6, 29,
+ * 31, 35, 50, 56, 71 and 91 of concurrency.test.ts's 0.7.34 test failed in 0.7.69, and 28 and 34 still did after eight rounds):
+ * - Not one holder worked out from the other records: every record it would be worked out from (`mm.seen`'s running
+ *   threads, `mm.chips`' cards) is a map a dozen threads write over each other (`patchStore`), so two threads can read
+ *   different copies in the same second and each find itself the holder. `noThreadHolder` still says who tries; the
+ *   claim says who keeps it, and once it is held it names the holder there too.
+ * - Not a check of the cards alone after they are up: that reads the same racing records, and a withdrawn record that
+ *   another thread's write brings back reads as a live card (`scheduleOwnCheck` now takes those off).
+ * - Not a wait before the card: a thread alone puts its card up in its first tick, and the band and the rest of the
+ *   tick wait for nothing.
+ * A claim is safe without a compare-and-set: a thread writes one only where it read none live, right after that read,
+ * and a write for another client carries the claims as its thread read them a moment before. So a thread that reads a
+ * live claim of another's never puts a card up, whatever `mm.chips` lacks or holds. Only threads that claim the same
+ * client in the same moment both put one up, and once the writes of that moment have landed, well within the 1 to 3
+ * seconds, every one of them reads the same name: the others withdraw theirs then. A live claim is never taken; its
+ * holder renews it while the card is up and gives it up when it withdraws the card (`keepClaims`, `dropClaims`); one
+ * whose thread stopped runs out (CLAIM_MS). A claim the store lost costs a card at most a check: its holder writes it
+ * again, and the check after that decides.
+ */
+async function claimCards($: EngineInterface, me: string, projectIds: readonly string[], now: number): Promise<Set<string>> {
+  const asked = new Set<string>()
+  if (!projectIds.length) return asked
+  try {
+    await patchStore<CardClaims>($, CLAIMS_KEY, {}, claims => {
+      for (const p of projectIds) {
+        if (claimedBy(claims[p], me, now)) continue
+        claims[p] = { sid: me, at: claims[p]?.sid === me ? claims[p].at : now, until: now + CLAIM_MS }
+        asked.add(p)
+      }
+      return asked.size ? (pruneClaims(claims, now), true) : false
+    })
+  } catch (err) {
+    // a claim the store refused: no card this tick
+    await noteFailure($, 'card claims', err)
+    asked.clear()
+  }
+  return asked
+}
+
+/** (0.7.72) Whether a claim on record is another thread's, live. */
+const claimedBy = (c: CardClaim | undefined, me: string, now: number): boolean => Boolean(c) && typeof c === 'object' && typeof c?.sid === 'string' && c.sid !== me && Number(c.until) > now
+
+/** (0.7.72) The claims this session is making or putting a card up under (`chipsTick`), by thread and client: `keepClaims` gives none of them up meanwhile. */
+const claimingHere = new Map<string, number>()
+/** (0.7.72) The threads whose check of their claims is waiting in this session (`scheduleClaimCheck`). */
+const claimCheck = new Set<string>()
+
+/**
+ * (0.7.72) 1 to 3 seconds after this thread claimed a client (spread by its id and the round), once every write of that moment
+ * has landed: the claims are read again (`keepClaims`, which writes again one the store lost), and a card of this thread's
+ * whose claim names another thread is withdrawn (`withdrawNow`). When it wrote a claim again, it looks once more on a later
+ * round, up to five.
+ */
+function scheduleClaimCheck($: EngineInterface, me: string, round = 0): void {
+  if (!me || (round === 0 && claimCheck.has(me))) return
+  claimCheck.add(me)
+  const check = async (): Promise<void> => {
+    claimCheck.delete(me)
+    const now = await $.clock.now()
+    const kept = await keepClaims($, me, now)
+    if (kept.elsewhere) await withdrawChips($, null, true)
+    if (kept.claimed && round < 4) scheduleClaimCheck($, me, round + 1)
+  }
+  try {
+    $.clock.after(settleMs(`${me}#claim#${round}`), () => void check().catch(() => claimCheck.delete(me)))
+  } catch {
+    claimCheck.delete(me)
+  }
+}
+
+/** (0.7.72) The claims on record that ran out a while ago go: a client's claim is written again when it is next wanted. */
+function pruneClaims(claims: CardClaims, now: number): void {
+  for (const [p, c] of Object.entries(claims)) if (!c || typeof c !== 'object' || !(Number(c.until) > now - CLAIM_MS)) delete claims[p]
+}
+
+/**
+ * (0.7.72) On this thread's tick, and on its claims' check: the claim to each card it keeps up is renewed once half its time
+ * has gone, and written again when the store lost it, unless another thread holds the client live (`withdrawNow` then
+ * withdraws this thread's card); a claim it holds with no card up, none being put up and none it waits on, is given up. One
+ * write, and only when something changed. Answers whether it wrote a claim again (`claimed`) and whether another thread holds
+ * a client this thread has a card up for (`elsewhere`).
+ */
+async function keepClaims($: EngineInterface, me: string, now: number): Promise<{ claimed: boolean; elsewhere: boolean }> {
+  const chips = await chipsOf($, now)
+  const lost = [...ownChips.values()].filter(c => c.threadId === me && !chips.some(s => sameChip(s, c)))
+  const up = new Set([...chips.filter(c => c.threadId === me), ...lost].filter(c => isCard(c) && !c.superseded && !withdrawnHere.has(chipKey(c))).map(c => c.projectId))
+  const busy = (p: string): boolean => claimingHere.has(`${me}\n${p}`) || [...minting].some(k => k.startsWith(`${p}\n${me}\n`))
+  const out = { claimed: false, elsewhere: false }
+  await patchStore<CardClaims>($, CLAIMS_KEY, {}, claims => {
+    let changed = false
+    for (const p of up) {
+      const c = claims[p]
+      if (claimedBy(c, me, now)) {
+        out.elsewhere = true
+        continue
+      }
+      if (c?.sid === me && Number(c.until) - now > CLAIM_MS / 2) continue
+      if (c?.sid !== me) out.claimed = true
+      claims[p] = { sid: me, at: c?.sid === me ? c.at : now, until: now + CLAIM_MS }
+      changed = true
+    }
+    for (const [p, c] of Object.entries(claims)) {
+      if (c?.sid !== me || up.has(p) || busy(p)) continue
+      delete claims[p]
+      changed = true
+    }
+    const had = Object.keys(claims).length
+    pruneClaims(claims, now)
+    return changed || Object.keys(claims).length !== had
+  })
+  return out
+}
+
+/** (0.7.72) This thread gives up its claims to these clients' cards (one it no longer holds is left as it is). */
+async function dropClaims($: EngineInterface, me: string, projectIds: readonly string[]): Promise<void> {
+  if (!projectIds.length) return
+  await patchStore<CardClaims>($, CLAIMS_KEY, {}, claims => {
+    const mine = projectIds.filter(p => claims[p]?.sid === me)
+    for (const p of mine) delete claims[p]
+    return mine.length > 0
+  })
 }
 
 /**
@@ -7590,6 +7767,7 @@ async function storedNeeds($: EngineInterface, now: number): Promise<Need[] | nu
       seen: await storeGet<Seen>($, 'mm.seen', {}),
       poller,
       home: await mayHoldCard($, where),
+      cards: await storeGet<CardClaims>($, CLAIMS_KEY, {}),
     },
     now,
   )
@@ -7765,6 +7943,8 @@ async function withdrawNow($: EngineInterface, me: string, needs: readonly Need[
   const last = await storeGet<Last | null>($, 'mm.last', null)
   const waiting = last && Array.isArray(last.items) ? new Set(listedIn(last).map(i => i.projectId)) : null
   const claims = await storeGet<Record<string, ClaimedHere>>($, 'mm.claimedHere', {})
+  // (0.7.72) the claims to no-thread clients' cards: a card of this thread's whose client another thread holds live is withdrawn
+  const cards = mine.some(isCard) ? await storeGet<CardClaims>($, CLAIMS_KEY, {}) : {}
   const forget = new Set<Chip>()
   let changed = false
   for (const [k, at] of withdrawnHere) if (now - at > CHIP_KEEP_MS) withdrawnHere.delete(k)
@@ -7784,7 +7964,10 @@ async function withdrawNow($: EngineInterface, me: string, needs: readonly Need[
     // (0.5.3) a new thread for a client the person went on with in its own thread, minted before they did
     const claim = claims[c.projectId]
     const spent = claimHolds(claim, c.projectId, links, last) && c.at <= claim.at && replacesThread(c, claim.sid)
-    if (!c.superseded && !movedOn && needed && !spent && (!waiting || waiting.has(c.projectId))) continue
+    // (0.7.72) a card whose client another thread has claimed, live: that thread's card is the client's one (`claimCards`)
+    const card = cards[c.projectId]
+    const another = isCard(c) && Boolean(card) && typeof card?.sid === 'string' && card.sid !== me && Number(card.until) > now
+    if (!c.superseded && !movedOn && needed && !spent && !another && (!waiting || waiting.has(c.projectId))) continue
     if (quick && (c.tries ?? 0) > 0) continue
     changed = true
     // a chip the app gave no id for cannot be withdrawn: it is only forgotten
@@ -7821,6 +8004,15 @@ async function withdrawNow($: EngineInterface, me: string, needs: readonly Need[
       return tried?.tries ? { ...f, tries: tried.tries } : f
     }),
   )
+  // (0.7.72) a write of another thread's that met this one can bring a withdrawn record back: looked at again 1 to 3 seconds on
+  scheduleOwnCheck($, me)
+  // (0.7.72) the claim to a card withdrawn is given up at once, so the thread that is to hold the client's card can claim it
+  // now; not while this thread still has another card up for the client, or is putting one up
+  const kept = [...chips.filter(c => c.threadId === me && !forget.has(c)), ...[...ownChips.values()].filter(c => c.threadId === me)]
+  const freed = [...new Set([...forget].filter(isCard).map(c => c.projectId))].filter(
+    p => !kept.some(c => c.projectId === p && isCard(c) && !c.superseded && !withdrawnHere.has(chipKey(c))) && !claimingHere.has(`${me}\n${p}`) && ![...minting].some(k => k.startsWith(`${p}\n${me}\n`)),
+  )
+  await dropClaims($, me, freed).catch(() => {})
 }
 
 /**
