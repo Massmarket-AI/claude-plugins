@@ -1545,7 +1545,9 @@ export function answerArgs(arg: string): { clear: true } | { type: AnswerType; a
  * when it was declared (`at`), each run's due time and, once the bridge found it, when its report was stamped (`seen`), and
  * what the client had for the viewer then (`base`). ⛔ LOCAL ONLY, as a declaration is: the pin report sends no part of it.
  */
-export type RunWait = { what: string; ticket: string; at: number; runs: WaitRun[]; base: RunBaseline; project?: string; repinned?: number }
+export type RunWait = { what: string; ticket: string; at: number; runs: WaitRun[]; base?: RunBaseline; project?: string; repinned?: number }
+// (0.7.70) `base` absent: the last sync's item for the client did not carry the ticket ids yet (a sync of a bridge before 0.7.70),
+// so the first pass after the declaration takes it.
 // (0.7.70) `project`: the project the thread was linked to when it declared the wait, absent for a thread linked to none (an
 // internal thread of the person's own): that one unpins itself, and the bridge only pins it again for a missed run (`repinned`,
 // when it did) and takes that pin off once the run's note lands.
@@ -1641,11 +1643,11 @@ export function runWaitsOf(raw: unknown): Record<string, RunWait> {
       kept.push({ at: t, ...(typeof seen === 'number' && Number.isFinite(seen) ? { seen } : {}) })
     }
     if (kept.length !== runs.length) continue
-    const b = base && typeof base === 'object' ? (base as Record<string, unknown>) : {}
-    const ids = Array.isArray(b.ids) ? b.ids.filter(isUuid) : []
+    const b = base && typeof base === 'object' ? (base as Record<string, unknown>) : undefined
+    const ids = b && Array.isArray(b.ids) ? b.ids.filter(isUuid) : []
     const { project, repinned } = w as Record<string, unknown>
     out[sid] = {
-      what, ticket, at, runs: kept.sort((x, y) => x.at - y.at), base: { mail: Number(b.mail) || 0, pkg: Number(b.pkg) || 0, task: Number(b.task) || 0, ids },
+      what, ticket, at, runs: kept.sort((x, y) => x.at - y.at), ...(b ? { base: { mail: Number(b.mail) || 0, pkg: Number(b.pkg) || 0, task: Number(b.task) || 0, ids } } : {}),
       ...(isUuid(project) ? { project } : {}), ...(typeof repinned === 'number' && Number.isFinite(repinned) ? { repinned } : {}),
     }
   }

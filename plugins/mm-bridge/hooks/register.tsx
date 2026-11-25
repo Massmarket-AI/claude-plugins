@@ -3047,7 +3047,10 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     if (!pid || !s || s.isArchived || !isUuid(pid) || away.has(sid) || unseen.has(sid) || gone.has(sid)) continue
     if (pins[sid] !== undefined && pins[sid]?.projectId !== pid) continue
     const it = listedNow.get(pid)
-    if (newSince(it, w.base)) {
+    // (a wait declared before this bridge's first sync stored its item's ticket ids: what the client has now is its baseline)
+    if (!w.base) {
+      runWaits[sid] = { ...w, base: baselineOf(it) }
+    } else if (newSince(it, w.base)) {
       delete runWaits[sid]
       await logAuto($, `thread ${sid}: something new for its client since it began waiting on a scheduled run; the wait is over and the usual pin rules act`)
       continue
@@ -10393,7 +10396,9 @@ async function runWaitCommand($: EngineInterface, arg: string): Promise<string> 
   const pid = linkedTo && isUuid(linkedTo) ? linkedTo : undefined
   const last = await storeGet<Last | null>($, 'mm.last', null)
   const it = pid ? listedIn(last).find(i => i && i.projectId === pid) : undefined
-  const wait: RunWait = { what: asked.what, ticket: asked.ticket, at: now, runs: asked.runs.map(at => ({ at })), base: baselineOf(it), ...(pid ? { project: pid } : {}) }
+  // (an item a bridge before 0.7.70 stored has no ticket ids: the first pass takes the baseline instead, `RunWait.base`)
+  const known = !it || Array.isArray(it.taskIds) || it.tasks === 0
+  const wait: RunWait = { what: asked.what, ticket: asked.ticket, at: now, runs: asked.runs.map(at => ({ at })), ...(known ? { base: baselineOf(it) } : {}), ...(pid ? { project: pid } : {}) }
   await patchStore<Record<string, RunWait>>($, 'mm.runwait', {}, fresh => {
     fresh[me] = wait
     capped(fresh)

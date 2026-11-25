@@ -136,7 +136,7 @@ describe('0.7.70: a thread that waits only on a scheduled run is unpinned until 
     await tickOnce($, w)
     expect(pinnedHere(w)).toBe(true)
     expect(await declare($, ET('14:00'))).toBe(runWaitNoted({ runs: [{ at: runTime(ET('14:00')) }], ticket: RUN_TICKET }))
-    expect(waitHere(w)?.base.ids).toEqual([TASK])
+    expect(waitHere(w)?.base?.ids).toEqual([TASK])
     await settle(w)
     expect(pinnedHere(w)).toBe(false)
     expect(titleHere(w).endsWith(' · waits on a run 2 PM')).toBe(true)
@@ -146,6 +146,20 @@ describe('0.7.70: a thread that waits only on a scheduled run is unpinned until 
     // and the pin report does not count it as a client that should be pinned
     const sent = w.pinPosts.at(-1)?.body as PinReport | undefined
     expect(sent?.items.some(i => i.project_id === ACME)).toBe(false)
+  })
+
+  test('declared before this bridge\'s first sync (the stored item has no ticket ids): the first pass takes the baseline, and the wait stands', LONG, async ($, on) => {
+    const w = acmeWorld(on)
+    await tickOnce($, w)
+    const last = w.stored['mm.last'] as { items: Array<Record<string, unknown>> }
+    for (const it of last.items) delete it.taskIds
+    await declare($, ET('14:00'))
+    expect(waitHere(w)?.base).toBeUndefined()
+    await settle(w)
+    expect(pinnedHere(w)).toBe(false)
+    expect(waitHere(w)?.base?.ids).toEqual([TASK])
+    await minutesOn(w, 6)
+    expect(pinnedHere(w)).toBe(false)
   })
 
   test('the person\'s own pin stays theirs: only the bridge\'s comes off', LONG, async ($, on) => {
