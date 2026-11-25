@@ -1,5 +1,5 @@
 // The bridge against a pretend desktop app, feed and store: an update by itself goes as soon as a package's drafts are
-// stored (0.7.69).
+// stored (0.7.76).
 //
 // Rob, 2026-11-24, of Peter MD's call on 11-23: "Update should have hit as soon as the transcript finished processing." The
 // times that day, in UTC: the package's two drafts were stored at 22:25:51; this bridge's five-minute sync first saw them at
@@ -48,7 +48,7 @@ const untilSent = async (w: W, ms: number) => {
   for (let t = 0; t < ms && sends(w).length === 0; t += 5_000) await w.clock.advance(5_000)
 }
 
-describe('0.7.69: an update by itself goes as soon as a package\'s drafts are stored (Rob, 2026-11-24)', () => {
+describe('0.7.76: an update by itself goes as soon as a package\'s drafts are stored (Rob, 2026-11-24)', () => {
   test('replay of 2026-11-23: drafts stored between two syncs reach the client\'s thread within a minute, set off by the pulse', LONG, async ($, on) => {
     let key = 'aaaaaaaaaaaaaaa1'
     const w = acmeWorld(on, pulsed(() => key))
@@ -66,7 +66,7 @@ describe('0.7.69: an update by itself goes as soon as a package\'s drafts are st
     // ⛔ the update, in its own words, into Acme's linked thread only
     expect(sends(w).map(c => [c.args.session_id, c.args.message])).toEqual([[ACME_THREAD, ACME_UPDATE]])
     const at = sentAt(w) as number
-    console.log(`replay 0.7.69: drafts stored ${(stored - NOW) / 1000}s after the first sync's tick began, update sent ${(at - stored) / 1000}s after the drafts`)
+    console.log(`replay 0.7.76: drafts stored ${(stored - NOW) / 1000}s after the first sync's tick began, update sent ${(at - stored) / 1000}s after the drafts`)
     // within a minute of the drafts being stored (the tick that read the pulse, its sync, the claim's 1 to 3 seconds)
     expect(at - stored).toBeGreaterThan(0)
     expect(at - stored).toBeLessThanOrEqual(75_000)
@@ -82,7 +82,7 @@ describe('0.7.69: an update by itself goes as soon as a package\'s drafts are st
     expect(sends(w).length).toBe(1)
   })
 
-  test('the same replay on an OW without the pulse: the update waits 10 minutes from the sync that first saw it, as before 0.7.69', LONG, async ($, on) => {
+  test('the same replay on an OW without the pulse: the update waits 10 minutes from the sync that first saw it, as before 0.7.76', LONG, async ($, on) => {
     const w = acmeWorld(on, pulsed(() => null))
     await tickOnce($, w)
     for (let i = 0; i < 2; i++) await w.clock.advance(60_000)
@@ -119,7 +119,7 @@ describe('0.7.69: an update by itself goes as soon as a package\'s drafts are st
     key = 'bbbbbbbbbbbbbbb3'
     await untilSent(w, 5 * 60_000)
     expect(sends(w).map(c => [c.args.session_id, c.args.message])).toEqual([[ACME_THREAD, ACME_UPDATE]])
-    console.log(`replay 0.7.69 building: update sent ${((sentAt(w) as number) - built) / 1000}s after the build ended`)
+    console.log(`replay 0.7.76 building: update sent ${((sentAt(w) as number) - built) / 1000}s after the build ended`)
     expect((sentAt(w) as number) - built).toBeLessThanOrEqual(75_000)
   })
 
@@ -154,7 +154,7 @@ describe('0.7.69: an update by itself goes as soon as a package\'s drafts are st
   })
 })
 
-describe('0.7.69: updatePace, the rule', () => {
+describe('0.7.76: updatePace, the rule', () => {
   const acme = (over: Record<string, unknown> = {}) => buildLists(drafted(over), NOW).queue.find(i => i.projectId === ACME)
   const it = acme()
   test('a finished package the thread has not been given goes now; one being built waits for it; neither without an OW that says so', () => {

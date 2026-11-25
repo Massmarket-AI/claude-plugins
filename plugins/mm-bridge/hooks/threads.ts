@@ -699,26 +699,26 @@ export function autoUpdateDue(seen: FirstSeen | undefined, now: number, pace: Pa
 }
 
 /**
- * (0.7.69, Rob 2026-11-24, of Peter MD's call: "Update should have hit as soon as the transcript finished processing") How
+ * (0.7.76, Rob 2026-11-24, of Peter MD's call: "Update should have hit as soon as the transcript finished processing") How
  * long an update sent by itself waits after this bridge first saw what the client has now (`FirstSeen.at`):
  *   now       a reply package this thread has not been given, its drafts stored and finished: at once
  *   building  the same package while Lane-2's build helper may still rewrite its drafts (the feed's `building`): until it
  *             is done, and at most BUILD_HOLD_MS
- *   quiet     anything else (mail, tasks, asks, a package OW cannot say is finished): AUTO_QUIET_MS, as before 0.7.69
- * Until 0.7.69 every update waited AUTO_QUIET_MS: on 2026-11-23 Peter MD's drafts were stored at 22:25:51 UTC, first seen
+ *   quiet     anything else (mail, tasks, asks, a package OW cannot say is finished): AUTO_QUIET_MS, as before 0.7.76
+ * Until 0.7.76 every update waited AUTO_QUIET_MS: on 2026-11-23 Peter MD's drafts were stored at 22:25:51 UTC, first seen
  * by the sync at 22:28:56, due at 22:38:56, and sent from the next sync, at 22:41:05.
  */
 export type Pace = 'now' | 'building' | 'quiet'
 
 /**
- * (0.7.69) The longest an update by itself waits for Lane-2's build helper (`Pace` building), from when this bridge first
+ * (0.7.76) The longest an update by itself waits for Lane-2's build helper (`Pace` building), from when this bridge first
  * saw the client as it is now. The helper has 15 minutes (client-reply-prep references/build-run.md) and OW stops calling a
  * package building 20 minutes after its newest draft write; this only bounds a feed that keeps saying so.
  */
 export const BUILD_HOLD_MS = 30 * 60_000
 
 /**
- * (0.7.69) A reply package is on the item for the viewer to work, not held by anyone: its drafts are stored (or it owes no
+ * (0.7.76) A reply package is on the item for the viewer to work, not held by anyone: its drafts are stored (or it owes no
  * reply), and the thread is to show its page. The package a thread asked to build is not this (`ownPackage` comes first).
  */
 export function readyPackage(it: QueueItem): boolean {
@@ -726,7 +726,7 @@ export function readyPackage(it: QueueItem): boolean {
 }
 
 /**
- * (0.7.69) Whether a thread given `had` (the signature stored when Update went, `Sent.sig`) was given this package as it is
+ * (0.7.76) Whether a thread given `had` (the signature stored when Update went, `Sent.sig`) was given this package as it is
  * now: its id in the words, and the same `covers_through` and `updated_at` (the last two lines of `signatureOf`). A package
  * revised in place (Peter MD's 45138705 on 11-23: same id, new drafts, a newer `covers_through`) is a package not given.
  */
@@ -737,10 +737,10 @@ export function packageGiven(had: string, it: QueueItem): boolean {
 }
 
 /**
- * (0.7.69) How soon an update by itself goes into thread `sid` for `it` (`Pace`). `given`: what the bridge last gave the
+ * (0.7.76) How soon an update by itself goes into thread `sid` for `it` (`Pace`). `given`: what the bridge last gave the
  * client's thread (`mm.sent`). `knows`: this computer has a fresh answer from an OW that says when a package is still being
  * built (`GET /drafts-pulse`, the same release as the feed's `building`). ⛔ Without it, every update waits AUTO_QUIET_MS, as
- * before 0.7.69: an OW that cannot say so would have a thread show a package whose drafts the build helper is still
+ * before 0.7.76: an OW that cannot say so would have a thread show a package whose drafts the build helper is still
  * rewriting (about one package in seven, measured on 316 packages from 2026-11-10 to 11-24), against Rob's rule of
  * 2026-11-05 that the build is done before anyone sees the package.
  */
@@ -777,7 +777,7 @@ export function prepDue(given: Sent | undefined, sid: string, it: QueueItem, now
  * This says when, never whether: every guard of the send still applies when the time comes (`autoUpdates`).
  */
 export function selfUpdateAt(seen: FirstSeen, pace: Pace = 'quiet'): number {
-  // (0.7.69) a finished package this thread has not been given goes at once; one still being built waits for its build
+  // (0.7.76) a finished package this thread has not been given goes at once; one still being built waits for its build
   return seen.at + (pace === 'now' ? 0 : pace === 'building' ? BUILD_HOLD_MS : AUTO_QUIET_MS)
 }
 
