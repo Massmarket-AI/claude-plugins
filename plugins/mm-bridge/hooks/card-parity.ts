@@ -930,6 +930,21 @@ export function holdsImage(page: string, tree: MmCardTree): boolean {
 }
 
 /**
+ * (0.7.69) Whether the page's Findings section (from its `### Findings` heading to the next `### ` or `## ` heading, or the end) holds a line
+ * that starts `- Sample not built:`: OW prints it when a lead sample the package promises is not built. The same text anywhere else
+ * (a draft body that quotes it) is not it.
+ */
+export function sampleNotBuilt(page: string | null): boolean {
+  if (!page) return false
+  let inFindings = false
+  for (const line of page.split(/\r?\n/)) {
+    if (/^### /.test(line) || /^## /.test(line)) inFindings = /^### Findings\s*$/.test(line)
+    else if (inFindings && /^- Sample not built:/.test(line)) return true
+  }
+  return false
+}
+
+/**
  * Why the card cannot stand in for this page, in words a thread can print after `card not ready: `, or '' when it can.
  * ⛔ The reason holds at most 60 characters of the page: it is never to go in a log.
  */

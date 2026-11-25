@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import type { MmCard, MmCardMarks, MmCardTree } from '../types'
 import {
-  CHECK_BUTTON, CHECK_DRAFT, CHECK_TYPE, FEEDBACK_LABEL, FEEDBACK_MAX, FEEDBACK_PLACEHOLDER, FEEDBACK_SAID, FEEDBACK_SUBMIT, FEEDBACK_TEXT, NOT_DRAWN, NO_CARD, NO_OWNER_CHECK, SIGNED_NOTE, SIGN_FILL_MS, SIGN_VALID_MS, THREAD_CHECKING, THREAD_NOT_CHECKED, askedOf, busyOf, canChange, cardDrawable, cardVerdict, checkMissOf, checkedOf, copyCheck, currentOf, drawCard, feedbackOf, fnv1a, holdOf, holdText, isChecked, isFresh, marksOf, noteAsked, noteCurrent, notePending, noteVersion, prepareCard, pressAsk, pressCheck, pressFeedback, pressSign, readTree,
+  CHECK_BUTTON, CHECK_DRAFT, CHECK_TYPE, FEEDBACK_LABEL, FEEDBACK_MAX, FEEDBACK_PLACEHOLDER, FEEDBACK_SAID, FEEDBACK_SUBMIT, FEEDBACK_TEXT, NOT_DRAWN, NO_CARD, NO_OWNER_CHECK, SAMPLE_GAP, SIGNED_NOTE, SIGN_FILL_MS, SIGN_VALID_MS, THREAD_CHECKING, THREAD_NOT_CHECKED, askedOf, busyOf, canChange, cardDrawable, cardVerdict, checkMissOf, checkedOf, copyCheck, currentOf, drawCard, feedbackOf, fnv1a, holdOf, holdText, isChecked, isFresh, marksOf, noteAsked, noteCurrent, notePending, noteVersion, prepareCard, pressAsk, pressCheck, pressFeedback, pressSign, readTree,
   drawHref, printedTags, refreshCard, sha256Hex, signOf, signatureLine, signatureSvg, standing, turnBegan, turnEnded, turnMark, type CardDraw,
 } from './card'
 import { drawnText, pageGap } from './card-parity'
@@ -805,6 +805,25 @@ describe('0.7.26 prepared on arrival: the renderer runs once a package version, 
     expect(holdOf(t.state.get('card') as MmCard)).toBe('page')
     await prepareCard(t.$, { ...f, page: null })
     expect((t.state.get('card') as MmCard).gap).toBe('the page could not be read to compare')
+  })
+
+  test('(0.7.69) a page whose Findings hold `- Sample not built:` holds the box back with the hold `sample`, and a press is refused', async () => {
+    const t = thread()
+    const packageId = '99999999-9999-4999-8999-999999999999'
+    const f = { packageId, projectId: SMS_TREE.project_id, client: 'X', own: true, current: SHA, page: SMS_PAGE, signer: 'Owner', home: '/h', note: t.log.note, isNewest: async () => true }
+    const line = '- Sample not built: 1 lead sample(s) this package promises. Recommend: build it before the go (client-reply-prep §9.2a step 2), then read the package again.'
+    await prepareCard(t.$, { ...f, page: `${SMS_PAGE}\n\n### Findings\n\n- A finding.\n${line}\n` })
+    const card = t.state.get('card') as MmCard
+    expect(card.gap).toBe(SAMPLE_GAP)
+    expect(holdOf(card)).toBe('sample')
+    expect(cardVerdict(card, packageId)).toBe('a lead sample this package promises is not built yet')
+    expect(holdText('sample', card, LABEL)).toContain('not built yet')
+    // outside Findings: no such hold from this rule
+    await prepareCard(t.$, { ...f, page: `${SMS_PAGE}\n\n### Client reply\n\n${line}\n\n### Findings\n\n- A finding.\n` })
+    expect((t.state.get('card') as MmCard).gap).not.toBe(SAMPLE_GAP)
+    // no line: clear
+    await prepareCard(t.$, f)
+    expect(holdOf(t.state.get('card') as MmCard)).toBe('')
   })
 
   test('a newer draw of the client part meanwhile: this one writes nothing', async () => {
