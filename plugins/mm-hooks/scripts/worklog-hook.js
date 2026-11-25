@@ -74,6 +74,19 @@
  * No chip feed, setup report or token counts from Codex, and a run Claude handed
  * to GPT (MM_GPT_DELEGATED=1) records nothing. See CODEX SESSIONS.
  *
+ * Skill proposals (0.15.0, 2026-11-25): a teammate's edit of a registry skill,
+ * and a new skill made in a tracked session, are sent to OW for review
+ * (/api/ext/skill-proposals) by a detached child of Stop instead of being lost to
+ * the next sync; the sync leaves a skill alone while its edit is under review; a
+ * SessionStart asks, at most once a week, about the skills only this computer
+ * has; and `--share-skill`, `--share-skill-decline`, `--skill-proposals` and
+ * `--skill-proposal-seen` do the same by hand. After the independent review
+ * (F3): a folder with no marker is kept and overwritten as before, never held or
+ * sent; an edit under review for more than 72 weekday hours is released to the
+ * sync and never sent again; a file the teammate added whose name looks like a
+ * secret is never uploaded; and the hourly scan resumes where a slow run stopped.
+ * See SKILL PROPOSALS.
+ *
  * Turn origin (0.11.5, 2026-10-12): every worklog POST also says who started the
  * work it belongs to, `person` or `auto`, read from the stamp Claude Code writes
  * on the turn's opening entry in the session's transcript. A turn the system
@@ -203,7 +216,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.14.1";
+const HOOK_VERSION = "0.15.0";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -7803,6 +7816,10 @@ async function handlePostToolUse(payload) {
   const toolName = payload.tool_name || "unknown_tool";
   const toolInput = payload.tool_input || {};
 
+  // ⛔ SKILL PROPOSALS (0.15.0, B2.3): a write into a skill folder is noted by
+  // name and time, locally. Nothing is sent from here.
+  noteSkillTouch(toolName, toolInput, Date.now());
+
   // ⛔ ONE DEADLINE FOR THE WHOLE RUN (2026-09-29). Besides the activity line,
   // this run makes one request per newly completed todo, and it used to make
   // them one after another with 10 s each: five completions against a slow
@@ -8098,9 +8115,11 @@ function undeclaredReminderFor(payload, state, turnOrigin, env, platform) {
 // ⛔ WHAT IT MAY WRITE: `~/.claude/skills/<key>/` for a key the registry lists
 // (and the `~/.claude/skills` container itself when a machine has none), plus
 // its timestamp file under `~/.claude/mm-hooks/state/` and the copies it keeps
-// of a local edit under `~/.claude/mm-hooks/state/skill-edits/` (0.12.3). Nothing
-// else, anywhere. That is the #342 invariant, widened deliberately and only for
-// this — see tests/unit/worklog-hook-state-home.unit.test.ts.
+// of a local edit under `~/.claude/mm-hooks/state/skill-edits/` (0.12.3), and
+// (0.15.0, SKILL PROPOSALS) `state/skill-proposals.json` and
+// `state/skill-touched.json`. Nothing else, anywhere. That is the #342
+// invariant, widened deliberately and only for this — see
+// tests/unit/worklog-hook-state-home.unit.test.ts.
 //
 // ⛔ THE WRITE RULES, shared with the installer (§5.3): every file is written to
 // a temp file and renamed into place; nothing is ever written through a symlink,
@@ -8571,7 +8590,8 @@ function keptSkillEditsForReport(deadlineAt) {
 /**
  * Write one registry skill under `<root>/<key>/` by the §5.3 rules. Returns
  * "installed" | "updated", or why it did not: "invalid", "too_large", "linked",
- * "foreign", "conflict", "error". Never throws out of the caller's try.
+ * "foreign", "conflict", "error", or "kept_for_review" (0.15.0: a local edit
+ * waiting on review, which is not a failure). Never throws out of the caller's try.
  */
 function writeRegistrySkill(root, key, sha, files, nowIso) {
   if (!files || typeof files !== "object" || Array.isArray(files)) return "invalid";
@@ -8651,7 +8671,20 @@ function writeRegistrySkill(root, key, sha, files, nowIso) {
       else if (base !== "" && local.sha !== base && local.md_sha !== base) {
         reason = base === sha ? "edited" : "both_moved";
       }
-      if (reason && !keepSkillEdit(dir, key, local, base, sha, reason, nowIso)) return "error";
+      if (reason) {
+        // ⛔ SKILL PROPOSALS (0.15.0, B2.1): an edit of one of ours not yet
+        // decided by review is not overwritten. "kept_for_review" is not a
+        // failure: the sync asks for the skill again on a later run, and a
+        // decided (or released) edit goes on below, kept first, as in 0.12.3. A
+        // folder with no marker (adoptable) never asks: kept and overwritten as
+        // in 0.12.3, never held and never sent (H1).
+        const ours = info.kind === "ours";
+        if (ours && skillEditReviewGate(key, local.sha || local.md_sha, nowIso) === "hold") {
+          return "kept_for_review";
+        }
+        if (!keepSkillEdit(dir, key, local, base, sha, reason, nowIso)) return "error";
+        if (ours) markKeptCopyKnown(key, local.sha || local.md_sha);
+      }
     }
   }
 
@@ -8842,6 +8875,10 @@ async function runSkillSync(root, deadlineAt, result, failures) {
   }
   const rows = Array.isArray(list.body.skills) ? list.body.skills : [];
   const wanted = [];
+  // ⛔ SKILL PROPOSALS (0.15.0): a skill whose local edit is under review goes
+  // to the back of the line, so held skills never take the slots of the rest.
+  const heldForReview = skillKeysHeldForReview(Date.now());
+  const later = [];
   const seen = new Set();
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i] && typeof rows[i] === "object" ? rows[i] : {};
@@ -8870,15 +8907,20 @@ async function runSkillSync(root, deadlineAt, result, failures) {
         result.skipped_failed += 1;
         continue;
       }
-      if (wanted.length < SKILLS_SYNC_MAX_PER_RUN) wanted.push({ key, sha });
+      if (heldForReview.has(key)) later.push({ key, sha });
+      else if (wanted.length < SKILLS_SYNC_MAX_PER_RUN) wanted.push({ key, sha });
     } else {
       result.left_alone += 1;
     }
   }
+  while (wanted.length < SKILLS_SYNC_MAX_PER_RUN && later.length > 0) wanted.push(later.shift());
   // A skill the registry no longer lists is forgotten with its failure.
   Object.keys(failures).forEach((key) => {
     if (!seen.has(key)) delete failures[key];
   });
+  // ⛔ SKILL PROPOSALS (0.15.0): which keys the team has, so a skill only this
+  // computer has can be told apart from a registry one (B2.3, B5).
+  rememberRegistryKeys(Array.from(seen));
   if (wanted.length === 0) return;
 
   const bundle = await skillsApiRequest(
@@ -8914,6 +8956,7 @@ async function runSkillSync(root, deadlineAt, result, failures) {
     if (outcome === "installed") result.installed += 1;
     else if (outcome === "updated") result.updated += 1;
     else if (outcome === "linked" || outcome === "foreign") result.left_alone += 1;
+    else if (outcome === "kept_for_review") result.kept_for_review += 1;
     else result.failed += 1;
     // L1: remember a permanent failure at the sha it failed at; a success
     // clears it. Anything else is transient and is simply asked for again.
@@ -8999,6 +9042,7 @@ async function syncRegistrySkills(budgetMs) {
       left_alone: 0,
       failed: 0,
       skipped_failed: 0,
+      kept_for_review: 0,
       reason: null,
     };
     const failures = claim.record.permanent_failures;
@@ -9170,6 +9214,18 @@ function registryIsBinary(buf) {
  * folder's real path. Null when there is no readable SKILL.md. Never throws.
  */
 function skillFolderShas(dir) {
+  const read = skillFolderRead(dir);
+  return read ? { sha: read.sha, md_sha: read.md_sha } : null;
+}
+
+/**
+ * skillFolderShas, with the files it hashed: `{sha, md_sha, files}`, where
+ * `files` is exactly the `{path: text}` map the folder sha is computed over, so
+ * OW's computeContentSha of an upload equals the sha here (0.15.0, SKILL
+ * PROPOSALS). `files` is null when the folder has no sha (a SKILL.md over the
+ * registry's per-file limit). Null when there is no readable SKILL.md. Never throws.
+ */
+function skillFolderRead(dir) {
   try {
     const mdBuf = fs.readFileSync(path.join(dir, "SKILL.md"));
     const md = mdBuf.toString("utf8");
@@ -9177,7 +9233,7 @@ function skillFolderShas(dir) {
     const pairsSha = (all) =>
       sha256Hex(Buffer.from(JSON.stringify(Object.keys(all).sort().map((p) => [p, all[p]])), "utf8"));
     const mdSha = pairsSha({ "SKILL.md": md });
-    if (mdBytes > REG_MAX_FILE_BYTES) return { sha: null, md_sha: mdSha };
+    if (mdBytes > REG_MAX_FILE_BYTES) return { sha: null, md_sha: mdSha, files: null };
     const candidates = [];
     const walk = (d, rel, depth) => {
       if (depth > 12) return;
@@ -9220,7 +9276,7 @@ function skillFolderShas(dir) {
       count += 1;
     }
     files["SKILL.md"] = md;
-    return { sha: pairsSha(files), md_sha: mdSha };
+    return { sha: pairsSha(files), md_sha: mdSha, files };
   } catch {
     return null;
   }
@@ -9724,6 +9780,1438 @@ async function skillsSyncNow() {
   } catch {
     /* silent */
   }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// ⛔ SKILL PROPOSALS (0.15.0, 2026-11-25). Rob, 2026-11-24: "there needs to be a
+// hook for the team: anytime they're working on a project and they're doing
+// something, they could create a new skill or improve an existing skill. That
+// automatically happens, and that should automatically trigger a sync to the
+// rest of us." Measured 2026-11-24: six teammates' live edits had been
+// overwritten by the sync, and none of 1,606 skill commits came from a teammate.
+// Rob's "Yes, build it", 2026-11-25 (control tower,
+// plans/skill-contributions-build-2026-11-25.md, Part B).
+//
+// What this computer sends to POST /api/ext/skill-proposals, where the control
+// tower's runner reviews it:
+//   B2.1 an edit of a registry skill the sync is about to replace
+//        (writeRegistrySkill): queued, and the folder is left alone
+//        ("kept_for_review") until review decides. A decided edit takes the
+//        0.12.3 path, kept first, then overwritten, and is never sent again at
+//        that sha. After 72 hours of failed uploads the 0.12.3 path runs anyway.
+//   B2.2 an edit of an up-to-date registry skill, which the sync never sees: the
+//        uploader's hourly scan, once its newest file is 30 minutes old.
+//   B2.3 a new skill a tracked session wrote under ~/.claude/skills (PostToolUse
+//        notes the folder's name in skill-touched.json and sends nothing), once
+//        its last touch and its newest file are 30 minutes old.
+//   B2.4 each kept copy of 0.12.3 to 0.14.x (reason edited or both_moved, not
+//        seen, under 30 days old), once.
+//
+// ⛔ UPLOADS ONLY IN A DETACHED CHILD. Stop's budget is too small, so Stop starts
+// this hook again as a detached child with the event MMSkillPropose on its stdin
+// (the MMSkillRepair pattern: the same consent gate, then the dispatch), at most
+// once every 15 minutes per computer, and only when something is queued, a poll
+// is due, or the hourly scan has something ready to find. 20 s at most. Stop
+// never waits on it.
+//
+// ⛔ WHAT LEAVES THE COMPUTER: a skill's files by skillFolderShas's own walk (so
+// OW's sha is ours: no dotfile, no link, no .git or node_modules, no binary, the
+// registry's size caps), its name, the sha it started from, the origin, the
+// 12-hex machine id, and a note only the member types (--share-skill --note).
+// Never from a linked folder, never through a link, never on a computer whose
+// skills come from a control-tower checkout, and never a folder that is not a
+// registry skill unless a tracked session wrote it (B2.3) or the member ran
+// --share-skill for it.
+//
+// ⛔ FAIL OPEN AND SILENT. Any error means no proposal and the 0.14 behaviour; a
+// state file that cannot be written queues nothing and holds nothing back. Every
+// hook event still exits 0. The CLI commands print plain lines and exit 0, 1 or 2.
+//
+// State, at the state root (never pruned), each written by writeFileAtomic:
+//   skill-proposals.json  {v, by_key, kept_uploaded, last_poll_at, share}, plus
+//                         the child's slot (child_at, child_nonce), the scan's
+//                         time (last_scan_at) and the registry's keys from the
+//                         last sync (registry_keys);
+//   skill-touched.json    {v, keys: {<name>: {last_at}}}.
+// ───────────────────────────────────────────────────────────────────────────
+
+const SKILL_PROPOSALS_URL = `${API_BASE}/api/ext/skill-proposals`;
+const SKILL_PROPOSALS_SEEN_URL = `${API_BASE}/api/ext/skill-proposals/seen`;
+const SKILL_PROPOSALS_STATE_NAME = "skill-proposals.json";
+const SKILL_TOUCHED_STATE_NAME = "skill-touched.json";
+/**
+ * The uploader's event name. Never sent by Claude Code: only startSkillPropose
+ * writes it, on the stdin of this hook's own detached child (see SKILL_REPAIR_EVENT).
+ */
+const SKILL_PROPOSE_EVENT = "MMSkillPropose";
+/** The child's whole budget (hardExitMsFor). */
+const SKILL_PROPOSE_HARD_EXIT_MS = 20000;
+/** At most one child this often per computer, its slot claimed before the spawn. */
+const SKILL_PROPOSE_CHILD_EVERY_MS = 15 * 60 * 1000;
+/** The B2.2 / B2.3 / B2.4 scan, at most this often. */
+const SKILL_PROPOSE_SCAN_EVERY_MS = 3600 * 1000;
+/** Open proposals are asked about at most this often. */
+const SKILL_PROPOSE_POLL_EVERY_MS = 15 * 60 * 1000;
+/** A folder is sent only once it has been left alone this long. */
+const SKILL_PROPOSE_SETTLE_MS = 30 * 60 * 1000;
+/** A queued edit that has failed to upload for this long is overwritten as in 0.12.3. */
+const SKILL_PROPOSE_FALLBACK_MS = 72 * 3600 * 1000;
+/**
+ * H2: an uploaded edit still open (pending, reviewing or held) holds the sync
+ * back for at most this many weekday hours since its upload. New York days;
+ * Saturday and Sunday do not count.
+ */
+const SKILL_PROPOSE_RELEASE_MS = 72 * 3600 * 1000;
+/** Uploads per child run, oldest first. */
+const SKILL_PROPOSE_MAX_UPLOADS = 10;
+/** B2.4: a kept copy older than this is not sent. */
+const SKILL_PROPOSE_KEPT_MAX_AGE_MS = 30 * 86400000;
+/** Stop's own look for scan work, before it starts a child. */
+const SKILL_PROPOSE_PRECHECK_MS = 500;
+/** A file newer than the folder's marker by more than this was changed after the sync wrote it. */
+const SKILL_PROPOSE_MARKER_SLACK_MS = 5000;
+/** The newest-file walk looks at no more entries than this in one folder. */
+const SKILL_PROPOSE_WALK_MAX_ENTRIES = 5000;
+const SKILL_PROPOSE_STATE_MAX_BYTES = 4 * 1024 * 1024;
+/** skill-touched.json keeps at most this many names, none older than SKILL_TOUCHED_KEEP_MS. */
+const SKILL_TOUCHED_MAX = 500;
+const SKILL_TOUCHED_KEEP_MS = 30 * 86400000;
+const SKILL_TOUCHED_MAX_BYTES = 1024 * 1024;
+/** OW's limit on a note. */
+const SKILL_PROPOSAL_NOTE_MAX = 500;
+/** The CLI's own backstop: it is not a hook event, so the hard exit is not armed for it. */
+const SKILL_PROPOSAL_CLI_HARD_EXIT_MS = 30000;
+/** B5: at most once in this long per computer, naming at most this many skills. */
+const SKILL_SHARE_NOTICE_EVERY_MS = 7 * 86400000;
+const SKILL_SHARE_NOTICE_MAX_NAMES = 12;
+/** Every status an entry may hold: "queued" is this computer's own (not uploaded yet). */
+const SKILL_PROPOSAL_STATUSES = [
+  "queued", "pending", "reviewing", "held", "merged", "returned", "routed_client",
+  "stale_copy", "no_change", "superseded", "withdrawn", "failed",
+];
+/** The statuses that keep the sync from overwriting the folder (B2.1). */
+const SKILL_PROPOSAL_HOLDING = ["queued", "pending", "reviewing", "held"];
+/** An uploaded proposal still waiting on review: these are polled. */
+const SKILL_PROPOSAL_OPEN = ["pending", "reviewing", "held"];
+const SKILL_PROPOSAL_ORIGINS = ["sync_edit", "kept_copy", "new_skill", "shared"];
+const SKILL_PROPOSAL_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const SKILL_PROPOSAL_SHA_RE = /^[0-9a-f]{64}$/;
+/** B2.3: the tools whose file_path (or notebook_path) is a touch. */
+const SKILL_TOUCH_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit"];
+/**
+ * H3 (review, 2026-11-25): a file the teammate added (not in the marker's list)
+ * is left out of an upload when its basename looks like a secret: this word
+ * rule, or `.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `*storage*state*`.
+ */
+const SKILL_PROPOSAL_SECRET_NAME_RE = /(^|[._-])(credentials?|secrets?|tokens?|passwords?|passwd|cookies?)([._-]|$)/i;
+
+/** VERBATIM — B4: what each CLI command prints when this folder is not tracked. */
+const SKILL_PROPOSAL_NOT_TRACKED = "This folder is not tracked, so nothing was sent.";
+
+/**
+ * VERBATIM — B5 (Opus, 2026-11-25). Placed byte for byte: do not reflow,
+ * re-punctuate or improve it. `${n}`, `${s}` and `${names}` are filled by
+ * ownSkillsNoticeText and nothing else is changed. A plain string, not a
+ * template: the placeholders are text here.
+ */
+const OWN_SKILLS_NOTICE = 'Massmarket skills: this computer has ${n} skill${s} of its own that the rest of the team does not have: ${names}. At a natural pause in this session, after the person\'s first request is handled, ask them once: "You have ${n} skill${s} of your own that the rest of the team doesn\'t have (${names}). Want me to send any of them for review, so everyone gets them?" Send only the ones they name, each with: node ~/.claude/mm-hooks/worklog-hook.js --share-skill <name> --note "<their one-line reason, if they gave one>" (Windows PowerShell: node "$env:USERPROFILE\\.claude\\mm-hooks\\worklog-hook.js" --share-skill <name>). For each one they want to keep to themselves, run the same command with --share-skill-decline <name> so they are not asked again. Never send a skill they did not name.';
+
+// ── state ──────────────────────────────────────────────────────────────────
+
+function skillProposalsStateFile() {
+  const root = stateRootDir();
+  return root ? path.join(root, SKILL_PROPOSALS_STATE_NAME) : null;
+}
+
+function skillTouchedStateFile() {
+  const root = stateRootDir();
+  return root ? path.join(root, SKILL_TOUCHED_STATE_NAME) : null;
+}
+
+/** An ISO time as stored, or null. */
+function proposalIso(value) {
+  return typeof value === "string" && value.length <= 40 && Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+/** A by_key entry with anything malformed dropped, or null for no entry. */
+function cleanProposalEntry(e) {
+  if (!e || typeof e !== "object" || Array.isArray(e)) return null;
+  if (typeof e.status !== "string" || SKILL_PROPOSAL_STATUSES.indexOf(e.status) === -1) return null;
+  if (typeof e.local_sha !== "string" || !/^[A-Za-z0-9._-]{1,200}$/.test(e.local_sha)) return null;
+  return {
+    local_sha: e.local_sha,
+    proposal_id: typeof e.proposal_id === "string" && SKILL_PROPOSAL_ID_RE.test(e.proposal_id) ? e.proposal_id : null,
+    status: e.status,
+    origin: SKILL_PROPOSAL_ORIGINS.indexOf(e.origin) !== -1 ? e.origin : "sync_edit",
+    queued_at: proposalIso(e.queued_at),
+    uploaded_at: proposalIso(e.uploaded_at),
+    first_failed_at: proposalIso(e.first_failed_at),
+    fails: Number.isInteger(e.fails) && e.fails >= 0 ? Math.min(e.fails, 1000000) : 0,
+    released_at: proposalIso(e.released_at),
+  };
+}
+
+/** skill-proposals.json, validated; a missing or broken file reads as empty. Never throws. */
+function readProposalState() {
+  const out = {
+    v: 1,
+    by_key: {},
+    kept_uploaded: {},
+    last_poll_at: null,
+    share: { asked_at: null, declined: [], shared: [] },
+    last_scan_at: null,
+    scan_cursor: null,
+    child_at: null,
+    child_nonce: null,
+    registry_keys: null,
+  };
+  const file = skillProposalsStateFile();
+  if (!file) return out;
+  let raw = null;
+  try {
+    raw = JSON.parse(readTextBounded(file, SKILL_PROPOSE_STATE_MAX_BYTES));
+  } catch {
+    return out;
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  const isObj = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v);
+  const names = (list) =>
+    Array.isArray(list)
+      ? Array.from(new Set(list.filter((n) => typeof n === "string" && SKILL_KEY_RE.test(n)))).slice(0, 5000)
+      : [];
+  try {
+    if (isObj(raw.by_key)) {
+      Object.keys(raw.by_key).forEach((key) => {
+        const e = cleanProposalEntry(raw.by_key[key]);
+        if (e && SKILL_KEY_RE.test(key)) out.by_key[key] = e;
+      });
+    }
+    if (isObj(raw.kept_uploaded)) {
+      Object.keys(raw.kept_uploaded).forEach((id) => {
+        const parts = id.split("/");
+        const value = raw.kept_uploaded[id];
+        if (
+          parts.length === 2 &&
+          SKILL_KEY_RE.test(parts[0]) &&
+          SKILL_EDIT_STAMP_RE.test(parts[1]) &&
+          (value === null || (typeof value === "string" && SKILL_PROPOSAL_ID_RE.test(value)))
+        ) {
+          out.kept_uploaded[id] = value;
+        }
+      });
+    }
+    out.last_poll_at = proposalIso(raw.last_poll_at);
+    out.last_scan_at = proposalIso(raw.last_scan_at);
+    out.scan_cursor = typeof raw.scan_cursor === "string" && SKILL_KEY_RE.test(raw.scan_cursor) ? raw.scan_cursor : null;
+    out.child_at = proposalIso(raw.child_at);
+    out.child_nonce = typeof raw.child_nonce === "string" && /^[0-9a-f]{16}$/.test(raw.child_nonce) ? raw.child_nonce : null;
+    if (Array.isArray(raw.registry_keys)) out.registry_keys = names(raw.registry_keys);
+    if (isObj(raw.share)) {
+      out.share = {
+        asked_at: proposalIso(raw.share.asked_at),
+        declined: names(raw.share.declined),
+        shared: names(raw.share.shared),
+      };
+    }
+  } catch {
+    /* what was read so far stands */
+  }
+  return out;
+}
+
+/** Write the whole state atomically. False when it could not be written. Never throws. */
+function writeProposalState(state) {
+  try {
+    const file = skillProposalsStateFile();
+    if (!file) return false;
+    const dir = path.dirname(file);
+    fs.mkdirSync(dir, { recursive: true });
+    // A real directory: never a write through a link.
+    if (pathKind(dir) !== "dir") return false;
+    return writeFileAtomic(file, `${JSON.stringify(state)}\n`, dir);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read the state fresh, let `mutate` change it, and write it back unless
+ * `mutate` returned false. Every writer goes through this, so a writer only
+ * ever changes what it means to on the newest copy: the Stop's sync, the child
+ * and the CLI may all run at once. `{state, wanted, written}`. Never throws.
+ */
+function updateProposalState(mutate) {
+  const state = readProposalState();
+  let wanted = false;
+  try {
+    wanted = mutate(state) !== false;
+  } catch {
+    wanted = false;
+  }
+  if (!wanted) return { state, wanted: false, written: false };
+  return { state, wanted: true, written: writeProposalState(state) };
+}
+
+/** A fresh queued entry. */
+function queuedProposalEntry(localSha, origin, nowIso) {
+  return {
+    local_sha: localSha,
+    proposal_id: null,
+    status: "queued",
+    origin,
+    queued_at: nowIso,
+    uploaded_at: null,
+    first_failed_at: null,
+    fails: 0,
+    released_at: null,
+  };
+}
+
+/** A queued entry whose uploads have failed for more than 72 hours. */
+function proposalFallbackDue(entry, nowMs) {
+  const failedAt = Date.parse(entry.first_failed_at || "");
+  return entry.status === "queued" && Number.isFinite(failedAt) && nowMs - failedAt > SKILL_PROPOSE_FALLBACK_MS;
+}
+
+/**
+ * The weekday time between two instants, in ms, counted up to just past `capMs`:
+ * Saturday and Sunday in New York do not count (UTC days on a node with no time
+ * zone data). Hour by hour on UTC hours, each of which lies inside one New York
+ * day because New York's offset is whole hours. Never throws.
+ */
+function weekdayMsBetween(startMs, endMs, capMs) {
+  try {
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return 0;
+    let total = 0;
+    let t = startMs;
+    for (let i = 0; i < 24 * 400 && t < endMs; i++) {
+      const next = Math.min(endMs, (Math.floor(t / 3600000) + 1) * 3600000);
+      const day = nyDayOf(t) || new Date(t).toISOString().slice(0, 10);
+      if (tokensIsWeekday(day)) total += next - t;
+      if (total > capMs) return total;
+      t = next;
+    }
+    return total;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * H2: an uploaded edit still open after 72 weekday hours since its upload, or
+ * one already released, no longer holds the sync back. Its proposal stays open.
+ */
+function proposalReleaseDue(entry, nowMs) {
+  if (SKILL_PROPOSAL_OPEN.indexOf(entry.status) === -1) return false;
+  if (entry.released_at) return true;
+  const from = Date.parse(entry.uploaded_at || entry.queued_at || "");
+  return Number.isFinite(from) && weekdayMsBetween(from, nowMs, SKILL_PROPOSE_RELEASE_MS) > SKILL_PROPOSE_RELEASE_MS;
+}
+
+// ── B2.1: the sync's gate ──────────────────────────────────────────────────
+
+/**
+ * writeRegistrySkill's question before it keeps and overwrites a local edit of
+ * an `ours` folder `key` (B2.1): "hold" (return kept_for_review, touch nothing)
+ * or "proceed" (the 0.12.3 path). An `adoptable` folder never asks (H1): it is
+ * kept and overwritten as in 0.12.3, never held and never sent. `localSha` is
+ * the folder's sha (or its SKILL.md's). Never throws; any doubt is "proceed",
+ * which is what 0.14 did.
+ *   - this sha queued: hold; but past the 72-hour fallback, mark it failed and proceed;
+ *   - this sha pending, reviewing or held: hold; but past 72 weekday hours since
+ *     its upload (H2), record released_at and proceed: the proposal stays open,
+ *     and this sha is never sent again;
+ *   - this sha decided (any other status): proceed, and it is not sent again;
+ *   - no entry, or another sha: queue it as sync_edit and hold, unless the queue
+ *     cannot be written.
+ */
+function skillEditReviewGate(key, localSha, nowIso) {
+  try {
+    if (!CONSENT_OK || !TOKEN || !localSha || !SKILL_KEY_RE.test(key)) return "proceed";
+    const nowMs = Number.isFinite(Date.parse(nowIso)) ? Date.parse(nowIso) : Date.now();
+    let verdict = "proceed";
+    const result = updateProposalState((s) => {
+      const e = s.by_key[key];
+      if (e && e.local_sha === localSha) {
+        if (proposalFallbackDue(e, nowMs)) {
+          e.status = "failed";
+          verdict = "proceed";
+          return true;
+        }
+        if (proposalReleaseDue(e, nowMs)) {
+          verdict = "proceed";
+          if (e.released_at) return false;
+          e.released_at = nowIso;
+          return true;
+        }
+        verdict = SKILL_PROPOSAL_HOLDING.indexOf(e.status) !== -1 ? "hold" : "proceed";
+        return false;
+      }
+      s.by_key[key] = queuedProposalEntry(localSha, "sync_edit", nowIso);
+      verdict = "hold";
+      return true;
+    });
+    // A queue that could not be written holds nothing back.
+    if (verdict === "hold" && result.wanted && !result.written) return "proceed";
+    return verdict;
+  } catch {
+    return "proceed";
+  }
+}
+
+/** The keys whose edit is waiting on review, so the sync asks for them last. Never throws. */
+function skillKeysHeldForReview(nowMs) {
+  const out = new Set();
+  try {
+    const s = readProposalState();
+    Object.keys(s.by_key).forEach((key) => {
+      const e = s.by_key[key];
+      if (SKILL_PROPOSAL_HOLDING.indexOf(e.status) !== -1 && !proposalFallbackDue(e, nowMs) && !proposalReleaseDue(e, nowMs)) {
+        out.add(key);
+      }
+    });
+  } catch {
+    /* nothing held */
+  }
+  return out;
+}
+
+/**
+ * After writeRegistrySkill kept a copy of an edit that review has already had
+ * (sent, decided, released or failed), remember that copy in kept_uploaded, so
+ * the B2.4 scan never sends it again, even once a later edit replaces the entry.
+ * Never throws.
+ */
+function markKeptCopyKnown(key, localSha) {
+  try {
+    if (!CONSENT_OK || !localSha || !SKILL_KEY_RE.test(key)) return;
+    const root = skillEditsRoot();
+    const keyDir = root ? path.join(root, key) : null;
+    if (!keyDir || pathKind(keyDir) !== "dir") return;
+    const stamp = fs.readdirSync(keyDir).find((name) => {
+      if (!SKILL_EDIT_STAMP_RE.test(name)) return false;
+      const record = readSkillEditRecord(path.join(keyDir, name));
+      return Boolean(record) && record.local === localSha;
+    });
+    if (!stamp) return;
+    updateProposalState((s) => {
+      const e = s.by_key[key];
+      const id = `${key}/${stamp}`;
+      if (!e || e.local_sha !== localSha || Object.prototype.hasOwnProperty.call(s.kept_uploaded, id)) return false;
+      if (!e.proposal_id && e.status === "queued") return false;
+      s.kept_uploaded[id] = e.proposal_id || null;
+      return true;
+    });
+  } catch {
+    /* the B2.4 scan's own known-copy check stands */
+  }
+}
+
+/** Keep the keys the registry listed in this sync. Written only when they changed. Never throws. */
+function rememberRegistryKeys(keys) {
+  try {
+    if (!CONSENT_OK) return;
+    const list = Array.from(new Set(keys.filter((k) => typeof k === "string" && SKILL_KEY_RE.test(k)))).sort();
+    updateProposalState((s) => {
+      if (s.registry_keys && s.registry_keys.slice().sort().join("\n") === list.join("\n")) return false;
+      s.registry_keys = list;
+      return true;
+    });
+  } catch {
+    /* B2.3 and B5 wait for the next sync */
+  }
+}
+
+// ── B2.3: a touch in a tracked session (PostToolUse) ───────────────────────
+
+/**
+ * The skill folder a Write, Edit, MultiEdit or NotebookEdit call wrote into:
+ * `<home>/.claude/skills/<name>/...`, `<name>` a skill key, and no link on the
+ * way from the skills folder to the file (each segment lstat'ed). Null for
+ * anything else. Never throws.
+ */
+function skillTouchName(toolName, toolInput) {
+  try {
+    if (SKILL_TOUCH_TOOLS.indexOf(toolName) === -1) return null;
+    const input = toolInput && typeof toolInput === "object" ? toolInput : {};
+    const raw = typeof input.file_path === "string" && input.file_path ? input.file_path : input.notebook_path;
+    if (typeof raw !== "string" || !raw || raw.length > 4096 || raw.indexOf("\0") !== -1) return null;
+    if (!path.isAbsolute(raw)) return null;
+    const claude = homeClaudeDir();
+    if (!claude) return null;
+    const root = path.join(claude, "skills");
+    const rel = path.relative(root, path.resolve(raw));
+    if (!rel || path.isAbsolute(rel) || rel === ".." || rel.indexOf(`..${path.sep}`) === 0) return null;
+    const parts = rel.split(path.sep).filter((p) => p !== "");
+    if (parts.length < 2 || !SKILL_KEY_RE.test(parts[0])) return null;
+    // ⛔ Never through a link: the skills folder and every folder on the way are
+    // real folders, and the file itself is a real file.
+    if (pathKind(root) !== "dir") return null;
+    let cur = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      cur = path.join(cur, parts[i]);
+      if (pathKind(cur) !== "dir") return null;
+    }
+    return pathKind(path.join(cur, parts[parts.length - 1])) === "file" ? parts[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+/** skill-touched.json, validated. Never throws. */
+function readSkillTouched() {
+  const out = { v: 1, keys: {} };
+  try {
+    const file = skillTouchedStateFile();
+    if (!file) return out;
+    const raw = JSON.parse(readTextBounded(file, SKILL_TOUCHED_MAX_BYTES));
+    const keys = raw && typeof raw === "object" && raw.keys && typeof raw.keys === "object" ? raw.keys : {};
+    Object.keys(keys).forEach((name) => {
+      const at = keys[name] && proposalIso(keys[name].last_at);
+      if (at && SKILL_KEY_RE.test(name)) out.keys[name] = { last_at: at };
+    });
+  } catch {
+    /* no touches on record */
+  }
+  return out;
+}
+
+/**
+ * PostToolUse (B2.3): note that this tracked session wrote into a skill folder.
+ * Only the folder's name and the time; nothing is sent from here. Never throws.
+ */
+function noteSkillTouch(toolName, toolInput, nowMs) {
+  try {
+    if (!CONSENT_OK) return;
+    const name = skillTouchName(toolName, toolInput);
+    if (!name) return;
+    const file = skillTouchedStateFile();
+    if (!file) return;
+    const touched = readSkillTouched();
+    touched.keys[name] = { last_at: new Date(nowMs).toISOString() };
+    const out = { v: 1, keys: {} };
+    Object.keys(touched.keys)
+      .map((k) => ({ k, at: Date.parse(touched.keys[k].last_at) }))
+      .filter((t) => nowMs - t.at < SKILL_TOUCHED_KEEP_MS)
+      .sort((a, b) => b.at - a.at)
+      .slice(0, SKILL_TOUCHED_MAX)
+      .forEach((t) => {
+        out.keys[t.k] = touched.keys[t.k];
+      });
+    const dir = path.dirname(file);
+    fs.mkdirSync(dir, { recursive: true });
+    if (pathKind(dir) !== "dir") return;
+    writeFileAtomic(file, `${JSON.stringify(out)}\n`, dir);
+  } catch {
+    /* the next touch tries again */
+  }
+}
+
+// ── the scans (B2.2, B2.3, B2.4) ───────────────────────────────────────────
+
+/**
+ * The newest mtime of the files skillFolderShas would hash (same walk: no link,
+ * no dotfile, no .git or node_modules), or null when the folder cannot be read.
+ * Files only: a folder's own time moves for things the hash never sees.
+ */
+function skillFolderNewestFileMtime(dir) {
+  let newest = 0;
+  let seen = 0;
+  const walk = (d, depth) => {
+    if (depth > 12) return;
+    const entries = fs.readdirSync(d, { withFileTypes: true });
+    for (let i = 0; i < entries.length; i++) {
+      seen += 1;
+      if (seen > SKILL_PROPOSE_WALK_MAX_ENTRIES) return;
+      const e = entries[i];
+      if (e.name === ".git" || e.name === "node_modules" || e.name.startsWith(".")) continue;
+      const abs = path.join(d, e.name);
+      const st = fs.lstatSync(abs);
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) walk(abs, depth + 1);
+      else if (st.isFile() && st.mtimeMs > newest) newest = st.mtimeMs;
+    }
+  };
+  try {
+    walk(dir, 0);
+  } catch {
+    return null;
+  }
+  return newest;
+}
+
+/** Is the hourly scan due? */
+function skillProposalScanDue(s, nowMs) {
+  const at = Date.parse(s.last_scan_at || "");
+  return !(Number.isFinite(at) && at <= nowMs && nowMs - at < SKILL_PROPOSE_SCAN_EVERY_MS);
+}
+
+/** Is a poll due: an uploaded proposal still open, and no poll in 15 minutes? */
+function skillProposalPollDue(s, nowMs) {
+  const open = Object.keys(s.by_key).some((k) => {
+    const e = s.by_key[k];
+    return Boolean(e.proposal_id) && SKILL_PROPOSAL_OPEN.indexOf(e.status) !== -1;
+  });
+  if (!open) return false;
+  const at = Date.parse(s.last_poll_at || "");
+  return !(Number.isFinite(at) && at <= nowMs && nowMs - at < SKILL_PROPOSE_POLL_EVERY_MS);
+}
+
+/**
+ * The scan. With `probe`, Stop's cheap look: true as soon as anything is ready
+ * to be found (or the look runs out of time), with no file hashed. Without it,
+ * the child's scan: `{queue: [{key, local_sha, origin}], kept: [...], keptKnown:
+ * {<key>/<stamp>: id|null}, timedOut, cursor, complete}`. Never on a
+ * control-tower computer. Throws nothing it does not catch per folder.
+ *
+ * ⛔ H4 (review finding 19): on a slow computer one run cannot check every
+ * registry folder, and a scan that starts at the first folder each time never
+ * reaches the rest. The child's B2.2 pass resumes after `s.scan_cursor` (the
+ * last folder checked), checks at least one folder in every run whatever time
+ * B2.4 and B2.3 took, and returns `cursor` (the last folder it checked) or, at
+ * the end of the list, `complete: true`: only then is last_scan_at written.
+ * B2.4 and B2.3 (short lists) start over on every run; out of time there, the
+ * child goes on to B2.2.
+ */
+function findSkillProposals(s, nowMs, deadlineAt, probe) {
+  const found = { queue: [], kept: [], keptKnown: {}, timedOut: false, cursor: null, complete: false };
+  const none = probe ? false : found;
+  const claude = homeClaudeDir();
+  if (!claude) return none;
+  const root = path.join(claude, "skills");
+  const rootIsDir = pathKind(root) === "dir";
+  if (rootIsDir && skillsComeFromControlTower(root)) return none;
+  const settled = (ms) => typeof ms === "number" && ms > 0 && nowMs - ms >= SKILL_PROPOSE_SETTLE_MS;
+  /** Was this entry queued after the folder last changed? Then it is this version. */
+  const queuedSince = (e, newest) => Boolean(e) && Date.parse(e.queued_at || "") >= newest;
+
+  // Out of time before B2.2 (child only): B2.2 still checks one folder.
+  let early = false;
+
+  // B2.4: the kept copies of 0.12.3 to 0.14.x, once each.
+  const editsRoot = skillEditsRoot();
+  if (editsRoot && pathKind(editsRoot) === "dir") {
+    let keys = [];
+    try {
+      keys = fs.readdirSync(editsRoot).sort();
+    } catch {
+      keys = [];
+    }
+    for (let i = 0; i < keys.length && !early; i++) {
+      const key = keys[i];
+      if (!SKILL_KEY_RE.test(key)) continue;
+      const keyDir = path.join(editsRoot, key);
+      if (pathKind(keyDir) !== "dir") continue;
+      let stamps = [];
+      try {
+        stamps = fs.readdirSync(keyDir).sort();
+      } catch {
+        continue;
+      }
+      for (let j = 0; j < stamps.length; j++) {
+        if (deadlinePassed(deadlineAt)) {
+          if (probe) return true;
+          found.timedOut = true;
+          early = true;
+          break;
+        }
+        const stamp = stamps[j];
+        const id = `${key}/${stamp}`;
+        if (!SKILL_EDIT_STAMP_RE.test(stamp) || Object.prototype.hasOwnProperty.call(s.kept_uploaded, id)) continue;
+        const record = readSkillEditRecord(path.join(keyDir, stamp));
+        if (!record || record.key !== key || record.seen_at) continue;
+        if (record.reason !== "edited" && record.reason !== "both_moved") continue;
+        const at = Date.parse(String(record.at || ""));
+        if (!Number.isFinite(at) || nowMs - at > SKILL_PROPOSE_KEPT_MAX_AGE_MS) continue;
+        const e = s.by_key[key];
+        if (e && e.local_sha === record.local && (e.proposal_id || SKILL_PROPOSAL_HOLDING.indexOf(e.status) === -1)) {
+          // Sent, or decided, as a live edit already: remembered, never sent twice.
+          if (!probe) found.keptKnown[id] = e.proposal_id || null;
+          continue;
+        }
+        if (probe) return true;
+        found.kept.push({
+          key,
+          stamp,
+          dir: path.join(keyDir, stamp),
+          base: SKILL_PROPOSAL_SHA_RE.test(String(record.base || "")) ? record.base : null,
+          at: new Date(at).toISOString(),
+        });
+      }
+    }
+  }
+  if (!rootIsDir) {
+    if (!probe) found.complete = true;
+    return probe ? false : found;
+  }
+
+  // B2.3: a new skill a tracked session wrote, once it has been left alone.
+  const registry = s.registry_keys ? new Set(s.registry_keys) : null;
+  if (registry && !early) {
+    const declined = new Set(s.share.declined);
+    const touched = readSkillTouched();
+    const names = Object.keys(touched.keys).sort();
+    for (let i = 0; i < names.length; i++) {
+      if (deadlinePassed(deadlineAt)) {
+        if (probe) return true;
+        found.timedOut = true;
+        early = true;
+        break;
+      }
+      const name = names[i];
+      if (registry.has(name) || declined.has(name)) continue;
+      if (!settled(Date.parse(touched.keys[name].last_at))) continue;
+      const info = inspectSkillFolder(root, name);
+      if (info.kind !== "foreign" && info.kind !== "adoptable") continue;
+      if (pathKind(path.join(info.dir, "SKILL.md")) !== "file") continue;
+      const newest = skillFolderNewestFileMtime(info.dir);
+      if (!settled(newest)) continue;
+      const e = s.by_key[name];
+      if (queuedSince(e, newest)) continue;
+      if (probe) return true;
+      const read = skillFolderRead(info.dir);
+      const local = read && (read.sha || read.md_sha);
+      if (!local || (e && e.local_sha === local)) continue;
+      found.queue.push({ key: name, local_sha: local, origin: "new_skill" });
+    }
+  }
+
+  // B2.2: an edit of an up-to-date registry skill, which the sync never sees.
+  // The child resumes after the cursor (H4); Stop's probe always looks from the top.
+  let names = [];
+  try {
+    names = fs.readdirSync(root).sort();
+  } catch {
+    names = [];
+  }
+  const cursor = probe ? null : s.scan_cursor;
+  let checked = 0;
+  for (let i = 0; i < names.length && i < CONTROL_TOWER_SCAN_MAX_ENTRIES; i++) {
+    const name = names[i];
+    if (cursor && name <= cursor) continue;
+    if ((probe || checked > 0) && deadlinePassed(deadlineAt)) {
+      if (probe) return true;
+      found.timedOut = true;
+      return found;
+    }
+    checked += 1;
+    found.cursor = name;
+    if (!SKILL_KEY_RE.test(name)) continue;
+    const info = inspectSkillFolder(root, name);
+    if (info.kind !== "ours" || info.marker.updating_to || !info.marker.sha) continue;
+    let markerMs = 0;
+    try {
+      markerMs = fs.lstatSync(path.join(info.dir, SKILL_MARKER_NAME)).mtimeMs;
+    } catch {
+      continue;
+    }
+    const newest = skillFolderNewestFileMtime(info.dir);
+    if (!(typeof newest === "number" && newest > markerMs + SKILL_PROPOSE_MARKER_SLACK_MS) || !settled(newest)) continue;
+    const e = s.by_key[name];
+    if (queuedSince(e, newest)) continue;
+    if (probe) return true;
+    const read = skillFolderRead(info.dir);
+    if (!read || read.sha === info.marker.sha || read.md_sha === info.marker.sha) continue;
+    const local = read.sha || read.md_sha;
+    if (!local || (e && e.local_sha === local)) continue;
+    found.queue.push({ key: name, local_sha: local, origin: "sync_edit" });
+  }
+  if (probe) return false;
+  found.cursor = null;
+  found.complete = true;
+  return found;
+}
+
+// ── B3: the detached uploader ──────────────────────────────────────────────
+
+/**
+ * Stop, after the skill sync: start the uploader when anything is queued, a
+ * poll is due, or the hourly scan has something ready to find, at most once
+ * every 15 minutes per computer, its slot claimed in skill-proposals.json first.
+ * A scan with nothing to find is recorded here, and no child is started. Never
+ * throws.
+ */
+function maybeStartSkillPropose() {
+  try {
+    if (!CONSENT_OK || !TOKEN) return false;
+    const nowMs = Date.now();
+    const s = readProposalState();
+    const childAt = Date.parse(s.child_at || "");
+    if (Number.isFinite(childAt) && childAt <= nowMs && nowMs - childAt < SKILL_PROPOSE_CHILD_EVERY_MS) return false;
+    let due =
+      Object.keys(s.by_key).some((k) => s.by_key[k].status === "queued") || skillProposalPollDue(s, nowMs);
+    if (!due && skillProposalScanDue(s, nowMs)) {
+      const hardExitAt = HARD_EXIT_AT || nowMs + HARD_EXIT_DEFAULT_MS;
+      const deadlineAt = Math.min(nowMs + SKILL_PROPOSE_PRECHECK_MS, hardExitAt - POST_TOOL_USE_SAVE_MARGIN_MS);
+      due = findSkillProposals(s, nowMs, deadlineAt, true) === true;
+      if (!due) {
+        // A whole look with nothing ready: a full pass, so a resumed one ends too.
+        updateProposalState((st) => {
+          st.last_scan_at = new Date(nowMs).toISOString();
+          st.scan_cursor = null;
+          return true;
+        });
+      }
+    }
+    if (!due) return false;
+    const nonce = require("crypto").randomBytes(8).toString("hex");
+    const claim = updateProposalState((st) => {
+      const prev = Date.parse(st.child_at || "");
+      if (Number.isFinite(prev) && prev <= nowMs && nowMs - prev < SKILL_PROPOSE_CHILD_EVERY_MS) return false;
+      st.child_at = new Date(nowMs).toISOString();
+      st.child_nonce = nonce;
+      return true;
+    });
+    if (!claim.written || readProposalState().child_nonce !== nonce) return false;
+    return startSkillPropose();
+  } catch {
+    return false;
+  }
+}
+
+/** The detached child (startSkillRepair's pattern, with SKILL_PROPOSE_EVENT). Never throws. */
+function startSkillPropose() {
+  try {
+    const child = childProcess.spawn(process.execPath, [__filename], {
+      detached: true,
+      stdio: ["pipe", "ignore", "ignore"],
+      windowsHide: true,
+      cwd: process.cwd(),
+      env: process.env,
+    });
+    child.on("error", () => {});
+    child.stdin.on("error", () => {});
+    child.stdin.end(JSON.stringify({ hook_event_name: SKILL_PROPOSE_EVENT, cwd: process.cwd() }));
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The request headers every skill-proposals call carries. */
+function skillProposalHeaders(withBody) {
+  return Object.assign(
+    withBody ? { "Content-Type": "application/json" } : {},
+    { Authorization: `Bearer ${TOKEN}` },
+    hookClientHeaders(),
+  );
+}
+
+/**
+ * What an upload's answer means here: `{kind: "ok", id, status}` (stored),
+ * `{kind: "refused", reason}` (400, 403 or 413: never sent again) or `{kind:
+ * "retry", reason}` (a network error, a timeout, 429, 5xx, anything else).
+ */
+function skillProposalAnswer(res) {
+  if (res && res.ok) {
+    const body = res.body || {};
+    const status =
+      typeof body.status === "string" && body.status !== "queued" && SKILL_PROPOSAL_STATUSES.indexOf(body.status) !== -1
+        ? body.status
+        : null;
+    const id = typeof body.id === "string" && SKILL_PROPOSAL_ID_RE.test(body.id.toLowerCase()) ? body.id.toLowerCase() : null;
+    if (body.ok === true && status && (id || status === "no_change")) return { kind: "ok", id, status };
+    return { kind: "retry", reason: "bad_body" };
+  }
+  const reason = (res && res.reason) || "network";
+  if (reason === "http_400" || reason === "http_403" || reason === "http_413") return { kind: "refused", reason };
+  return { kind: "retry", reason };
+}
+
+/** POST one proposal through the consent-gated, bounded request helper. Never throws. */
+async function postSkillProposal(body, deadlineAt) {
+  try {
+    const res = await skillsApiRequest(
+      SKILL_PROPOSALS_URL,
+      { method: "POST", headers: skillProposalHeaders(true), body: JSON.stringify(body) },
+      deadlineAt,
+    );
+    return skillProposalAnswer(res);
+  } catch {
+    return { kind: "retry", reason: "network" };
+  }
+}
+
+/** H3: does this file's basename look like a secret? */
+function looksLikeSecretFileName(rel) {
+  const base = String(rel).split("/").pop() || "";
+  const lower = base.toLowerCase();
+  return (
+    SKILL_PROPOSAL_SECRET_NAME_RE.test(base) ||
+    lower.indexOf(".env") === 0 ||
+    /\.(pem|key|p12|pfx)$/.test(lower) ||
+    lower.indexOf("id_rsa") === 0 ||
+    /storage.*state/.test(lower)
+  );
+}
+
+/**
+ * H3: the files an upload carries. A file in the marker's `files` list (the
+ * registry's own) always goes; a file the teammate added is left out when its
+ * name looks like a secret. `markerFiles` is [] for a folder with no marker.
+ */
+function proposalUploadFiles(files, markerFiles) {
+  const known = new Set(Array.isArray(markerFiles) ? markerFiles : []);
+  const out = {};
+  Object.keys(files || {}).forEach((rel) => {
+    if (!known.has(rel) && looksLikeSecretFileName(rel)) return;
+    out[rel] = files[rel];
+  });
+  return out;
+}
+
+/** The marker's `files` list of the live folder `key` when it is one of ours, else []. Never throws. */
+function liveMarkerFiles(key) {
+  try {
+    const claude = homeClaudeDir();
+    const root = claude ? path.join(claude, "skills") : null;
+    if (!root || pathKind(root) !== "dir") return [];
+    const info = inspectSkillFolder(root, key);
+    return info.kind === "ours" ? info.marker.files : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Change a queued entry only if it is still the one this run started from. */
+function updateQueuedEntry(key, localSha, change) {
+  return updateProposalState((s) => {
+    const e = s.by_key[key];
+    if (!e || e.status !== "queued" || e.local_sha !== localSha) return false;
+    return change(s, e) !== false;
+  });
+}
+
+/**
+ * Upload one queued live entry (B3): the folder re-read now by the walk the sha
+ * uses; a folder that is gone, linked or no longer edited drops the entry; a sha
+ * that moved replaces the entry's. True when a request was made.
+ */
+async function uploadLiveProposal(key, entry, deadlineAt) {
+  const drop = () =>
+    updateQueuedEntry(key, entry.local_sha, (s) => {
+      delete s.by_key[key];
+    });
+  const fail = () =>
+    updateQueuedEntry(key, entry.local_sha, (s, e) => {
+      e.status = "failed";
+    });
+  const claude = homeClaudeDir();
+  const root = claude ? path.join(claude, "skills") : null;
+  if (!root || pathKind(root) !== "dir") return false;
+  const info = inspectSkillFolder(root, key);
+  let kind = "new";
+  let base = null;
+  if (info.kind === "ours") {
+    if (info.marker.updating_to) return false; // our own write is under way: a later run
+    kind = "edit";
+    base = SKILL_PROPOSAL_SHA_RE.test(info.marker.sha) ? info.marker.sha : null;
+  } else if ((info.kind === "adoptable" || info.kind === "foreign") && entry.origin !== "sync_edit") {
+    kind = entry.origin === "kept_copy" ? "edit" : "new";
+  } else {
+    drop();
+    return false;
+  }
+  if (pathKind(path.join(info.dir, "SKILL.md")) !== "file") {
+    drop();
+    return false;
+  }
+  const read = skillFolderRead(info.dir);
+  if (!read || (info.kind === "ours" && (read.sha === info.marker.sha || read.md_sha === info.marker.sha))) {
+    drop(); // nothing left to propose: the edit was undone
+    return false;
+  }
+  if (!read.files) {
+    fail(); // a SKILL.md over the registry's per-file limit: OW would refuse it
+    return false;
+  }
+  const local = read.sha;
+  if (local !== entry.local_sha) {
+    const moved = updateQueuedEntry(key, entry.local_sha, (s, e) => {
+      e.local_sha = local;
+    });
+    if (!moved.written) return false;
+  }
+  const files = proposalUploadFiles(read.files, info.kind === "ours" ? info.marker.files : []);
+  const answer = await postSkillProposal(
+    { skill_key: key, kind, origin: entry.origin, base_sha: base, files, note: null, machine_id: setupMachineId() },
+    deadlineAt,
+  );
+  const nowIso = new Date().toISOString();
+  updateQueuedEntry(key, local, (s, e) => {
+    if (answer.kind === "ok") {
+      e.proposal_id = answer.id;
+      e.status = answer.status;
+      e.uploaded_at = nowIso;
+      e.first_failed_at = null;
+    } else if (answer.kind === "refused") {
+      e.status = "failed";
+    } else {
+      if (!e.first_failed_at) e.first_failed_at = nowIso;
+      e.fails += 1;
+    }
+  });
+  return true;
+}
+
+/** Upload one kept copy (B2.4); remembered in kept_uploaded unless it should be tried again. */
+async function uploadKeptProposal(k, deadlineAt) {
+  const remember = (value) =>
+    updateProposalState((s) => {
+      s.kept_uploaded[`${k.key}/${k.stamp}`] = value;
+      return true;
+    });
+  if (pathKind(k.dir) !== "dir" || pathKind(path.join(k.dir, "SKILL.md")) !== "file") {
+    remember(null);
+    return false;
+  }
+  const read = skillFolderRead(k.dir);
+  if (!read || !read.files) {
+    remember(null);
+    return false;
+  }
+  const files = proposalUploadFiles(read.files, liveMarkerFiles(k.key));
+  const answer = await postSkillProposal(
+    { skill_key: k.key, kind: "edit", origin: "kept_copy", base_sha: k.base, files, note: null, machine_id: setupMachineId() },
+    deadlineAt,
+  );
+  if (answer.kind !== "retry") remember(answer.kind === "ok" ? answer.id : null);
+  return true;
+}
+
+/** The queued entries and the scan's kept copies, oldest first, at most 10 requests. */
+async function uploadSkillProposals(found, deadlineAt) {
+  const s = readProposalState();
+  const items = [];
+  Object.keys(s.by_key).forEach((key) => {
+    const e = s.by_key[key];
+    if (e.status === "queued") items.push({ key, at: Date.parse(e.queued_at || "") || 0, entry: e });
+  });
+  (found ? found.kept : []).forEach((k) => items.push({ key: k.key, at: Date.parse(k.at) || 0, kept: k }));
+  items.sort((a, b) => a.at - b.at || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  let sent = 0;
+  for (let i = 0; i < items.length && sent < SKILL_PROPOSE_MAX_UPLOADS; i++) {
+    if (deadlinePassed(deadlineAt - 1000)) break;
+    const item = items[i];
+    const made = item.kept ? await uploadKeptProposal(item.kept, deadlineAt) : await uploadLiveProposal(item.key, item.entry, deadlineAt);
+    if (made) sent += 1;
+  }
+  return sent;
+}
+
+/** The rows of a GET /api/ext/skill-proposals answer. */
+function proposalRowsOf(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const list = Array.isArray(b.proposals) ? b.proposals : Array.isArray(b.rows) ? b.rows : Array.isArray(b.items) ? b.items : [];
+  return list.filter((r) => r && typeof r === "object" && !Array.isArray(r));
+}
+
+/**
+ * Copy OW's statuses into by_key by proposal id. A proposal that became merged
+ * gives the hourly sync slot back, so the next Stop's sync takes the team copy.
+ */
+function applyProposalRows(rows) {
+  const byId = new Map();
+  rows.forEach((r) => {
+    const id = typeof r.id === "string" ? r.id.toLowerCase() : "";
+    if (!SKILL_PROPOSAL_ID_RE.test(id)) return;
+    if (typeof r.status !== "string" || r.status === "queued" || SKILL_PROPOSAL_STATUSES.indexOf(r.status) === -1) return;
+    byId.set(id, r.status);
+  });
+  if (byId.size === 0) return;
+  let merged = false;
+  updateProposalState((s) => {
+    let changed = false;
+    Object.keys(s.by_key).forEach((key) => {
+      const e = s.by_key[key];
+      if (!e.proposal_id || e.status === "queued" || !byId.has(e.proposal_id)) return;
+      const next = byId.get(e.proposal_id);
+      if (next === e.status) return;
+      if (next === "merged") merged = true;
+      e.status = next;
+      changed = true;
+    });
+    return changed;
+  });
+  if (merged) reopenSkillSyncSlot();
+}
+
+/** Give the hourly skill-sync slot back, as skillsSyncNow does. Never throws. */
+function reopenSkillSyncSlot() {
+  try {
+    const file = skillsSyncStateFile();
+    if (!file || pathKind(file) !== "file") return;
+    const prev = readJsonObject(file);
+    if (!prev) return;
+    prev.last_attempt_at = new Date(0).toISOString();
+    writeFileAtomic(file, `${JSON.stringify(prev)}\n`, path.dirname(file));
+  } catch {
+    /* the hourly sync takes it */
+  }
+}
+
+/** GET this member's proposals; `since` an ISO time or null (OW's default). */
+async function fetchSkillProposals(since, deadlineAt) {
+  const url = since ? `${SKILL_PROPOSALS_URL}?since=${encodeURIComponent(since)}` : SKILL_PROPOSALS_URL;
+  return skillsApiRequest(url, { method: "GET", headers: skillProposalHeaders(false) }, deadlineAt);
+}
+
+/** B3 step 3: ask about the open proposals, at most every 15 minutes. Never throws. */
+async function pollSkillProposals(deadlineAt) {
+  try {
+    const nowMs = Date.now();
+    const s = readProposalState();
+    if (!skillProposalPollDue(s, nowMs)) return;
+    // As far back as the oldest open proposal, so a long hold is still answered.
+    let oldest = nowMs;
+    Object.keys(s.by_key).forEach((key) => {
+      const e = s.by_key[key];
+      if (!e.proposal_id || SKILL_PROPOSAL_OPEN.indexOf(e.status) === -1) return;
+      const at = Date.parse(e.uploaded_at || e.queued_at || "");
+      if (Number.isFinite(at) && at < oldest) oldest = at;
+    });
+    const since = new Date(Math.max(oldest - 86400000, nowMs - 89 * 86400000)).toISOString();
+    // Claimed before the request, so a slow OW is asked at most this often too.
+    updateProposalState((st) => {
+      st.last_poll_at = new Date(nowMs).toISOString();
+      return true;
+    });
+    const res = await fetchSkillProposals(since, deadlineAt);
+    if (res.ok) applyProposalRows(proposalRowsOf(res.body));
+  } catch {
+    /* the next poll */
+  }
+}
+
+/**
+ * The child (SKILL_PROPOSE_EVENT): the scans when due, then the uploads, then
+ * the poll. Prints nothing. main() has passed the consent gate and armed the
+ * hard exit before this runs.
+ */
+async function runSkillProposals() {
+  try {
+    if (!CONSENT_OK || !TOKEN) return;
+    const startedAt = Date.now();
+    const hardExitAt = HARD_EXIT_AT || startedAt + SKILL_PROPOSE_HARD_EXIT_MS;
+    const endAt = Math.min(startedAt + SKILL_PROPOSE_HARD_EXIT_MS - 2000, hardExitAt - 1500);
+    const nowIso = new Date(startedAt).toISOString();
+    let found = null;
+    if (skillProposalScanDue(readProposalState(), startedAt)) {
+      found = findSkillProposals(readProposalState(), startedAt, Math.min(startedAt + 8000, endAt - 6000), false);
+      const editsRoot = skillEditsRoot();
+      updateProposalState((s) => {
+        found.queue.forEach((q) => {
+          const e = s.by_key[q.key];
+          if (e && e.local_sha === q.local_sha) return;
+          s.by_key[q.key] = queuedProposalEntry(q.local_sha, q.origin, nowIso);
+        });
+        Object.keys(found.keptKnown).forEach((id) => {
+          s.kept_uploaded[id] = found.keptKnown[id];
+        });
+        // A copy pruned from disk needs no memory.
+        Object.keys(s.kept_uploaded).forEach((id) => {
+          const parts = id.split("/");
+          if (!editsRoot || pathKind(path.join(editsRoot, parts[0], parts[1])) === "missing") delete s.kept_uploaded[id];
+        });
+        // H4: last_scan_at only after a full pass; otherwise the next run
+        // resumes after the last folder this one checked.
+        if (found.complete) {
+          s.last_scan_at = nowIso;
+          s.scan_cursor = null;
+        } else if (found.cursor) {
+          s.scan_cursor = found.cursor;
+        }
+        return true;
+      });
+    }
+    await uploadSkillProposals(found, endAt);
+    await pollSkillProposals(endAt);
+  } catch {
+    /* silent */
+  }
+}
+
+// ── B5: the member's own skills (SessionStart) ─────────────────────────────
+
+/**
+ * The skills only this computer has: real folders under ~/.claude/skills with a
+ * real SKILL.md, a name that is a skill key (so never hidden), not a key the
+ * registry listed in the last sync, not ours or linked, not shared or declined
+ * before, and not already sent (no by_key entry). Null when the registry's keys
+ * are not known yet (no sync on this computer so far), or on a control-tower
+ * computer. Never throws.
+ */
+function ownSkillCandidates(s) {
+  try {
+    if (!s.registry_keys) return null;
+    const claude = homeClaudeDir();
+    if (!claude) return null;
+    const root = path.join(claude, "skills");
+    if (pathKind(root) !== "dir" || skillsComeFromControlTower(root)) return null;
+    const listed = new Set(s.registry_keys);
+    const skip = new Set(s.share.shared.concat(s.share.declined));
+    const out = [];
+    const names = fs.readdirSync(root).sort();
+    for (let i = 0; i < names.length && i < CONTROL_TOWER_SCAN_MAX_ENTRIES; i++) {
+      const name = names[i];
+      if (!SKILL_KEY_RE.test(name) || listed.has(name) || skip.has(name) || s.by_key[name]) continue;
+      const info = inspectSkillFolder(root, name);
+      if (info.kind !== "foreign" && info.kind !== "adoptable") continue;
+      if (pathKind(info.dir) !== "dir" || pathKind(path.join(info.dir, "SKILL.md")) !== "file") continue;
+      out.push(name);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** OWN_SKILLS_NOTICE with its three placeholders filled, in one pass. */
+function ownSkillsNoticeText(names) {
+  const n = names.length;
+  const shown = names.slice(0, SKILL_SHARE_NOTICE_MAX_NAMES);
+  const more = n - shown.length;
+  const values = {
+    n: String(n),
+    s: n === 1 ? "" : "s",
+    names: shown.join(", ") + (more > 0 ? ` and ${more} more` : ""),
+  };
+  return OWN_SKILLS_NOTICE.replace(/\$\{(n|s|names)\}/g, (m, k) => values[k]);
+}
+
+/**
+ * B5: the notice for this session, or null. Only in a tracked session a person
+ * is at (not Codex, not sdk, not MM_UNATTENDED), at most once in 7 days per
+ * computer, and only with candidates. The caller decides the rank: it is shown
+ * only where no other notice is. Never throws.
+ */
+function ownSkillsNoticeNow(nowMs) {
+  try {
+    if (!CONSENT_OK || !TOKEN || CODEX_RUN || !isPersonSession()) return null;
+    const s = readProposalState();
+    const asked = Date.parse(s.share.asked_at || "");
+    if (Number.isFinite(asked) && asked <= nowMs && nowMs - asked < SKILL_SHARE_NOTICE_EVERY_MS) return null;
+    const names = ownSkillCandidates(s);
+    return names && names.length > 0 ? ownSkillsNoticeText(names) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The notice reached the session: not again for 7 days. Never throws. */
+function markOwnSkillsAsked(nowMs) {
+  try {
+    updateProposalState((s) => {
+      s.share.asked_at = new Date(nowMs).toISOString();
+      return true;
+    });
+  } catch {
+    /* it may show again */
+  }
+}
+
+// ── B4: the CLI ────────────────────────────────────────────────────────────
+
+/** One line of text from OW: no line breaks or control characters. */
+function proposalCliText(value) {
+  return typeof value === "string" ? value.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim() : "";
+}
+
+const SKILL_PROPOSAL_CLI_USAGE = {
+  "--share-skill": 'usage: node worklog-hook.js --share-skill <skill name> [--note "<one-line reason>"]',
+  "--share-skill-decline": "usage: node worklog-hook.js --share-skill-decline <skill name>",
+  "--skill-proposals": "usage: node worklog-hook.js --skill-proposals",
+  "--skill-proposal-seen": "usage: node worklog-hook.js --skill-proposal-seen <proposal id>",
+};
+
+/**
+ * `--share-skill <name> [--note "<text>"]`, `--share-skill-decline <name>`,
+ * `--skill-proposals` and `--skill-proposal-seen <id>` (B4). Plain lines; 0 done,
+ * 1 failed (an untracked folder included), 2 a usage error. Never reads stdin.
+ * Every request goes through the consent gate, the token and skillsApiRequest.
+ */
+async function skillProposalCli(argv) {
+  const emit = (line) => {
+    try {
+      process.stdout.write(`${line}\n`);
+    } catch {
+      /* a closed stdout is not a reason to fail */
+    }
+  };
+  const cmd = String(argv[0] == null ? "" : argv[0]);
+  const usage = SKILL_PROPOSAL_CLI_USAGE[cmd];
+  if (!usage) {
+    Object.keys(SKILL_PROPOSAL_CLI_USAGE).forEach((k) => emit(SKILL_PROPOSAL_CLI_USAGE[k]));
+    return 2;
+  }
+  const arg = String(argv[1] == null ? "" : argv[1]);
+  const isName = SKILL_KEY_RE.test(arg) && Boolean(safeSkillPathParts(arg));
+  let note = null;
+  let shapeOk = false;
+  if (cmd === "--share-skill") {
+    shapeOk = isName && (argv.length === 2 || (argv.length === 4 && argv[2] === "--note"));
+    if (shapeOk && argv.length === 4) {
+      note = proposalCliText(String(argv[3])).slice(0, SKILL_PROPOSAL_NOTE_MAX) || null;
+    }
+  } else if (cmd === "--share-skill-decline") {
+    shapeOk = isName && argv.length === 2;
+  } else if (cmd === "--skill-proposals") {
+    shapeOk = argv.length === 1;
+  } else {
+    shapeOk = argv.length === 2 && SKILL_PROPOSAL_ID_RE.test(arg.toLowerCase());
+  }
+  if (!shapeOk) {
+    emit(usage);
+    return 2;
+  }
+
+  // ⛔ The consent gate, as for every event: an untracked folder sends nothing.
+  let allowed = false;
+  try {
+    allowed = evaluateConsent().allowed === true;
+  } catch {
+    allowed = false;
+  }
+  if (!allowed) {
+    emit(SKILL_PROPOSAL_NOT_TRACKED);
+    return 1;
+  }
+  CONSENT_OK = true;
+
+  if (cmd === "--share-skill-decline") {
+    const r = updateProposalState((s) => {
+      if (s.share.declined.indexOf(arg) === -1) s.share.declined.push(arg);
+      return true;
+    });
+    if (!r.written) {
+      emit("error: state_not_written");
+      return 1;
+    }
+    emit(`Noted: ${arg} stays yours.`);
+    return 0;
+  }
+
+  if (!TOKEN) {
+    emit("error: no_token");
+    return 1;
+  }
+  // A runtime warning (an older node's fetch) would land in the thread's shell
+  // output. Every request carries its own deadline; the backstop answers for a
+  // command still held 30 seconds on, and nothing it started may print after
+  // that. Its code goes back through main() as process.exitCode: a hook never
+  // calls process.exit with anything but 0 (the fail-open guard).
+  process.removeAllListeners("warning");
+  let answered = false;
+  const say = (line) => {
+    if (!answered) emit(line);
+  };
+  let backstop = null;
+  const late = new Promise((resolve) => {
+    backstop = setTimeout(() => {
+      say("error: deadline");
+      answered = true;
+      resolve(1);
+    }, SKILL_PROPOSAL_CLI_HARD_EXIT_MS);
+    if (backstop && typeof backstop.unref === "function") backstop.unref();
+  });
+  try {
+    const code = await Promise.race([skillProposalCliSend(cmd, arg, note, say), late]);
+    answered = true;
+    return code;
+  } finally {
+    if (backstop) clearTimeout(backstop);
+  }
+}
+
+/** The request half of skillProposalCli, after its shape, consent and token checks. */
+async function skillProposalCliSend(cmd, arg, note, emit) {
+  const deadlineAt = Date.now() + (cmd === "--share-skill" ? 20000 : 10000);
+
+  if (cmd === "--share-skill") {
+    const claude = homeClaudeDir();
+    const root = claude ? path.join(claude, "skills") : null;
+    const info = root && pathKind(root) === "dir" ? inspectSkillFolder(root, arg) : { kind: "missing" };
+    if (info.kind === "missing") {
+      emit("error: no_such_skill");
+      return 1;
+    }
+    // ⛔ Never from a linked folder.
+    if (info.kind === "linked") {
+      emit("error: linked");
+      return 1;
+    }
+    if (pathKind(info.dir) !== "dir" || pathKind(path.join(info.dir, "SKILL.md")) !== "file") {
+      emit("error: no_skill_md");
+      return 1;
+    }
+    const read = skillFolderRead(info.dir);
+    if (!read || !read.files) {
+      emit("error: too_large");
+      return 1;
+    }
+    const answer = await postSkillProposal(
+      {
+        skill_key: arg,
+        kind: info.kind === "ours" || info.kind === "adoptable" ? "edit" : "new",
+        origin: "shared",
+        base_sha: info.kind === "ours" && SKILL_PROPOSAL_SHA_RE.test(info.marker.sha) ? info.marker.sha : null,
+        files: proposalUploadFiles(read.files, info.kind === "ours" ? info.marker.files : []),
+        note,
+        machine_id: setupMachineId(),
+      },
+      deadlineAt,
+    );
+    if (answer.kind !== "ok") {
+      emit(`error: ${answer.reason}`);
+      return 1;
+    }
+    const nowIso = new Date().toISOString();
+    updateProposalState((s) => {
+      if (s.share.shared.indexOf(arg) === -1) s.share.shared.push(arg);
+      s.share.declined = s.share.declined.filter((n) => n !== arg);
+      s.by_key[arg] = Object.assign(queuedProposalEntry(read.sha, "shared", nowIso), {
+        proposal_id: answer.id,
+        status: answer.status,
+        uploaded_at: nowIso,
+      });
+      return true;
+    });
+    if (!answer.id) {
+      emit(`status: ${answer.status}`);
+      return 0;
+    }
+    emit(`Sent ${arg} for review (proposal ${answer.id.slice(0, 8)}).`);
+    return 0;
+  }
+
+  if (cmd === "--skill-proposals") {
+    const res = await fetchSkillProposals(null, deadlineAt);
+    if (!res.ok) {
+      emit(`error: ${res.reason}`);
+      return 1;
+    }
+    const rows = proposalRowsOf(res.body);
+    applyProposalRows(rows);
+    rows.forEach((r) => {
+      const text = proposalCliText(r.reason) || proposalCliText(r.summary);
+      emit(`${proposalCliText(r.id).slice(0, 8)}  ${proposalCliText(r.skill_key)}  ${proposalCliText(r.status)}  ${text}`.trimEnd());
+    });
+    return 0;
+  }
+
+  // --skill-proposal-seen
+  const res = await skillsApiRequest(
+    SKILL_PROPOSALS_SEEN_URL,
+    { method: "POST", headers: skillProposalHeaders(true), body: JSON.stringify({ ids: [arg.toLowerCase()] }) },
+    deadlineAt,
+  );
+  if (!res.ok || !res.body || res.body.ok !== true) {
+    emit(`error: ${res.ok ? "bad_body" : res.reason}`);
+    return 1;
+  }
+  emit("Marked seen.");
+  return 0;
 }
 
 // ── the check ──────────────────────────────────────────────────────────────
@@ -11420,13 +12908,16 @@ async function handleStop(payload) {
   // ⛔ The token counts (0.13.0) run beside both, inside the same hard exit: their
   // read has its own TOKENS_STOP_PARSE_MS budget and their POST ends before the
   // hard exit, so the Stop takes no longer than it did. See TOKEN USAGE.
+  //
+  // ⛔ SKILL PROPOSALS (0.15.0): after the sync, its uploader is started as a
+  // detached child when there is work for it. Stop never waits on an upload.
   await Promise.allSettled([
     postWorklog({
       contentMd: `🛑 Session ended. ${state.toolCallCount} tool call(s) streamed.`,
       source: worklogSource(),
       declarations: declarationFields(sessionId, state, null),
     }),
-    syncRegistrySkills(),
+    syncRegistrySkills().then(() => maybeStartSkillPropose()),
     // ⛔ CODEX SESSIONS (0.14.0): no token counts from a Codex run.
     CODEX_RUN ? Promise.resolve() : reportSessionTokens(payload),
   ]);
@@ -11746,7 +13237,18 @@ async function handleSessionStart(payload) {
   // list may put the built-in copy first instead, so that "start task
   // <number>" stays inside the preview — see renderTerminalTasks.)
   const lane = renderChipLane(feed, trackingInstructionFor(feed));
-  const emitted = await emitSessionContext(composeSessionContext(lane.instruction, lane.block, lane.tail));
+  // ⛔ SKILL PROPOSALS (0.15.0, B5): the member's own skills, at the LOWEST rank
+  // of the one-notice-per-session ranking: only when the served text carries no
+  // notice of its own. After the chip block or short list and before any task
+  // packets, so it never displaces the instruction or the list. A session that
+  // defers its chip lane to the first prompt is asked there, where that prompt's
+  // feed decides the rank (handleUserPromptSubmit).
+  const nowMs = Date.now();
+  const ownNotice =
+    chipPlan === "serve_now" && (!feed || promptLeadFor(feed) === "") ? ownSkillsNoticeNow(nowMs) : null;
+  const block = [lane.block, ownNotice].filter((part) => typeof part === "string" && part !== "").join("\n\n");
+  const emitted = await emitSessionContext(composeSessionContext(lane.instruction, block, lane.tail));
+  if (ownNotice && emitted) markOwnSkillsAsked(nowMs);
   await recordChipLane(payload, feed, lane, emitted);
   await setupReport;
 }
@@ -11857,12 +13359,20 @@ async function handleUserPromptSubmit(payload) {
     return;
   }
   const feed = await fetchChipFeedForSession("UserPromptSubmit");
-  if (!feed) return;
-  const lane = renderChipLane(feed, promptLeadFor(feed));
-  const text = composePromptContext(lane.instruction, lane.block, lane.tail);
+  // ⛔ SKILL PROPOSALS (0.15.0, B5): the deferred session's notice, at the
+  // lowest rank: only when this feed carries no notice of its own.
+  const nowMs = Date.now();
+  const ownNotice = !feed || promptLeadFor(feed) === "" ? ownSkillsNoticeNow(nowMs) : null;
+  if (!feed && !ownNotice) return;
+  const lane = feed
+    ? renderChipLane(feed, promptLeadFor(feed))
+    : { instruction: "", block: "", tail: "", deliveries: [] };
+  const block = [lane.block, ownNotice].filter((part) => typeof part === "string" && part !== "").join("\n\n");
+  const text = composePromptContext(lane.instruction, block, lane.tail);
   if (!text) return;
   const emitted = await emitHookContext("UserPromptSubmit", text);
-  await recordChipLane(payload, feed, lane, emitted);
+  if (ownNotice && emitted) markOwnSkillsAsked(nowMs);
+  if (feed) await recordChipLane(payload, feed, lane, emitted);
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -12418,6 +13928,7 @@ function hardExitMsFor(raw) {
   try {
     const parsed = safeJsonParse(raw);
     if (parsed && parsed.hook_event_name === SKILL_REPAIR_EVENT) return SKILL_REPAIR_HARD_EXIT_MS;
+    if (parsed && parsed.hook_event_name === SKILL_PROPOSE_EVENT) return SKILL_PROPOSE_HARD_EXIT_MS;
     return parsed && (parsed.hook_event_name === "SessionStart" || parsed.hook_event_name === "UserPromptSubmit")
       ? HARD_EXIT_SESSION_START_MS
       : HARD_EXIT_DEFAULT_MS;
@@ -12457,6 +13968,22 @@ async function main() {
   if (argv.length > 0 && String(argv[0]).indexOf("--skill-edit-seen") === 0) {
     try {
       process.exitCode = skillEditSeenCli(argv);
+    } catch {
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  // ⛔ `--share-skill`, `--share-skill-decline`, `--skill-proposals` and
+  // `--skill-proposal-seen` (0.15.0, SKILL PROPOSALS): management commands with
+  // their own exit codes that never read stdin. Any spelling starting with either
+  // prefix lands here, so `--share-skill=x` is refused rather than read as an event.
+  if (
+    argv.length > 0 &&
+    (String(argv[0]).indexOf("--share-skill") === 0 || String(argv[0]).indexOf("--skill-proposal") === 0)
+  ) {
+    try {
+      process.exitCode = await skillProposalCli(argv);
     } catch {
       process.exitCode = 1;
     }
@@ -12615,6 +14142,10 @@ async function main() {
       // ⛔ The setup report's repair (0.12.0): never a Claude Code event, only
       // this hook's own detached child, and through the same consent gate.
       await skillsSyncNow();
+    } else if (event === SKILL_PROPOSE_EVENT) {
+      // ⛔ The skill-proposal uploader (0.15.0): Stop's detached child, through
+      // the same consent gate. See SKILL PROPOSALS.
+      await runSkillProposals();
     }
   } catch (err) {
     debugLog(`unhandled error for event=${event}: ${err && err.stack}`);

@@ -1,6 +1,6 @@
 import type { Elements, EngineInterface, Register, RenderElement } from 'claude-code'
 
-import type { MmBand, MmBrowser, MmBrowserAsk, MmBrowserChoice, MmCard, MmFolds, MmTeamNow, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTeam, MmTrack, MmTrackLine, MmView } from '../types'
+import type { MmBand, MmBrowser, MmBrowserAsk, MmBrowserChoice, MmCard, MmCardAsked, MmFolds, MmTeamNow, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTeam, MmTrack, MmTrackLine, MmView } from '../types'
 
 import {
   INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, ownerPrivateProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients,
@@ -18,7 +18,7 @@ import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
   LABEL, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, secondThreadSentence, startKickoff, threadLink, titleLooksLike, titleSuggestion,
-  REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, chipTitle, ownPackage, seenNow, selfUpdateAt, selfUpdateText, waitingText,
+  REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, chipTitle, ownPackage, readyPackage, seenNow, selfUpdateAt, selfUpdateText, updatePace, waitingText,
   FRESH_THREAD_BYTES, draftsComing, freshParagraph, prepDue, replacedBy,
   buildHeading, buildMore, buildOf, buildShown,
   teamCount, teamHeading, teamOf, teamPane, teamPerson,
@@ -74,7 +74,8 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 //    kickoffText's `auto`, the marker first), through Update's own send and guards, once this bridge has seen the
 //    client unchanged for AUTO_QUIET_MS ((0.7.14) never waiting for its drafts: mail goes in saying they follow, and they
 //    go in as a second update when ready; a thread they never reach is asked for prep AUTO_NO_DRAFTS_MS after the mail
-//    was first seen), within AUTO_UPDATES_PER_SYNC from one sync and AUTO_UPDATES_PER_HOUR and AUTO_UPDATES_PER_DAY
+//    was first seen; (0.7.76) and a reply package the thread lacks, its drafts stored and finished, goes at once, set off
+//    by OW's drafts pulse within a minute: `updatePace`, `pulsePass`), within AUTO_UPDATES_PER_SYNC from one sync and AUTO_UPDATES_PER_HOUR and AUTO_UPDATES_PER_DAY
 //    on this computer, never into a thread the person used in the last AUTO_IDLE_MS, never from a thread into itself,
 //    and only where the time-tracking hook counts it as automatic (`autoUpdates`). It stamps nothing and claims
 //    nothing: an automatic send is nobody's act (R11).
@@ -243,7 +244,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.74'
+export const VERSION = '0.7.77'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -274,6 +275,20 @@ const PANE_VIEW = 'mm-view'
 const PANE_QUEUE = 'mm-queue'
 const SYNC_MS = 5 * 60_000
 const TICK_MS = 60_000
+/**
+ * (0.7.76, Rob 2026-11-24: "Update should have hit as soon as the transcript finished processing") How often the thread that
+ * polls asks OW's drafts pulse (`GET /drafts-pulse`, `pulsePass`): a key that changes when a reply draft is written or a
+ * package's build ends. A changed key syncs at once, so new drafts reach the feed within a minute instead of at the next of
+ * the five-minute syncs (SYNC_MS). Three small reads on OW, against the closeout's dozens.
+ */
+const PULSE_MS = 60_000
+/** (0.7.76) After OW answers the pulse 404 or 405 (an OW without the route yet), it is not asked again for this long. */
+const PULSE_MISSING_MS = 30 * 60_000
+/**
+ * (0.7.76) A pulse answered this recently says this computer reads an OW that marks a package still being built (the feed's
+ * `building`, the same OW release): only then does a finished package go at once (`updatePace`).
+ */
+const PULSE_KNOWN_MS = 10 * 60_000
 /** (0.5.3) How often a thread withdraws its own chips that are no longer wanted, from the store alone (`chipsPass`). */
 const CHIPS_PASS_MS = 15_000
 /** How long the sync's lease (`mm.lease`) holds after its last write: a holder that stops writing it lets it run out after this. */
@@ -1482,9 +1497,9 @@ function idHash(id: string): number {
 }
 
 /**
- * (0.7.74) A thread's own fraction of a millisecond, 1 to 4095 parts of 4096 by its id, added to a time it writes as a claim
+ * (0.7.77) A thread's own fraction of a millisecond, 1 to 4095 parts of 4096 by its id, added to a time it writes as a claim
  * (`capNotice`): read back, the time says whose claim it is, with the store's value still a time. Exact for any time before
- * 2039 (below 2^41 ms a double holds 2^-12 ms). Two threads that share a fraction both act, as before 0.7.74.
+ * 2039 (below 2^41 ms a double holds 2^-12 ms). Two threads that share a fraction both act, as before 0.7.77.
  */
 const claimMark = (id: string): number => (1 + (idHash(id) % 4_095)) / 4_096
 
@@ -4411,8 +4426,120 @@ function noteRow($: EngineInterface, row: string, kind: RowKind): void {
  */
 export const DRAW_FAILED = (label: string): string =>
   `[Massmarket bridge] The card for Package ${label} could not be drawn in this thread. Print the whole page now, as client-reply-prep §9.3 says for a card that is not ready.`
-/** (0.7.40) The tags the thread was told of (`DRAW_FAILED`): once a tag a session, so it can never repeat or loop. */
+/**
+ * (0.7.40) The tags the thread was told of (`DRAW_FAILED`): once a tag a session, so it can never repeat or loop. (0.7.75) Kept on the
+ * thread's record too (`CardShown.told`), so a new process of the thread tells none of them again.
+ */
 const drawFailTold = new Set<string>()
+
+/**
+ * (0.7.75) What this thread's card owes the screen, kept in the plugin's store by the thread's session id, so that a new process of the
+ * thread, or this one after a reload of the bridge's code, has it too: `asked`, the live `mm card` call (`askedOf` keeps it in `$.state`,
+ * which outlives a reload of the code but never the process); `line`, the reply row that took its card; `told`, the tags the thread was
+ * told of. Spotlight Dentistry thread, 2026-11-19, from the app's log (ET): `mm card` answered ready at 11:08:31 AM; the app reloaded the
+ * plugins at 11:10, 11:17 and 11:23, which emptied this module (the owed check, the line, the tags told), and evicted the process at
+ * 11:23:45, which emptied the state too. Rob opened the thread at 1:01 PM. A new process drew it with no live call on record: the call's
+ * row drew one dim line, no line took a card, nothing was owed and no note came. He saw one line, no package and no button. The session id
+ * is the transcript's, the same in every process of a thread: that thread's one transcript file was written from 11:00 AM to 1:25 PM.
+ */
+type CardShown = { asked: MmCardAsked; line?: string; told: string[] }
+/** (0.7.75) The threads whose record is kept, the oldest dropped first; and the tags told kept on each, the newest. */
+const CARD_SHOWN_MAX = 200
+const TAGS_TOLD_MAX = 30
+/** (0.7.75) Each thread's record as this process read it from the store, or has changed it since, by session id. */
+const shownKept = new Map<string, CardShown | null>()
+
+/** (0.7.75) A record as the store holds it, or null for anything else: none, another shape, a damaged file. */
+function readShown(v: unknown): CardShown | null {
+  const r = v && typeof v === 'object' ? (v as Partial<CardShown>) : null
+  const a = r?.asked
+  if (!r || !a || typeof a !== 'object' || typeof a.packageId !== 'string' || typeof a.toolUseId !== 'string' || !a.toolUseId) return null
+  if (typeof a.at !== 'number' || !/^[0-9a-f]{12}$/.test(String(a.label))) return null
+  return {
+    asked: { packageId: a.packageId, label: a.label, toolUseId: a.toolUseId, at: a.at },
+    ...(typeof r.line === 'string' && r.line ? { line: r.line } : {}),
+    told: Array.isArray(r.told) ? r.told.filter((t): t is string => typeof t === 'string' && /^[0-9a-f]{12}$/.test(t)).slice(-TAGS_TOLD_MAX) : [],
+  }
+}
+
+/**
+ * (0.7.75) This thread's record: read from the store once a process (and again after a reload of the code), then as this process keeps it.
+ * A tag it says was told is never told here (`drawFailTold`). Null with none, or a store that cannot be read. Reads only. Never throws.
+ */
+async function shownRec($: EngineInterface): Promise<CardShown | null> {
+  try {
+    const sid = await instanceId($)
+    if (!sid) return null
+    if (!shownKept.has(sid)) {
+      const read = readShown((await storeGet<Record<string, unknown>>($, 'mm.cardShown', {}))[sid])
+      // a change this process made while the store was read stands
+      if (!shownKept.has(sid)) shownKept.set(sid, read)
+    }
+    const rec = shownKept.get(sid) ?? null
+    for (const label of rec?.told ?? []) drawFailTold.add(label)
+    return rec
+  } catch {
+    return null
+  }
+}
+
+/**
+ * (0.7.75) A change to this thread's record: kept in this process at once, then written to the store, made on the store's fresh copy of this
+ * thread's entry alone (`patchStore`). Never awaited by a draw: a render hook writes nothing itself. Never throws: a record not written is
+ * one a new process does not have, which is how every process was before 0.7.75.
+ */
+async function keepShown($: EngineInterface, change: (rec: CardShown | null) => CardShown | null): Promise<void> {
+  try {
+    const sid = await instanceId($)
+    if (!sid) return
+    await shownRec($)
+    // nothing awaited between the read and the write of this process's copy: two changes in a row both stand
+    shownKept.set(sid, change(shownKept.get(sid) ?? null))
+    await patchStore<Record<string, unknown>>($, 'mm.cardShown', {}, fresh => {
+      const was = readShown(fresh[sid])
+      const now = change(was)
+      if (sameValue(now, was)) return false
+      delete fresh[sid]
+      if (now) fresh[sid] = now
+      capped(fresh, CARD_SHOWN_MAX)
+    })
+  } catch {
+    // kept in this process alone
+  }
+}
+
+/**
+ * (0.7.75) The live `mm card` call: this process's (`askedOf`, in `$.state`), else the one the thread's record keeps from an earlier process
+ * (`shownRec`). The state's wins: it is the newest this process answered. Reads only.
+ */
+async function liveAsked($: EngineInterface): Promise<MmCardAsked | null> {
+  return (await askedOf($)) ?? (await shownRec($))?.asked ?? null
+}
+
+/** (0.7.75) The `mm card` call this process answered ready, last: its own turn's end owes that card (`owe`), never `owedFromEarlier`. */
+let askedHere = ''
+
+/**
+ * (0.7.40) The main thread's own `mm card` that answered ready is the live one: its row in the thread draws the card. A sub-agent's call
+ * never is: its row is not in the thread the person reads, and the send gate reads the main chain alone. (0.7.75) It goes on the thread's
+ * record too, with no line yet (`keepShown`), so a new process of the thread has the live call. Never throws: the answer stands, and the
+ * row then draws one line in place of the card.
+ */
+export async function noteCardAnswer($: EngineInterface, call: { args: string; toolUseId: unknown; ownCall: boolean }, result: string): Promise<void> {
+  try {
+    const packageId = cardAskOf(call.args)
+    const ready = CARD_READY_HEAD.exec(result)
+    const toolUseId = call.toolUseId
+    if (!call.ownCall || !packageId || !ready || typeof toolUseId !== 'string' || !toolUseId) return
+    const label = ready[1] as string
+    await noteAsked($, { packageId, label, toolUseId })
+    askedHere = toolUseId
+    const at = await $.clock.now()
+    await keepShown($, rec => ({ asked: { packageId, label, toolUseId, at }, told: rec?.told ?? [] }))
+  } catch {
+    // the answer stands
+  }
+}
 
 /**
  * (0.7.40) Tell the thread, once for this tag in this session, that the live card could not be drawn: it then prints the page. (0.7.48) Or,
@@ -4421,6 +4548,8 @@ const drawFailTold = new Set<string>()
 function tellDrawFailed($: EngineInterface, label: string, text: string = DRAW_FAILED(label)): void {
   if (!/^[0-9a-f]{12}$/.test(label) || drawFailTold.has(label)) return
   drawFailTold.add(label)
+  // (0.7.75) on the thread's record too, so no new process of the thread tells this tag again
+  void keepShown($, rec => (rec ? { ...rec, told: [...rec.told.filter(t => t !== label), label].slice(-TAGS_TOLD_MAX) } : rec))
   void (async () => {
     try {
       await $.prompt.submit({ text })
@@ -4445,8 +4574,20 @@ export const CARD_NOT_SHOWN = (label: string): string =>
   `[Massmarket bridge] The card for Package ${label} is not drawn under your line in this thread. Print the whole page now, as client-reply-prep §9.3 says for a card that is not ready.`
 /** (0.7.48) How long after the thread is drawn the line has to have taken the card. */
 export const SHOWN_WAIT_MS = 6_000
-/** (0.7.48) The ready answer whose card is still to be seen under the thread's line, from when it answered (`since`). One at a time. */
-let owedCard: { toolUseId: string; label: string; since: number; armed: boolean } | null = null
+/**
+ * (0.7.48) The ready answer whose card is still to be seen under the thread's line, from when it answered (`since`). One at a time.
+ * (0.7.75) `earlier`: a ready answer an earlier process of the thread gave (or this one, before a reload of the code), owed again here once
+ * a surface draws the thread (`owedFromEarlier`): `from`, when it was owed here, and `held`, when this process first found its card drawable.
+ */
+type Owed = { toolUseId: string; packageId: string; label: string; since: number; armed: boolean; earlier?: { from: number; held?: number } }
+let owedCard: Owed | null = null
+/** (0.7.75) Whether this process has looked for a card an earlier one owed (`owedFromEarlier`): once, at the first draw of the thread. */
+let earlierLooked = false
+/**
+ * (0.7.75) How long a card an earlier process owed has, from when it is owed here, to become drawable in this process: its client part read
+ * and its card drawn again on this computer (about 4 s, after the pickup read). Past it with no card, the thread is told (CARD_NOT_SHOWN).
+ */
+export const EARLIER_WAIT_MS = 30_000
 /** (0.7.48) When a surface last drew this thread: its band, or one of its reply rows. */
 let threadDrawnAt = 0
 /** (0.7.48) When this thread's current turn of the main conversation began; null until one has in this process. */
@@ -4477,24 +4618,35 @@ async function releaseLine($: EngineInterface, row: string): Promise<void> {
   const calls = [...lineOfCall].filter(([, line]) => line === row).map(([call]) => call)
   if (!calls.length) return
   for (const call of calls) lineOfCall.delete(call)
+  // (0.7.75) and off the thread's record: a new process lets a later line of the tag take it too
+  void forgetLine($, row)
   try {
     $.ui.invalidate('ui.render')
   } catch {
     // the call's row draws the card at its next draw
   }
   if (turnOpen) return
-  const asked = await askedOf($)
+  const asked = await liveAsked($)
   if (!asked || !calls.includes(asked.toolUseId) || drawFailTold.has(asked.label)) return
-  owedCard = { toolUseId: asked.toolUseId, label: asked.label, since: asked.at, armed: false }
+  owedCard = { toolUseId: asked.toolUseId, packageId: asked.packageId, label: asked.label, since: asked.at, armed: false }
   armShown($)
+}
+
+/** (0.7.75) The row gave its card back: the thread's record no longer names it as the line that takes the card. Never throws. */
+async function forgetLine($: EngineInterface, row: string): Promise<void> {
+  await keepShown($, rec => (rec?.line === row ? { asked: rec.asked, told: rec.told } : rec))
 }
 
 /** (0.7.48) A turn of the main conversation ended with an answer: the ready answer it got, if any, is owed to the screen. */
 async function owe($: EngineInterface): Promise<void> {
-  const asked = await askedOf($)
-  if (!asked || turnBeganAt === null || asked.at < turnBeganAt) return
+  const asked = await liveAsked($)
+  if (!asked || turnBeganAt === null || asked.at < turnBeganAt) {
+    // (0.7.75) a card owed from an earlier process waits out a turn under way (`stillComing`): checked again now it has ended
+    if (owedCard?.earlier) armShown($)
+    return
+  }
   if (lineOfCall.has(asked.toolUseId) || drawFailTold.has(asked.label)) return
-  owedCard = { toolUseId: asked.toolUseId, label: asked.label, since: asked.at, armed: false }
+  owedCard = { toolUseId: asked.toolUseId, packageId: asked.packageId, label: asked.label, since: asked.at, armed: false }
   armShown($)
 }
 
@@ -4505,10 +4657,60 @@ async function owe($: EngineInterface): Promise<void> {
 async function noteThreadDrawn($: EngineInterface): Promise<void> {
   try {
     threadDrawnAt = await $.clock.now()
-    if (owedCard && (await askedOf($))?.toolUseId !== owedCard.toolUseId) owedCard = null
+    if (owedCard && (await liveAsked($))?.toolUseId !== owedCard.toolUseId) owedCard = null
     armShown($)
+    // (0.7.75) the first draw in this process: a card the thread's record still owes from an earlier one is owed here too
+    if (!earlierLooked) {
+      earlierLooked = true
+      void owedFromEarlier($)
+    }
   } catch {
     // the next draw notes it
+  }
+}
+
+/**
+ * (0.7.75) A card the thread's record owes from an earlier process, or from this one before a reload of the code, owed again here: the
+ * process that drew it then is gone, and with it the card on the screen. Looked for once a process, at the first draw of the thread. Not for
+ * a call this process answered (its turn's end owes that one, `owe`), one a newer call of this process replaced, one whose line drew the
+ * card here already, a tag the thread was told of, a package no longer waiting (`offTheLists`), or one the transcript shows settled after
+ * the call (`settledAfter`). Never throws.
+ */
+async function owedFromEarlier($: EngineInterface): Promise<void> {
+  try {
+    const asked = (await shownRec($))?.asked
+    if (!asked || owedCard || asked.toolUseId === askedHere || lineOfCall.has(asked.toolUseId) || drawFailTold.has(asked.label)) return
+    const live = await askedOf($)
+    if (live && live.toolUseId !== asked.toolUseId) return
+    if ((await offTheLists($, asked.packageId)) || (await settledAfter($, asked))) return
+    if (owedCard || lineOfCall.has(asked.toolUseId) || drawFailTold.has(asked.label)) return
+    const from = await $.clock.now()
+    owedCard = { toolUseId: asked.toolUseId, packageId: asked.packageId, label: asked.label, since: Math.min(threadDrawnAt, from), armed: false, earlier: { from } }
+    armShown($)
+  } catch {
+    // the next process looks again
+  }
+}
+
+/**
+ * (0.7.75) Whether the transcript shows this ready answer settled after its call: the person's go (`Send package <12>`, the words the box
+ * sends) or the bridge's note for its tag (DRAW_FAILED, CARD_NOT_SHOWN), told by a version before 0.7.75 kept any record of it. A transcript
+ * that cannot be read, or no longer holds the call, settles nothing. Reads only. Never throws.
+ */
+async function settledAfter($: EngineInterface, asked: MmCardAsked): Promise<boolean> {
+  try {
+    const messages = await $.session.messages()
+    if (!Array.isArray(messages)) return false
+    const at = messages.findIndex(m => m?.role === 'assistant' && (m.toolUses ?? []).some(u => u?.tool_use_id === asked.toolUseId))
+    if (at < 0) return false
+    const go = `Send package ${asked.label}`
+    const notes = [DRAW_FAILED(asked.label), CARD_NOT_SHOWN(asked.label)]
+    return messages.slice(at + 1).some(m => {
+      const text = String(m?.text ?? '').trim()
+      return text === go || notes.some(n => text.includes(n))
+    })
+  } catch {
+    return false
   }
 }
 
@@ -4526,24 +4728,57 @@ function armShown($: EngineInterface): void {
 }
 
 /** (0.7.48) The check: the line took the card or a newer call replaced it, or nobody has drawn the thread since the answer (checked again at the next draw), or tell. */
-async function checkShown($: EngineInterface, it: NonNullable<typeof owedCard>): Promise<void> {
+async function checkShown($: EngineInterface, it: Owed): Promise<void> {
   if (owedCard !== it) return
   it.armed = false
-  if (lineOfCall.has(it.toolUseId) || (await askedOf($))?.toolUseId !== it.toolUseId) {
+  if (lineOfCall.has(it.toolUseId) || (await liveAsked($))?.toolUseId !== it.toolUseId) {
     owedCard = null
     return
   }
   if (threadDrawnAt < it.since) return
+  // (0.7.75) a card owed from an earlier process gets the time this one needs to draw it again
+  if (it.earlier && (await stillComing($, it, it.earlier))) return
+  if (owedCard !== it) return
   owedCard = null
+  // the line took it while this looked
+  if (lineOfCall.has(it.toolUseId)) return
   tellDrawFailed($, it.label, CARD_NOT_SHOWN(it.label))
 }
 
-/** (0.7.48) For tests: the module's record of the turn, the screen and the owed card, as a new process has it. */
+/**
+ * (0.7.75) Whether a card owed from an earlier process may still be drawn under its line here, so the thread is not told yet: a turn is under
+ * way (its end checks again, `owe`; after a reload of the code only `busyOf` knows it), the card is not drawable here yet and EARLIER_WAIT_MS
+ * has not passed since it was owed (its client part is still being read, or its card drawn), or it became drawable less than SHOWN_WAIT_MS
+ * ago. Checked again SHOWN_WAIT_MS later while it waits.
+ */
+async function stillComing($: EngineInterface, it: Owed, earlier: NonNullable<Owed['earlier']>): Promise<boolean> {
+  if (turnOpen || (await busyOf($))) return true
+  const now = await $.clock.now()
+  const card = await cardOf($)
+  const held = cardDrawable((await clientPart($)).text, card) && card.packageId === it.packageId && card.tree?.label === it.label
+  if (held && earlier.held === undefined) earlier.held = now
+  const waiting = earlier.held !== undefined ? now - earlier.held < SHOWN_WAIT_MS : now - earlier.from < EARLIER_WAIT_MS
+  if (waiting) armShown($)
+  return waiting
+}
+
+/**
+ * (0.7.48) For tests: the module's record of the turn, the screen and the owed card, as a new process has it. (0.7.75) And all else of this
+ * module's that a new process, or a reload of the code, starts without: the lines that took a card, the rows drawn, the tags told, the
+ * thread's record as read, and the call answered here.
+ */
 export function resetShown(): void {
   owedCard = null
   threadDrawnAt = 0
   turnBeganAt = null
   turnOpen = false
+  earlierLooked = false
+  askedHere = ''
+  shownKept.clear()
+  lineOfCall.clear()
+  callOfLine.clear()
+  drawnRows.clear()
+  drawFailTold.clear()
 }
 
 /** (0.7.40) This row fell back to the engine's: unlisted, and a row that was listed asks for one redraw, so its answer shows again. */
@@ -4886,6 +5121,8 @@ async function aSecond($: EngineInterface): Promise<void> {
  * not count, as its thread is still at work and the send gate reads the main chain alone. Nor does a typed /mm card: it runs no turn
  * (measured 2026-11-07), so there is no turn to end, and the gate does not count it either. Nor does a call that outlived its turn
  * (`turnMark`): it says nothing of the turn under way when it answers.
+ * (0.7.75) Where the pane shows another client, or nothing yet, it first puts this thread's own client there, as `mm view` does
+ * (`putOwnClient`), and then judges: the pane's state is never on its own a reason to answer not ready.
  */
 async function cardCommand($: EngineInterface, arg: string, ownCall: boolean): Promise<string> {
   try {
@@ -4894,7 +5131,13 @@ async function cardCommand($: EngineInterface, arg: string, ownCall: boolean): P
     if (!isUuid(packageId)) return CARD_WHOLE_ID
     // ⛔ Every `$.state.get` of one dispatch reads one moment, so waiting here on the state would never see a draw end: `refreshCard`
     // waits for a render under way (a module's promise, not the state), then draws the card itself.
-    const held = await cardOf($)
+    let held = await cardOf($)
+    // (0.7.75) this thread's client in the side pane first, as `mm view` puts it there (`putOwnClient`): a pane that shows another client,
+    // or nothing yet (a new process of the thread), is no reason to answer not ready
+    if (held.packageId !== packageId || !(await clientPart($)).text) {
+      await putOwnClient($, packageId)
+      held = await cardOf($)
+    }
     if (held.packageId !== packageId) return cardNotReady(cardVerdict(held, packageId))
     const read = await readOwPage($, packageId)
     await foldPage($, read.markdown)
@@ -4924,6 +5167,27 @@ async function cardCommand($: EngineInterface, arg: string, ownCall: boolean): P
     return shown && isOnScreen(packageId, card.tree, 'desktop') ? cardReady(label) : cardReadyOffScreen(label)
   } catch {
     return cardNotReady('the card could not be checked')
+  }
+}
+
+/**
+ * (0.7.75) This thread's client in the side pane, as `mm view` puts it there (`showList`'s client part): from what the last sync stored, its
+ * part read and its card drawn on this computer (`beginClient`), and the pane opened. Only when that client's waiting package is the one
+ * asked about: anything else is for `mm card` to answer as it finds it. No sync, no note to Claude, no claim, no pickup. Spotlight Dentistry
+ * thread, 2026-11-19 at 1:02 PM ET: a new process of the thread answered `card not ready: the side pane is not showing this package` before
+ * anything had put the client in its pane, so the thread printed the page where the card could have been drawn. Never throws.
+ */
+async function putOwnClient($: EngineInterface, packageId: string): Promise<void> {
+  try {
+    // this thread's id, which `ownIn` reads without an app call
+    await selfId($)
+    const it = await ownIn($, listedIn(await storeGet<Last | null>($, 'mm.last', null)))
+    if (!it || pickupOf(it) !== packageId) return
+    const finish = await beginClient($, it, true, true)
+    await openPane($, await paneTitle($))
+    await finish()
+  } catch {
+    // `mm card` answers from what the pane holds
   }
 }
 
@@ -5745,7 +6009,9 @@ async function tick($: EngineInterface): Promise<void> {
       // sync on record was made by an older bridge (`olderSync`): an older thread's press, skill load or update applied
       // its own version's rules, and this sync puts the pins and names right within the minute, not five minutes on.
       const asked = Number(await storeGet<number>($, 'mm.ask', 0)) || 0
-      if (!last || now - last.at >= SYNC_MS || asked > last.at || took || olderSync(last)) {
+      // (0.7.76) and at once when OW's drafts pulse moved: a reply draft was written or a package's build ended (`pulsePass`)
+      const pulsed = await pulsePass($, now)
+      if (!last || now - last.at >= SYNC_MS || asked > last.at || took || olderSync(last) || pulsed) {
         try {
           synced = await syncPass($)
         } catch (err) {
@@ -6217,9 +6483,9 @@ async function capNotice($: EngineInterface, pid: string, line: string): Promise
     fresh[pid] = stamp
     mine = true
   }).catch(() => {})
-  // ⛔ (0.7.74) the claim, checked after the write. Threads that sync together each read no line in the hour and each write
+  // ⛔ (0.7.77) the claim, checked after the write. Threads that sync together each read no line in the hour and each write
   // their own time (the store has no compare-and-set), and each then wrote the line: three lines for one client in the
-  // fifteen-thread test once 0.7.74's `settleSeen` moved its schedule. 1 to 3 seconds on, once that moment's writes have
+  // fifteen-thread test once 0.7.77's `settleSeen` moved its schedule. 1 to 3 seconds on, once that moment's writes have
   // landed, the one thread whose time is on record writes it. A claim another thread's stale write took away writes no line
   // this time: the next capped sync claims again.
   if (!mine) return
@@ -6353,6 +6619,9 @@ async function selfLiner(
   const links = pass.links ?? (await storeGet<Record<string, string>>($, 'mm.links', {}))
   const sent = pass.sent ?? (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))
   const seen = await storeGet<Record<string, FirstSeen>>($, 'mm.firstSeen', {})
+  // (0.7.76) the same pace the send keeps (`updatePace`): a finished package this thread lacks says it goes shortly. From
+  // this process's own copy (`pulseSeenAt`), never another store read here: the line is words, the send asks the store
+  const knows = pulseSeenAt > 0 && pulseSeenAt <= now && now - pulseSeenAt <= PULSE_KNOWN_MS
   return (it, rec) => {
     const pid = it.projectId
     const pick = autoUpdateTarget(rec, links[pid])
@@ -6361,7 +6630,7 @@ async function selfLiner(
     const given = sent[pid]
     if (given && given.sid === pick.sid && (hasWaiting(given.sig, it) || ownPackage(given, pick.sid, it))) return ''
     const prev = seen[pid]
-    return selfUpdateText(selfUpdateAt(seenNow(prev && typeof prev === 'object' ? prev : undefined, it, sigHash(signature), now)), now)
+    return selfUpdateText(selfUpdateAt(seenNow(prev && typeof prev === 'object' ? prev : undefined, it, sigHash(signature), now), updatePace(it, given, pick.sid, knows)), now)
   }
 }
 
@@ -6421,6 +6690,10 @@ async function autoUpdates($: EngineInterface): Promise<void> {
   const sent = await storeGet<Record<string, Sent>>($, 'mm.sent', {})
   const chips = await chipsOf($, now)
   const starting = await storeGet<Record<string, { until?: number }>>($, 'mm.starting', {})
+  // (0.7.76) an OW that says when a package is still being built: read only once a ready package needs it (`paceOf`)
+  let knows: boolean | undefined
+  const paceOf = async (it: QueueItem, given: Sent | undefined, sid: string) =>
+    readyPackage(it) ? updatePace(it, given, sid, (knows ??= await knowsBuilding($, now))) : updatePace(it, given, sid, false)
   for (const it of last.items.slice().sort(byDue)) {
     const pid = it.projectId
     // (0.7.14) the thread has this, sent while its drafts could still come, and none came: it is asked for prep now
@@ -6448,7 +6721,7 @@ async function autoUpdates($: EngineInterface): Promise<void> {
       await ownWork($, it, sid, signature, given, now)
       continue
     }
-    if (!autoUpdateDue(was, now)) continue
+    if (!autoUpdateDue(was, now, await paceOf(it, given, sid))) continue
     const hook = await hookCountsAuto($, now)
     if (!hook.ok) {
       if (!hookLogged.has(`hook\n${hook.why}`)) {
@@ -6604,9 +6877,10 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
     const cur = buildLists(read, now).queue.find(i => i.projectId === pid)
     if (!cur || !autoUpdatable(cur, now) || signatureOf(cur) !== signature) return
     const was = seenOf(await storeGet<Record<string, FirstSeen>>($, 'mm.firstSeen', {}), pid, signature)
-    if (!autoUpdateDue(was, now)) return
-    if (!(await stillTheClients($, pid, { sid, title: found.title ?? '', suggested: false }, sid, links, read, { live: new Map([[sid, found]]) }))) return
+    // (0.7.76) still due as the feed has it now: a package whose build began meanwhile waits for it (`updatePace`)
     const given = (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]
+    if (!autoUpdateDue(was, now, updatePace(cur, given, sid, await knowsBuilding($, now)))) return
+    if (!(await stillTheClients($, pid, { sid, title: found.title ?? '', suggested: false }, sid, links, read, { live: new Map([[sid, found]]) }))) return
     // (0.7.14) the follow-up that asks for prep goes only while it is still due: the drafts did not come meanwhile
     if (prep ? !prepDue(given, sid, cur, now, was) : (given && given.sid === sid && hasWaiting(given.sig, cur)) || sentHere.get(`${pid}\n${sid}`) === signature) return
     // (0.7.14) mail with no package while Lane-2 may still build the drafts: the words say they follow (`draftsComing`)
@@ -7981,7 +8255,7 @@ async function noteSeen($: EngineInterface, human: boolean): Promise<void> {
 }
 
 /**
- * (0.7.74, the Start-card race) This thread's own entry in `mm.seen`, looked at again 1 to 3 seconds after it wrote it, and
+ * (0.7.77, the Start-card race) This thread's own entry in `mm.seen`, looked at again 1 to 3 seconds after it wrote it, and
  * written again when another thread's write took it away or put an older one back; five rounds at most, while it had to.
  * Every thread writes the one map at its tick (`patchStore`: the store has no compare-and-set), and threads that started
  * together tick together, so the entry of the thread that holds the no-thread cards could be lost twice running and read as
@@ -9898,6 +10172,72 @@ async function sendPinReport($: EngineInterface, report: PinReport, now: number)
   }
 }
 
+/**
+ * (0.7.76) What the bridge keeps of OW's drafts pulse (`mm.pulse`): when it was last asked, the last key OW gave and when (`okAt`),
+ * the key the last sync it set off was for (`synced`), and, while OW has no such route, until when not to ask.
+ */
+type PulseKept = { asked?: number; key?: string; okAt?: number; synced?: string; missingUntil?: number }
+
+/**
+ * (0.7.76, Rob 2026-11-24: "Update should have hit as soon as the transcript finished processing") OW's drafts pulse
+ * (`GET /api/ext/drafts-pulse`, read-only: a key over the newest reply-draft write and the packages still being built, no id,
+ * name or content), asked on the lease holder's tick every PULSE_MS. True when its key moved since the sync it last set off:
+ * the tick then syncs at once, and that sync's updates by themselves are chosen at once (a finished package goes at once,
+ * `updatePace`). The key that sets off a sync is spent before the sync runs, so a feed that fails is asked again at the
+ * five-minute cadence, never every minute. The first key this computer reads is recorded without a sync. A 404 or 405 is
+ * not asked again for PULSE_MISSING_MS; any other failure keeps what was there. ⛔ Never throws into the tick.
+ */
+async function pulsePass($: EngineInterface, now: number): Promise<boolean> {
+  try {
+    const kept = await storeGet<PulseKept>($, 'mm.pulse', {})
+    if (Number(kept.missingUntil) > now) return false
+    // (a tick early by a few seconds, as the first one after a start is, does not wait a whole minute more)
+    if (now - (Number(kept.asked) || 0) < PULSE_MS - TEAM_SLACK_MS) return false
+    await patchStore<PulseKept>($, 'mm.pulse', {}, p => {
+      p.asked = now
+    })
+    const asked = await within($, $.http.fetch(`${EXT}/drafts-pulse`, { headers: await authHeaders($) }))
+    if (!asked.ok) return false
+    const r = asked.value
+    if (r.status === 404 || r.status === 405) {
+      await patchStore<PulseKept>($, 'mm.pulse', {}, p => {
+        p.missingUntil = now + PULSE_MISSING_MS
+        delete p.okAt
+      })
+      pulseSeenAt = 0
+      return false
+    }
+    if (r.status < 200 || r.status >= 300) return false
+    const body = JSON.parse(r.text) as { ok?: unknown; key?: unknown } | null
+    const key = body && body.ok === true && typeof body.key === 'string' && /^[0-9a-f]{8,64}$/.test(body.key) ? body.key : ''
+    if (!key) return false
+    let moved = false
+    await patchStore<PulseKept>($, 'mm.pulse', {}, p => {
+      moved = typeof p.synced === 'string' && p.synced !== key
+      p.key = key
+      p.okAt = now
+      p.synced = key
+      delete p.missingUntil
+    })
+    pulseSeenAt = now
+    return moved
+  } catch {
+    // the next tick asks again; the five-minute sync carries on as before
+    return false
+  }
+}
+
+/** (0.7.76) This computer reads an OW that marks a package still being built: its pulse answered in the last PULSE_KNOWN_MS. */
+async function knowsBuilding($: EngineInterface, now: number): Promise<boolean> {
+  const kept = await storeGet<PulseKept>($, 'mm.pulse', {})
+  const okAt = Number(kept.okAt)
+  pulseSeenAt = Number.isFinite(okAt) ? okAt : 0
+  return Number.isFinite(okAt) && okAt <= now && now - okAt <= PULSE_KNOWN_MS
+}
+
+/** (0.7.76) When this process last saw a pulse answered (`mm.pulse.okAt`, as `pulsePass` or `knowsBuilding` had it): 0, none. */
+let pulseSeenAt = 0
+
 /** (0.7.34) What the bridge keeps of Team now (`mm.team`): the last good read, when it was asked, and, while OW has no such route, until when not to ask. */
 type TeamKept = { asked?: number; got?: number; team?: TeamNow; seen?: TeamSeen; missingUntil?: number }
 
@@ -11583,16 +11923,9 @@ export const register: Register = on => {
     } catch (err) {
       result = await didNotFinish($, args, err)
     }
-    // (0.7.40) the main thread's own `mm card` that answered ready is the live one: its row in the thread draws the card. A sub-agent's
-    // call never is: its row is not in the thread the person reads, and the send gate reads the main chain alone.
-    try {
-      const asked = cardAskOf(args)
-      const ready = CARD_READY_HEAD.exec(result)
-      const toolUseId = (e as { tool_use_id?: unknown }).tool_use_id
-      if (ownCall && asked && ready && typeof toolUseId === 'string' && toolUseId) await noteAsked($, { packageId: asked, label: ready[1] as string, toolUseId })
-    } catch {
-      // the answer stands; the row then draws one line in place of the card
-    }
+    // (0.7.40) the main thread's own `mm card` that answered ready is the live one: its row in the thread draws the card (`noteCardAnswer`,
+    // which (0.7.75) keeps it on the thread's record too, for a new process of the thread)
+    await noteCardAnswer($, { args, toolUseId: (e as { tool_use_id?: unknown }).tool_use_id, ownCall }, result)
     await refreshBand($).catch(() => {})
     return { result }
   }).catch(($, e) => ({ result: notInTime((e as Record<string, unknown>).args) }))
@@ -12243,7 +12576,8 @@ export const register: Register = on => {
   // the thread, instead of just the side panel."). The row of the thread's own `mm card <package id>` call, once it has answered ready,
   // is the whole card: drawn by `drawLiveCard`, the pane's own drawing, from the same state, so its box opens and closes exactly as the
   // pane's does and a press there is the pane's press. The model reads only the short answer: the card costs it nothing.
-  // - The live call (`askedOf`, noted by the tool hook) draws the card while the bridge still holds that package at that tag.
+  // - The live call (`askedOf`, noted by the tool hook; (0.7.75) or, in a new process of the thread, the one its record keeps: `liveAsked`)
+  //   draws the card while the bridge still holds that package at that tag.
   // - An earlier ready row of the same tag says it is shown again below; one of a tag since replaced names the newer one; one whose
   //   package the pane does not draw now (`cardDrawable`, the pane's own test), or with no live call on record, says so. One dim line
   //   each, no tree, no box.
@@ -12278,9 +12612,10 @@ export const register: Register = on => {
       let tree: RenderElement
       let kind: RowKind = 'line'
       const label = CARD_READY_HEAD.exec(out)?.[1]
-      const asked = await askedOf($)
+      // (0.7.75) this process's live call, or the one the thread's record keeps from an earlier process (`liveAsked`)
+      const asked = await liveAsked($)
       // (0.7.40) the pane's own test (`cardDrawable`): where the pane draws no card, the row draws none either, and so no box to press.
-      // With no live call on record (a new process), no row draws the card, so none may say it is shown below.
+      // With no live call on record, no row draws the card, so none may say it is shown below.
       const held = cardDrawable((await clientPart($)).text, card) && card.packageId === packageId && Boolean(card.tree?.label)
       if (!held || !card.tree) tree = <Text dimColor>{label && (await offTheLists($, packageId)) ? ROW_LEFT(label) : ROW_GONE}</Text>
       else if (!label) return pass()
@@ -12327,7 +12662,7 @@ export const register: Register = on => {
       }
       // (0.7.40) the live ready row could not be drawn: the thread is told once a tag, and prints the page (`tellDrawFailed`)
       try {
-        const asked = await askedOf($)
+        const asked = await liveAsked($)
         if (asked && asked.packageId === packageId && asked.toolUseId === (p.tool_use_id || e.requestId)) tellDrawFailed($, asked.label)
       } catch {
         // nothing on record to tell of
@@ -12371,7 +12706,7 @@ export const register: Register = on => {
     }
     let took = ''
     try {
-      const asked = await askedOf($)
+      const asked = await liveAsked($)
       if (!asked || !text.includes(`Package ${asked.label}`)) return next(e)
       if (!callOfLine.has(row)) {
         callOfLine.set(row, asked.toolUseId)
@@ -12380,6 +12715,10 @@ export const register: Register = on => {
       if (callOfLine.get(row) !== asked.toolUseId) return next(e)
       const taken = lineOfCall.get(asked.toolUseId)
       if (taken && taken !== row) return next(e)
+      // (0.7.75) the line an earlier process saw take this call's card keeps it here: another line of the same tag, drawn before it from the
+      // top of the thread, never does
+      const kept = taken ? null : await shownRec($)
+      if (kept && kept.asked.toolUseId === asked.toolUseId && kept.line && kept.line !== row) return next(e)
       const card = await cardOf($)
       const held = cardDrawable((await clientPart($)).text, card) && card.packageId === asked.packageId && card.tree?.label === asked.label
       if (!held || !card.tree) return next(e)
@@ -12394,6 +12733,8 @@ export const register: Register = on => {
       if (!taken) {
         lineOfCall.set(asked.toolUseId, row)
         trimRows(lineOfCall)
+        // (0.7.75) on the thread's record, for a new process of it
+        void keepShown($, rec => (rec && rec.asked.toolUseId === asked.toolUseId && rec.line !== row ? { ...rec, line: row } : rec))
         // the call's row draws its line in place of the card now
         try {
           $.ui.invalidate('ui.render')
@@ -12416,6 +12757,7 @@ export const register: Register = on => {
         for (const [call, line] of lineOfCall) {
           if (line !== row) continue
           lineOfCall.delete(call)
+          void forgetLine($, row)
           try {
             $.ui.invalidate('ui.render')
           } catch {
@@ -12434,7 +12776,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     try {
       if ((e.surface !== 'desktop' && e.surface !== 'mobile') || e.props.isExpanded) return next(e)
-      const asked = await askedOf($)
+      const asked = await liveAsked($)
       if (asked && e.props.calls.some(c => c.tool_use_id === asked.toolUseId)) return next({ ...e, props: { ...e.props, isExpanded: true } })
     } catch {
       // the group as the engine draws it

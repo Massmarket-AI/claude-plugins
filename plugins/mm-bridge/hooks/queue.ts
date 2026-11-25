@@ -95,6 +95,12 @@ export type FeedDraft = {
    * Absent on a server that does not send it yet: the row is read as before.
    */
   no_reply?: boolean
+  /**
+   * (0.7.76, OW `building`) Lane-2's build helper may still rewrite this package's drafts (client-reply-prep
+   * references/build-run.md: it has 15 minutes after the drafts are first stored). Sent only when true, by an OW that also
+   * answers `GET /drafts-pulse`; absent otherwise, and on a server that does not send it yet.
+   */
+  building?: boolean
   checked_at?: string | null
   checked_send_at?: string | null
   last_outbound_at?: string | null
@@ -610,6 +616,12 @@ export type QueueItem = {
   go?: GoRef
   /** (0.7.27, OW #638) The package the viewer is to work owes no reply: what it reads (`NO_REPLY_WHAT`). Absent otherwise, and on an item an older version stored. */
   noReply?: true
+  /**
+   * (0.7.76) The package the viewer is to work may still have its drafts rewritten by Lane-2's build helper (the feed's
+   * `building`). Absent otherwise, and on an item an older version stored. Never part of what a thread is given
+   * (`signatureOf`): it only says when an update goes by itself (`updatePace`).
+   */
+  building?: true
   /** (0.7.27) The viewer's own pace on this client (the row they hold). Absent with none, and on an item an older version stored: read `paceOf(it)`. */
   pace?: PaceRef
   /** (0.7.27) The earliest start-by of the viewer's own tickets here whose work has not started (OW status `in_progress` is the one sign it has). Past it, the client is `behind · not started`. */
@@ -2649,6 +2661,9 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
       it.ok = null
       if (noReply) it.noReply = true
       else delete it.noReply
+      // (0.7.76) the build helper may still rewrite its drafts: an update by itself waits for it (`updatePace`)
+      if (d.building === true) it.building = true
+      else delete it.building
       // (R8) what the server's check of our latest send found on this package
       it.check = checkOf(d)
       if (inReach) {
