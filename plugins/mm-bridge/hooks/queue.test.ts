@@ -4,14 +4,14 @@ import { businessMsBetween, subtractBusinessMs } from './business-time'
 import {
   CUTOFF_WINDOW_MS, LIST_FLOOR_MS, NO_DUE_DATE, NOBODY, THREAD_TITLE_MAX, WINDOW_AHEAD_MS, buildLists, clockAndDue, dueWhen, listCutoff, rowLine, shownDue, buildQueue, cleanName, cleanText, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockLead, clockText, draftsLine, dueLine, holdBanner,
   CHECK_WAIT_MS, checkingTitle, fastState, internalProjects, whenText, holdSentence, holderName, isClosingRoute, isDraftDone, isUuid, mailLookbackHours, needsLine, noteText, pinsNow, shortName, stillOpenTitle, threadTitle, titleFor, titleNames, withTeammate,
-  ROUTE_PAGE, dateText, peopleRows, routeChoices, routePage, routedText, seesPeople, shownText, sourceLink, waitedText,
+  ROUTE_PAGE, dateText, peopleRows, routeChoices, routeGuess, routeLabel, routePage, routePageOf, routePrePick, routeSearch, routedText, searchFold, seesPeople, shownText, sourceLink, waitedText,
   INTERNAL_OPS, INTERNAL_PROJECTS, askLine, asksMarkdown, feedClients, heldInternal, internalAskThread, openAsks,
   QUEUE_SHOWN_MAX, internalQueueThread, ownQueueRows, queueMarkdown, queueTotal, queuedOf,
   QUEUE_OLDER_MAX, newestFirst, olderHeading, olderMarkdown, olderOf, olderTotal, ownOlderRows, queueWhen, shownOlder,
   ETA_ASK_TEXT, INTERNAL_DISCORD, etaAsksOf, etaOnly, lateSentence, matesOf, queueHome, undatedCount, undatedOnly, whoseLate,
   ASSIGN_ASK_TEXT, ASSIGN_BY_BASIS, assignAsksOf, assignMarkdown, assignOnly, committedCount,
   STILL_NEEDS_YOU, checkNow, ownActBy, pinReason, pinTitle, pinsFor, watchMarkdown, watchOf,
-  LATE_WITH_TEAM, TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine, teamLateSegment, teamLateWho,
+  LATE_WITH_TEAM, TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine, teamLateSegment, teamLateSplit, teamLateWho,
   GO_THEIRS, GO_WHAT, clientWaiting, goFirstText, goMarkdown, goMine, goOf, goOnly, goSentence, mayStart, ownPins, stepWord,
   okLateOnly, ownBesides, teamLateOnly,
 } from './queue'
@@ -1925,6 +1925,177 @@ describe('New people: who wrote to us with no project matched (founder and PMs o
     expect(seesPeople({ role: 'pm' })).toBe(true)
     expect(seesPeople({ role: 'member' })).toBe(false)
   })
+
+  // (0.7.66, Rob 2026-11-20) the Route picker's search: the client's name or the company's, misspelt or not
+  const pid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`
+  /** Made-up projects, as routeChoices gives them: named after the company or the person, the other in `client`. */
+  const COOL = { projectId: pid(1), name: 'Cool Calc', client: 'Wes Fairfax' }
+  const NORTH = { projectId: pid(2), name: 'Northwind Interiors', client: 'Dana Whitfield' }
+  const PRIYA_P = { projectId: pid(3), name: 'Priya Raman', client: 'Fabrikam Health' }
+  const HARBOR = { projectId: pid(4), name: 'Harbor Society', client: 'Lena Okafor', aliases: ['Wavecrest Rx'] }
+  const CALC = { projectId: pid(5), name: 'Calc Partners' }
+  const BOLT_P = { projectId: pid(6), name: 'Bolt Staffing (Sam)' }
+  const PICK = [BOLT_P, CALC, COOL, HARBOR, NORTH, PRIYA_P]
+  const found = (q: string) => routeSearch(PICK, q)
+  const names = (q: string) => found(q).items.map(p => p.name)
+
+  test('the search folds as the time tracker does: Kool Kalk and Cool Calc are the same letters', async () => {
+    expect(searchFold('Kool Kalk')).toBe('coolcalc')
+    expect(searchFold('Cool Calc')).toBe('coolcalc')
+    expect(searchFold('Phoenix Lock & Key')).toBe('foenixloccey')
+    expect(searchFold('Fraser-Zane, LLC')).toBe('frasersanellc')
+    // accents go too, and anything that is not text is nothing
+    expect(searchFold('José Núñez')).toBe('josenunes')
+    expect(searchFold(null)).toBe('')
+    expect(searchFold(42)).toBe('')
+  })
+
+  test('"Kool Kalk" finds "Cool Calc", and as plain words, not a near spelling', async () => {
+    expect(found('Kool Kalk')).toEqual({ items: [COOL], close: false })
+    expect(names('kool')).toEqual(['Cool Calc'])
+    // each word anywhere, in any order
+    expect(names('kalk kool')).toEqual(['Cool Calc'])
+  })
+
+  test('a company-name search finds the project, whether the company is its name or its client', async () => {
+    expect(names('Northwind')).toEqual(['Northwind Interiors'])
+    expect(names('fabrikam health')).toEqual(['Priya Raman'])
+    expect(names('bolt staffing')).toEqual(['Bolt Staffing (Sam)'])
+  })
+
+  test('a client-name search finds the project, whether the person is its client or its name', async () => {
+    expect(names('Dana Whitfield')).toEqual(['Northwind Interiors'])
+    expect(names('whitfield dana')).toEqual(['Northwind Interiors'])
+    expect(names('fairfax')).toEqual(['Cool Calc'])
+    expect(names('Priya')).toEqual(['Priya Raman'])
+    // a person and a company together
+    expect(names('wes cool')).toEqual(['Cool Calc'])
+  })
+
+  test('an alias search finds a project by the other name it goes by', async () => {
+    expect(names('Wavecrest')).toEqual(['Harbor Society'])
+    expect(names('wave crest rx')).toEqual(['Harbor Society'])
+    // a word of the alias with a word of the name
+    expect(names('harbor wavecrest')).toEqual(['Harbor Society'])
+  })
+
+  test('a misspelt name is forgiven when nothing has the words as typed, the closest first', async () => {
+    expect(found('Fairfacks')).toEqual({ items: [COOL], close: true })
+    expect(found('Whitfeild')).toEqual({ items: [NORTH], close: true })
+    expect(found('Okafur')).toEqual({ items: [HARBOR], close: true })
+    expect(found('Wavecrst')).toEqual({ items: [HARBOR], close: true })
+    expect(names('Norhtwind Interirs')).toEqual(['Northwind Interiors'])
+    // one word exact, one misspelt
+    expect(names('dana whitfeild')).toEqual(['Northwind Interiors'])
+    // the closest first: one edit before two
+    expect(routeSearch([{ projectId: pid(7), name: 'Harbr Societi' }, HARBOR], 'Harbor Sociiety').items.map(p => p.name)).toEqual(['Harbor Society', 'Harbr Societi'])
+  })
+
+  test('words as typed beat near spellings, a short word is never guessed at, and nothing typed lists every project as given', async () => {
+    // "calc" is in two names: those two, not every name a letter away
+    expect(found('calc')).toEqual({ items: [CALC, COOL], close: false })
+    expect(found('xyz')).toEqual({ items: [], close: false })
+    expect(found('bol')).toEqual({ items: [BOLT_P], close: false })
+    expect(found('blt')).toEqual({ items: [], close: false })
+    expect(found('Zebra Fintech')).toEqual({ items: [], close: false })
+    expect(found('')).toEqual({ items: PICK, close: false })
+    expect(found('   ')).toEqual({ items: PICK, close: false })
+    expect(found(undefined as never)).toEqual({ items: PICK, close: false })
+    // a project from an OW that sends no client or aliases: its name alone
+    expect(routeSearch([{ projectId: pid(8), name: 'Acme Roofing Pat' }], 'akme pat').items.map(p => p.name)).toEqual(['Acme Roofing Pat'])
+  })
+
+  test("OW's guess picks the one project it names, and none when it names none or several", async () => {
+    expect(routeGuess(PICK, 'Northwind')).toEqual(NORTH)
+    expect(routeGuess(PICK, 'Kool Kalk')).toEqual(COOL)
+    expect(routeGuess(PICK, 'Cool Calk')).toEqual(COOL)
+    expect(routeGuess(PICK, 'Wavecrest Rx')).toEqual(HARBOR)
+    // a guess with more words than the project's names: the one project whose name, client or alias it holds whole
+    expect(routeGuess(PICK, 'Wavecrest Rx store')).toEqual(HARBOR)
+    expect(routeGuess(PICK, 'the Northwind Interiors office')).toEqual(NORTH)
+    // a name of under 5 letters is not enough to pick by
+    expect(routeGuess([{ projectId: pid(10), name: 'Bolt' }], 'Bolt Labs Inc')).toBeUndefined()
+    expect(routeGuess(PICK, 'Calc')).toBeUndefined()
+    expect(routeGuess(PICK, 'HNWRx')).toBeUndefined()
+    for (const none of ['unknown', 'None', 'N/A', 'no project', '', '  ', null, undefined, 7]) expect(routeGuess(PICK, none)).toBeUndefined()
+    expect(routeGuess([], 'Northwind')).toBeUndefined()
+  })
+
+  test('the picker lists a project with its client when its name does not hold it, and finds the page a project is on', async () => {
+    expect(routeLabel(COOL)).toBe('Cool Calc · Wes Fairfax')
+    expect(routeLabel(CALC)).toBe('Calc Partners')
+    expect(routeLabel({ projectId: pid(9), name: 'Goldberg Centre Yehuda Goldberg', client: 'Goldberg Centre' })).toBe('Goldberg Centre Yehuda Goldberg')
+    const list = Array.from({ length: 120 }, (_, i) => ({ projectId: pid(i + 1), name: `Client ${String(i + 1).padStart(3, '0')}` }))
+    expect(routePageOf(list, pid(1))).toBe(0)
+    expect(routePageOf(list, pid(50))).toBe(0)
+    expect(routePageOf(list, pid(51))).toBe(1)
+    expect(routePageOf(list, pid(120))).toBe(2)
+    expect(routePageOf(list, 'nope')).toBe(0)
+  })
+
+  test("Route's projects carry the client's name and aliases when the feed gives them, cleaned, and only then", async () => {
+    const choices = routeChoices(feed({
+      role: 'founder',
+      route_projects: [
+        { id: pid(1), name: 'Cool Calc', client_name: 'Wes\nFairfax', aliases: ['Kool Kalk', 'Cool Calc', '  ', 'Kool Kalk', 42 as never, '<<>>'] },
+        { id: pid(2), name: 'Northwind Interiors', client_name: null, aliases: null },
+        { id: pid(3), name: 'Harbor Society', client_name: 'Harbor Society', aliases: Array.from({ length: 30 }, (_, i) => `Alias ${i + 1}`) },
+      ],
+    }))
+    expect(choices[0]).toEqual({ projectId: pid(1), name: 'Cool Calc', client: 'Wes Fairfax', aliases: ['Kool Kalk'] })
+    expect(choices[2]).toEqual({ projectId: pid(2), name: 'Northwind Interiors' })
+    expect(choices[1]?.client).toBe('Harbor Society')
+    expect(choices[1]?.aliases).toHaveLength(20)
+    // an OW that sends id and name only: exactly as before
+    expect(routeChoices(feed({ role: 'pm', route_projects: [{ id: pid(1), name: 'Cool Calc' }] }))).toEqual([{ projectId: pid(1), name: 'Cool Calc' }])
+  })
+
+  test("the picker opens with OW's own pick when it is a route project, else the project its guess names, else nothing", async () => {
+    // OW's pick wins over the guess
+    expect(routePrePick(PICK, { suggested: { projectId: HARBOR.projectId }, guess: 'Northwind' })).toEqual({ project: HARBOR, from: 'suggested' })
+    // a pick that is not a route project: the guess
+    expect(routePrePick(PICK, { suggested: { projectId: pid(99) }, guess: 'Northwind' })).toEqual({ project: NORTH, from: 'guess' })
+    expect(routePrePick(PICK, { guess: 'Kool Kalk' })).toEqual({ project: COOL, from: 'guess' })
+    expect(routePrePick(PICK, { suggested: { projectId: pid(99) } })).toBeUndefined()
+    expect(routePrePick(PICK, { guess: 'Calc' })).toBeUndefined()
+    expect(routePrePick(PICK, {})).toBeUndefined()
+    expect(routePrePick([], { suggested: { projectId: HARBOR.projectId } })).toBeUndefined()
+  })
+
+  test("a row carries OW's own pick by id with its reason cleaned; a pick with no uuid is none, and a Directory lead's row has none", async () => {
+    const SUG = 'e0e0e0e0-0000-4000-8000-000000000001'
+    const rows = peopleRows(feed({
+      role: 'founder',
+      person_alerts: [
+        { ...alerts[0]!, suggested_project: { id: SUG, name: 'Cool Calc', rule: 'thread-continuity', reason: 'Same Gmail\nthread as an email filed to it' } },
+        { ...alerts[1]!, suggested_project: { id: SUG, name: 'Cool Calc', rule: 'exact-contact', reason: 'x' } },
+        { ...alerts[2]!, suggested_project: { id: 'COOL', name: 'Cool Calc', rule: 'guess-match', reason: 'x' } },
+      ],
+    }), thu)
+    expect(rows.map(r => [r.id, r.suggested])).toEqual([
+      [A2, undefined],
+      [A3, undefined],
+      [A1, { projectId: SUG, reason: 'Same Gmail thread as an email filed to it' }],
+    ])
+    // no reason: an empty one; null or absent: none
+    expect(peopleRows(feed({ role: 'pm', person_alerts: [{ ...alerts[0]!, suggested_project: { id: SUG } }] }), thu)[0]?.suggested).toEqual({ projectId: SUG, reason: '' })
+    expect(peopleRows(feed({ role: 'pm', person_alerts: [{ ...alerts[0]!, suggested_project: null }] }), thu)[0]).not.toHaveProperty('suggested')
+  })
+
+  test("a row carries OW's guess at the project, one cleaned line, and a Directory lead's row none", async () => {
+    const rows = peopleRows(feed({
+      role: 'founder',
+      person_alerts: [
+        { ...alerts[0]!, project_guess: 'Northwind\nInteriors' },
+        { ...alerts[1]!, project_guess: 'Marcus Co' },
+        { ...alerts[2]!, project_guess: 'x'.repeat(200) },
+      ],
+    }), thu)
+    expect(rows.map(r => [r.id, r.guess])).toEqual([[A2, undefined], [A3, `${'x'.repeat(79)}…`], [A1, 'Northwind Interiors']])
+    // none given: no key at all
+    expect(peopleRows(feed({ role: 'founder', person_alerts: [{ ...alerts[0]!, project_guess: null }] }), thu)[0]).not.toHaveProperty('guess')
+    expect(peopleRows(feed({ role: 'founder', person_alerts: alerts }), thu).every(r => !('guess' in r))).toBe(true)
+  })
 })
 
 // (0.5.28, internal asks) Rob, 2026-10-23: "anyone asked to do something internally ... should show up in my brige
@@ -2147,6 +2318,20 @@ describe('(0.5.28, internal asks) an ask lists on the asked person\'s item for i
       `${helper} ext POST /team-asks/post`,
       'grep -rn "team-ask/post" docs/',
     ]) expect(isClosingRoute(command), command).toBe(false)
+  })
+
+  // ⛔ (0.7.62, Rob 2026-11-19: "I don't want to miss something from a teammate when they need something for a client,
+  // so they can keep working on time.") An open ask has no age: OW serves it until it is answered or closed (#785), and
+  // the bridge's 3-week cut (`listCutoff`) never drops it, as it drops a ticket the nightly job would have closed.
+  test('(0.7.62) an open ask 30 days past its reply time still lists, reads late and pins', async () => {
+    const later = DUE + 30 * 24 * 3_600_000
+    const [it] = buildQueue(robFeed({ asks: [ask()] }), later)
+    if (!it) throw new Error('no item: the ask was cut')
+    expect(it).toMatchObject({ projectId: CREG, kind: 'ask', dueAt: DUE, actBy: DUE })
+    expect(openAsks(it).map(a => a.id)).toEqual([ASK])
+    expect(pinsNow(it, later)).toBe(true)
+    // an ask with no time at all is still dropped, as before
+    expect(buildQueue(robFeed({ asks: [ask({ asked_at: 'not a time', due_at: null })] }), later)).toEqual([])
   })
 })
 
@@ -2694,10 +2879,11 @@ describe('(0.7.4) a teammate\'s internal tickets owe an ETA and list with a cloc
     expect(heldInternal(it)).toBe(false)
     expect(pinsNow(it, wed)).toBe(true)
     expect(autoUpdatable(it, wed)).toBe(true)
-    expect(titleFor(it, wed)).toBe('🔴 2h left · Massmarket AI · ETA needed')
+    // (0.7.60, Rob approved 2026-11-19 ('Yes, all five')) an owed ETA is an internal clock: never red, past it `behind`, never late
+    expect(titleFor(it, wed)).toBe('🟡 2h left · Massmarket AI · ETA needed')
     expect(waitingText(it)).toBe('1 needs an ETA')
     // the pane: OW's words, then the ticket and when its ETA is needed by; no word of reply drafts
-    expect(clientMarkdown(it, wed)).toBe(['## Massmarket AI', '🔴 2h left · Massmarket AI · ETA needed', '', `### ${ETA_ASK_TEXT}`, '', `- Ticket 1 (ticket 00000001) · ETA needed by ${clockText(Date.parse('2026-10-28T21:00:00Z'), wed)}`].join('\n'))
+    expect(clientMarkdown(it, wed)).toBe(['## Massmarket AI', '🟡 2h left · Massmarket AI · ETA needed', '', `### ${ETA_ASK_TEXT}`, '', `- Ticket 1 (ticket 00000001) · ETA needed by ${clockText(Date.parse('2026-10-28T21:00:00Z'), wed)}`].join('\n'))
     // the kickoff: the internal skill, then how to record each ETA, with the ticket's full id
     expect(kickoffText(it)).toBe(
       [
@@ -2723,11 +2909,13 @@ describe('(0.7.4) a teammate\'s internal tickets owe an ETA and list with a cloc
     expect(lists.queue.map(i => i.projectId)).toEqual([INTERNAL_OPS, CLIENT, INTERNAL_DISCORD])
     const [ops, acme, discord] = lists.queue as [QueueItem, QueueItem, QueueItem]
     // (0.7.12) with when it was due (until 0.7.12: the clock alone)
-    expect(titleFor(ops, wed)).toBe('🔴 4h late, due 11 AM · Massmarket AI · ETA needed')
-    expect(titleFor(acme, wed)).toBe('🔴 3h late, due 12 PM · Acme Legal · ETA needed')
+    // (0.7.60, Rob approved 2026-11-19 ('Yes, all five')) an owed ETA is an internal clock: never red, past it `behind`, never late
+    expect(titleFor(ops, wed)).toBe('🟡 Massmarket AI · behind · due 11 AM')
+    expect(titleFor(acme, wed)).toBe('🟡 Acme Legal · behind · due 12 PM')
     expect(pinsNow(ops, wed)).toBe(true)
     expect(clientMarkdown(ops, wed)).toContain('- Ticket 1 (ticket 00000001) · ETA was needed by ')
-    expect(clientMarkdown(ops, wed)).toContain(', 4h late')
+    expect(clientMarkdown(ops, wed)).toContain(', behind')
+    expect(clientMarkdown(ops, wed)).not.toContain('late')
     // a client's item is never internal: it was never held, and now it has a clock
     expect(acme).toMatchObject({ projectId: CLIENT, tasks: 1 })
     expect(acme.internal).toBeUndefined()
@@ -2797,10 +2985,10 @@ describe('(0.7.4) a teammate\'s internal tickets owe an ETA and list with a cloc
     expect(lists.queue.map(i => i.projectId)).toEqual([INTERNAL_OPS])
     const ops = lists.queue[0] as QueueItem
     expect(ops).toMatchObject({ kind: 'queue', tasks: 0 })
-    expect(matesOf(ops)).toEqual([{ by: holderName(ASIF), id: tid(2), title: 'Ticket 2', lateSince: Date.parse('2026-10-28T15:00:00Z'), eta: true }])
+    expect(matesOf(ops)).toEqual([{ by: holderName(ASIF), id: tid(2), title: 'Ticket 2', lateSince: Date.parse('2026-10-28T15:00:00Z'), eta: true, internal: true }])
     // ((0.7.21) not on his own row: `1 late with Asif` until 0.7.21; Team · late lists it)
     expect(waitingText(ops)).toBe('1 ticket in the internal queue')
-    expect(clientMarkdown(ops, wed)).toContain(['### Late with a teammate (1)', '', `- ${holderName(ASIF)} · Ticket 2 (ticket 00000002) · no ETA given, 4h late`].join('\n'))
+    expect(clientMarkdown(ops, wed)).toContain(['### Late with a teammate (1)', '', `- ${holderName(ASIF)} · Ticket 2 (ticket 00000002) · no ETA given, behind since 11 AM`].join('\n'))
     // ⛔ never in his kickoff: it is the teammate's to answer
     expect(kickoffText(ops)).not.toContain('Ticket 2')
     // a client with nothing of his: under With a teammate, whose and what; never pinned, never counted
@@ -2815,7 +3003,7 @@ describe('(0.7.4) a teammate\'s internal tickets owe an ETA and list with a cloc
     expect(holdSentence(beta)).toBe(`${nayan} owes an ETA on 1 internal ticket`)
     expect(holdSentence(discord)).toBe(`${nayan} is past the ETA on 1 internal ticket`)
     expect(titleFor(discord, wed)).toContain('past ETA')
-    expect(noteText(beta, ROB)).toContain(`${nayan} owes an ETA on 1 internal ticket (late); the side pane lists them. They are the teammate's to answer, not Rob's.`)
+    expect(noteText(beta, ROB)).toContain(`${nayan} owes an ETA on 1 internal ticket (behind); the side pane lists them. They are the teammate's to answer, not Rob's.`)
     // ⛔ the client ticket nothing marks internal reaches him nowhere
     expect([...lists.queue, ...lists.teammate].map(i => i.projectId)).not.toContain(CLIENT)
     // ⛔ a teammate's own feed never gets anyone else's
@@ -3012,13 +3200,14 @@ describe('(0.7.15) an `assign_by` commitment asks for an owner by its clock, nev
     expect(pinsNow(it, wed)).toBe(true)
     expect(autoUpdatable(it, wed)).toBe(true)
     // the thread's name and the row: what is asked, never `task`
-    expect(titleFor(it, wed)).toBe('🔴 2h left · Acme Legal · assign an owner')
-    expect(rowLine(it, wed)).toBe('🔴 Acme Legal · assign an owner · 2h left')
+    // (0.7.60, Rob approved 2026-11-19 ('Yes, all five')) `assign_by` is an internal clock: never red, past it `behind`, never late
+    expect(titleFor(it, wed)).toBe('🟡 2h left · Acme Legal · assign an owner')
+    expect(rowLine(it, wed)).toBe('🟡 Acme Legal · assign an owner · 2h left')
     expect(waitingText(it)).toBe('1 needs an owner')
     expect(rowExtra(it)).toBe('')
     // the pane: what to do, then the ticket and its clock; no `Due (dates we committed to)`, no word of reply drafts
     const md = clientMarkdown(it, wed)
-    expect(md).toBe(['## Acme Legal', '🔴 2h left · Acme Legal · assign an owner', '', `### ${ASSIGN_ASK_TEXT}`, '', `- Build 1 (ticket 00000001) · owner needed by ${clockText(CLOCK, wed)}`].join('\n'))
+    expect(md).toBe(['## Acme Legal', '🟡 2h left · Acme Legal · assign an owner', '', `### ${ASSIGN_ASK_TEXT}`, '', `- Build 1 (ticket 00000001) · owner needed by ${clockText(CLOCK, wed)}`].join('\n'))
     expect(md).not.toContain('committed')
     // the kickoff: an owner by the clock, assigned through /ticket-status; an ETA through §5.3 only for one taken
     expect(kickoffText(it)).toBe(
@@ -3037,9 +3226,10 @@ describe('(0.7.15) an `assign_by` commitment asks for an owner by its clock, nev
 
   test('late: past its clock it is late as any task is, and the pane says when the owner was needed', async () => {
     const it = one(h9Feed({ overdue: [handed(1, { due_at: '2026-10-28T16:00:00Z' })] }))
-    expect(titleFor(it, wed)).toBe('🔴 3h late, due 12 PM · Acme Legal · assign an owner')
+    // (0.7.60, Rob approved 2026-11-19 ('Yes, all five')) `assign_by` is an internal clock: never red, past it `behind`, never late
+    expect(titleFor(it, wed)).toBe('🟡 Acme Legal · behind · due 12 PM')
     expect(pinsNow(it, wed)).toBe(true)
-    expect(assignMarkdown(it, wed)).toBe([`### ${ASSIGN_ASK_TEXT}`, '', `- Build 1 (ticket 00000001) · owner was needed by ${clockText(Date.parse('2026-10-28T16:00:00Z'), wed)}, 3h late`].join('\n'))
+    expect(assignMarkdown(it, wed)).toBe([`### ${ASSIGN_ASK_TEXT}`, '', `- Build 1 (ticket 00000001) · owner was needed by ${clockText(Date.parse('2026-10-28T16:00:00Z'), wed)}, behind`].join('\n'))
   })
 
   test('it acts by its clock, not by the start-by time of the work\'s estimate; a committed task still acts by its start-by', async () => {
@@ -3056,7 +3246,8 @@ describe('(0.7.15) an `assign_by` commitment asks for an owner by its clock, nev
       expect(it).toMatchObject({ kind: 'task', tasks: 1, taskTitles: ['Build 1'] })
       expect(assignAsksOf(it)).toEqual([])
       expect(assignOnly(it)).toBe(false)
-      expect(titleFor(it, wed)).toBe('🔴 2h left · Acme Legal · task')
+      // (0.7.60) `eta_owed` is an internal clock: never red
+      expect(titleFor(it, wed)).toBe(basis === 'eta_owed' ? '🟡 2h left · Acme Legal · task' : '🔴 2h left · Acme Legal · task')
       expect(waitingText(it)).toBe('1 task due')
       expect(assignMarkdown(it, wed)).toBe('')
       expect(assignParagraph(it)).toBe('')
@@ -3072,7 +3263,8 @@ describe('(0.7.15) an `assign_by` commitment asks for an owner by its clock, nev
     expect(committedCount(mixed)).toBe(1)
     expect(waitingText(mixed)).toBe('1 task due, 1 needs an ETA, 1 needs an owner')
     expect(rowExtra(mixed)).toBe('1 task due · 1 needs an ETA · 1 needs an owner')
-    expect(titleFor(mixed, wed)).toBe('🔴 2h left · Acme Legal · task')
+    // (0.7.60) the soonest clock is the owner ask's (internal), and the client's own is tomorrow: yellow
+    expect(titleFor(mixed, wed)).toBe('🟡 2h left · Acme Legal · task')
     const md = clientMarkdown(mixed, wed)
     expect(md).toContain('### Due (dates we committed to)\n- Page 2')
     expect(md).toContain(`### ${ASSIGN_ASK_TEXT}\n\n- Build 1 (ticket 00000001) · owner needed by `)
@@ -3253,7 +3445,46 @@ describe('(0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from
     const stored = { ...it, checkAhead: 2 * H } as QueueItem
     expect(watchOf(stored)).toEqual([])
     expect(pinsFor(stored, wed)).toBe(false)
-    expect(teamLate([it])).toEqual([{ by: 'Asif', count: 1, clients: [{ projectId: CLIENT, client: 'Acme Legal', refs: [{ by: 'Asif', id: tid(1), title: 'Build 1', lateSince: wed - 4 * H, eta: true }] }] }])
+    expect(teamLate([it])).toEqual([{ by: 'Asif', count: 1, behind: 1, clients: [{ projectId: CLIENT, client: 'Acme Legal', refs: [{ by: 'Asif', id: tid(1), title: 'Build 1', lateSince: wed - 4 * H, eta: true, internal: true }] }] }])
+  })
+
+  test('(0.7.61, Rob approved 2026-11-19 \'Yes, all five\'; \'I think we should fix the small gaps.\') an internal clock reads behind, never late, in lateSentence and the pin reason', async () => {
+    const r = (by: string, e: boolean, internal?: true) => ({ by, id: tid(1), title: 't', lateSince: 0, eta: e, ...(internal ? { internal } : {}) })
+    // internal only: behind
+    expect(lateSentence([r('Asif', false, true), r('Asif', true, true), r('Asif', true, true)])).toBe('Asif: 3 internal tickets behind, 2 with no ETA')
+    expect(lateSentence([r('Asif', false, true), r('Asif', true, true), r('Asif', true, true)])).not.toContain('late')
+    // client only: unchanged
+    expect(lateSentence([r('Asif', false), r('Nayan', true)])).toBe('Asif and Nayan: 2 internal tickets late, 1 with no ETA')
+    // mixed: split
+    expect(lateSentence([r('Asif', false), r('Asif', true, true), r('Asif', true, true)])).toBe('Asif: 3 internal tickets, 1 late, 2 behind, 2 with no ETA')
+    const f: Feed = { member: ROB, role: 'founder', tickets: { overdue: [ticket(1, ASIF, 0, { due_at: null, due_source: null, eta_needed_by: at(-4), eta_ask: 'x' })] } }
+    const it = listed(f)
+    expect(lateOnly(it)).toBe(true)
+    const refs = matesOf(it)
+    const withInternal = { ...it, theirs: undefined, mates: refs.map(m => ({ ...m, internal: true as const })) } as QueueItem
+    expect(pinReason(withInternal, wed)).toBe("No pin needed: only Asif's tickets behind are here, and they are on the 9 AM image.")
+    expect(pinReason({ ...it, theirs: undefined, mates: refs.map(m => ({ ...m, internal: undefined })) } as QueueItem, wed)).toBe("No pin needed: only Asif's late tickets are here, and they are on the 9 AM image.")
+  })
+
+  test('(0.7.61) Team · late: the count and heading split client refs (late) from internal ones (behind)', async () => {
+    const person = (count: number, behind?: number) => ({ by: 'Asif', count, ...(behind ? { behind } : {}), clients: [{ client: 'Acme', lines: ['x'] }] })
+    // all client refs
+    expect(teamLateSplit([person(5)])).toEqual({ late: 5, behind: 0 })
+    expect(teamLateSegment(teamLateSplit([person(5)]))).toBe(' · 5 late with the team')
+    expect(teamHeading([person(5)])).toBe('Team · late (5)')
+    // all internal refs
+    expect(teamLateSplit([person(3, 3)])).toEqual({ late: 0, behind: 3 })
+    expect(teamLateSegment(teamLateSplit([person(3, 3)]))).toBe(' · 3 behind with the team')
+    expect(teamHeading([person(3, 3)])).toBe('Team · behind (3)')
+    // a mix, over two people
+    const mix = [person(3, 1), person(2, 2)]
+    expect(teamLateSplit(mix)).toEqual({ late: 2, behind: 3 })
+    expect(teamLateSegment(teamLateSplit(mix))).toBe(' · 2 late, 3 behind with the team')
+    expect(teamHeading(mix)).toBe('Team · late (5)')
+    expect(teamLateSegment(teamLateSplit([]))).toBe('')
+    // the pane carries the split from the refs
+    const t = teamLate([{ ...listed({ member: ROB, role: 'founder', tickets: { overdue: [ticket(1, ASIF, 0, { due_at: null, due_source: null, eta_needed_by: at(-4), eta_ask: 'x' })] } }) }] as QueueItem[])
+    expect(t[0]?.behind).toBeGreaterThanOrEqual(0)
   })
 
   test('an item an older version stored (no `own`) pins as R1 always read it', async () => {
@@ -3340,20 +3571,20 @@ describe('0.7.21 (Rob, 11-05): the founder\'s teammates\' late tickets leave his
       'Team · late (7)',
       'Asif (3)',
       '  Beta Co',
-      '    - Build the booking page · late since Mon 1 PM · no ETA given',
-      '    - Fix the form · late since 1 PM · no ETA given',
+      '    - Build the booking page · behind since Mon 1 PM · no ETA given',
+      '    - Fix the form · behind since 1 PM · no ETA given',
       '  Acme Legal',
-      '    - Send the intake form · late since 11 AM · no ETA given',
+      '    - Send the intake form · behind since 11 AM · no ETA given',
       'Nayan (2)',
       '  Massmarket Internal',
-      '    - Name the channels · late since Tue 1 PM · no ETA given',
+      '    - Name the channels · behind since Tue 1 PM · no ETA given',
       '    - Post the recap · late since 9 AM · past its ETA',
       'Antu (1)',
       '  Beta Co',
-      '    - Write the FAQ · late since 2 PM · no ETA given',
+      '    - Write the FAQ · behind since 2 PM · no ETA given',
       'Mahfuz (1)',
       '  Acme Legal',
-      '    - Logo files · late since 12 PM · no ETA given',
+      '    - Logo files · behind since 12 PM · no ETA given',
     ])
     // stored and read back, as the pane holds it
     expect(teamOf(JSON.parse(JSON.stringify(pane)))).toEqual(pane)
@@ -3451,7 +3682,7 @@ describe('0.7.21 (Rob, 11-05): the founder\'s teammates\' late tickets leave his
     expect(text.filter(l => l === 'Team · late (7)')).toHaveLength(2)
     expect(text.join('\n')).not.toContain('With a teammate')
     const head = text.lastIndexOf('Team · late (7)')
-    expect(text.slice(head, head + 4)).toEqual(['Team · late (7)', 'Asif (3)', '  Beta Co', '    - Build the booking page · late since Mon 1 PM · no ETA given'])
+    expect(text.slice(head, head + 4)).toEqual(['Team · late (7)', 'Asif (3)', '  Beta Co', '    - Build the booking page · behind since Mon 1 PM · no ETA given'])
     expect(text.at(-1)).toBe('Updated 3:00 PM')
     // with nobody late: no group, no heading
     expect(paneText(rows, 'Needs you now (1)', 'N', { team: [] })).not.toContain('Team')
@@ -3713,7 +3944,7 @@ describe('0.7.23 C (Rob, 11-05: "when a teammate\'s holding it, but it\'s late, 
       tickets: { overdue: [{ ticket_id: tid(2), project_id: CLIENT, project_name: 'Acme Legal', title: 'Send the intake form', due_at: null, due_source: null, assignee_email: ASIF, eta_needed_by: at(-3), eta_ask: ETA_ASK_TEXT }] },
     })
     const team = teamLate(buildLists(f, wed).teammate)
-    expect(teamLines(teamPane(buildLists(f, wed).teammate, wed))).toEqual(['Team · late (2)', 'Asif (2)', '  Acme Legal', '    - reply 1d late, flagged for your OK', '    - Send the intake form · late since 12 PM · no ETA given'])
+    expect(teamLines(teamPane(buildLists(f, wed).teammate, wed))).toEqual(['Team · late (2)', 'Asif (2)', '  Acme Legal', '    - reply 1d late, flagged for your OK', '    - Send the intake form · behind since 12 PM · no ETA given'])
     expect(teamLateCount(team)).toBe(2)
   })
 

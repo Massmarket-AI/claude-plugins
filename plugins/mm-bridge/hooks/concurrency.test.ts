@@ -384,7 +384,10 @@ describe('0.5.7: a dozen threads that tick at once never start one client\'s thr
     await w.advance(4_000)
     await w.advance(3_100)
   }
-  for (const seed of [1, 7, 42, 99, 2026, 1013, 5, 11]) {
+  // (0.7.72) 6, 29, 31 and 35 each ended with two cards for one client in 0.7.69: two threads that read different copies of
+  // `mm.seen` each put one up, and a withdrawn card's record that another thread's write brought back read as a live card. Every
+  // seed from 1 to 100 passes since the claim (`claimCards`).
+  for (const seed of [1, 7, 42, 99, 2026, 1013, 5, 11, 6, 29, 31, 35]) {
     test(`twelve threads, no poller they know of: no thread is started, and each client ends with one card (seed ${seed})`, async () => {
       const ids = Array.from({ length: N }, (_, i) => `local_as_${seed}_${i + 1}`)
       const w = world({ seed, extra: ids, startOnly: true })
@@ -405,6 +408,32 @@ describe('0.5.7: a dozen threads that tick at once never start one client\'s thr
       await tickAll(w, threads)
       await w.advance(60_000)
       expect(w.cards.length).toBe(cards)
+    })
+  }
+
+  // (0.7.72) The cards themselves, as the app holds them (put up and not withdrawn), after every round, once its claims' check
+  // has run (1 to 3 seconds on): never two for one client, from the first round on. And the record agrees with the app once the
+  // round settles. In 0.7.69 every thread that ticked first put one up for the same clients, and eight rounds still ended with
+  // two (28, 34). Seeds 1 to 100 pass this.
+  const LONG = { timeoutMs: 30_000 }
+  for (const seed of [6, 28, 29, 31, 34, 35]) {
+    test(`(0.7.72) eight rounds of twelve threads: never two cards up for one client, and the record says the same (seed ${seed})`, LONG, async () => {
+      const ids = Array.from({ length: N }, (_, i) => `local_cl_${seed}_${i + 1}`)
+      const w = world({ seed, extra: ids, startOnly: true })
+      await before(w)
+      w.put('mm.lease', { owner: 'cli-nobody', until: NOW + HOUR, version: VERSION })
+      const threads = ids.map((id, i) => w.session(`cli-cl-${seed}-${i + 1}`, id))
+      const clientOf = (prompt: string) => Array.from({ length: N }, (_, i) => fresh(i + 1)).find(p => prompt.includes(p)) ?? ''
+      const up = () => w.cards.map((prompt, i) => ({ taskId: `task_${String(i + 1).padStart(8, '0')}`, projectId: clientOf(prompt) })).filter(c => !w.dismissed.includes(c.taskId))
+      const twice = (list: Array<{ projectId: string }>) => list.filter((c, i) => list.findIndex(o => o.projectId === c.projectId) !== i).map(c => c.projectId)
+      for (let round = 1; round <= 8; round++) {
+        await tickAll(w, threads)
+        expect({ round, twice: twice(up()) }).toEqual({ round, twice: [] })
+        await w.advance(60_000)
+        const live = ((w.stored('mm.chips') ?? []) as Array<{ taskId: string; threadId: string; projectId: string; superseded?: boolean }>).filter(r => ids.includes(r.threadId) && !r.superseded)
+        expect({ round, records: live.map(r => r.taskId).sort() }).toEqual({ round, records: up().map(c => c.taskId).sort() })
+      }
+      expect(w.startedNow).toEqual([])
     })
   }
 })

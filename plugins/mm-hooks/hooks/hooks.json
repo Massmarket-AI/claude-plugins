@@ -8,6 +8,11 @@
       },
       {
         "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/sync-codex.js\"", "timeout": 15 }
+        ]
+      },
+      {
+        "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/sync-extension.js\"", "timeout": 10 }
         ]
       },
@@ -27,6 +32,13 @@
         "matcher": "Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit|mcp__.*",
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/skill-check.js\"", "timeout": 10 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/skill-check.js\"", "timeout": 15 }
         ]
       }
     ]

@@ -867,9 +867,10 @@ describe('S3: a press answers within 100 ms of fake time while OW takes 5 second
   test('(0.5.14) the band carries Start missing threads, not Open list; a typed /mm opens the pane at once, drawn from the last sync; the refresh draws it again', async () => {
     const { w, hub } = await slowOw('s3l')
     const t0 = w.now()
-    // the band's one button, in a thread whose pane has nothing drawn yet: Client Two has no thread
+    // the band's buttons, in a thread whose pane has nothing drawn yet: (0.7.73) the next client first, then Start missing threads
+    // while Client Two has no thread and no Start card
     const band = await bandButtons(hub)
-    expect([...band.keys()]).toEqual(['mm-start-missing'])
+    expect([...band.keys()]).toEqual(['mm-next', 'mm-start-missing'])
     expect(band.get('mm-open-list')).toBeUndefined()
     // a typed /mm in another thread: the pane at once, from the 9 AM sync, and its answer once the feed has answered
     const other = w.session('local_s3la')
@@ -1071,7 +1072,7 @@ describe('L3: a refresh that fails after a press shows in one line, until a sync
     expect((w.view(hubId, 'queue') as Queue | undefined)?.warning).toBe(LINE)
     expect(await paneTexts(hub)).toContain(LINE)
     expect((await paneTexts(hub)).filter(t => t === LINE).length).toBe(1)
-    expect(await paneTexts(hub)).toContain('Needs you now (1)')
+    expect(await paneTexts(hub)).toContain('Needs you (1)')
     // OW answers again: a sync that works draws the list without it
     w.feedAnswers(200)
     await mm(hub, '')
@@ -1167,7 +1168,7 @@ describe('C3 (0.5.4): a client with no thread has ONE chip, in the thread the pe
 })
 
 describe('C1 and C2 (0.5.4): a client with a thread has ONE chip, in that thread; the other threads point to it', () => {
-  test('six running threads: the linked one mints Do it here, the others nothing for it; their band says where it is; the no-thread client has one chip too; nothing is minted again', async () => {
+  test('six running threads: the linked one mints Do it here, the others nothing for it; their band says where it is; the no-thread client has one chip too; nothing is minted again (0.7.73: the band no longer says where a chip is)', async () => {
     const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(61, 'Client Six One', 1), mail(62, 'Client Six Two', 2)] }
     const ids = Array.from({ length: 6 }, (_, i) => `local_c1_${i + 1}`)
     const w = fakeApp(feed, ids.map(sessionId => ({ sessionId })), [], { every: true })
@@ -1187,14 +1188,16 @@ describe('C1 and C2 (0.5.4): a client with a thread has ONE chip, in that thread
     expect(liveChips(w).filter(c => c.projectId === pid(62)).length).toBe(1)
     expect(spawnedIn(w).map(c => String(c.args.title)).filter(t => t.startsWith('Do it here'))).toEqual(['Do it here: Client Six One: reply to the client'])
     expect(String(spawnedIn(w).find(c => String(c.args.title).startsWith('Do it here'))?.args.tldr)).toMatch(/\. Recommended: Do it here\.$/)
-    // a thread with neither chip: its band says where each is (the chips pass draws it within 15 seconds)
+    // a thread with neither chip: (0.7.73) its band says what needs the person and what is next, never where a chip is (the
+    // cards come by themselves; the band says only what failed)
     await w.advance(15_000)
     await settleAll()
     const holder62 = liveChips(w).find(c => c.projectId === pid(62))?.threadId
     const elsewhere = ids.find(id => id !== ids[0] && id !== holder62) as string
     const band = (w.view(elsewhere, 'band') as { text: string }).text
-    expect(band).toContain(' · a chip is ready in Client Six One.')
-    expect(band).toMatch(/🔴 Client Six Two has no thread \(due [^)]+\): its chip is in \S/)
+    expect(band).toStartWith('Needs you: 2 · next: ')
+    expect(band).not.toContain('a chip is ready in')
+    expect(band).not.toContain('its chip is in')
     // in the linked thread itself: no pointer to its own chip
     expect((w.view(ids[0] as string, 'band') as { text: string }).text).not.toContain('a chip is ready in')
     for (let i = 0; i < 2; i++) {
@@ -1385,7 +1388,7 @@ describe('0.5.3 claim in place, as 0.5.4 has it: the long thread\'s own fresh-th
 // ======================================================================== 0.5.6
 
 describe('0.5.6: Start moves the chip to the thread it is pressed in (Rob, 10-14: "Start in the thread that I click it on")', () => {
-  test('the chip in Y; Start pressed in X: X mints, Y\'s is superseded and Y withdraws it on its pass; one live chip; again in X: already here; a third thread says where it is now', async () => {
+  test('the chip in Y; Start pressed in X: X mints, Y\'s is superseded and Y withdraws it on its pass; one live chip; again in X: already here; a third thread says where it is now (0.7.73: on the row, not the band)', async () => {
     const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(81, 'Client Eight One', 3)] }
     const [Y, X, Z] = ['local_mvy', 'local_mvx', 'local_mvz']
     const w = fakeApp(feed, [{ sessionId: Y, title: 'Fabrikam Media HighLevel Build' }, { sessionId: X, title: 'Where I am' }, { sessionId: Z, title: 'Elsewhere' }], [], { every: true })
@@ -1419,9 +1422,11 @@ describe('0.5.6: Start moves the chip to the thread it is pressed in (Rob, 10-14
     }
     expect(spawnedIn(w).length).toBe(2)
     expect(liveChips(w).map(c => c.threadId)).toEqual([X])
-    // a third thread: the band says where the chip is and that Start brings it there; the row says the same
-    expect((w.view(Z, 'band') as { text: string }).text).toMatch(/🔴 Client Eight One has no thread \(due [^)]+\): its chip is in Where I am\. Press Start thread in the pane to bring it here\./)
-    expect((w.view(X, 'band') as { text: string }).text).toMatch(/its chip is in Where I am\.(?! Press)/)
+    // a third thread: (0.7.73) the band no longer says where the chip is (the card is there by itself: the band says only what
+    // failed), and the row still says where it is and that Start brings it there
+    expect((w.view(Z, 'band') as { text: string }).text).toStartWith('Needs you: 1 · next: Client Eight One, ')
+    expect((w.view(Z, 'band') as { text: string }).text).not.toContain('its chip is in')
+    expect((w.view(X, 'band') as { text: string }).text).not.toContain('its chip is in')
     await mm(zs, '')
     const rows = (w.view(Z, 'queue') as { rows: Array<{ projectId: string; reason: string }> }).rows
     expect(rows.find(r => r.projectId === pid(81))?.reason).toBe('its chip is in "Where I am"; Start thread moves it here')
@@ -2509,7 +2514,7 @@ describe('0.7.12: a pin needs a clock, late says when it was due, undated says s
       expect(q.header).toBe('Nothing needs you right now.')
       expect(allRows(q)).toEqual([])
       expect(q.older).toBeUndefined()
-      expect(bandOf(w)).toBe('Nothing needs you in the next 24 hours.')
+      expect(bandOf(w)).toBe('Nothing needs you right now.')
       expect((w.stored('mm.last') as { items: unknown[] }).items).toEqual([])
       // treated as done: our pin comes off and the thread is named clear
       expect(w.app.get('local_c1')).toMatchObject({ title: `✓ ${KIN} · clear 10 AM`, pinned: false })
@@ -2830,5 +2835,63 @@ describe('0.7.19: the newest bridge on this machine holds the sync, against the 
     const last = w.stored('mm.last') as { at: number }
     expect(Number(w.stored('mm.ask'))).toBeGreaterThan(last.at)
     expect(leaseOf(w)).toBeUndefined()
+  })
+})
+
+// (0.7.71, Rob 2026-11-24, the approved Phase 2 plan: alert only when someone has to act) A new pin raises one notification, from the
+// pinned thread's own session (the phone hears a thread over its own Remote Control), and the sound from the thread whose sync made it.
+// The record of what was alerted, and the switch, are the computer's (the store every thread here shares), so a second thread pinning
+// the same thing again never alerts, and /mm alerts off typed in one thread holds in all of them.
+describe('0.7.71: the alert record and the alerts switch are the computer\'s, whichever thread syncs', () => {
+  const ONE = pid(1)
+  const app = (opts: { every?: boolean } = {}) => {
+    const f: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [] }
+    const w = fakeApp(f, [{ sessionId: 'local_a' }, { sessionId: 'local_b' }, { sessionId: 'local_one', title: 'One work' }], [], opts)
+    w.put('mm.links', { [ONE]: 'local_one' })
+    return { w, f, a: w.session('local_a'), b: w.session('local_b') }
+  }
+  const pinnedOne = (w: ReturnType<typeof fakeApp>) => w.app.get('local_one')?.pinned === true
+
+  test('thread A pins Client One: A plays the sound, and Client One\'s own thread raises the one notification within 30 s; it goes and comes back, and thread B pins it again for the same thing: nothing more', async () => {
+    const { w, f, a, b } = app({ every: true })
+    const one = w.session('local_one')
+    for (const t of [a, b, one]) await startIn(t)
+    await w.advance(5_000)
+    await mm(a, '')
+    expect(w.notified).toEqual([])
+    f.mail = [mail(1, 'Client One')]
+    await w.advance(60_000)
+    await mm(a, '')
+    expect(pinnedOne(w)).toBe(true)
+    expect(w.played).toEqual([{ thread: 'local_a', asset: 'sounds/arrive.wav', gain: 0.6 }])
+    expect(w.notified).toEqual([])
+    await w.advance(30_000)
+    expect(w.notified.map(n => [n.thread, n.title, n.key])).toEqual([['local_one', 'Massmarket', `pin:${ONE}`]])
+    expect(w.notified[0]?.text).toMatch(/^Pinned for you: .*Client One/)
+    await w.advance(120_000)
+    expect(w.notified).toHaveLength(1)
+    f.mail = []
+    await w.advance(60_000)
+    await mm(b, '')
+    expect(pinnedOne(w)).toBe(false)
+    f.mail = [mail(1, 'Client One')]
+    await w.advance(60_000)
+    await mm(b, '')
+    expect(pinnedOne(w)).toBe(true)
+    expect(w.notified).toHaveLength(1)
+    expect(w.played).toHaveLength(1)
+  })
+
+  test('/mm alerts off typed in thread A holds when thread B syncs: the pin is made, with no notification and no sound', async () => {
+    const { w, f, a, b } = app()
+    expect(await mm(a, 'alerts off')).toContain('Alerts are off on this computer')
+    expect(await mm(b, 'alerts')).toBe('Alerts are off on this computer. Type /mm alerts on or /mm alerts off.')
+    await mm(b, '')
+    f.mail = [mail(1, 'Client One')]
+    await w.advance(60_000)
+    await mm(b, '')
+    expect(pinnedOne(w)).toBe(true)
+    expect(w.notified).toEqual([])
+    expect(w.played).toEqual([])
   })
 })

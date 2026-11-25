@@ -87,8 +87,9 @@ jobs:
           fi
 
   # What scripts/release.mjs checks before a release, run on every pull request:
-  # `claude plugin validate` on the marketplace and both plugins, then the
-  # bridge's tests (`claude plugin test`, offline; no login or API key needed).
+  # `claude plugin validate` on the marketplace and every plugin, then the
+  # bridge's and the theme's tests (`claude plugin test`, offline; no login or
+  # API key needed).
   plugins:
     name: Validate plugins and run bridge tests
     # macOS, where teammates run these plugins. The bridge's slowest tests take
@@ -97,9 +98,12 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 20
     env:
-      # Pinned so a run is reproducible. Bump it when the bridge needs a newer
-      # Claude Code (npm view @anthropic-ai/claude-code dist-tags).
-      CLAUDE_CODE_VERSION: "2.1.308"
+      # Pinned so a run is reproducible. Bump it when a plugin needs a newer
+      # Claude Code (npm view @anthropic-ai/claude-code dist-tags). 2.1.330
+      # since 2026-11-24: the theme's tests need $.theme, which 2.1.308's test
+      # harness does not provide; 2.1.330 is what that release ran all three
+      # suites on.
+      CLAUDE_CODE_VERSION: "2.1.330"
       DISABLE_AUTOUPDATER: "1"
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
@@ -117,7 +121,7 @@ jobs:
       - name: Validate marketplace and plugins
         run: |
           set -euo pipefail
-          for target in . plugins/mm-hooks plugins/mm-bridge; do
+          for target in . plugins/mm-hooks plugins/mm-bridge plugins/massmarket-theme; do
             out=$(claude plugin validate "$target" 2>&1) || { echo "$out"; exit 1; }
             echo "$out"
             if ! grep -q 'Validation passed' <<<"$out"; then
@@ -148,8 +152,26 @@ jobs:
           echo "::notice::$summary"
           exit "$status"
 
+      # The theme's tests, the same way: output to a file, then the summary line.
+      - name: Theme tests
+        working-directory: plugins/massmarket-theme
+        run: |
+          log="$RUNNER_TEMP/theme-tests.log"
+          set +e
+          claude plugin test . > "$log" 2>&1
+          status=$?
+          set -e
+          cat "$log"
+          summary=$(grep -E '^Ran [0-9]+ tests' "$log" || true)
+          if [ -z "$summary" ]; then
+            echo "::error::the theme test output has no summary line, so it is incomplete"
+            exit 1
+          fi
+          echo "::notice::$summary"
+          exit "$status"
+
       # mm-hooks' SessionStart steps and the release's extension carry: node's own test runner, no
       # install. Every Chrome folder, home, server and Claude Code CLI they use is fabricated in a temporary
       # directory.
       - name: mm-hooks tests
-        run: node --test plugins/mm-hooks/scripts/sync-extension.test.js plugins/mm-hooks/scripts/update-plugins.test.js scripts/carry-extension.test.mjs plugins/mm-hooks/scripts/revision-insights-notice.test.js plugins/mm-hooks/scripts/skill-check.test.js
+        run: node --test plugins/mm-hooks/scripts/sync-extension.test.js plugins/mm-hooks/scripts/update-plugins.test.js scripts/carry-extension.test.mjs plugins/mm-hooks/scripts/revision-insights-notice.test.js plugins/mm-hooks/scripts/skill-check.test.js plugins/mm-hooks/scripts/worklog-hook-open-line.test.js plugins/mm-hooks/scripts/sync-codex.test.js

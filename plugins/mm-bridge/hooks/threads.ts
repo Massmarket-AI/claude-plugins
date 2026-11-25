@@ -19,13 +19,15 @@
 import type { MmRow, MmTeam } from '../types'
 
 import {
+  ANSWER_LABEL, isAnswerType,
   MAY_NEED_OK, NOBODY, assignAsksOf, assignOnly, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, committedCount, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
-  checkNow, newestFirst, olderTotal, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, tasksBesidesUndated, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
-  TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine,
+  checkNow, clientDueOf, internalBehindAt, leadDueOf, newestFirst, olderTotal, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, tasksBesidesUndated, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
+  TEAM_BEHIND, TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine, teamLateSplit,
   goOf, goOnly, goWithMail, stepWord,
   NO_REPLY_WHAT, afterPackage, checkDot, noReplyNow, owesNoReply, paceOf, paceOnly, paceStatus, paceWord, statusOf,
 } from './queue'
-import type { AskRef, FeedThread, QueueItem, StatusDot } from './queue'
+import type { AnswerType, AskRef, FeedThread, QueueItem, StatusDot } from './queue'
+import { wallTime } from './business-time'
 
 const TZ = 'America/New_York'
 
@@ -61,6 +63,11 @@ export type AppThread = {
   parentSessionId?: string
   detached?: boolean
   startedBy?: string
+  /**
+   * (0.7.64) The app says the thread is in the middle of a turn (`isRunning`). A message sent to it now is held by the app
+   * and delivered when the turn ends, however long that takes and whatever has changed by then.
+   */
+  running?: boolean
 }
 
 /**
@@ -382,6 +389,35 @@ export function markedThreads(
   skip: OwnSkip = {},
 ): string[] {
   return byNewest(markedOf(projectId, links, feedThreads, pairs, skip)).map(o => o.sid)
+}
+
+/**
+ * (0.7.64, Rob 2026-11-19: "I noticed that even the old pinned bridge threads are still getting updated every time there's
+ * something new from the client... Once there's a new bridge thread, the old ones should stop being updated.") The thread
+ * that replaced `sid` for client `pid`, when `sid` is an OLDER bridge thread of the client: it carries the client's own
+ * [mm-link] marker (`marked`: it opened with it, or an Update carried it in), and the client's linked thread is another
+ * one whose marker for the client was recorded LATER (`markedAt`). Undefined for anything else: the linked thread
+ * itself, a thread of no marker or another client's, a second thread opened with the marker AFTER the linked one (R5, a
+ * second thread by the person's own start), or a time not on record for either.
+ * Read from the links as they are NOW, so it never outlives them: the person's /mm link in the old thread makes it the
+ * linked one again, and it is not replaced; a client with no linked thread has no replaced thread. What it changes is the
+ * bridge's own reading of the old thread (`currentIn`: not one of the client's current threads, no client part in its
+ * pane). Updates, auto-updates and the reply-ready note already go to the linked thread alone, and the pin follows the
+ * link, so nothing else needs this rule.
+ */
+export function replacedBy(
+  sid: string,
+  pid: string,
+  links: Readonly<Record<string, string>>,
+  marked: Readonly<Record<string, string>>,
+  markedAt: Readonly<Record<string, number>>,
+): string | undefined {
+  const linked = Object.hasOwn(links, pid) ? links[pid] : undefined
+  if (!linked || linked === sid || !THREAD_ID.test(sid) || !THREAD_ID.test(linked)) return undefined
+  if (marked[sid] !== pid || marked[linked] !== pid) return undefined
+  const was = markedAt[sid]
+  const now = markedAt[linked]
+  return typeof was === 'number' && typeof now === 'number' && Number.isFinite(was) && Number.isFinite(now) && was < now ? linked : undefined
 }
 
 /** (0.7.6) What `markedThreads` and `ownThreads` pass over, and the records they read. */
@@ -1282,11 +1318,51 @@ export const START_MISSING = 'Start missing threads'
 
 /** (0.7.34) A row's pin, as the pin report has it: whether its thread is pinned, and why not. The photo's words, for the viewer's own row. */
 export type RowPin = { pinned: boolean; why?: string }
-const OWN_WHY: Readonly<Record<string, string>> = { no_thread: 'not pinned: no thread', unseen: "not pinned: can't see thread", person_unpinned: 'not pinned: you unpinned it', write_cap: 'not pinned yet' }
+const OWN_WHY: Readonly<Record<string, string>> = {
+  no_thread: 'not pinned: no thread',
+  unseen: "not pinned: can't see thread",
+  person_unpinned: 'not pinned: you unpinned it',
+  write_cap: 'not pinned yet',
+  // (0.7.59) the app refused the bridge's pin
+  refused: 'not pinned: the app refused',
+}
 export const rowPinWords = (pin: RowPin): string => (pin.pinned ? 'pinned' : (pin.why && Object.hasOwn(OWN_WHY, pin.why) ? (OWN_WHY[pin.why] as string) : 'not pinned'))
 /** (0.7.34) The report's rows by client, for the pane's marks. */
 export const rowPinsOf = (report: Pick<PinReport, 'items'>): Record<string, RowPin> =>
   Object.fromEntries(report.items.map(i => [i.project_id, i.pinned ? { pinned: true } : { pinned: false, ...(i.why_not ? { why: i.why_not } : {}) }]))
+
+/**
+ * ⛔ (0.7.59, Rob 2026-11-16: "Yes, build it") The pane's line under `Needs you now` when the app refused `n` of the rows' pins:
+ * the reason the person can act on. The app's `set_pinned` asks the person first for a thread other than the caller (or one it
+ * started) unless the session runs in Bypass permissions mode; asked from the bridge, nobody answers, and the pin is refused.
+ * Opus-authored, placed verbatim.
+ */
+export const refusedPinsText = (n: number): string =>
+  `The Claude app refused ${n} pin${n === 1 ? '' : 's'}. It asks before the bridge pins a thread unless Claude Code runs in Bypass permissions mode: switch the mode, or pin ${n === 1 ? 'it' : 'them'} yourself.`
+
+/** (0.7.59) How many of these rows' pins the app refused, by the pin report's marks (`rowPinsOf`). */
+export const refusedPinCount = (rows: Iterable<{ pin?: RowPin } | undefined>): number => {
+  let n = 0
+  for (const r of rows) if (r?.pin && !r.pin.pinned && r.pin.why === 'refused') n++
+  return n
+}
+
+/**
+ * (0.7.59) The report as an OW from before `refused` takes it: each `refused` item reads `unknown` and carries no `why_text`.
+ * OW answers 400 for a `why_not` it does not know, so `sendPinReport` sends this once after a 400 to a report with a `refused`
+ * item: the rest of the report still reaches the team. Null when the report has no `refused` item (nothing to send again).
+ */
+export function pinReportForOlderOw(report: PinReport): PinReport | null {
+  if (!report.items.some(i => i.why_not === 'refused')) return null
+  return {
+    ...report,
+    items: report.items.map(i => {
+      if (i.why_not !== 'refused') return i
+      const { why_text: _whyText, ...rest } = i
+      return { ...rest, why_not: 'unknown' }
+    }),
+  }
+}
 
 
 /** (0.5.25) What a row's Start, and /mm start <client>, puts there. */
@@ -1382,6 +1458,273 @@ export function recordLooksFinished(record: unknown): boolean {
   if (status !== 'completed') return false
   const detail = typeof summary?.status_detail === 'string' ? summary.status_detail : ''
   return !(LEFT_OPEN.test(detail) && !NOTHING_LEFT.test(detail))
+}
+
+// ---------------------------------------------------------------- (0.7.68) a client's thread says it waits on the person
+
+/**
+ * ⛔ (0.7.68, Rob 2026-11-23: "it depends on what the question is and how important it is I answer it. you almost always end
+ * with a question. we can probably come up with some rules around what types of questions need answering." Then, of Claude's
+ * recommended four kinds: "Yes, build it".) What a client's thread declared through `mm waiting <type> -- <question>`, by
+ * thread (`mm.waiting`): the kind (`ANSWER_TYPES`), the question as the thread put it (`cutAsk`), and when. It stands until the
+ * first of: the person's own prompt in that thread at or after `at`; `mm waiting clear` there; a newer declaration there; the
+ * thread archived, gone or unlinked. ⛔ LOCAL ONLY: the question and the kind never leave this computer (the pin report sends
+ * kind `waiting`, never either).
+ */
+export type Declared = { type: AnswerType; ask: string; at: number }
+
+/** (0.7.68) The most characters of a thread's question the bridge keeps, cut on a word boundary. */
+export const ASK_MAX = 140
+
+/**
+ * (0.7.68) A thread's question as the bridge keeps and shows it: control characters and line breaks become spaces, runs of
+ * spaces collapse, a double quote becomes a single one (the sentence quotes it), and past ASK_MAX characters it is cut at the
+ * last space (or at ASK_MAX when there is none past half of it) with `…`. '' for nothing.
+ */
+export function cutAsk(raw: unknown): string {
+  const text = (typeof raw === 'string' ? raw : '').normalize('NFC').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ').replace(/"/g, "'").replace(/\s+/g, ' ').trim()
+  const chars = [...text]
+  if (chars.length <= ASK_MAX) return text
+  const head = chars.slice(0, ASK_MAX - 1).join('')
+  const space = head.lastIndexOf(' ')
+  return `${(space > ASK_MAX / 2 ? head.slice(0, space) : head).replace(/[\s.,;:!?-]+$/u, '')}…`
+}
+
+/** (0.7.68) The declarations on record, each checked again (a thread id, a known kind, a question, a time): a damaged entry is none. */
+export function declaredOf(raw: unknown): Record<string, Declared> {
+  const out: Record<string, Declared> = {}
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out
+  for (const [sid, d] of Object.entries(raw as Record<string, unknown>)) {
+    if (!THREAD_ID.test(sid) || !d || typeof d !== 'object') continue
+    const { type, ask, at } = d as { type?: unknown; ask?: unknown; at?: unknown }
+    if (!isAnswerType(type) || typeof ask !== 'string' || ask === '' || typeof at !== 'number' || !Number.isFinite(at)) continue
+    out[sid] = { type, ask, at }
+  }
+  return out
+}
+
+/**
+ * ⛔ (0.7.68) The mm tool's own words for `waiting`, verbatim as the coordinator gave them for Rob's approved recommendation:
+ * when a thread may say it waits on the person, and the never-list.
+ */
+export const ANSWER_TOOL_TEXT = `"waiting <send|money|only-you|risk> -- <question>" says this thread's work stops until the person answers that question, and pins the thread until they answer: send = a go on something that reaches a client, prospect or the team (email, text, LinkedIn, follow-up schedule, reply package, Discord post); money = a price off the price book, a discount, credit or refund that needs them, or spend over $10; only-you = something only they can do (sign in, a fact or promise only they have, a call only they take); risk = a client relationship at risk, client data or privacy, or a security problem. Never for a go to merge, migrate or deploy our own code, housekeeping, a choice you can make yourself, or anything that can wait. "waiting clear" takes it back.`
+
+/** (0.7.68) What `mm waiting` answers for a kind it does not know, or no question: one line, naming the four kinds. */
+export const ANSWER_REFUSED = 'Not recorded: say "waiting <type> -- <question>" with type send, money, only-you or risk and the question itself, or "waiting clear".'
+/** (0.7.68) What it answers in a thread that is no client's linked thread here: nothing is stored. */
+export const ANSWER_CLIENTS_ONLY = "Not recorded: the bridge pins client threads only, and this thread is not linked to a client's project here."
+/** (0.7.68) What it answers once the declaration is on record. */
+export const answerNoted = (type: AnswerType): string =>
+  `Recorded: this thread waits on the person's answer (${ANSWER_LABEL[type]}). The bridge pins it at its next sync and keeps it pinned until they answer here or you call "waiting clear".`
+/** (0.7.68) What `waiting clear` answers, whether there was a declaration or not. */
+export const ANSWER_CLEARED = 'Cleared: this thread no longer says it waits on the person. Its pin follows the usual rules from the next sync.'
+
+/** (0.7.68) `mm waiting <type> -- <question>`, or `mm waiting clear`: what it asks for, or ANSWER_REFUSED. */
+export function answerArgs(arg: string): { clear: true } | { type: AnswerType; ask: string } | string {
+  const text = arg.trim()
+  if (/^clear$/i.test(text)) return { clear: true }
+  const m = /^(\S+)\s+--\s*([\s\S]*)$/.exec(text) ?? /^(\S+)--\s*([\s\S]*)$/.exec(text)
+  const type = m?.[1]?.toLowerCase()
+  const ask = cutAsk(m?.[2])
+  if (!isAnswerType(type) || !ask) return ANSWER_REFUSED
+  return { type, ask }
+}
+
+// ---------------------------------------------------------------- (0.7.70) a thread waits on a scheduled run
+
+/**
+ * ⛔ (0.7.70, Rob 2026-11-24: "When we're waiting for a scheduled run before something needs me again, it should probably unpin
+ * and then only repin after the run goes or it fails. This is something that could help clear up my pin list and everybody
+ * else's system-wide. It doesn't need my attention between now and then, and I'm constantly checking it as I'm clicking through
+ * all the different threads and having to bring my head back to the fact that I'm just waiting on a run." Then, the same day:
+ * "we set up the watchdogs to make sure outreach is running right in all channels for clients. If something is not running
+ * properly, it's supposed to pin itself ... But if everything I need to do is already scheduled and we're waiting for the send
+ * to know that it's been fixed, I think we can unpin until we know there's an issue again that I need to do something with.")
+ * What a linked thread declared through `mm waiting scheduled <when>[, <when>] ticket <id> -- <what>`, by thread
+ * (`mm.runwait`): what the runs check (`what`, cut as a question is), the OW ticket every run notes its result on (`ticket`),
+ * when it was declared (`at`), each run's due time and, once the bridge found it, when its report was stamped (`seen`), and
+ * what the client had for the viewer then (`base`). ⛔ LOCAL ONLY, as a declaration is: the pin report sends no part of it.
+ */
+export type RunWait = { what: string; ticket: string; at: number; runs: WaitRun[]; base?: RunBaseline; project?: string; repinned?: number }
+// (0.7.70) `base` absent: the last sync's item for the client did not carry the ticket ids yet (a sync of a bridge before 0.7.70),
+// so the first pass after the declaration takes it.
+// (0.7.70) `project`: the project the thread was linked to when it declared the wait, absent for a thread linked to none (an
+// internal thread of the person's own): that one unpins itself, and the bridge only pins it again for a missed run (`repinned`,
+// when it did) and takes that pin off once the run's note lands.
+
+/** (0.7.70) One scheduled run: when it is due, and (`seen`) the stamp of the first note on the wait's ticket at or after then. */
+export type WaitRun = { at: number; seen?: number }
+
+/**
+ * (0.7.70) What the client had for the viewer when the wait began (`baselineOf`): the newest time of each kind (`newest`) and
+ * the ids of the viewer's own tickets (`taskIds`). Anything past it is something new (`newSince`), and ends the wait.
+ */
+export type RunBaseline = { mail: number; pkg: number; task: number; ids: string[] }
+
+/**
+ * (0.7.70) How long after its due time a run has to note its ticket before the bridge reads it as failed and pins the thread
+ * again: two hours (a check that waits for an idle runner can take one, and launchd runs a missed time on wake). Claude's
+ * recommendation in the build, not Rob's number.
+ */
+export const RUN_GRACE_MS = 2 * 60 * 60_000
+/** (0.7.70) The furthest ahead a run may be: a wait is for a run that is set up and near, never for "some day". */
+export const RUN_AHEAD_MAX_MS = 14 * 24 * 60 * 60_000
+/** (0.7.70) The most runs one wait holds (a day-one and a day-three check is two). */
+export const RUN_WAIT_RUNS_MAX = 6
+/**
+ * (0.7.70) How long a wait whose runs all reported stands, the client still listed and nothing new: 21 days after its last run,
+ * the three weeks after which a quiet ticket closes. Past it the usual rules act on the thread again (quiet is never done).
+ */
+export const RUN_DONE_KEEP_MS = 21 * 24 * 60 * 60_000
+
+/** (0.7.70) What the client has for the viewer now, as a wait's baseline. No item: nothing. */
+export function baselineOf(it: Pick<QueueItem, 'newest' | 'taskIds'> | undefined): RunBaseline {
+  const n = it?.newest
+  const ids = Array.isArray(it?.taskIds) ? [...new Set(it.taskIds.filter(isUuid).map(id => id.toLowerCase()))] : []
+  return { mail: Number(n?.mail) || 0, pkg: Number(n?.pkg) || 0, task: Number(n?.task) || 0, ids }
+}
+
+/**
+ * ⛔ (0.7.70) Whether the client has something for the viewer that it did not have when the wait began: a newer message, package
+ * or task or ask, or a ticket of the viewer's own that opened or reopened since (a watchdog's ticket, a run's "short" ticket).
+ * That is a result that needs the person, and it ends the wait. No item (the client is on none of the lists): nothing new.
+ */
+export function newSince(it: Pick<QueueItem, 'newest' | 'taskIds'> | undefined, base: RunBaseline): boolean {
+  if (!it) return false
+  const now = baselineOf(it)
+  if (now.mail > base.mail || now.pkg > base.pkg || now.task > base.task) return true
+  const had = new Set(base.ids)
+  return now.ids.some(id => !had.has(id))
+}
+
+/**
+ * (0.7.70) Where a wait stands: `waiting` for its next run (due `due`); `missed`, a run past its due time and RUN_GRACE_MS with no
+ * report (since `since`), which pins the thread again; `done`, every run reported (the last due `last`). Runs are read in order:
+ * a later run's report never stands for an earlier one's.
+ */
+export type RunState = { kind: 'waiting'; due: number } | { kind: 'missed'; due: number; since: number } | { kind: 'done'; last: number }
+export function runState(w: Pick<RunWait, 'runs' | 'at'>, now: number): RunState {
+  const runs = [...w.runs].sort((a, b) => a.at - b.at)
+  const open = runs.find(r => !Number.isFinite(r.seen))
+  if (!open) return { kind: 'done', last: runs.length ? (runs[runs.length - 1] as WaitRun).at : w.at }
+  const since = open.at + RUN_GRACE_MS
+  return now >= since ? { kind: 'missed', due: open.at, since } : { kind: 'waiting', due: open.at }
+}
+
+/**
+ * (0.7.70) The stamp of the first note on a ticket at or after `after`, from its `resolution_notes` as OW's ticket-status GET
+ * gives them: every OW change and note is a line that opens `[<ISO time>] <who>: ...` (OW `composeResolutionNote`). Undefined
+ * with none.
+ */
+export function reportedAt(notes: unknown, after: number): number | undefined {
+  if (typeof notes !== 'string' || !Number.isFinite(after)) return undefined
+  let best: number | undefined
+  for (const m of notes.matchAll(/^\[(\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:?\d{2}))\]/gm)) {
+    const t = Date.parse(m[1] as string)
+    if (Number.isFinite(t) && t >= after && (best === undefined || t < best)) best = t
+  }
+  return best
+}
+
+/** (0.7.70) The waits on record, each checked again (a thread id, a ticket id, a time, one to RUN_WAIT_RUNS_MAX runs): a damaged entry is none. */
+export function runWaitsOf(raw: unknown): Record<string, RunWait> {
+  const out: Record<string, RunWait> = {}
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out
+  for (const [sid, w] of Object.entries(raw as Record<string, unknown>)) {
+    if (!THREAD_ID.test(sid) || !w || typeof w !== 'object') continue
+    const { what, ticket, at, runs, base } = w as Record<string, unknown>
+    if (typeof what !== 'string' || !what || !isUuid(ticket) || typeof at !== 'number' || !Number.isFinite(at)) continue
+    if (!Array.isArray(runs) || runs.length < 1 || runs.length > RUN_WAIT_RUNS_MAX) continue
+    const kept: WaitRun[] = []
+    for (const r of runs) {
+      const t = r && typeof r === 'object' ? (r as { at?: unknown }).at : undefined
+      const seen = r && typeof r === 'object' ? (r as { seen?: unknown }).seen : undefined
+      if (typeof t !== 'number' || !Number.isFinite(t)) continue
+      kept.push({ at: t, ...(typeof seen === 'number' && Number.isFinite(seen) ? { seen } : {}) })
+    }
+    if (kept.length !== runs.length) continue
+    const b = base && typeof base === 'object' ? (base as Record<string, unknown>) : undefined
+    const ids = b && Array.isArray(b.ids) ? b.ids.filter(isUuid) : []
+    const { project, repinned } = w as Record<string, unknown>
+    out[sid] = {
+      what, ticket, at, runs: kept.sort((x, y) => x.at - y.at), ...(b ? { base: { mail: Number(b.mail) || 0, pkg: Number(b.pkg) || 0, task: Number(b.task) || 0, ids } } : {}),
+      ...(isUuid(project) ? { project } : {}), ...(typeof repinned === 'number' && Number.isFinite(repinned) ? { repinned } : {}),
+    }
+  }
+  return out
+}
+
+/** (0.7.70) The mm tool's words for a scheduled wait, after the four kinds. */
+export const RUN_WAIT_TOOL_TEXT = `"waiting scheduled <when>[, <when>] ticket <ticket id> -- <what the run checks>" says this thread waits only on scheduled runs that are already set up (a launchd one-shot, a runner's check), each <when> as YYYY-MM-DD HH:MM New York time (or an ISO time with its offset) within 14 days, every run noting its result on that OW ticket: the bridge takes its own pin off and keeps it off, whatever is due for the client then, until a run's result needs the person (anything new for the client: a ticket, a message, a package) or a run has not noted the ticket within 2 hours of its time, and then pins it again. Never for a run that is not set up yet, or while anything else in the thread still needs the person.`
+
+/** (0.7.70) What it answers for words it cannot read. */
+export const RUN_WAIT_REFUSED = 'Not recorded: say "waiting scheduled <when>[, <when>] ticket <ticket id> -- <what the run checks>", each <when> as YYYY-MM-DD HH:MM New York time (or an ISO time with its offset), no earlier than 2 hours ago and within 14 days, at most 6 runs, and the full id of the OW ticket the runs note their results on.'
+
+/** (0.7.70) What it answers once the wait is on record. */
+export function runWaitNoted(w: Pick<RunWait, 'runs' | 'ticket'>): string {
+  const times = w.runs.map(r => dueText(r.at)).join(', ')
+  const n = w.runs.length
+  return `Recorded: this thread waits on ${n === 1 ? 'a scheduled run' : `${n} scheduled runs`} (${times}), each noting ticket ${w.ticket.slice(0, 8)}. The bridge takes its own pin off at its next sync and keeps it off until a run's result needs the person (anything new for this client) or a run has not noted the ticket within 2 hours of its time; then it pins the thread again. "waiting clear" takes it back.`
+}
+
+/** (0.7.70) What `mm waiting scheduled` answers in a thread that is no linked thread here: nothing is stored. */
+export const RUN_WAIT_NO_THREAD = 'Not recorded: the bridge could not tell which thread this is.'
+
+/**
+ * (0.7.70) What it answers in a thread linked to no project here (an internal thread of the person's own): the bridge has no pin
+ * of its own on it to take off, so the thread unpins itself; the bridge pins it again only for a missed run.
+ */
+export function runWaitNotedUnlinked(w: Pick<RunWait, 'runs' | 'ticket'>): string {
+  const times = w.runs.map(r => dueText(r.at)).join(', ')
+  const n = w.runs.length
+  return `Recorded: this thread waits on ${n === 1 ? 'a scheduled run' : `${n} scheduled runs`} (${times}), each noting ticket ${w.ticket.slice(0, 8)}. It is linked to no project here, so unpin it yourself now (mcp__ccd_sidebar__set_pinned with pinned false). The bridge pins it again if a run has not noted the ticket within 2 hours of its time, and takes that pin off once the note lands. "waiting clear" takes it back.`
+}
+
+/** (0.7.70) The end of a thread's name while it waits on a run: ` · waits on a run Wed 4:15 PM`, and once one is missed ` · run missed`. */
+export const runWaitSuffix = (s: RunState, now: number): string =>
+  s.kind === 'missed' ? 'run missed' : s.kind === 'waiting' ? `waits on a run ${runWhen(s.due, now)}` : 'runs reported'
+
+/** (0.7.70) When a run is due, short: `4:15 PM` today, `Fri 4:15 PM` within the week, else `Nov 30 4:15 PM`. New York time. */
+export function runWhen(t: number, now: number): string {
+  const time = fmt(t, { hour: 'numeric', minute: '2-digit' }).replace(':00', '')
+  const day = (x: number) => fmt(x, { year: 'numeric', month: '2-digit', day: '2-digit' })
+  if (day(t) === day(now)) return time
+  return t - now < 6 * 24 * 60 * 60_000 && t > now ? `${fmt(t, { weekday: 'short' })} ${time}` : `${monthDay(t)} ${time}`
+}
+
+/** (0.7.70) The band's sentence while a wait holds the pin off, once a run is missed, and once every run reported. */
+export function runWaitWhy(w: Pick<RunWait, 'what' | 'ticket'>, s: RunState): string {
+  if (s.kind === 'missed') return `Pinned for you: a scheduled run (${w.what}) was due ${dueText(s.due)} and has not noted ticket ${w.ticket.slice(0, 8)} since. Check that it ran.`
+  if (s.kind === 'waiting') return `No pin needed until a scheduled run reports: ${w.what}, due ${dueText(s.due)}. It is pinned again if its result needs you or it has not noted ticket ${w.ticket.slice(0, 8)} by ${dueText(s.due + RUN_GRACE_MS)}.`
+  return `No pin needed: the scheduled runs (${w.what}) reported on ticket ${w.ticket.slice(0, 8)} and nothing new for you came of them.`
+}
+
+/** (0.7.70) The name of a thread a missed run pins while its client is on none of the lists. */
+export const runMissedTitle = (client: string): string => `🔴 ${client} · run missed`
+
+/** (0.7.70) `mm waiting scheduled ...`: the runs (ms, in order), the ticket and what they check, or RUN_WAIT_REFUSED. */
+export function runWaitArgs(arg: string, now: number): { runs: number[]; ticket: string; what: string } | string {
+  const m = /^scheduled\s+([\s\S]+?)\s+ticket\s+(\S+)\s*--\s*([\s\S]*)$/i.exec(arg.trim())
+  if (!m) return RUN_WAIT_REFUSED
+  const ticket = (m[2] as string).toLowerCase()
+  const what = cutAsk(m[3])
+  if (!isUuid(ticket) || !what) return RUN_WAIT_REFUSED
+  const runs: number[] = []
+  for (const part of (m[1] as string).split(/\s*,\s*/)) {
+    const t = runTime(part.trim())
+    if (!Number.isFinite(t) || t < now - RUN_GRACE_MS || t > now + RUN_AHEAD_MAX_MS) return RUN_WAIT_REFUSED
+    if (!runs.includes(t)) runs.push(t)
+  }
+  if (!runs.length || runs.length > RUN_WAIT_RUNS_MAX) return RUN_WAIT_REFUSED
+  return { runs: runs.sort((a, b) => a - b), ticket, what }
+}
+
+/** (0.7.70) One run time: `2026-11-25 16:15` (New York time, an `ET` after it allowed), or an ISO time with `Z` or an offset. NaN otherwise. */
+export function runTime(text: string): number {
+  const wall = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?:\s*(?:ET|EST|EDT))?$/i.exec(text)
+  if (wall) return wallTime(Number(wall[1]), Number(wall[2]), Number(wall[3]), Number(wall[4]), Number(wall[5]))
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/.test(text)) return Date.parse(text)
+  return NaN
 }
 
 /** (0.5.25) One thread for the model to start: the client, and start_session's arguments exactly as the bridge would pass them. */
@@ -1906,7 +2249,7 @@ export type TeamPane = MmTeam
  * ticket one line (`teamLateLine`). Empty for every viewer but the founder.
  */
 export function teamPane(items: readonly QueueItem[], now: number): TeamPane[] {
-  return teamLate(items).map(p => ({ by: p.by, count: p.count, clients: p.clients.map(c => ({ client: c.client, lines: c.refs.map(r => teamLateLine(r, now)) })) }))
+  return teamLate(items).map(p => ({ by: p.by, count: p.count, ...(p.behind > 0 ? { behind: p.behind } : {}), clients: p.clients.map(c => ({ client: c.client, lines: c.refs.map(r => teamLateLine(r, now)) })) }))
 }
 
 /** (0.7.21) Team · late as the pane stores it, each part checked again: a pane an older version stored has none. */
@@ -1931,7 +2274,11 @@ export function teamOf(v: unknown): TeamPane[] {
 export const teamCount = (team: readonly TeamPane[]): number => teamLateCount(team)
 
 /** (0.7.21) Team · late's heading, with how many tickets it holds: `Team · late (5)`. */
-export const teamHeading = (team: readonly TeamPane[]): string => `${TEAM_LATE} (${teamCount(team)})`
+export const teamHeading = (team: readonly TeamPane[]): string => {
+  // (0.7.61, Rob approved 2026-11-19 ('Yes, all five')) `Team · behind` when every ref is on an internal clock, else `Team · late`
+  const { late, behind } = teamLateSplit(team)
+  return `${late === 0 && behind > 0 ? TEAM_BEHIND : TEAM_LATE} (${teamCount(team)})`
+}
 
 /** (0.7.21) A teammate's heading in it: `Asif (3)`. */
 export const teamPerson = (p: Pick<TeamPane, 'by' | 'count'>): string => `${p.by} (${p.count})`
@@ -2069,8 +2416,16 @@ export function lookupOrder(missing: readonly string[], ours: (sid: string) => b
     .map(x => x.sid)
 }
 
-/** (0.7.23) Why a client that should be pinned is not, as the pin report says it. */
-export type PinWhyNot = 'no_thread' | 'unseen' | 'person_unpinned' | 'write_cap' | 'unknown'
+/**
+ * (0.7.23) Why a client that should be pinned is not, as the pin report says it. ⛔ (0.7.59, Rob 2026-11-16: "Yes, build it",
+ * the bridge fix so a refused pin shows its reason) `refused`: the app refused the pass's `set_pinned`, or a refusal of the last
+ * PIN_WAIT_MS is still holding it back. Before 0.7.59 that read `unknown`, so Team now said "not pinned" with no reason while
+ * the teammates' apps, outside Bypass permissions mode, asked before every pin of another thread and nobody answered.
+ */
+export type PinWhyNot = 'no_thread' | 'unseen' | 'person_unpinned' | 'write_cap' | 'refused' | 'unknown'
+
+/** (0.7.59) The most characters of the app's own words a `refused` item carries (OW's `BRIDGE_PINS_WHY_TEXT_MAX`). */
+export const PIN_REPORT_WHY_TEXT_MAX = 120
 
 /** (0.7.23) One client in the pin report: one that should be pinned (R1, `pinsFor`), and whether it is. */
 export type PinReportItem = {
@@ -2081,6 +2436,14 @@ export type PinReportItem = {
   due_at: string | null
   pinned: boolean
   why_not: PinWhyNot | null
+  /** (0.7.59) With `refused` alone: the app's own words, cleaned and cut at PIN_REPORT_WHY_TEXT_MAX. */
+  why_text?: string
+  /**
+   * ⛔ (0.7.60, Rob approved 2026-11-19 ('Yes, all five'): "Only a client date turns a thread red") Whose clock `due_at` is:
+   * `internal` for one of the person's own clocks (an owed ETA, or INTERNAL_CLOCK_BASES), which OW never draws red or late;
+   * `client` for every other. OW before it ignores the key.
+   */
+  clock: 'client' | 'internal'
 }
 
 /** (0.7.23) A client thread that is pinned though its client is not in the report's items: who pinned it. */
@@ -2106,7 +2469,8 @@ const capText = (text: string, max: number): string => [...text].slice(0, max).j
  * your reply; a client once, the first wins) that should be pinned by R1's test (`pinsFor`), with whether its linked thread
  * is pinned once the pass is done and, when not, why: `no_thread` (no link), `unseen` (its thread could not be seen this
  * sync: `unseen` or `away`), `person_unpinned` (the person's unpin stands: `staysOff`), `write_cap` (the pass wanted it pinned
- * but had no writes left, MAX_WRITES), else `unknown`. `tone` is red once the clock its thread's name shows is past, and
+ * but had no writes left, MAX_WRITES), (0.7.59) `refused` (the app refused the pin, or a refusal still holds it back: `refused`,
+ * with the app's words as `why_text`), else `unknown`. `tone` is red once the clock its thread's name shows is past, and
  * `due_at` that clock. `extra`: the client threads pinned once the pass is done whose client is not in `items`, and whether
  * the pin is the bridge's or the person's; never a thread linked to no client (the person's own). ⛔ Pure: it reads only what
  * it is given. (0.7.23, coordinator 2026-11-05) A client whose thread the pass named through the checking loop
@@ -2124,8 +2488,16 @@ export function pinReport(o: {
   elsewhere?: (sid: string) => boolean
   stayedOff: ReadonlySet<string>
   capped: ReadonlySet<string>
+  /** (0.7.59) The threads whose pin the app refused this pass, or whose refusal still holds them back: thread id → the app's words. */
+  refused?: ReadonlyMap<string, string>
   /** (0.7.23) The clients (project ids) whose thread the pass named through the checking loop (R8). */
   checkedOff?: ReadonlySet<string>
+  /**
+   * ⛔ (0.7.68) The client threads whose own declaration (`mm waiting`) should pin them this pass, the feed not pinning them:
+   * project id → thread. Each is an item of kind `waiting`, with no due time. ⛔ Only the ids go in: the thread's question and
+   * its kind never reach the report.
+   */
+  waiting?: ReadonlyMap<string, string>
   byUs: (sid: string) => boolean
   client: (projectId: string, sid: string) => string | undefined
 }): PinReport {
@@ -2144,22 +2516,74 @@ export function pinReport(o: {
         ? 'no_thread'
         : !s
           ? o.hidden(sid) ? 'unseen' : 'unknown'
-          : o.stayedOff.has(sid) ? 'person_unpinned' : o.capped.has(sid) ? 'write_cap' : 'unknown'
+          : o.stayedOff.has(sid)
+            ? 'person_unpinned'
+            : o.refused?.has(sid)
+              ? 'refused'
+              : o.capped.has(sid)
+                ? 'write_cap'
+                : 'unknown'
+    const whyText = whyNot === 'refused' && sid ? cleanText(o.refused?.get(sid), PIN_REPORT_WHY_TEXT_MAX) : ''
     // the clock its thread's name shows (`pinTitle`): a teammate's part to check on (the PM's), else the client's due time
     const c = ownPins(it, o.now) ? null : checkNow(it, o.now)
     // (0.7.27, Rob 2026-11-05: "Every status shows by name in each person's row on the 9 AM image") the status that names the
     // thread, when one does: its kind, its colour and its date
     const status = c ? (c.pace ? paceStatus(c.pace, o.now) : null) : statusOf(it, o.now)
     const notStarted = c !== null && c.pace === undefined && c.notStarted && checkDot(c, o.now) === '🟡'
-    const at = status ? status.at : c ? c.due : hasDue(it) ? it.dueAt : NaN
+    // ⛔ (0.7.60) the clock its name shows is the client's own due time once an internal one has passed (`leadDueOf`); with
+    // none, the internal one, sent as such
+    const lead = leadDueOf(it, o.now)
+    const behind = internalBehindAt(it, o.now)
+    const at = status ? status.at : c ? c.due : Number.isFinite(lead) ? lead : Number.isFinite(behind) ? behind : NaN
+    // whose clock that is: an internal one passed (`behind`), or (no status, or a not-started start-by, the one status with
+    // no sentence of its own) the client's soonest due time while it is not the client's own. A pace row's date is a client's.
+    const internal = c === null && Number.isFinite(at) && (status ? status.internal === true || (status.why === '' && at < clientDueOf(it)) : at < clientDueOf(it))
     items.push({
       project_id: it.projectId,
       client: capText(cleanText(it.client, 80), 80),
       kind: capText(status ? status.kind : notStarted ? 'behind' : String(it.kind ?? ''), 16),
-      tone: status ? REPORT_TONE[status.dot] : Number.isFinite(at) && at <= o.now ? 'red' : 'yellow',
+      tone: status ? REPORT_TONE[status.dot] : Number.isFinite(at) && at <= o.now && !internal ? 'red' : 'yellow',
       due_at: Number.isFinite(at) ? new Date(at).toISOString() : null,
       pinned,
       why_not: whyNot,
+      ...(whyText ? { why_text: whyText } : {}),
+      clock: internal ? 'internal' : 'client',
+    })
+  }
+  // ⛔ (0.7.68, Rob 2026-11-23) a thread that waits on the person's answer by its own declaration, the feed not pinning it: kind
+  // `waiting`, yellow, no due time and so no clock of a client's (`clock: 'internal'`: OW never draws it red or late). Its why
+  // when not pinned is as for any item: `person_unpinned` while the person's unpin stands for that declaration (`stayedOff`).
+  // (a client listed but not pinned by the feed is not an item yet: `seen` holds every listed client, so the items are asked)
+  const reported = new Set(items.map(i => i.project_id))
+  for (const [pid, sid] of o.waiting ?? []) {
+    // (OW refuses a whole report with an item that names no client: one with no name on record is left out)
+    const name = cleanText(o.client(pid, sid) ?? '', 80)
+    if (!isUuid(pid) || reported.has(pid) || !name) continue
+    reported.add(pid)
+    const s = o.thread(sid)
+    const pinned = s?.pinned === true
+    const whyNot: PinWhyNot | null = pinned
+      ? null
+      : !s
+        ? o.hidden(sid) ? 'unseen' : 'unknown'
+        : o.stayedOff.has(sid)
+          ? 'person_unpinned'
+          : o.refused?.has(sid)
+            ? 'refused'
+            : o.capped.has(sid)
+              ? 'write_cap'
+              : 'unknown'
+    const whyText = whyNot === 'refused' ? cleanText(o.refused?.get(sid), PIN_REPORT_WHY_TEXT_MAX) : ''
+    items.push({
+      project_id: pid,
+      client: capText(name, 80),
+      kind: 'waiting',
+      tone: 'yellow',
+      due_at: null,
+      pinned,
+      why_not: whyNot,
+      ...(whyText ? { why_text: whyText } : {}),
+      clock: 'internal',
     })
   }
   const inItems = new Set(items.map(i => i.project_id))

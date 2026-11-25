@@ -68,6 +68,9 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   const fetched: string[] = []
   /** Every pane a thread's bridge opened, in order. */
   const opened: Array<{ thread: string; id: string }> = []
+  /** (0.7.71) Every notification a thread's bridge raised, and every sound it played. */
+  const notified: Array<{ thread: string; text: string; title?: string; key?: string }> = []
+  const played: Array<{ thread: string; asset?: string; gain?: number }> = []
   /** OW answers the closeout feed this long after it is asked (0: at once): a slow feed, on the fake clock. */
   let feedDelayMs = 0
   /** The closeout feed's HTTP status (200: it answers). */
@@ -232,6 +235,15 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           return { isPlaced: true }
         },
         scroll: async () => undefined,
+        // (0.7.71) the person's own notification channel, as a host raises it
+        notify: async (text: string, options: { title?: string; key?: string } = {}) => {
+          notified.push({ thread: self, text, ...(options.title !== undefined ? { title: options.title } : {}), ...(options.key !== undefined ? { key: options.key } : {}) })
+          return { isSent: true, channel: 'client' }
+        },
+      },
+      // (0.7.71) the plugin's own sound
+      audio: {
+        play: async (clip: { asset?: string }, options: { gain?: number } = {}) => void played.push({ thread: self, asset: clip.asset, gain: options.gain }),
       },
       process: { run: async () => ({ exitCode: 1, stdout: '', stderr: '' }) },
       command: { register: async () => ({ command: 'mm' }) },
@@ -256,6 +268,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
     written,
     fetched,
     opened,
+    notified,
+    played,
     failPins,
     refusePins,
     refuseTitles,

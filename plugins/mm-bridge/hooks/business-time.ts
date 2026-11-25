@@ -167,3 +167,20 @@ export function businessDeadline(startMs: number, durationMs: number, tz: string
   const p = localParts(due, tz)
   return p.h === 0 && p.mi === 0 && p.s === 0 && due > startMs ? due - 60_000 : due
 }
+
+/**
+ * (0.7.70) The instant a wall-clock time (y, m, d, h, mi) is in tz: what `mm waiting scheduled 2026-11-25 16:15` means in New
+ * York time. NaN for a date or time that does not exist (Feb 30, 25:00, or the hour a spring-forward skips).
+ */
+export function wallTime(y: number, m: number, d: number, h: number, mi: number, tz: string = BUSINESS_TZ): number {
+  if (![y, m, d, h, mi].every(Number.isInteger) || m < 1 || m > 12 || d < 1 || d > 31 || h < 0 || h > 23 || mi < 0 || mi > 59) return NaN
+  const probe = new Date(Date.UTC(y, m - 1, d))
+  if (probe.getUTCMonth() !== m - 1 || probe.getUTCDate() !== d) return NaN
+  const midnight = localMidnight(y, m, d, tz)
+  for (const shift of [0, -HOUR, HOUR]) {
+    const c = midnight + h * HOUR + mi * 60_000 + shift
+    const p = localParts(c, tz)
+    if (p.y === y && p.m === m && p.d === d && p.h === h && p.mi === mi) return c
+  }
+  return NaN
+}

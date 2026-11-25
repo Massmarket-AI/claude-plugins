@@ -53,6 +53,27 @@
  * by hand. Only the day, the session id and the counts leave the machine. See
  * TOKEN USAGE.
  *
+ * No open line (0.13.1, 2026-11-18): when a thread names its task with `--task`
+ * on a session tied to a client, the CLI asks GET /api/ext/open-line whether that
+ * client has a line the work can count to, and prints one more line when it has
+ * none. Short timeout, silent on any failure. See NO OPEN LINE.
+ *
+ * Chips only for a typed session (0.13.2, 2026-11-20, OW ticket c0f6608d): the
+ * server records a serve the moment it answers the chip feed, so the feed is
+ * asked for only by a session a person starts and types into. Never on a
+ * SessionStart that is a resume or a compaction, never in an sdk or unattended
+ * run, and, once this computer's UserPromptSubmit registration has been seen,
+ * at the session's first prompt instead of its start, and only when that prompt
+ * is typed: not a scheduled task, not a bridge kickoff, not the app's own event.
+ * See CHIPS ONLY FOR A TYPED SESSION.
+ *
+ * Codex sessions (0.14.0, 2026-11-20): GPT in the Codex CLI runs this same file
+ * from ~/.codex/hooks.json with `--codex` first, and its rows reach OW with the
+ * client and task the way Claude's do: the client from a shell read of a client
+ * skill's SKILL.md, the task from `--task`, the rows under `claude-code-codex`.
+ * No chip feed, setup report or token counts from Codex, and a run Claude handed
+ * to GPT (MM_GPT_DELEGATED=1) records nothing. See CODEX SESSIONS.
+ *
  * Turn origin (0.11.5, 2026-10-12): every worklog POST also says who started the
  * work it belongs to, `person` or `auto`, read from the stamp Claude Code writes
  * on the turn's opening entry in the session's transcript. A turn the system
@@ -182,7 +203,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.13.0";
+const HOOK_VERSION = "0.14.1";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -315,7 +336,9 @@ const FETCH_TIMEOUT_MS = 10000;
 
 // ⛔ HARD-EXIT BUDGETS (2026-09-29) — main() arms one of these before anything
 // else on the event path runs; see the block there. SessionStart gets the long
-// one because its chip-feed request alone may use CHIP_FETCH_TIMEOUT_MS (10 s).
+// one because its chip-feed request alone may use CHIP_FETCH_TIMEOUT_MS (10 s),
+// and so does UserPromptSubmit (0.13.2), which makes that request at a typed
+// session's first prompt.
 const HARD_EXIT_SESSION_START_MS = 12000;
 const HARD_EXIT_DEFAULT_MS = 6000;
 /** When the armed hard exit fires (epoch ms). 0 until main() arms it. */
@@ -405,6 +428,15 @@ const DEBUG_LOG = STATE_DIR ? path.join(STATE_DIR, "debug.log") : null;
 const SESSION_STATE_DIR = (() => {
   const root = stateRootDir();
   return root ? path.join(root, "sessions") : null;
+})();
+/**
+ * The chip lane's per-session "serve at the first typed prompt" files (0.13.2):
+ * `<homedir>/.claude/mm-hooks/state/chip-lane/<session id>.pending`. Plain
+ * files, pruned like every other state file. See CHIPS ONLY FOR A TYPED SESSION.
+ */
+const CHIP_LANE_DIR = (() => {
+  const root = stateRootDir();
+  return root ? path.join(root, "chip-lane") : null;
 })();
 
 /**
@@ -879,6 +911,7 @@ function writeDeclarationRecord(sessionId, state, previous) {
 function pruneOldState(event) {
   pruneStateFiles(STATE_DIR);
   pruneStateFiles(SESSION_STATE_DIR);
+  pruneStateFiles(CHIP_LANE_DIR);
   if (event === "SessionStart") pruneDeclarationRecords();
 }
 
@@ -1004,7 +1037,7 @@ async function postWorklog({ contentMd, title, source, declarations, skillLoad }
         {
           content_md: scrubText(String(contentMd == null ? "" : contentMd)).text,
           title: title ? scrubText(String(title)).text : undefined,
-          source: source || "claude-code",
+          source: source || worklogSource(),
           // ⛔ ATTRIBUTION PHASE 1 — docs/worklog-attribution-design-2026-09-02.md
           // §3.1 (Signal A) and §6 phase 1. The consent gate already answered
           // "which project is this?" when it answered "may I record this?":
@@ -5807,6 +5840,261 @@ function captureDeclaration(toolName, toolInput, toolResponse, state) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// CODEX SESSIONS (0.14.0, 2026-11-20) — GPT in the Codex CLI records like Claude.
+//
+// Rob, 2026-11-20: "I want to make sure GPT also fires hooks for the team for
+// work tracking." Since 2026-11-11 the team hands work to GPT in Codex, and may
+// switch to it when Claude runs out of usage (2026-11-19). A Codex session
+// recorded nothing.
+//
+// Codex (0.155) runs THIS file from ~/.codex/hooks.json, which the mm-hooks
+// plugin writes and trusts, with `--codex` as its first argument. Its payloads
+// have Claude Code's shape, measured 2026-11-20 (control tower
+// docs/codex-hooks-probe-2026-09-17.md, addendum): PascalCase hook_event_name,
+// session_id, cwd (also the hook process's own cwd, so the consent gate is
+// unchanged), tool_name `Bash` with tool_input.command a string, and
+// tool_response the command's output as ONE STRING, which shellStdout reads, so
+// `--task` declares exactly as it does in Claude.
+//
+// What differs, and what this file does about it:
+//   CLIENT    Codex has no Skill tool: its model loads a skill by reading the
+//             SKILL.md in the shell. A shell call declares the client when its
+//             command names `skills/<name>/SKILL.md` for a client skill AND its
+//             output carries that file's own frontmatter line `name: <name>`:
+//             what was read, not what the command said (the `--task` rule, L3).
+//             The same read is a SKILL LOAD, via "read".
+//   SOURCE    Rows carry CODEX_WORKLOG_SOURCE, inside the `claude-code%` family
+//             every time and presence reader counts, and told apart from Claude.
+//   START     The Codex tracking instruction and nothing else: no chip feed
+//             (Codex cannot show or mint a card, and OW records a serve as
+//             minted: R42), no setup report (it describes the Claude install),
+//             no token backfill, no settings.json check.
+//   PROMPT    UserPromptSubmit does nothing. ⛔ It never writes the
+//             prompt-hook-seen marker: that marker tells CLAUDE sessions their
+//             UserPromptSubmit registration is live, and a Codex run must never
+//             make Claude wait for a prompt hook it may not have.
+//   STOP      The Stop line and the skills top-up, as in Claude. No token
+//             counts: OW keeps no harness on a token row yet, and GPT's
+//             flat-plan tokens must not be added to Claude's.
+//   DELEGATED A run Claude started through gpt-delegation's gpt-task.mjs
+//             (MM_GPT_DELEGATED=1) records and prints NOTHING, on any event:
+//             the Claude thread that handed the task over is the one at work,
+//             and its own rows already count that time and name its client.
+//   ORIGIN    Codex writes no `turnOrigin` stamp, so a row's turn_origin comes
+//             from the program Codex says started the session: the
+//             `originator` on the first line of its rollout. `codex_exec` (a
+//             headless run, like `claude -p`) is "cannot tell" and the key is
+//             left out; any other (the TUI, the desktop app, the IDE extension;
+//             their agents carry the parent's originator) is "person". ⛔
+//             Without it a Codex session on a computer whose Claude rows carry
+//             origins is read by OW as one nobody typed in, and its time is
+//             dropped (measured 2026-11-20: the proof session's rows reached OW
+//             and counted no minutes). See codexTurnOrigin.
+// ⛔ FAIL-OPEN like every other path: a Codex read that cannot be parsed is no
+// declaration, never an error.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** The first argument ~/.codex/hooks.json passes this file. */
+const CODEX_FLAG = "--codex";
+
+/** The `source` a Codex session's rows carry: inside HOOK_SOURCE_PREFIX's family on OW. */
+const CODEX_WORKLOG_SOURCE = "claude-code-codex";
+
+/** True for this run when Codex started it. Set once in main(), after the consent gate. */
+let CODEX_RUN = false;
+
+/** A command longer than this is not searched for skill files. */
+const CODEX_SKILL_COMMAND_MAX = 8192;
+
+/** At most this much of a command's output is searched for a skill's name line. */
+const CODEX_SKILL_OUTPUT_MAX = 256 * 1024;
+
+/** At most this many skill files are taken from one command. */
+const CODEX_SKILL_READS_MAX = 8;
+
+/** Each `skills/<name>/SKILL.md` a shell command names (`/` or `\`, any prefix). */
+const CODEX_SKILL_FILE_RE = /(?:^|[^A-Za-z0-9._-])skills[\\/]([A-Za-z0-9][A-Za-z0-9._-]{0,126})[\\/]SKILL\.md(?![A-Za-z0-9._-])/g;
+
+/** A Codex session transcript: `<home>/.codex/sessions/.../rollout-*.jsonl`. */
+function isCodexTranscriptPath(value) {
+  return typeof value === "string" && value.length <= 4096 && /[\\/]\.codex[\\/]sessions[\\/]/.test(value);
+}
+
+/** Did Codex start this run? The `--codex` flag, or a payload only Codex sends. Never throws. */
+function isCodexRun(flagSeen, payload) {
+  if (flagSeen) return true;
+  try {
+    const p = payload && typeof payload === "object" ? payload : {};
+    return isCodexTranscriptPath(p.transcript_path) || isCodexHookPayload(p);
+  } catch {
+    return false;
+  }
+}
+
+/** A run Claude handed to GPT (gpt-delegation's gpt-task.mjs sets it). */
+function isDelegatedGptRun(env) {
+  const e = env || process.env;
+  return e.MM_GPT_DELEGATED === "1";
+}
+
+/** The `source` this run's work rows carry. */
+function worklogSource() {
+  return CODEX_RUN ? CODEX_WORKLOG_SOURCE : "claude-code";
+}
+
+/** At most this much of a rollout is read for its first line (measured: 42 KB at most over 400 rollouts). */
+const CODEX_META_READ_BYTES = 512 * 1024;
+
+/** Codex's name for a headless run. Its rows carry no origin. */
+const CODEX_HEADLESS_ORIGINATOR = "codex_exec";
+
+/**
+ * The `originator` on the first line (`session_meta`) of a Codex rollout:
+ * "codex_exec", "Codex Desktop", "codex_cli_rs", ... or null. One bounded read
+ * of the file's head; never throws.
+ */
+function codexOriginator(transcriptPath) {
+  if (!isCodexTranscriptPath(transcriptPath)) return null;
+  let fd = null;
+  try {
+    fd = fs.openSync(transcriptPath, "r");
+    const chunks = [];
+    let total = 0;
+    let end = -1;
+    while (total < CODEX_META_READ_BYTES && end < 0) {
+      const buf = Buffer.alloc(Math.min(65536, CODEX_META_READ_BYTES - total));
+      const n = fs.readSync(fd, buf, 0, buf.length, total);
+      if (n <= 0) break;
+      const piece = buf.subarray(0, n);
+      const nl = piece.indexOf(10);
+      if (nl >= 0) end = total + nl;
+      chunks.push(piece);
+      total += n;
+    }
+    if (end < 0) return null;
+    const line = Buffer.concat(chunks, total).subarray(0, end).toString("utf8");
+    const meta = JSON.parse(line);
+    const o = meta && meta.type === "session_meta" && meta.payload ? meta.payload.originator : null;
+    return typeof o === "string" && o.trim() && o.length <= 120 ? o.trim() : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // nothing to do
+      }
+    }
+  }
+}
+
+/** A Codex row's turn_origin: "person" unless the session is headless or its originator cannot be read (null). */
+function codexTurnOrigin(payload) {
+  const o = codexOriginator(payload && payload.transcript_path);
+  if (!o || o === CODEX_HEADLESS_ORIGINATOR) return null;
+  return "person";
+}
+
+/** Does this output show the skill's own frontmatter line `name: <name>`? A line number in front is allowed. */
+function skillNameLineShown(output, name) {
+  if (typeof output !== "string" || !output || !name) return false;
+  const esc = String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`^[ \\t]*(?:\\d+[\\t:][ \\t]*)?name:[ \\t]*["']?${esc}["']?[ \\t]*\\r?$`, "m");
+  return re.test(output.slice(0, CODEX_SKILL_OUTPUT_MAX));
+}
+
+/**
+ * The skills a Codex shell call read, `[{name, via: "read"}]` in the order the
+ * command names them: each named `skills/<name>/SKILL.md` whose name line is in
+ * the call's output. Empty for any other run, tool or call. Never throws.
+ */
+function codexSkillReads(toolName, toolInput, toolResponse) {
+  try {
+    if (!CODEX_RUN || TASK_DECLARATION_TOOLS.indexOf(toolName) === -1) return [];
+    const input =
+      toolInput && typeof toolInput === "object" && !Array.isArray(toolInput) ? toolInput : {};
+    const command =
+      typeof input.command === "string" ? input.command : typeof input.cmd === "string" ? input.cmd : "";
+    if (!command || command.length > CODEX_SKILL_COMMAND_MAX) return [];
+    const output = shellStdout(toolResponse);
+    if (!output) return [];
+    const names = [];
+    const re = new RegExp(CODEX_SKILL_FILE_RE.source, "g");
+    let m;
+    while ((m = re.exec(command)) !== null && names.length < CODEX_SKILL_READS_MAX) {
+      if (names.indexOf(m[1]) === -1) names.push(m[1]);
+    }
+    return names.filter((name) => skillNameLineShown(output, name)).map((name) => ({ name, via: "read" }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Record the client a Codex shell call declared (the last client skill it read)
+ * in the session state, and say "client"; null when it read none. Last writer
+ * wins, as captureDeclaration. Never throws.
+ */
+function captureCodexClient(reads, state) {
+  try {
+    let name = "";
+    (Array.isArray(reads) ? reads : []).forEach((r) => {
+      if (r && isClientProjectSkill(r.name)) name = r.name;
+    });
+    if (!name) return null;
+    state.declared_skill = scrubText(name).text;
+    state.declared_skill_at = new Date().toISOString();
+    return "client";
+  } catch (err) {
+    debugLog(`captureCodexClient failed: ${err && err.message}`);
+    return null;
+  }
+}
+
+/** The load a Codex call's row names: the client skill it read, else its first read; null for none. */
+function codexRowSkillLoad(reads) {
+  if (!Array.isArray(reads) || reads.length === 0) return null;
+  const client = reads.filter((r) => isClientProjectSkill(r.name));
+  const pick = client.length ? client[client.length - 1] : reads[0];
+  return { name: pick.name, via: "read" };
+}
+
+/**
+ * VERBATIM — Opus, 2026-11-20. The tracking instruction a Codex session starts
+ * with: the Claude copy (TRACKING_INSTRUCTION_FALLBACK) with the skill step
+ * reworded for a harness that has no Skill tool. The `--task` lines are the
+ * Claude copy's, byte for byte.
+ */
+const CODEX_TRACKING_INSTRUCTION = [
+  "Massmarket time tracking: this Codex session's work is recorded by client and task.",
+  "- First read the client's <client>-project skill from its first line, with one shell command such as: sed -n 1,200p ~/.codex/skills/<client>-project/SKILL.md (the same file is at ~/.claude/skills/<client>-project/SKILL.md). That read is what names the client. For Massmarket's own work read massmarket-internal-ops (our systems) or massmarket-self-funnel (our marketing and sales). Personal work: skip this step.",
+  "- As soon as you know the task, declare it in a few plain words, and again whenever it changes:",
+  '  node ~/.claude/mm-hooks/worklog-hook.js --task "<task>"',
+  '  (Windows PowerShell: node "$env:USERPROFILE\\.claude\\mm-hooks\\worklog-hook.js" --task "<task>")',
+  '  Example: --task "Phase 1 nurture sequence copy"',
+  '  Working an OW ticket? Start the task with its 8-character id: --task "f779a7a0 Fix inbound router"',
+  "- Decide the task from the work; do not ask the team member. Never put secrets, passwords or personal details in the label.",
+].join("\n");
+
+/**
+ * SessionStart for Codex: the token warning or the Codex instruction, and
+ * nothing else (see CODEX SESSIONS, START). Never throws.
+ */
+async function handleCodexSessionStart() {
+  if (!TOKEN) {
+    process.stderr.write(
+      "[worklog-hook] No tracker token on this machine, so this session is not being recorded.\n" +
+        "To fix it, open Claude Code in your client-work folder, start a new thread, and paste:\n" +
+        "  Set up my Massmarket worklog hook. Follow https://onboarding-wizard.massmarket.ai/api/ext/hook-install?guide=1\n" +
+        "First time on this computer? Ask Rob for a one-time install code before you paste it.\n",
+    );
+    return;
+  }
+  await emitHookContext("SessionStart", CODEX_TRACKING_INSTRUCTION);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // SKILL LOADS (0.12.0, 2026-11-05) — which skills this session has loaded.
 //
 // Rob, 2026-11-05: "A lot of my teammates probably are also not loading the
@@ -7420,6 +7708,8 @@ function rowOriginFor(payload, state) {
  * Where it is not registered nothing changes: the first-row rule stands.
  */
 function handleSubagentStart(payload) {
+  // ⛔ CODEX SESSIONS (0.14.0): origins are read from Claude transcripts only.
+  if (CODEX_RUN) return;
   const sessionId = payload.session_id;
   const tasks = taskOriginsDirFor(sessionId);
   const agent = taskIdOf(payload.agent_id);
@@ -7539,20 +7829,30 @@ async function handlePostToolUse(payload) {
   // At most one bounded read of the transcript's tail per run (none for an
   // agent whose origin is already kept); the save at the end of this run keeps
   // the answer for the rest of the turn, and for the agent.
-  TURN_ORIGIN = rowOriginFor(payload, state);
+  // ⛔ CODEX SESSIONS (0.14.0): from the rollout's originator (ORIGIN).
+  TURN_ORIGIN = CODEX_RUN ? codexTurnOrigin(payload) : rowOriginFor(payload, state);
 
   // ⛔ TASK ANNOUNCING (SPEC v2 §2.3). A declaration made by THIS call is taken
   // into the state before anything is posted, so this call's own row already
   // carries it — and is the one row marked with `declaration_event`.
-  const declarationEvent = captureDeclaration(toolName, toolInput, payload.tool_response, state);
+  // ⛔ CODEX SESSIONS (0.14.0): in Codex a shell read of a client skill's
+  // SKILL.md is the client declaration, and every skill it read is a load.
+  const codexReads = codexSkillReads(toolName, toolInput, payload.tool_response);
+  const codexClient = captureCodexClient(codexReads, state);
+  const claudeDeclaration = captureDeclaration(toolName, toolInput, payload.tool_response, state);
+  const declarationEvent = codexClient || claudeDeclaration;
 
   // ⛔ SKILL LOADS (0.12.0). The marker the required-skill check reads, and the
   // fields this call's own row carries. The name only.
-  const skillLoad = skillLoadFrom(toolName, toolInput);
+  const skillLoad = skillLoadFrom(toolName, toolInput) || codexRowSkillLoad(codexReads);
+  const inAgent = typeof payload.agent_id === "string" && payload.agent_id !== "";
   if (skillLoad) {
-    skillLoad.inAgent = typeof payload.agent_id === "string" && payload.agent_id !== "";
+    skillLoad.inAgent = inAgent;
     markSkillLoaded(sessionId, skillLoad);
   }
+  codexReads.forEach((read) => {
+    if (!skillLoad || read.name !== skillLoad.name) markSkillLoaded(sessionId, { name: read.name, via: "read", inAgent });
+  });
 
   // ⛔ UNDECLARED-SESSION REMINDER (0.11.11). Decided after the declaration
   // capture, so the call that loads a client skill is never counted. The write
@@ -7571,7 +7871,7 @@ async function handlePostToolUse(payload) {
     postWorklog(
       {
         contentMd: `- ${describeToolCall(toolName, toolInput)}`,
-        source: "claude-code",
+        source: worklogSource(),
         declarations: declarationFields(sessionId, state, declarationEvent),
         skillLoad,
       },
@@ -7712,7 +8012,7 @@ function undeclaredReminderApplies(payload, env) {
   if (!TOKEN) return false;
   if (e.MM_UNATTENDED === "1") return false;
   if (!isInteractiveSession(e)) return false;
-  if (isCodexHookPayload(payload)) return false;
+  if (CODEX_RUN || isCodexHookPayload(payload)) return false;
   return !(typeof payload.agent_id === "string" && payload.agent_id);
 }
 
@@ -9513,6 +9813,45 @@ function segmentRuns(seg) {
   return true;
 }
 
+/** Words that run the script named after them: a Python interpreter, or `uv run` / `pipx run` / `poetry run`. */
+const SCRIPT_RUNNER_RE = /^(?:python(?:3(?:\.\d+)?)?|pypy3?|run)$/;
+
+/**
+ * Does this segment RUN the script `name`, rather than only name it? (2026-11-22.)
+ * It does when the script is the segment's first word (`./send_package.py`,
+ * `$S/send_package.py`), or when the word before it, past options and the values
+ * of `-X` / `-W`, is a Python interpreter or `run` (`python3 -u x.py`,
+ * `uv run x.py`, `timeout 600 python3 x.py`, `bash -c 'python3 x.py'`).
+ * A segment that only names it is not a run: `for f in …/send_package.py`, or the
+ * tail of `grep -n "a\|b" …/send_package.py`, which the quote-blind split cuts
+ * off at the `|` inside the pattern. Before this, any running segment holding the
+ * name matched, so a read of the file or a `for` loop over it was stopped as a
+ * client send.
+ */
+function runsScript(seg, name) {
+  const want = String(name).toLowerCase();
+  const words = seg.text.split(/\s+/).filter(Boolean).map((w) => w.replace(/^["'(]+|["';)]+$/g, ""));
+  const base = (w) => w.split(/[\\/]/).pop().toLowerCase();
+  for (let i = 0; i < words.length; i++) {
+    if (base(words[i]) !== want) continue;
+    if (i === 0) return true;
+    let j = i - 1;
+    while (j >= 0) {
+      if (/^-/.test(words[j])) {
+        j--;
+        continue;
+      }
+      if (j >= 1 && /^-[XW]$/.test(words[j - 1])) {
+        j -= 2;
+        continue;
+      }
+      break;
+    }
+    if (j >= 0 && SCRIPT_RUNNER_RE.test(base(words[j]))) return true;
+  }
+  return false;
+}
+
 /** A write call in an HTTP command: curl with a write method or a body, or mm-api with a write verb. */
 const HTTP_WRITE_RE = /(?:\s-X\s*["']?(?:POST|PUT|PATCH|DELETE)\b|\s--request\s+["']?(?:POST|PUT|PATCH|DELETE)\b|\s(?:-d|--data(?:-raw|-binary|-urlencode)?|--json|-F|--form)\s|mm-api\.mjs["']?\s+\w+\s+["']?(?:POST|PUT|PATCH|DELETE)\b)/;
 
@@ -9562,12 +9901,12 @@ const SKILL_CHECK_RULES = [
   // ── a client reply: draft, package, send ──
   {
     id: "reply.send_package", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
-    bash: (seg) => /(^|[\s/])send_package\.py\b/.test(seg.text) && !/--dry-run\b/.test(seg.text),
+    bash: (seg) => runsScript(seg, "send_package.py") && !/--dry-run\b/.test(seg.text),
   },
   {
     id: "reply.send_client_email", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
     bash: (seg) =>
-      /(^|[\s/])send-client-email\.py\b/.test(seg.text) &&
+      runsScript(seg, "send-client-email.py") &&
       /(^|\s)--send\b/.test(seg.text) &&
       !onlyInternalAddresses(seg.text) &&
       !messageFileIsInternal(seg.text),
@@ -9584,7 +9923,7 @@ const SKILL_CHECK_RULES = [
   },
   {
     id: "reply.inline_image", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
-    bash: (seg) => /(^|[\s/])stage_inline_image\.py\b/.test(seg.text),
+    bash: (seg) => runsScript(seg, "stage_inline_image.py"),
   },
   {
     id: "reply.gmail_draft", action: "reply", requires: [SKILL_CHECK_CRP], client: true,
@@ -9845,7 +10184,7 @@ function skillCheckApplies(payload, env) {
   if (e.MM_UNATTENDED === "1") return false;
   if (e.LANE2_RUN_ID || e.MM_RUN_SESSION) return false;
   if (!isInteractiveSession(e)) return false;
-  if (isCodexHookPayload(payload)) return false;
+  if (CODEX_RUN || isCodexHookPayload(payload)) return false;
   if (isPluginToolCall(payload)) return false;
   return true;
 }
@@ -11057,7 +11396,8 @@ async function handleStop(payload) {
   const turnOriginBefore = state.turn_origin;
   const turnPromptBefore = state.turn_origin_prompt_id;
   const turnChainBefore = state.turn_chain_origin;
-  TURN_ORIGIN = rowOriginFor(payload, state);
+  // ⛔ CODEX SESSIONS (0.14.0): from the rollout's originator (ORIGIN).
+  TURN_ORIGIN = CODEX_RUN ? codexTurnOrigin(payload) : rowOriginFor(payload, state);
   const turnOriginChanged =
     state.turn_origin !== turnOriginBefore ||
     state.turn_origin_prompt_id !== turnPromptBefore ||
@@ -11083,12 +11423,236 @@ async function handleStop(payload) {
   await Promise.allSettled([
     postWorklog({
       contentMd: `🛑 Session ended. ${state.toolCallCount} tool call(s) streamed.`,
-      source: "claude-code",
+      source: worklogSource(),
       declarations: declarationFields(sessionId, state, null),
     }),
     syncRegistrySkills(),
-    reportSessionTokens(payload),
+    // ⛔ CODEX SESSIONS (0.14.0): no token counts from a Codex run.
+    CODEX_RUN ? Promise.resolve() : reportSessionTokens(payload),
   ]);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// CHIPS ONLY FOR A TYPED SESSION (0.13.2, 2026-11-20; OW ticket c0f6608d,
+// invariant R42 "No active member keeps being served chips that never reach
+// them"; the fix Rob approved).
+//
+// The server writes `minted` the moment it answers GET /api/ext/chip-feed
+// (serve = minted), and a card reaches a person only when the model in the
+// session that fetched it puts it on screen. So every fetch by a session nobody
+// reads spends a serve, and after MAX_UNCLAIMED_RESURFACES of them the task is
+// hidden until someone acts. Measured 2026-11-20: has9@'s serves landed seconds
+// before scheduled tasks started ("Daily ETA self-assessment", "Revision
+// insights (weekly)") and in bursts on resumed and compacted sessions; none was
+// delivered after 11-11, and four of his tasks sat hidden at the ceiling.
+//
+// So the feed is asked for only by a session a person starts and types into:
+//
+//   1. Never on a SessionStart whose `source` is `resume` or `compact`: that
+//      session already had its start. A pending first-prompt serve for it is
+//      withdrawn.
+//   2. Never in a run no person is at: an sdk entrypoint (the `claude -p`
+//      runners) or MM_UNATTENDED=1 (isPersonSession).
+//   3. A SessionStart payload carries no prompt, so it cannot tell a scheduled
+//      task or a bridge kickoff from a person's thread. Once this computer's
+//      UserPromptSubmit registration has been SEEN (promptHookLive: this hook
+//      ran on UserPromptSubmit here within PROMPT_HOOK_LIVE_MS), a startup or
+//      clear SessionStart serves nothing and leaves a pending file. The
+//      session's FIRST UserPromptSubmit takes that file (an atomic rename, so
+//      a double registration still serves once) and serves only when the
+//      prompt is typed (chipPromptVerdict): not a scheduled task, not a prompt
+//      holding the bridge's `[mm-link <uuid>]` marker, not an event the app
+//      wrote, not a thread another session started. The chip text goes out as
+//      that prompt's additionalContext.
+//   4. Until that registration is seen (a hook the plugin updated before the
+//      plugin registered UserPromptSubmit, a computer on the installer alone),
+//      a startup SessionStart serves exactly as before, with 1 and 2 applied,
+//      so no member is left without chips while the rollout is half done.
+//
+// Everything else SessionStart does is unchanged: the token warning, the
+// settings self-check, the token backfill, the setup report, and the tracking
+// instruction first, every time (the built-in copy when no feed was fetched).
+// A feed fetched at the first prompt puts any notice its `session_text` carries
+// in front of the chip text (promptLeadFor), never the instruction a second time.
+//
+// ⛔ FAIL-QUIET LIKE THE REST OF THE LANE. Every file step here is best-effort:
+// a pending file that cannot be written means no chips this session (the next
+// one tries again), never a failed hook. The prompt's words are read for the
+// verdict and nothing else: never kept, sent or logged.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** SessionStart `source` values whose session already had its start: never served. */
+const CHIP_SKIP_START_SOURCES = ["resume", "compact"];
+
+/** This computer's UserPromptSubmit registration counts as live this long after its last run. */
+const PROMPT_HOOK_LIVE_MS = 14 * 86400000;
+
+/** The seen marker is rewritten at most this often, so an ordinary prompt costs one stat. */
+const PROMPT_HOOK_SEEN_REFRESH_MS = 60 * 60 * 1000;
+
+/** At the state ROOT, so the 48-hour prune of the state folders never takes it. */
+const PROMPT_HOOK_SEEN_FILE = (() => {
+  const root = stateRootDir();
+  return root ? path.join(root, "prompt-hook-seen.json") : null;
+})();
+
+/** The bridge's marker ANYWHERE in a prompt (TURN_ORIGIN_MARKER_RE is anchored at the start). */
+const CHIP_BRIDGE_MARKER_ANYWHERE_RE =
+  /\[mm-link [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\]/;
+
+/**
+ * A first prompt the app wrote, by how it opens: a background task reporting
+ * back, the app waking the session, another session's message, the
+ * pull-request watch. (A scheduled task's wrapper is TURN_ORIGIN_SCHEDULED_TASK_RE.)
+ * Both are read by the OPENING alone, looser than isScheduledTaskPrompt on
+ * purpose: a person's prompt read as not typed costs one session without chips;
+ * an app's prompt read as typed costs a serve nobody sees.
+ */
+const CHIP_APP_PROMPT_RE =
+  /^<(?:task-notification|side-sessions-event|cross-session-message|ci-monitor-event)[\s>]/;
+
+/** The SessionStart payload's `source`, lower case; "" when it has none (an older Claude Code). */
+function sessionStartSource(payload) {
+  return payload && typeof payload.source === "string" ? payload.source.trim().toLowerCase() : "";
+}
+
+/** A person is at this run: not an sdk entrypoint (isInteractiveSession), not MM_UNATTENDED=1. */
+function isPersonSession(env) {
+  const e = env || process.env;
+  if (e.MM_UNATTENDED === "1") return false;
+  return isInteractiveSession(e);
+}
+
+/** Has this hook run on UserPromptSubmit on this computer within PROMPT_HOOK_LIVE_MS? Never throws. */
+function promptHookLive(now) {
+  if (!PROMPT_HOOK_SEEN_FILE) return false;
+  try {
+    const st = fs.statSync(PROMPT_HOOK_SEEN_FILE);
+    const at = typeof now === "number" ? now : Date.now();
+    return st.isFile() && at - st.mtimeMs < PROMPT_HOOK_LIVE_MS;
+  } catch {
+    return false;
+  }
+}
+
+/** Note that UserPromptSubmit reaches this hook here: at most one write an hour. Never throws. */
+function markPromptHookSeen() {
+  if (!PROMPT_HOOK_SEEN_FILE) return;
+  try {
+    try {
+      const st = fs.statSync(PROMPT_HOOK_SEEN_FILE);
+      if (st.isFile() && Date.now() - st.mtimeMs < PROMPT_HOOK_SEEN_REFRESH_MS) return;
+    } catch {
+      /* not there yet */
+    }
+    fs.mkdirSync(path.dirname(PROMPT_HOOK_SEEN_FILE), { recursive: true });
+    fs.writeFileSync(
+      PROMPT_HOOK_SEEN_FILE,
+      JSON.stringify({ v: 1, hook_version: HOOK_VERSION, at: new Date().toISOString() }),
+      "utf8",
+    );
+  } catch {
+    /* best-effort: the next prompt tries again */
+  }
+}
+
+/**
+ * What a SessionStart does with the chip lane: `skip_resumed` (a resume or a
+ * compaction), `skip_no_person` (sdk or unattended), `defer` (wait for the
+ * first typed prompt) or `serve_now` (the fallback while UserPromptSubmit has
+ * not been seen here). Pure but for the seen marker's stat. Never throws.
+ */
+function chipLanePlanAtStart(payload, env, now) {
+  if (CHIP_SKIP_START_SOURCES.indexOf(sessionStartSource(payload)) !== -1) return "skip_resumed";
+  if (!isPersonSession(env)) return "skip_no_person";
+  return promptHookLive(now) ? "defer" : "serve_now";
+}
+
+/** This session's pending file, or null when the session has no id. */
+function chipLanePendingPath(sessionId) {
+  if (!CHIP_LANE_DIR || !isSessionKey(sessionId)) return null;
+  return path.join(CHIP_LANE_DIR, `${String(sessionId).replace(/[^a-zA-Z0-9_-]/g, "_")}.pending`);
+}
+
+/** Leave this session's first prompt the chip lane. Never throws. */
+function markChipLanePending(sessionId, source) {
+  const file = chipLanePendingPath(sessionId);
+  if (!file) return;
+  try {
+    fs.mkdirSync(CHIP_LANE_DIR, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ v: 1, source: source || null, at: new Date().toISOString() }), "utf8");
+  } catch {
+    /* no chips this session; the next one tries again */
+  }
+}
+
+/** Withdraw any first-prompt serve for this session. Never throws. */
+function clearChipLanePending(sessionId) {
+  const file = chipLanePendingPath(sessionId);
+  if (!file) return;
+  try {
+    fs.unlinkSync(file);
+  } catch {
+    /* none was pending */
+  }
+}
+
+/**
+ * Take this session's pending file: true for exactly one caller. The rename is
+ * atomic, so two runs for the same prompt (the plugin's registration and one
+ * in settings.json) cannot both serve. Never throws.
+ */
+function takeChipLanePending(sessionId) {
+  const file = chipLanePendingPath(sessionId);
+  if (!file) return false;
+  const taken = `${file}.taken-${process.pid}-${Date.now().toString(36)}`;
+  try {
+    fs.renameSync(file, taken);
+  } catch {
+    return false;
+  }
+  try {
+    fs.unlinkSync(taken);
+  } catch {
+    /* the prune takes it */
+  }
+  return true;
+}
+
+/**
+ * Who wrote a session's first prompt, by its own words: `typed`, or why not
+ * (`empty`, `bridge`, `scheduled`, `app_event`, `side_session`). Read after the
+ * app's notes in front of the text. Never throws; the text is never kept.
+ */
+function chipPromptVerdict(prompt) {
+  if (typeof prompt !== "string" || !prompt.trim()) return "empty";
+  if (CHIP_BRIDGE_MARKER_ANYWHERE_RE.test(prompt)) return "bridge";
+  const text = turnEntryAfterLeadingNotes(prompt.replace(/^\s+/, "")).replace(/^\s+/, "");
+  if (TURN_ORIGIN_SCHEDULED_TASK_RE.test(text)) return "scheduled";
+  if (CHIP_APP_PROMPT_RE.test(text)) return "app_event";
+  if (text.startsWith(TURN_ORIGIN_SIDE_FRESH_PREFIX) || text.startsWith(TURN_ORIGIN_SIDE_FORK_PREFIX)) {
+    return "side_session";
+  }
+  return "typed";
+}
+
+/**
+ * What a feed fetched at the first prompt puts in front of its chip text: ""
+ * when its `session_text` is the instruction SessionStart already gave (the
+ * built-in copy), the notice alone when it is a notice in front of that
+ * instruction (sessionTextFor), and the whole text otherwise.
+ */
+function promptLeadFor(feed) {
+  const full = trackingInstructionFor(feed);
+  if (full === TRACKING_INSTRUCTION_FALLBACK) return "";
+  const after = `\n\n${TRACKING_INSTRUCTION_FALLBACK}`;
+  if (full.endsWith(after)) return full.slice(0, full.length - after.length).replace(/\s+$/, "");
+  return full;
+}
+
+/** The first prompt's additionalContext: lead, chip block, tail, blank lines between, none empty. */
+function composePromptContext(lead, block, tail) {
+  return [lead, block, tail].filter((part) => typeof part === "string" && part !== "").join("\n\n");
 }
 
 async function handleSessionStart(payload) {
@@ -11159,7 +11723,40 @@ async function handleSessionStart(payload) {
   // outcome. See SAME SETUP AS ROB.
   const setupReport = sendSetupReport(payload);
 
+  // ── Chips bridge (0.13.2): only for a session a person starts and types ──
+  // into. A resume, a compaction, an sdk or unattended run: no fetch at all.
+  // Once this computer's UserPromptSubmit registration has been seen, a fresh
+  // start serves nothing here and the session's first typed prompt does. Until
+  // then a fresh start fetches here, as before. See CHIPS ONLY FOR A TYPED
+  // SESSION.
+  const chipPlan = chipLanePlanAtStart(payload);
+  const sessionId = payload && payload.session_id;
+  if (chipPlan === "defer") markChipLanePending(sessionId, sessionStartSource(payload));
+  else clearChipLanePending(sessionId);
+  if (chipPlan !== "serve_now") debugLog(`chip lane at SessionStart: ${chipPlan}`);
+
   // ── Chips bridge: fetch + verify + inject. Entirely fail-open. ──────────
+  const feed = chipPlan === "serve_now" ? await fetchChipFeedForSession("SessionStart") : null;
+
+  // ── Task announcing (SPEC-task-announcing-v2 §2.1) ─────────────────────
+  // ⛔ The tracking instruction goes FIRST, on EVERY SessionStart the consent
+  // gate lets through — the feed off, failed, empty or not fetched included.
+  // It is the verified feed's `session_text`, or this file's own copy; the chip
+  // text below comes from the verified feed and from nothing else. (A terminal
+  // list may put the built-in copy first instead, so that "start task
+  // <number>" stays inside the preview — see renderTerminalTasks.)
+  const lane = renderChipLane(feed, trackingInstructionFor(feed));
+  const emitted = await emitSessionContext(composeSessionContext(lane.instruction, lane.block, lane.tail));
+  await recordChipLane(payload, feed, lane, emitted);
+  await setupReport;
+}
+
+/**
+ * The chip-feed request for a session that may be served (SessionStart's
+ * fallback path, or a typed first prompt): the verified payload, or null.
+ * Entirely fail-open. `label` names the event in the debug log only.
+ */
+async function fetchChipFeedForSession(label) {
   let feed = null;
   try {
     const result = await fetchChipFeed();
@@ -11182,57 +11779,90 @@ async function handleSessionStart(payload) {
     }
   } catch (err) {
     feed = null;
-    debugLog(`chip bridge SessionStart failed: ${err && err.stack}`);
+    debugLog(`chip bridge ${label} failed: ${err && err.stack}`);
   }
+  return feed;
+}
 
-  // ── Task announcing (SPEC-task-announcing-v2 §2.1) ─────────────────────
-  // ⛔ The tracking instruction goes FIRST, on EVERY SessionStart the consent
-  // gate lets through — the feed off, failed or empty included. It is the
-  // verified feed's `session_text`, or this file's own copy; the chip text
-  // below comes from the verified feed and from nothing else. (A terminal
-  // list may put the built-in copy first instead, so that "start task
-  // <number>" stays inside the preview — see renderTerminalTasks.)
-  let instruction = trackingInstructionFor(feed);
-  let block = "";
-  let tail = "";
-  let deliveries = [];
-  if (feed) {
-    try {
-      if (isDesktopSession()) {
-        // Desktop: the chip block, byte-identical to before, below the instruction.
-        block = renderChipContext(feed);
-      } else {
-        // Every other surface: the text list (SPEC-terminal-chip-fallback).
-        const text = renderTerminalTasks(feed, instruction);
-        instruction = text.instruction;
-        block = text.shortList;
-        tail = text.packets;
-        deliveries = text.deliveries;
-      }
-    } catch (err) {
-      // A render that fails injects no chip text at all — never half a block.
-      block = "";
-      tail = "";
-      deliveries = [];
-      debugLog(`chip render failed: ${err && err.stack}`);
+/**
+ * The chip text for a verified feed: `{instruction, block, tail, deliveries}`.
+ * `instruction` is what goes first (renderTerminalTasks may swap in the
+ * built-in copy); no feed, or a render that fails, gives no chip text at all —
+ * never half a block.
+ */
+function renderChipLane(feed, instruction) {
+  const out = { instruction, block: "", tail: "", deliveries: [] };
+  if (!feed) return out;
+  try {
+    if (isDesktopSession()) {
+      // Desktop: the chip block, byte-identical to before, below the instruction.
+      out.block = renderChipContext(feed);
+    } else {
+      // Every other surface: the text list (SPEC-terminal-chip-fallback).
+      const text = renderTerminalTasks(feed, instruction);
+      out.instruction = text.instruction;
+      out.block = text.shortList;
+      out.tail = text.packets;
+      out.deliveries = text.deliveries;
     }
+  } catch (err) {
+    out.instruction = instruction;
+    out.block = "";
+    out.tail = "";
+    out.deliveries = [];
+    debugLog(`chip render failed: ${err && err.stack}`);
   }
-  const emitted = await emitSessionContext(composeSessionContext(instruction, block, tail));
+  return out;
+}
 
-  if (feed && block) {
+/** Record what a rendered chip lane served, once its context write is known. */
+async function recordChipLane(payload, feed, lane, emitted) {
+  const sessionId = payload && payload.session_id;
+  if (feed && lane.block) {
     // ⛔ Record what was ACTUALLY served, from the same verified payload that
     // drove the render. This set is the cross-check that makes the PostToolUse
     // `delivered_chip` ack deterministic instead of a guess — see the
     // producer block above. Written AFTER the render so a render failure can
     // never leave us acking chips nobody was shown.
-    recordServedChips(payload && payload.session_id, servedChipsFromPayload(feed));
+    recordServedChips(sessionId, servedChipsFromPayload(feed));
   }
-  if (deliveries.length > 0 && emitted) {
+  if (lane.deliveries.length > 0 && emitted) {
     // Terminal: the list is the surface, so its delivery to the session IS the
     // delivery — recorded only once the context write is confirmed.
-    await recordSessionDeliveries(payload && payload.session_id, deliveries, postToolUseDeadline());
+    await recordSessionDeliveries(sessionId, lane.deliveries, postToolUseDeadline());
   }
-  await setupReport;
+}
+
+/**
+ * UserPromptSubmit (0.13.2): the chip lane at a typed session's FIRST prompt.
+ * Every run notes that the registration reaches this hook (promptHookLive).
+ * Only the run that takes this session's pending file goes on, and it serves
+ * only a person's typed prompt; every other prompt costs one failed rename.
+ * Prints nothing unless it has chip text for the session.
+ */
+async function handleUserPromptSubmit(payload) {
+  // ⛔ CODEX SESSIONS (0.14.0): nothing in Codex, and never the marker (PROMPT).
+  if (CODEX_RUN) return;
+  markPromptHookSeen();
+  if (!TOKEN) return;
+  const sessionId = payload && payload.session_id;
+  if (!takeChipLanePending(sessionId)) return;
+  if (!isPersonSession()) {
+    debugLog("chip lane at first prompt: no person at this run, nothing served");
+    return;
+  }
+  const verdict = chipPromptVerdict(payload && payload.prompt);
+  if (verdict !== "typed") {
+    debugLog(`chip lane at first prompt: ${verdict}, nothing served`);
+    return;
+  }
+  const feed = await fetchChipFeedForSession("UserPromptSubmit");
+  if (!feed) return;
+  const lane = renderChipLane(feed, promptLeadFor(feed));
+  const text = composePromptContext(lane.instruction, lane.block, lane.tail);
+  if (!text) return;
+  const emitted = await emitHookContext("UserPromptSubmit", text);
+  await recordChipLane(payload, feed, lane, emitted);
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -11668,17 +12298,127 @@ function taskCliLine(argv) {
   return label ? `Task noted: ${label}` : TASK_NOT_NOTED_LINE;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// ⛔ NO OPEN LINE (0.13.1, 2026-11-18). OW counts a client's work against what
+// the client paid for or agreed (its scope lines), and work that sits on no
+// line shows as unmatched in the morning image and, past 2 hours, as an OW task.
+// That is a day late. So when a thread names its task, the `--task` CLI asks OW
+// whether the session's client has a line the work can count to (paid, agreed,
+// or a bank with hours left) and, when it has none, prints NO_OPEN_LINE_NOTICE
+// on the line after `Task noted:`. The teammate learns it while the work starts.
+//
+// WHICH CLIENT. The session's own: the `<client>-project` skill its PostToolUse
+// recorded (DECLARATION_STATE_DIR), found by CLAUDE_CODE_SESSION_ID, which
+// Claude Code puts in its shell's environment. Read only: the state file and
+// the declarations record, the newer declaration of the two, as a load takes
+// it. Nothing here writes a file, not even the debug log.
+//
+// ⛔ ASKED ONLY WHEN ALL HOLD: the label was noted; a tracker token; not
+// MM_UNATTENDED=1 and a person at the session (isInteractiveSession), since the
+// line is for the teammate; a session id in the environment; a `-project` skill
+// declared in it (Massmarket's own two work skills are no client); and the
+// consent gate allows this folder, as for any request that names a client.
+//
+// ⛔ FAIL OPEN AND SILENT. One GET, OPEN_LINE_TIMEOUT_MS for the whole of it,
+// body included. Anything but a 200 whose JSON says `ok: true` and
+// `open_line: false` exactly prints nothing. OW's answer is never printed, and
+// neither is the token or a header: the one line printed is the constant below.
+// The exit code is 0 whatever happens, and the `Task noted:` line (which the
+// PostToolUse run reads the declaration from) is written first, unchanged.
+// ───────────────────────────────────────────────────────────────────────────
+
+const OPEN_LINE_URL = `${API_BASE}/api/ext/open-line`;
+
+/** The whole check (request and body) ends within this, then it is silence. */
+const OPEN_LINE_TIMEOUT_MS = 2500;
+
+/** A backstop past the timeout: the CLI is gone by then, exit 0, whatever is still pending. */
+const OPEN_LINE_HARD_EXIT_MS = 4000;
+
+/** A Claude Code session id as the environment carries it. */
+const CLI_SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * VERBATIM — Opus, 2026-11-18. Printed on its own line after `Task noted:` when
+ * OW says the session's client has no open line. Do not reflow or reword it.
+ */
+const NO_OPEN_LINE_NOTICE =
+  "Heads up: this client has no open line right now (nothing paid, agreed, or hours left in a bank), so this work will show as unmatched until a quote or invoice covers it.";
+
+/** A `<client>-project` skill proper: Massmarket's own two work skills are not one. */
+function isClientSkillProper(name) {
+  const segments = String(name || "").split(":");
+  return /-project$/.test(segments[segments.length - 1]);
+}
+
+/**
+ * The client skill this shell's Claude Code session declared, or null. Read
+ * only (header). Never throws.
+ */
+function cliSessionClientSkill(env) {
+  try {
+    const e = env || process.env;
+    const sid = typeof e.CLAUDE_CODE_SESSION_ID === "string" ? e.CLAUDE_CODE_SESSION_ID.trim() : "";
+    if (!CLI_SESSION_ID_RE.test(sid)) return null;
+    const held = { declared_skill: null, declared_skill_at: null, declared_task: null, declared_task_at: null };
+    const file = SESSION_STATE_DIR ? path.join(SESSION_STATE_DIR, sessionStateFileName(sid)) : null;
+    adoptNewerDeclarations(file ? readJsonObject(file) : null, held);
+    adoptNewerDeclarations(readDeclarationRecord(sid), held);
+    const skill = stateString(held.declared_skill);
+    return skill && isClientSkillProper(skill) ? skill : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * NO_OPEN_LINE_NOTICE when OW says this session's client has no open line;
+ * null in every other case, failures included (header). Never throws.
+ */
+async function noOpenLineNotice(env) {
+  try {
+    const e = env || process.env;
+    if (!TOKEN) return null;
+    if (e.MM_UNATTENDED === "1") return null;
+    if (!isInteractiveSession(e)) return null;
+    const skill = cliSessionClientSkill(e);
+    if (!skill) return null;
+    if (!evaluateConsent().allowed) return null;
+    // A runtime warning (an older node's fetch) would land in the thread's
+    // shell output. This process prints nothing but its own lines.
+    process.removeAllListeners("warning");
+    setTimeout(() => process.exit(0), OPEN_LINE_HARD_EXIT_MS).unref();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OPEN_LINE_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${OPEN_LINE_URL}?skill=${encodeURIComponent(skill)}`, {
+        method: "GET",
+        headers: Object.assign({ Authorization: `Bearer ${TOKEN}` }, hookClientHeaders(), profileHeaders()),
+        signal: controller.signal,
+      });
+      if (res.status !== 200) return null;
+      const body = await res.json();
+      const answered = body && typeof body === "object" && !Array.isArray(body) && body.ok === true;
+      return answered && body.open_line === false ? NO_OPEN_LINE_NOTICE : null;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The hard-exit budget for the event in this payload: HARD_EXIT_SESSION_START_MS
- * for SessionStart, whose chip-feed request alone may use 10 s, and
- * HARD_EXIT_DEFAULT_MS for every other event — including a payload whose event
- * cannot be read at all.
+ * for SessionStart and UserPromptSubmit, either of which may make the chip-feed
+ * request (10 s alone), and HARD_EXIT_DEFAULT_MS for every other event —
+ * including a payload whose event cannot be read at all.
  */
 function hardExitMsFor(raw) {
   try {
     const parsed = safeJsonParse(raw);
     if (parsed && parsed.hook_event_name === SKILL_REPAIR_EVENT) return SKILL_REPAIR_HARD_EXIT_MS;
-    return parsed && parsed.hook_event_name === "SessionStart"
+    return parsed && (parsed.hook_event_name === "SessionStart" || parsed.hook_event_name === "UserPromptSubmit")
       ? HARD_EXIT_SESSION_START_MS
       : HARD_EXIT_DEFAULT_MS;
   } catch {
@@ -11687,9 +12427,12 @@ function hardExitMsFor(raw) {
 }
 
 async function main() {
+  // ⛔ CODEX SESSIONS (0.14.0): ~/.codex/hooks.json runs this file with
+  // `--codex` first. It marks the run, and is taken off before the CLI branches.
+  const codexFlag = process.argv[2] === CODEX_FLAG;
   // ⛔ Management path first. Only a `--consent*` argv reaches it, and the hook
-  // itself is always invoked with no arguments.
-  const argv = process.argv.slice(2);
+  // itself is always invoked with no arguments (Codex: `--codex` alone).
+  const argv = process.argv.slice(codexFlag ? 3 : 2);
   if (argv.length > 0 && String(argv[0]).indexOf("--consent") === 0) {
     // ⛔ `process.exitCode` + return, NOT process.exit(). stdout to a PIPE is
     // asynchronous in node, and process.exit() truncates whatever has not
@@ -11734,20 +12477,37 @@ async function main() {
   }
 
   // ⛔ `--task` (SPEC v2 §2.2) — run by the THREAD, in its own shell, to declare
-  // its task. It prints one line and exits 0, always: no stdin, no network, no
-  // file. The PostToolUse run for that shell call does the recording.
-  // `process.exitCode` + return for the same flush reason as above.
+  // its task. It prints its line and exits 0, always: no stdin, no file. The
+  // PostToolUse run for that shell call does the recording. Since 0.13.1 a noted
+  // task may get one more line (NO OPEN LINE), after one short GET that is made
+  // only for a session tied to a client. `process.exitCode` + return for the
+  // same flush reason as above.
   if (argv.length > 0 && isTaskCliArg(argv[0])) {
+    const line = taskCliLine(argv);
     try {
-      process.stdout.write(`${taskCliLine(argv)}\n`);
+      process.stdout.write(`${line}\n`);
     } catch {
       /* a closed stdout is not a reason to fail */
+    }
+    process.exitCode = 0;
+    if (line.indexOf(TASK_NOTED_PREFIX) === 0) {
+      try {
+        const notice = await noOpenLineNotice();
+        if (notice) process.stdout.write(`${notice}\n`);
+      } catch {
+        /* the notice is a courtesy; the task is noted either way */
+      }
     }
     process.exitCode = 0;
     return;
   }
 
   const raw = readStdin();
+
+  // ⛔ CODEX SESSIONS (0.14.0), DELEGATED: a run Claude handed to GPT records
+  // and prints nothing, on every event. Decided from the environment and this
+  // check's own parse, before the gate below, because it touches no disk.
+  if (isDelegatedGptRun() && isCodexRun(codexFlag, safeJsonParse(raw))) process.exit(0);
 
   // ═════════════════════════════════════════════════════════════════════════
   // ⛔ THE HARD EXIT (2026-09-29). Armed before anything else on the event
@@ -11821,6 +12581,9 @@ async function main() {
     sessionCwd = "";
   }
   CONSENT_CWD_REL = CONSENT_ROOT ? cwdRelativeToRoot(CONSENT_ROOT, sessionCwd) : null;
+  // ⛔ CODEX SESSIONS (0.14.0): which harness this run answers. Read after the
+  // gate, from the flag and the payload; nothing here touches the disk.
+  CODEX_RUN = isCodexRun(codexFlag, payload);
 
   const event = payload.hook_event_name || "";
   // Kept in this session's declarations record so the prune can tell whether
@@ -11836,7 +12599,13 @@ async function main() {
     } else if (event === "Stop") {
       await handleStop(payload);
     } else if (event === "SessionStart") {
-      await handleSessionStart(payload);
+      // ⛔ CODEX SESSIONS (0.14.0): Codex gets its instruction and nothing else.
+      if (CODEX_RUN) await handleCodexSessionStart();
+      else await handleSessionStart(payload);
+    } else if (event === "UserPromptSubmit") {
+      // ⛔ The chip lane at a typed session's first prompt (0.13.2). Registered
+      // by the mm-hooks plugin; every other prompt is one failed rename and out.
+      await handleUserPromptSubmit(payload);
     } else if (event === "SubagentStart") {
       handleSubagentStart(payload);
     } else if (event === "PreToolUse") {

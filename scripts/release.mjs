@@ -15,7 +15,7 @@
 // 2. Bumps the patch version of every plugin whose files changed since its version was last set
 //    (uncommitted edits, or commits such as a merged pull request) and whose version was not bumped by hand. An unbumped plugin reaches nobody: auto-update keys on version.
 //    mm-bridge's VERSION constant is kept equal to its plugin.json.
-// 3. Validates with `claude plugin validate`, runs the bridge's tests and mm-hooks' tests, scans with gitleaks.
+// 3. Validates with `claude plugin validate`, runs the bridge's, the theme's and mm-hooks' tests, scans with gitleaks.
 // 4. Commits and pushes main.
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
@@ -27,7 +27,7 @@ import { carryPublishedExtension } from './carry-extension.mjs'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const OW = process.env.OW_REPO || join(homedir(), 'Projects', 'onboarding-wizard')
 const DRY = process.argv.includes('--dry-run')
-const PLUGINS = ['mm-hooks', 'mm-bridge']
+const PLUGINS = ['mm-hooks', 'mm-bridge', 'massmarket-theme']
 
 const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts })
 const git = (...args) => run('git', args)
@@ -111,8 +111,8 @@ for (const target of ['.', ...PLUGINS.map(p => `plugins/${p}`)]) {
   const out = run(claude, ['plugin', 'validate', target])
   if (!/Validation passed/.test(out)) throw new Error(`validate ${target} failed:\n${out}`)
 }
-run(claude, ['plugin', 'test', '.'], { cwd: join(ROOT, 'plugins/mm-bridge') })
-run(process.execPath, ['--test', 'plugins/mm-hooks/scripts/sync-extension.test.js', 'plugins/mm-hooks/scripts/update-plugins.test.js', 'scripts/carry-extension.test.mjs', 'plugins/mm-hooks/scripts/revision-insights-notice.test.js', 'plugins/mm-hooks/scripts/skill-check.test.js'])
+for (const p of ['mm-bridge', 'massmarket-theme']) run(claude, ['plugin', 'test', '.'], { cwd: join(ROOT, 'plugins', p) })
+run(process.execPath, ['--test', 'plugins/mm-hooks/scripts/sync-extension.test.js', 'plugins/mm-hooks/scripts/update-plugins.test.js', 'scripts/carry-extension.test.mjs', 'plugins/mm-hooks/scripts/revision-insights-notice.test.js', 'plugins/mm-hooks/scripts/skill-check.test.js', 'plugins/mm-hooks/scripts/sync-codex.test.js'])
 run('gitleaks', ['dir', ROOT, '--redact', '--no-banner'])
 
 console.log(`Releasing: ${released.join(', ')}`)

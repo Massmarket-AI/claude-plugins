@@ -53,7 +53,8 @@ export const PKG = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 /** (0.7.33) The line over a client's page on a computer whose renderer draws no card (this test world's, unless it says `renderer: 'tree'`). */
 export const CARD_NOT_DRAWN = 'The card could not be drawn on this computer. Your thread prints the whole package instead.'
 
-export type Thread = { sessionId: string; title: string; pinned: boolean; isArchived: boolean; lastActivityAt: string; link?: string; cwd?: string }
+/** (0.7.64) `isRunning`: as the app answers a thread in the middle of a turn. */
+export type Thread = { sessionId: string; title: string; pinned: boolean; isArchived: boolean; lastActivityAt: string; link?: string; cwd?: string; isRunning?: boolean }
 export type Call = { server: string; tool: string; args: Record<string, unknown> }
 
 export const thread = (sessionId: string, title: string, hoursAgo: number, over: Partial<Thread> = {}): Thread => ({
@@ -166,8 +167,12 @@ export type WorldOptions = {
   browserNow?: () => { status: number; body?: unknown } | 'network'
   /** (0.7.53) How OW answers `POST /browser-answer`. Left out, 404. */
   browserAnswer?: (body: Record<string, unknown>) => { status: number; body?: unknown } | 'network'
+  /** (0.7.70) How OW answers `GET /ticket-status?ticket_id=<id>` (a scheduled wait's report): a status and a body, or no answer at all. Left out, 404. */
+  ticketStatus?: (url: string) => { status: number; body?: unknown } | 'network'
   /** (0.7.23) How OW answers the sync's pin report (`POST /bridge-pins`): a status, or no answer at all. Left out, 404: an OW without the route yet. */
   bridgePins?: (body: PinReport) => { status: number; body?: unknown } | 'network'
+  /** (0.7.59) Threads the app refuses to pin or unpin, with its words (as outside Bypass permissions mode). Read at each call. */
+  refusePins?: Record<string, string>
   /**
    * (0.7.6) How the app answers `unarchive_session`: left out, the thread is unarchived and the app says so; `refuse`,
    * the person said no to the app's question (an error answer); `error`, the call itself fails; `silent`, the app never
@@ -178,6 +183,11 @@ export type WorldOptions = {
   renderer?: 'tree'
   /** (0.7.26) What the reply-package pickup read answers, when not the plain page. */
   pickup?: Record<string, unknown>
+  /**
+   * (0.7.71) How `git` and `gh` answer in this thread's folder (the band's Ship row): an exit code and what they print, or `throws` (not
+   * on this computer). Left out, or undefined for a command: exit 128, `not a git repository`. Kept apart from `ran`.
+   */
+  git?: (argv: string[], cwd: string | undefined) => { exitCode: number; stdout?: string; stderr?: string } | 'throws' | undefined
 }
 
 /** (0.5.11, review of PR #15, F4) The parts of the time-tracking hook's text the bridge reads: 0.11.7's, and 0.11.4's. */
@@ -253,6 +263,7 @@ export function world(on: On, opts: WorldOptions = {}) {
       return text(`Session ${id} unarchived.`)
     }
     if (e.tool === 'set_session_title' && t) t.title = String(e.args.title)
+    if (e.tool === 'set_pinned' && opts.refusePins && Object.hasOwn(opts.refusePins, id)) return refused(String(opts.refusePins[id]))
     if (e.tool === 'set_pinned' && t) t.pinned = Boolean(e.args.pinned)
     // As the app answers a session asking for its own usage: the account's plan, and the session's context window.
     if (e.tool === 'get_usage') return text(opts.usage ? opts.usage() : { plan: { status: 'ok', plan: PLAN_MARK }, context: { session: 'self', status: 'unavailable' } })
@@ -358,6 +369,12 @@ export function world(on: On, opts: WorldOptions = {}) {
       if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
       return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: typeof answer.body === 'string' ? answer.body : JSON.stringify(answer.body ?? {}) } }
     }
+    // (0.7.70) one ticket's state, as OW's ticket-status GET answers it
+    if (e.url.includes('/api/ext/ticket-status?')) {
+      const answer = opts.ticketStatus ? opts.ticketStatus(e.url) : { status: 404, body: { error: 'Ticket not found.' } }
+      if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
+      return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: JSON.stringify(answer.body ?? {}) } }
+    }
     if (e.url.includes('/closeout') && opts.fetchTakesMs) {
       const ms = opts.fetchTakesMs(++feedReads)
       if (ms > 0) await clock.sleep(ms)
@@ -420,6 +437,8 @@ export function world(on: On, opts: WorldOptions = {}) {
   })
   /** Every program the bridge started. */
   const ran: string[] = []
+  /** (0.7.71) Every git and gh command the bridge ran, and in which folder. */
+  const gitRuns: Array<{ argv: string[]; cwd: string | undefined }> = []
   /** (0.7.26) Every reply-package card the bridge drew on this computer: the renderer, apart from the programs above. */
   const renders: string[] = []
   /** (0.7.33) What the renderer draws now. */
@@ -438,6 +457,14 @@ export function world(on: On, opts: WorldOptions = {}) {
       if (opts.renderer === 'tree') return { value: { exitCode: 0, stdout: treeNow, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
       // a renderer from before --tree: the pane shows the page alone, as before 0.7.26
       return { value: { exitCode: 2, stdout: '', stderr: 'render_visual.py: error: unrecognized arguments: --tree -', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    // (0.7.71) git and gh, for the band's Ship row: kept apart from `ran`
+    if (e.argv[0] === 'git' || e.argv[0] === 'gh') {
+      gitRuns.push({ argv: e.argv.map(String), cwd: (e as { cwd?: string }).cwd ?? (e as { init?: { cwd?: string } }).init?.cwd })
+      const said = opts.git?.(e.argv.map(String), gitRuns.at(-1)?.cwd)
+      if (said === 'throws') return { deny: `spawn ${String(e.argv[0])} ENOENT` }
+      const r = said ?? { exitCode: 128, stderr: 'fatal: not a git repository (or any of the parent directories): .git' }
+      return { value: { exitCode: r.exitCode, stdout: r.stdout ?? '', stderr: r.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     ran.push(JSON.stringify(e))
     if (opts.opener === 'missing') return { deny: `spawn ${String(e.argv[0])} ENOENT` }
@@ -532,7 +559,7 @@ export function world(on: On, opts: WorldOptions = {}) {
   /** The chips this session asked the app for. */
   const minted = () => calls.filter(c => c.tool === 'spawn_task')
   return {
-    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, notices, ran, renders, shell, box, fills, resolves, statuses, closes, scopePosts, pinPosts, browserPosts,
+    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, notices, ran, renders, shell, box, fills, resolves, statuses, closes, scopePosts, pinPosts, browserPosts, gitRuns,
     /** The app calls that change a thread: a rename, a pin, a message, a chip. (Reading this session's own usage, and withdrawing a chip, change none.) */
     writes: () => calls.filter(c => !['get_session', 'list_sessions', 'get_usage', 'dismiss_task'].includes(c.tool)).map(c => [c.tool, c.args.session_id ?? '', c.args.title ?? c.args.pinned ?? ''].join(' | ')),
     /** The chips this session asked the app to withdraw, by their ids. */
@@ -600,9 +627,23 @@ export const mm = async ($: Engine, args: string): Promise<string> => String((aw
 export const pane = ($: Engine) => $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'Pane', requestId: 'mm-queue', props: PANE })
 export type Drawing = { findAll: (query: { type?: string; key?: string }) => Promise<FoundElement[]> }
 /** Every text the pane draws, top to bottom. */
-export const lines = async (ui: Drawing): Promise<string[]> =>
+export const lines = async (ui: Drawing): Promise<string[]> => {
+  const all = await ui.findAll({})
+  // (0.7.73) a You row's detail lines have tests of their own (`details`): each drawn in the row's `mm-you-details:` Box is left out once
+  const skip = new Map<string, number>()
+  for (const e of all) if (e.type === 'Box' && String(e.key ?? '').startsWith('mm-you-details:')) for (const d of detailTexts(e)) skip.set(d, (skip.get(d) ?? 0) + 1)
+  const left = (text: string) => {
+    const n = skip.get(text) ?? 0
+    if (n > 0) skip.set(text, n - 1)
+    return n === 0
+  }
   // (0.7.34) a row's pin mark has tests of its own; the Needs you now heading is a button now, and reads as the heading it is
-  (await ui.findAll({})).flatMap(e => (e.type === 'Text' && !PIN_MARKS.has(e.text) ? [e.text] : e.key === 'mm-needs-toggle' ? [e.text.replace(/\s+[▾▸]$/, '')] : []))
+  // (0.7.73) a You row's head is the press that opens its thread when it has one, and reads as the line it is
+  return all.flatMap(e => (e.type === 'Text' && !PIN_MARKS.has(e.text) && left(e.text) ? [e.text] : e.key === 'mm-needs-toggle' ? [e.text.replace(/\s+[▾▸]$/, '')] : e.type === 'Button' && String(e.key).startsWith('mm-you-open:') ? [String(e.props.label)] : []))
+}
+/** (0.7.73) The texts of a You row's detail Box, as drawn (indented two spaces). */
+const detailTexts = (box: FoundElement): string[] =>
+  box.children.flatMap(c => (c && typeof c === 'object' && (c as { type?: string }).type === 'Text' ? [((c as { children?: unknown[] }).children ?? []).filter((s): s is string => typeof s === 'string').join('')] : []))
 export const PIN_MARKS = new Set(['●', '○'])
 export const buttons = async (ui: Drawing): Promise<Array<[string, string]>> => (await ui.findAll({ type: 'Button' })).map(b => [String(b.key), String(b.props.label)])
 
@@ -628,16 +669,21 @@ export const CEDAR_KICKOFF = `[mm-link ${CEDAR}] Cedar Dental (OW project ${CEDA
  * (0.5.2, R4) A client on the list with no thread at all, due within the pin's window: its row's name. (0.7.5, the panel
  * redesign) Its one line, ending ` · no thread`, and red while it pins now.
  */
-export const CEDAR_FRESH = '🔴 Cedar Dental · task · 5h left · no thread'
-export const BOLT_FRESH = '🔴 Bolt Staffing · reply · 22h left · 2 new · no thread'
-export const ACME_FRESH = '🔴 Acme Roofing · reply ready · 21h left · no thread'
+// (0.7.73) the You row's head is the same with or without a thread: its next line says `needs a pin: no thread` (`YOU_NO_THREAD`)
+export const CEDAR_FRESH = 'Cedar Dental: deliver "Send the intake form"'
+export const BOLT_FRESH = 'Bolt Staffing: answer Client about "Question" (+1 more)'
+export const ACME_FRESH = "Acme Roofing: approve Acme Roofing's reply package"
 /**
  * (0.7.5, the panel redesign) A client's row in the pane: ONE line, the chip, the client, what is needed, the time left
- * (the thread's own name, ACME_TITLE and the others, is unchanged).
+ * (the thread's own name, ACME_TITLE and the others, is unchanged). (0.7.73) The You row's head: the client and what is
+ * needed from the person, then (`YOU_META`) one line of pace, by when, the pin and why, and then the row's own detail.
  */
-export const ACME_ROW = '🟡 Acme Roofing · reply ready · 21h left'
-export const BOLT_ROW = '🟡 Bolt Staffing · reply · 22h left · 2 new'
-export const CEDAR_ROW = '🔴 Cedar Dental · task · 5h left'
+export const ACME_ROW = "Acme Roofing: approve Acme Roofing's reply package"
+export const BOLT_ROW = 'Bolt Staffing: answer Client about "Question" (+1 more)'
+export const CEDAR_ROW = 'Cedar Dental: deliver "Send the intake form"'
+/** (0.7.73) A You row's second line: its pace dot and words first. */
+export const YOU_META = /^[🟢🟡🔴] /u
+export const YOU_NO_THREAD = 'needs a pin: no thread'
 /** (0.7.5) The pane's one clock, at NOW in the person's own time (11:00 AM in New York; CI runs in UTC). */
 export const UPDATED = `Updated ${localClock(NOW)}`
 /** (0.7.9) The second line of an Update row whose linked thread is due to be updated by itself, as a sync at NOW words it. */
@@ -757,12 +803,26 @@ export const personClose = (on: On, pid: string) => {
   return { close: () => { closing = true } }
 }
 /** A client's buttons on the pane, by their labels. */
-export const buttonsOf = async (ui: Drawing, projectId: string): Promise<string[]> => (await buttons(ui)).filter(b => b[0].endsWith(projectId)).map(b => b[1])
-/** (0.7.5) The text the pane draws right under a row's one line: its second line where it has one, else what comes next. */
+/** (0.7.73) Not the You row's own press on its words (`mm-you-open:<project>`), which opens the thread: the row's buttons under it. */
+export const buttonsOf = async (ui: Drawing, projectId: string): Promise<string[]> => (await buttons(ui)).filter(b => b[0].endsWith(projectId) && !b[0].startsWith('mm-you-open:')).map(b => b[1])
+/**
+ * (0.7.5) The text the pane draws right under a row's one line: its second line where it has one, else what comes next.
+ * (0.7.73) Past the You row's own line of pace, by when, pin and why (`meta`), which every You row has.
+ */
 export const under = async (ui: Drawing, row: string): Promise<string | undefined> => {
   const all = await lines(ui)
   const at = all.findIndex(l => l.endsWith(row))
-  return at < 0 ? undefined : all[at + 1]
+  if (at < 0) return undefined
+  return YOU_META.test(all[at + 1] ?? '') ? all[at + 2] : all[at + 1]
+}
+/** (0.7.73) A You row's detail lines (`youDetails`), by its project, as drawn (indented). */
+export const details = async (ui: Drawing, projectId: string): Promise<string[]> =>
+  (await ui.findAll({ type: 'Box' })).filter(e => e.key === `mm-you-details:${projectId}`).flatMap(detailTexts)
+/** (0.7.73) A You row's line of pace, by when, its pin and why. */
+export const meta = async (ui: Drawing, row: string): Promise<string | undefined> => {
+  const all = await lines(ui)
+  const at = all.findIndex(l => l.endsWith(row))
+  return at < 0 || !YOU_META.test(all[at + 1] ?? '') ? undefined : all[at + 1]
 }
 /** The feed, with something changed on Acme's package and the sessions it lists. */
 export const acmeFeed = (over: Record<string, unknown> = {}, threads: NonNullable<Feed['threads']> = [declared(ACME, 'cli-acme', 30)]): Feed => {

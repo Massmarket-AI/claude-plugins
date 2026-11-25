@@ -94,7 +94,8 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(records(w).map(r => [r.pid, r.sid, r.ok, r.by, r.client])).toEqual([[ACME, 'local_a', true, SELF, 'Acme Roofing']])
     expect((w.stored['mm.sent'] as Record<string, { sid: string }>)[ACME]?.sid).toBe('local_a')
     expect(w.stored['mm.updating']).toEqual({})
-    expect((await bandLines($)).join(' ')).toContain('Updated Acme Roofing\'s thread.')
+    // (0.7.73) the band no longer says so: an update that went is work the bridge does by itself; only a failed one is shown
+    expect((await bandLines($)).join(' ')).not.toContain('Updated Acme Roofing')
     expect(notices(w)).toMatch(new RegExp(`updated Acme Roofing \\(${ACME}\\) sig [0-9a-f]{8} in local_a: something new for the client: drafts ready`))
     // nothing opened, nothing typed, nothing said in the pane
     expect([w.ran, w.opened, w.toasts, w.prompts]).toEqual([[], [], [], []])
@@ -355,10 +356,11 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
   // ---- (0.7.9, Rob 2026-10-29: "It seems like the threads aren't auto-updating anymore. They're not repinning
   // themselves.") A row whose thread is due to be updated by itself says when, and so does its thread's part of the pane
   /** (0.7.9) The line the pane draws right under Bolt's row. */
+  // (0.7.73) the line under Bolt's You row's line of pace, by when, pin and why
   const underBolt = async (ui: Drawing): Promise<string | undefined> => {
     const all = await lines(ui)
-    const at = all.findIndex(l => l.includes('Bolt Staffing ·'))
-    return at < 0 ? undefined : all[at + 1]
+    const at = all.findIndex(l => /^\d+\. Bolt Staffing: /.test(l))
+    return at < 0 ? undefined : all[at + 2]
   }
   /**
    * (0.7.9) When the first sync (at NOW + 4 s) first saw Bolt's mail, plus the 10 minutes ((0.7.14) until 0.7.14 "when the
@@ -2184,7 +2186,7 @@ describe('(0.7.5) the pane: Needs you now, then Your build queue, then the group
     expect(String(w.statuses.at(-1) ?? '')).toMatch(/^MM: 1 need you · \d+ pinned/)
     const ui = await pane($)
     const drawn = await lines(ui)
-    expect(drawn.slice(0, 2)).toEqual(['Needs you now (1)', `◆ 1. ${CEDAR_FRESH}`])
+    expect(drawn.slice(0, 2)).toEqual(['Needs you (1)', `1. ${CEDAR_FRESH}`])
     // the queue in its own part, the top 3 by rank, then how many more: no thread is linked to it here
     expect(drawn.slice(drawn.indexOf('Your build queue · 40'))).toEqual(['Your build queue · 40', ' 1. Ticket 1', ' 2. Ticket 2', ' 3. Ticket 3', ' + 37 more in the queue', UPDATED])
     expect((await buttons(ui)).filter(([k]) => k.startsWith('mm-fold:') || k === 'mm-build-open')).toEqual([['mm-fold:undated', 'No due date (1)']])
@@ -2615,7 +2617,8 @@ describe('0.7.10 (Rob, 10-28): kickoffs never hand a client out twice, start in 
     expect(one).toBe('Own thread archived: Road Dog Industrial. Never start a new thread for it: bring it back with mm "restore Road Dog Industrial" (the app may ask the person first).')
     // ⛔ not in the band's Start missing threads, and not on its no-thread list
     const band = await bandOf($)
-    expect((await buttons(band)).filter(b => b[0] === 'mm-start-missing')).toEqual([['mm-start-missing', 'All threads started']])
+    // (0.7.73) no Start missing threads at all (and no All threads started): no client here needs a thread and lacks a card
+    expect((await buttons(band)).filter(b => b[0] === 'mm-start-missing')).toEqual([])
     await band.unmount()
     expect(w.minted()).toEqual([])
     expect(starts(w)).toEqual([])
@@ -3730,43 +3733,43 @@ describe('0.7.21 (Rob, 11-05: "When things are overdue but not assigned to me, I
     expect(w.threads.get('local_c')).toMatchObject({ title: CEDAR_TITLE, pinned: true })
     const ui = await pane($)
     const before = await lines(ui)
-    // his row: one line, no `1 late with Builder B` under it (0.7.4 to 0.7.20)
-    const row = before.findIndex(l => l.includes('🔴 Cedar Dental · task · 5h left'))
+    // his row: (0.7.73) its You row, no `1 late with Builder B` under it (0.7.4 to 0.7.20)
+    const row = before.findIndex(l => /^\d+\. Cedar Dental: /.test(l))
     expect(row).toBeGreaterThan(-1)
     expect(before.some(l => l.includes('late with'))).toBe(false)
     // (0.7.21 to 0.7.26: Team · late, by person, then client, the last button on the line of groups)
     expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([])
     expect(before.some(l => l.includes('Team · late') || l.includes('With a teammate'))).toBe(false)
     await ui.unmount()
-    expect((await mm($, 'status')).split('\n')).toContain('late with the team: 3 (Builder B 2, Builder C 1)')
+    expect((await mm($, 'status')).split('\n')).toContain('3 behind with the team (Builder B 2, Builder C 1)')
     expect(sends(w)).toEqual([])
   })
 
   test('(0.7.27) the status line says nothing of the team; /mm status keeps naming who is late', async ($, on) => {
     const w = world(on, { feed: robFeed(5), threads: [thread('local_c', 'Cedar work', 2)], store: { 'mm.links': { [CEDAR]: 'local_c' } } })
     await mm($, '')
-    // (0.7.21 to 0.7.26: `MM: 1 need you · 1 pinned · 3 late with the team`)
+    // (0.7.21 to 0.7.26: `MM: 1 need you · 1 pinned · 3 late with the team; 0.7.61: 3 behind with the team`)
     expect(String(w.statuses.at(-1) ?? '')).toMatch(/^MM: 1 need you · 1 pinned(  |$)/)
     const status = await mm($, 'status')
-    expect(status.split('\n')).toContain('late with the team: 3 (Builder B 2, Builder C 1)')
+    expect(status.split('\n')).toContain('3 behind with the team (Builder B 2, Builder C 1)')
     // nobody late: the line as it was
     w.setFeed(robFeed(5, false))
     await mm($, '')
     expect(String(w.statuses.at(-1) ?? '')).toMatch(/^MM: 1 need you · 1 pinned(  |$)/)
-    expect(await mm($, 'status')).not.toContain('late with the team')
+    expect(await mm($, 'status')).not.toContain('with the team')
   })
 
   test('⛔ a teammate\'s feed and the PM\'s: no Team · late, and the status line is as it was', async ($, on) => {
     const w = world(on, { feed: { ...robFeed(5), member: ME, role: 'builder' }, threads: [] })
     await mm($, '')
-    expect(String(w.statuses.at(-1) ?? '')).not.toContain('late with the team')
+    expect(String(w.statuses.at(-1) ?? '')).not.toContain('with the team')
     const ui = await pane($)
     expect((await buttons(ui)).some(b => b[0] === 'mm-fold:team')).toBe(false)
     await ui.unmount()
     w.setFeed({ ...robFeed(5), member: 'has9@example.com', role: 'pm' })
     await mm($, '')
-    expect(String(w.statuses.at(-1) ?? '')).not.toContain('late with the team')
-    expect(await mm($, 'status')).not.toContain('late with the team')
+    expect(String(w.statuses.at(-1) ?? '')).not.toContain('with the team')
+    expect(await mm($, 'status')).not.toContain('with the team')
   })
 
   test('S1 (0.7.27, Rob 11-05: "everything that shows up as needing to be worked on right now ... shouldn\'t show up for me and clutter my page"): the founder\'s pane and strip have neither Team · late nor With a teammate, drawn from a sync or from the stored one; (0.7.34) a PM\'s has none either', async ($, on) => {
@@ -3781,7 +3784,7 @@ describe('0.7.21 (Rob, 11-05: "When things are overdue but not assigned to me, I
     expect((await buttons(ui)).filter(b => b[0].startsWith('mm-fold:'))).toEqual([])
     const shown = await lines(ui)
     expect(shown.some(l => l.includes('With a teammate') || l.includes('Team · late') || l.includes('late with'))).toBe(false)
-    expect(String(w.statuses.at(-1) ?? '')).not.toContain('late with the team')
+    expect(String(w.statuses.at(-1) ?? '')).not.toContain('with the team')
     await ui.unmount()
     // (0.7.34) and a PM's page has none either: Team now shows him the team's
     const t: FeedTicket = { ticket_id: tid(2), project_id: CEDAR, project_name: 'Cedar Dental', title: 'Build the intake flow', due_at: new Date(NOW + 5 * HOUR).toISOString(), due_source: 'commitment', assignee_email: 'builder-b@example.com' }
@@ -3957,7 +3960,7 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
     expect(body.at).toBe(new Date(NOW).toISOString())
     const by = (pid: string) => body.items.find(i => i.project_id === pid)
     // pinned: a green light, no reason
-    expect(by(pidOf(1))).toEqual({ project_id: pidOf(1), client: nameOf(1), kind: 'task', tone: 'yellow', due_at: new Date(NOW + HOUR).toISOString(), pinned: true, why_not: null })
+    expect(by(pidOf(1))).toEqual({ project_id: pidOf(1), client: nameOf(1), kind: 'task', tone: 'yellow', due_at: new Date(NOW + HOUR).toISOString(), pinned: true, why_not: null, clock: 'client' })
     // no thread of its own; red: its reply is past due
     expect(by(BOLT)).toMatchObject({ client: 'Bolt Staffing', kind: 'reply', tone: 'red', pinned: false, why_not: 'no_thread' })
     // its thread past the app's list, and the lookup could not say
@@ -3974,12 +3977,12 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
     expect(body.extra).toEqual([{ project_id: ACME, client: 'Acme Roofing', by: 'person' }])
     // the whole of it, as OW gets it: Bolt's late reply, Dune's task, then the Willow tasks by when they are due
     const due = (h: number) => new Date(NOW + h * HOUR).toISOString()
-    const willow = (n: number, pinned: boolean) => ({ project_id: pidOf(n), client: nameOf(n), kind: 'task', tone: 'yellow', due_at: due(1 + (n - 1) * 0.25), pinned, why_not: pinned ? null : 'write_cap' })
+    const willow = (n: number, pinned: boolean) => ({ project_id: pidOf(n), client: nameOf(n), kind: 'task', tone: 'yellow', due_at: due(1 + (n - 1) * 0.25), pinned, why_not: pinned ? null : 'write_cap', clock: 'client' })
     expect(body).toEqual({
       at: '2026-10-12T15:00:00.000Z',
       items: [
-        { project_id: BOLT, client: 'Bolt Staffing', kind: 'reply', tone: 'red', due_at: '2026-10-12T13:00:00.000Z', pinned: false, why_not: 'no_thread' },
-        { project_id: DUNE, client: 'Dune Labs', kind: 'task', tone: 'yellow', due_at: due(0.75), pinned: false, why_not: 'unseen' },
+        { project_id: BOLT, client: 'Bolt Staffing', kind: 'reply', tone: 'red', due_at: '2026-10-12T13:00:00.000Z', pinned: false, why_not: 'no_thread', clock: 'client' },
+        { project_id: DUNE, client: 'Dune Labs', kind: 'task', tone: 'yellow', due_at: due(0.75), pinned: false, why_not: 'unseen', clock: 'client' },
         ...Array.from({ length: 13 }, (_, i) => willow(i + 1, i < 12)),
       ],
       extra: [{ project_id: ACME, client: 'Acme Roofing', by: 'person' }],
@@ -4006,7 +4009,7 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
       byUs: sid => sid === 'local_a',
       client: () => 'Acme Roofing',
     })
-    expect(r.items).toEqual([{ project_id: CEDAR, client: 'Cedar Dental', kind: 'task', tone: 'red', due_at: new Date(NOW - HOUR).toISOString(), pinned: true, why_not: null }])
+    expect(r.items).toEqual([{ project_id: CEDAR, client: 'Cedar Dental', kind: 'task', tone: 'red', due_at: new Date(NOW - HOUR).toISOString(), pinned: true, why_not: null, clock: 'client' }])
     expect(r.extra).toEqual([{ project_id: ACME, client: 'Acme Roofing', by: 'bridge' }])
   })
 
@@ -4044,6 +4047,64 @@ describe('0.7.23 (B): the pin report: what should be pinned, whether it is, and 
       expect(w.pinPosts).toHaveLength(2)
     })
   }
+
+  // ⛔ (0.7.59, Rob 2026-11-16: "Yes, build it") a pin the app refused reads `refused`, with the app's words, not `unknown`
+  test('0.7.59: a pin the app refuses is reported refused, with its words; held back by the wait, it still reads refused', async ($, on) => {
+    const refusePins: Record<string, string> = { local_w02: 'The user declined to pin\nthis session.' }
+    const w = reportWorld(on, { refusePins }, 3)
+    await mm($, '')
+    expect(w.pinPosts).toHaveLength(1)
+    const first = (pid: string) => w.pinPosts[0]?.body.items.find(i => i.project_id === pid)
+    expect(first(pidOf(2))).toMatchObject({ client: nameOf(2), pinned: false, why_not: 'refused', why_text: 'The user declined to pin this session.' })
+    // a pin that went through carries no words
+    expect(first(pidOf(1))).toMatchObject({ pinned: true, why_not: null })
+    expect(Object.keys(first(pidOf(1)) ?? {})).not.toContain('why_text')
+    // the person's own row says so
+    expect((w.stored['mm.last'] as { rowPins: Record<string, unknown> }).rowPins[pidOf(2)]).toEqual({ pinned: false, why: 'refused' })
+    // within PIN_WAIT_MS the app is not asked again, even once it would take the pin: still refused, in the same words
+    delete refusePins.local_w02
+    const mark = w.calls.length
+    await w.clock.advance(31 * 60_000)
+    await mm($, '')
+    expect(w.calls.slice(mark).some(c => c.tool === 'set_pinned' && c.args.session_id === 'local_w02')).toBe(false)
+    expect(w.pinPosts).toHaveLength(2)
+    expect(w.pinPosts[1]?.body.items.find(i => i.project_id === pidOf(2))).toMatchObject({ pinned: false, why_not: 'refused', why_text: 'The user declined to pin this session.' })
+  })
+
+  test('0.7.59: an OW from before refused (400): the same report again at once, refused read as unknown with no words; kept as sent', async ($, on) => {
+    const bodies: PinReport[] = []
+    const w = reportWorld(
+      on,
+      {
+        refusePins: { local_w02: 'The user declined to pin this session.' },
+        bridgePins: body => {
+          bodies.push(body)
+          return body.items.some(i => i.why_not === 'refused') ? { status: 400, body: { code: 'invalid_field', field: 'why_not' } } : OK
+        },
+      },
+      3,
+    )
+    await mm($, '')
+    expect(bodies).toHaveLength(2)
+    const was = bodies[0]?.items.find(i => i.project_id === pidOf(2))
+    expect(was).toMatchObject({ why_not: 'refused', why_text: 'The user declined to pin this session.' })
+    const { why_text: _whyText, ...rest } = was ?? ({} as PinReport['items'][number])
+    expect(bodies[1]?.items.find(i => i.project_id === pidOf(2))).toEqual({ ...rest, why_not: 'unknown' })
+    expect(JSON.stringify(bodies[1])).not.toContain('why_text')
+    expect(bodies[1]?.items.filter(i => i.project_id !== pidOf(2))).toEqual(bodies[0]?.items.filter(i => i.project_id !== pidOf(2)))
+    // taken: kept as the report's own hash, so it is not sent again before 30 minutes
+    expect(Object.keys(w.stored['mm.pinReport'] as Record<string, unknown>).sort()).toEqual(['at', 'hash'])
+    await w.clock.advance(6 * 60_000)
+    await mm($, '')
+    expect(bodies).toHaveLength(2)
+  })
+
+  test('0.7.59: a 400 to a report with nothing refused is not sent again in that sync', async ($, on) => {
+    const w = reportWorld(on, { bridgePins: () => ({ status: 400, body: { code: 'invalid_field', field: 'at' } }) }, 3)
+    await mm($, '')
+    expect(w.pinPosts).toHaveLength(1)
+    expect(w.stored['mm.pinReport']).toBeUndefined()
+  })
 
   // (`200` here is the yardstick: the same sync, with OW taking the report)
   for (const answer of [{ status: 200 }, { status: 500 }, 'network'] as const) {
@@ -4243,6 +4304,44 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       expect(said).not.toContain('does not match the stored drafts')
       expect(w.written.filter(f => f.path.endsWith('bridge-notices.log')).map(f => f.text).join('\n')).not.toContain('A line only OW prints')
       await u.unmount()
+    })
+
+    describe('0.7.69 a lead sample the package promises is not built', () => {
+      const SAMPLE_LINE = '- Sample not built: 1 lead sample(s) this package promises. Recommend: build it before the go (client-reply-prep §9.2a step 2), then read the package again.'
+      const SAMPLE_ANSWER =
+        'card not ready: a lead sample this package promises is not built yet. Build it first (client-reply-prep §9.2a step 2), then ask mm card again. Do not ask for the go on this package until then.'
+      const withFindings = (first: string[]) => `${PAGE}\n\n### Findings\n\n${first.join('\n')}\n\n### Links\n\n- none`
+
+      test('(a) first finding: the exact answer, the box closed, the pane says why', async ($, on) => {
+        const w = world(on, { ...own, pickup: { ...PICKUP, markdown: withFindings([SAMPLE_LINE, '- Another finding.']) } })
+        const u = await shown($)
+        expect(await tool($, `card ${PKG}`)).toBe(SAMPLE_ANSWER)
+        expect(SAMPLE_ANSWER).not.toContain('Print the whole page')
+        expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn'))).toBe(false)
+        expect((await lines(u)).join('\n')).toContain('This package promises a lead sample that is not built yet')
+        await u.unmount()
+      })
+
+      test('(d) not the first finding: still refuses', async ($, on) => {
+        const w = world(on, { ...own, pickup: { ...PICKUP, markdown: withFindings(['- A first finding.', SAMPLE_LINE]) } })
+        const u = await shown($)
+        expect(await tool($, `card ${PKG}`)).toBe(SAMPLE_ANSWER)
+        await u.unmount()
+      })
+
+      test('(b) the same text outside Findings (a draft body): this rule does not refuse', async ($, on) => {
+        const w = world(on, { ...own, pickup: { ...PICKUP, markdown: `${PAGE}\n\n### Client reply\n\n${SAMPLE_LINE}\n\n### Findings\n\n- A finding.` } })
+        const u = await shown($)
+        expect(await tool($, `card ${PKG}`)).not.toBe(SAMPLE_ANSWER)
+        await u.unmount()
+      })
+
+      test('(c) no such line: unchanged', async ($, on) => {
+        const w = world(on, { ...own, pickup: PICKUP })
+        const u = await shown($)
+        expect(await tool($, `card ${PKG}`)).toBe(READY)
+        await u.unmount()
+      })
     })
 
     test('the package moved on since the pane read it: not ready, and the box closes', async ($, on) => {
@@ -5027,7 +5126,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       return () => last
     }
     /** The row of one `mm card` call, as the desktop draws it once the call has answered. */
-    const row = ($: Engine, toolUseId: string, output: unknown, surface: 'desktop' | 'terminal' = 'desktop') =>
+    const row = ($: Engine, toolUseId: string, output: unknown, surface: 'desktop' | 'terminal' | 'mobile' = 'desktop') =>
       $.ui.mount({
         plugin: 'mm-bridge', surface, component: 'ToolUse', requestId: toolUseId,
         props: { tool_use_id: toolUseId, tool: 'mcp__mm-bridge__mm', input: { args: `card ${PKG}` }, isRunning: false, isErrored: false, isInterrupted: false, output } as never,
@@ -5547,6 +5646,113 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       expect(await u.findAll({ type: 'Input' })).toEqual([])
       for (const m of [r, u]) await m.unmount()
     })
+
+    // (0.7.71, Rob 2026-11-24: approve reply packages from the phone) The mobile app draws a tree that keeps a tool row as one quiet line, and
+    // as a card under the row only when the Box holding the row and the rest has a border or a background.
+    describe('0.7.71 on the phone: the same card, under the row, in a bordered Box, with the same one-press go', () => {
+      /** A few milliseconds of real time, for the press's record and note (they are written off the clock). */
+      const pause = (ms: number) => new Promise<void>(res => void (globalThis as unknown as { setTimeout: (f: () => void, ms: number) => unknown }).setTimeout(res, ms))
+      /** The engine's own row, beneath the plugins: what `next(e)` draws. */
+      const engineRow = (on: On) => on('ui.render', { component: 'ToolUse' }, (t$, e) => (t$.ui.resolve(e) as { Text: (p: { children: string }) => unknown }).Text({ children: 'the engine\'s own row' }) as never)
+
+      test('the live ready row keeps the engine\'s row and draws the whole card under it, in a Box with a border, the desktop\'s own lines', async ($, on) => {
+        world(on, own)
+        engineRow(on)
+        const asked = watchAsked(on)
+        const u = await shown($)
+        const said = await tool($, `card ${PKG}`)
+        const phone = await row($, String(asked()?.toolUseId), said, 'mobile')
+        const card = await phone.find({ type: 'Box', key: `mm-card-phone:${PKG}` })
+        expect(card?.props.borderStyle).toBe('round')
+        const shown2 = await lines(phone)
+        expect(shown2[0]).toBe('the engine\'s own row')
+        expect(shown2.join('\n')).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
+        expect(shown2.join('\n')).toContain('Every question answered?')
+        // the desktop's row draws the same card lines (it replaces the row there)
+        const desk = await row($, String(asked()?.toolUseId), said)
+        expect(await lines(desk)).toEqual(shown2.slice(1))
+        // no Changes field on the phone, which draws none; the box waits for the turn there too
+        expect(await phone.findAll({ type: 'Input' })).toEqual([])
+        expect(await hasBox(phone)).toBe(false)
+        await endTurn($)
+        expect(await hasBox(phone)).toBe(true)
+        expect(await hasBox(desk)).toBe(true)
+        for (const m of [phone, desk, u]) await m.unmount()
+      })
+
+      test('a press on the phone is the desktop\'s press: the record, the note, then exactly "Send package <12>" into the thread as the person\'s go', async ($, on) => {
+        const w = world(on, own)
+        engineRow(on)
+        const asked = watchAsked(on)
+        const u = await shown($)
+        const said = await tool($, `card ${PKG}`)
+        const phone = await row($, String(asked()?.toolUseId), said, 'mobile')
+        await endTurn($)
+        await phone.press({ key: `mm-card-sign-btn:${LABEL}` })
+        for (let i = 0; i < 200 && !recorded(w); i++) await pause(2)
+        const record = JSON.parse(recorded(w)?.text.trim().split('\n').at(-1) ?? '{}') as Record<string, unknown>
+        expect(record).toMatchObject({ v: 1, session_id: SELF_CLI, package_id: PKG, package_sha256: SMS_TREE.package_sha256, label: LABEL })
+        for (let i = 0; i < 200 && !w.appended.some(t => t.includes(SIGNED_START)); i++) await pause(2)
+        const note = (JSON.parse(w.appended.find(t => t.includes(SIGNED_START)) ?? '{}') as { content?: Array<{ text: string }> }).content?.[0]?.text ?? ''
+        expect(CARD_PRESS_NOTE.exec(note)?.[1]).toBe(LABEL)
+        expect(w.prompts).toEqual([])
+        await w.clock.advance(3_100)
+        for (let i = 0; i < 200 && !w.prompts.length; i++) await pause(2)
+        expect(w.prompts).toEqual([{ text: `Send package ${LABEL}`, origin: { kind: 'plugin', name: 'mm-bridge', asUser: true } }])
+        expect(w.fills).toEqual([])
+        for (let i = 0; i < 200 && !(await lines(phone)).join('\n').includes(SEALED); i++) await pause(2)
+        expect((await lines(phone)).join('\n')).toContain(SEALED)
+        expect((await lines(u)).join('\n')).toContain(SEALED)
+        for (const m of [phone, u]) await m.unmount()
+      })
+
+      test('while the desktop\'s reply line holds the card, the phone\'s row still draws it (the phone has no such line)', async ($, on) => {
+        world(on, own)
+        engineRow(on)
+        const asked = watchAsked(on)
+        const u = await shown($)
+        const said = await tool($, `card ${PKG}`)
+        const live = String(asked()?.toolUseId)
+        // the desktop's reply line under the call takes the card
+        const reply = await $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'AssistantMessage', requestId: 'msg_1', props: { text: `The card is below. Package ${LABEL}.`, isFirstOfReply: true } as never })
+        expect((await lines(reply)).join('\n')).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
+        const desk = await row($, live, said)
+        expect(await lines(desk)).toEqual([`The card for Package ${LABEL} is drawn in full below, under your thread's line.`])
+        const phone = await row($, live, said, 'mobile')
+        expect((await lines(phone)).join('\n')).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
+        expect((await phone.find({ type: 'Box', key: `mm-card-phone:${PKG}` }))?.props.borderStyle).toBe('round')
+        for (const m of [phone, desk, reply, u]) await m.unmount()
+      })
+
+      test('a line in place of the card is the row and that line, with no border: a quiet line', async ($, on) => {
+        world(on, own)
+        engineRow(on)
+        const asked = watchAsked(on)
+        const u = await shown($)
+        const first = await tool($, `card ${PKG}`)
+        const firstId = String(asked()?.toolUseId)
+        await tool($, `card ${PKG}`)
+        const old = await row($, firstId, first, 'mobile')
+        expect(await lines(old)).toEqual(['the engine\'s own row', `Shown again below. Package ${LABEL}.`])
+        expect(await old.find({ type: 'Box', key: `mm-card-phone:${PKG}` })).toBeUndefined()
+        const quiet = await old.find({ type: 'Box', key: `mm-card-phone-line:${PKG}` })
+        expect(quiet?.props.borderStyle).toBeUndefined()
+        expect(quiet?.props.backgroundColor).toBeUndefined()
+        expect(await buttons(old)).toEqual([])
+        for (const m of [old, u]) await m.unmount()
+      })
+
+      test('any other call on the phone is the engine\'s row, untouched', async ($, on) => {
+        world(on, own)
+        engineRow(on)
+        const r = await $.ui.mount({
+          plugin: 'mm-bridge', surface: 'mobile', component: 'ToolUse', requestId: 'toolu_x',
+          props: { tool_use_id: 'toolu_x', tool: 'mcp__mm-bridge__mm', input: { args: 'status' }, isRunning: false, isErrored: false, isInterrupted: false, output: 'member: x' } as never,
+        })
+        expect(await lines(r)).toEqual(['the engine\'s own row'])
+        await r.unmount()
+      })
+    })
   })
 })
 
@@ -5595,7 +5801,10 @@ describe('0.7.34: Team now, Needs you now that folds, the pin marks and the no-t
       const ui = await pane($)
       expect(await label(ui, TOGGLE)).toBe('Team now · 1 working  ▾')
       expect((await lines(ui)).some(l => l.startsWith('Asif'))).toBe(true)
-      expect(await label(ui, 'mm-needs-toggle')).toBe('Needs you now (3)  ▸')
+      // (0.7.73) the You section never folds: an older `needs: false` leaves its rows drawn, with no fold button
+      expect(await label(ui, 'mm-needs-toggle')).toBeUndefined()
+      expect(await lines(ui)).toContain('Needs you (3)')
+      expect((await lines(ui)).some(l => /^\d+\. Cedar Dental: /.test(l))).toBe(true)
       await ui.unmount()
     })
 
@@ -5662,17 +5871,13 @@ describe('0.7.34: Team now, Needs you now that folds, the pin marks and the no-t
   })
 
   describe('Needs you now', () => {
-    test('it folds, and the rows go with it; the groups under it stay', async ($, on) => {
+    test('it folds, and the rows go with it; the groups under it stay (0.7.73: the You section replaces it and never folds; its rows are always drawn)', async ($, on) => {
       const w = world(on, { feed: feed(), threads: [] })
       await tickOnce($, w)
       const ui = await pane($)
-      expect(await label(ui, 'mm-needs-toggle')).toBe('Needs you now (3)  ▾')
-      expect((await lines(ui)).some(l => l.includes('Cedar Dental'))).toBe(true)
-      await ui.press({ key: 'mm-needs-toggle' })
-      expect(await label(ui, 'mm-needs-toggle')).toBe('Needs you now (3)  ▸')
-      expect((await lines(ui)).some(l => l.includes('Cedar Dental'))).toBe(false)
-      await ui.press({ key: 'mm-needs-toggle' })
-      expect((await lines(ui)).some(l => l.includes('Cedar Dental'))).toBe(true)
+      expect(await label(ui, 'mm-needs-toggle')).toBeUndefined()
+      expect(await lines(ui)).toContain('Needs you (3)')
+      expect((await lines(ui)).some(l => /^\d+\. Cedar Dental: /.test(l))).toBe(true)
       await ui.unmount()
     })
 
@@ -5798,7 +6003,8 @@ describe('0.7.34: Team now, Needs you now that folds, the pin marks and the no-t
       const w = world(on, { feed: { member: H9, role: 'pm', drafts: [], mail: [], tickets: { overdue: [mine] }, threads: [] } as Feed, threads: [thread('local_c', 'Cedar', 5)], store: { 'mm.links': { [CEDAR]: 'local_c' } } })
       await tickOnce($, w)
       const ui = await pane($)
-      expect((await lines(ui)).some(l => l.includes('Cedar Dental · task'))).toBe(true)
+      // (0.7.73) his You row
+      expect((await lines(ui)).some(l => /^\d+\. Cedar Dental: /.test(l))).toBe(true)
       await ui.unmount()
     })
   })
@@ -5879,10 +6085,11 @@ describe('0.7.38 (Rob 2026-11-07: "Any Reply package should appear above the tea
     await w.clock.advance(4_000)
     for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
     const ui = await pane($)
-    expect((await lines(ui)).slice(0, 3)).toEqual(['This thread: Acme Roofing', CARD_NOT_DRAWN, 'Needs you now (3)'])
+    expect((await lines(ui)).slice(0, 3)).toEqual(['This thread: Acme Roofing', CARD_NOT_DRAWN, 'Needs you (3)'])
     const keys = await keysOf(ui)
     expect(keys.indexOf('mm-teamnow-toggle')).toBeGreaterThan(keys.indexOf(`drafts:${BOLT}`))
-    expect(keys.indexOf('mm-teamnow-toggle')).toBeGreaterThan(keys.indexOf('mm-needs-toggle'))
+    // (0.7.73) the You section has no fold button: its last row's buttons come before Team now (above)
+    expect(keys).not.toContain('mm-needs-toggle')
     await ui.unmount()
   })
 
@@ -5903,7 +6110,7 @@ describe('0.7.38 (Rob 2026-11-07: "Any Reply package should appear above the tea
     const ui = await pane($)
     w.setFeed(feed())
     await mm($, '')
-    expect((await lines(ui))).toContain('Needs you now (3)')
+    expect((await lines(ui))).toContain('Needs you (3)')
     await ui.unmount()
   })
 })
@@ -5947,7 +6154,8 @@ describe('(0.7.41) a sent package leaves the side pane, and the chat says while 
     await w.clock.advance(60_000)
     const band = await bandTexts($)
     expect(band.texts[0]).toBe(WAITING)
-    expect(band.buttons).toEqual([['mm-open-waiting', 'Open the side pane'], ['mm-start-missing', 'Start missing threads (2)']])
+    // (0.7.73) then the next client to act on; no Start missing threads while both clients with no thread have their cards
+    expect(band.buttons).toEqual([['mm-open-waiting', 'Open the side pane'], ['mm-next', 'Cedar Dental, deliver "Send the intake form", due 4 PM']])
     const b = await bandOf($)
     const opened = w.opened.length
     await b.press({ key: 'mm-open-waiting' })
@@ -6570,7 +6778,7 @@ describe('0.7.53: Working manually in browser', () => {
   const browserReads = (w: { fetched: string[] }) => w.fetched.filter(u => u.endsWith('/api/ext/browser-now')).length
   const ROW_LINE = 'Working manually in browser · app.gohighlevel.com · Workflows · no thread'
 
-  test('a line goes under its client\'s row; a client with no row is in one short block above Team now', async ($, on) => {
+  test('a line goes under its client\'s row; a client with no row is in one short block above Team now (0.7.73: the You section never folds, so a row\'s line stays under it)', async ($, on) => {
     const w = world(on, { feed: feed(), browserNow: () => read({ lines: [line(), line({ project_id: DUNE, client: 'Dune Dental', site: 'dune.example', title: 'Booking', no_thread: false })] }) })
     await tickOnce($, w)
     const ui = await pane($)
@@ -6586,11 +6794,9 @@ describe('0.7.53: Working manually in browser', () => {
     const keys = (await buttons(ui)).map(b => b[0])
     expect(keys).toContain('mm-teamnow-toggle')
     expect(keys.some(k => k.startsWith('mm-browser:'))).toBe(false)
-    // Needs you now folded: Acme's row is not drawn, so its line goes to the block
-    await ui.press({ key: 'mm-needs-toggle' })
-    const folded = await lines(ui)
-    expect(folded).toContain('Acme Roofing · app.gohighlevel.com · Workflows · no thread')
-    expect(folded).not.toContain(ROW_LINE)
+    // (0.7.73) no fold to press: Acme's row is always drawn, so its line never goes to the block
+    expect(keys).not.toContain('mm-needs-toggle')
+    expect(drawn).not.toContain('Acme Roofing · app.gohighlevel.com · Workflows · no thread')
     await ui.unmount()
   })
 
@@ -6601,8 +6807,8 @@ describe('0.7.53: Working manually in browser', () => {
     const ui = await pane($)
     const drawn = await lines(ui)
     expect(drawn.slice(drawn.indexOf('Needs a client'), drawn.indexOf('Needs a client') + 2)).toEqual(['Needs a client', '14m in the browser · plumber.example · Plumber admin'])
-    // above Needs you now
-    expect(drawn.indexOf('Needs a client')).toBeLessThan(drawn.findIndex(l => l.startsWith('Needs you now')))
+    // (0.7.73) right under the You section, which is the top of the pane (it was above Needs you now)
+    expect(drawn.indexOf('Needs a client')).toBeGreaterThan(drawn.indexOf('Needs you (3)'))
     expect((await buttons(ui)).filter(b => b[0].startsWith(`mm-browser:pane:${Q1}`)).map(b => b[1])).toEqual(['Acme Roofing', 'Bolt Staffing', 'Internal', 'Personal'])
     now = read()
     const before = browserReads(w)

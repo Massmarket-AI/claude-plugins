@@ -72,7 +72,7 @@
 import type { BoxProps, ButtonProps, ElementConstructor, EngineInterface, InputProps, LinkProps, Register, RenderNode, SvgProps, TextProps } from 'claude-code'
 
 import type { MmCard, MmCardAsked, MmCardChecked, MmCardFeedback, MmCardMarks, MmCardNode, MmCardRun, MmCardSigned, MmCardTree } from '../types'
-import { isOwUrl, pageGap, settleLines } from './card-parity'
+import { isOwUrl, pageGap, sampleNotBuilt, settleLines } from './card-parity'
 import { platformOf } from './threads'
 
 const CARD = { plugin: 'mm-bridge', key: 'card' } as const
@@ -139,6 +139,8 @@ export const NOT_DRAWN = 'The card could not be drawn on this computer. Your thr
  * and `mm card` answers not ready, so the thread prints the page and the go is given from that.
  */
 export const NO_OWNER_CHECK = "signatures can't be checked on this computer"
+/** (0.7.69) The gap of a page whose Findings say a lead sample it promises is not built (`sampleNotBuilt`): the card holds its box back (`holdOf` 'sample'). */
+export const SAMPLE_GAP = 'a lead sample this package promises is not built yet'
 /** (0.7.33) The failures already noted this session, one line each. */
 const notedFailures = new Set<string>()
 
@@ -469,7 +471,7 @@ export async function onWindows($: EngineInterface): Promise<boolean> {
  * as stale), and the page's own hash, which is what a signature is for.
  */
 async function pageFacts($: EngineInterface, tree: MmCardTree | null, page: string | null, current: string | null): Promise<{ gap?: string; pageSha?: string }> {
-  const gap = !tree || !isFresh(tree, current) ? '' : (await onWindows($)) ? NO_OWNER_CHECK : pageGap(page, tree)
+  const gap = !tree || !isFresh(tree, current) ? '' : sampleNotBuilt(page) ? SAMPLE_GAP : (await onWindows($)) ? NO_OWNER_CHECK : pageGap(page, tree)
   return { ...(gap ? { gap } : {}), ...(page ? { pageSha: await sha256Hex(page) } : {}) }
 }
 
@@ -769,6 +771,8 @@ export function holdOf(card: MmCard): string {
   // (0.7.33) a card that could not be drawn again says nothing of the package now, whatever its hash
   if (!isFresh(tree, card.current) || card.status === 'failed') return 'stale'
   if (!card.own) return 'not-own'
+  // (0.7.69) the page says a lead sample it promises is not built: no go on this package until it is
+  if (card.gap === SAMPLE_GAP) return 'sample'
   if (card.gap === NO_OWNER_CHECK) return 'no-owner-check'
   // (0.7.33) the page holds something this card does not: the thread prints the page, and the go is given from it
   if (card.gap) return 'page'
@@ -796,6 +800,8 @@ export function cardVerdict(card: MmCard, packageId: string): string {
       return "this is not the client's own thread"
     case 'page':
       return card.gap ?? 'the page holds a line the card does not'
+    case 'sample':
+      return SAMPLE_GAP
     case 'no-owner-check':
       return NO_OWNER_CHECK
     default:
@@ -1486,6 +1492,8 @@ export function holdText(hold: string, card: MmCard, label: string): string {
         : `This card was drawn from package ${label || 'with no tag'}; the package is now ${now}. Drawing it again…`
     case 'not-own':
       return `Sign in ${card.client || 'the client'}'s own thread. This card is here to read.`
+    case 'sample':
+      return `This package promises a lead sample that is not built yet, so signing is off here. Build it first (client-reply-prep §9.2a step 2), then ask for the card again.`
     case 'no-owner-check':
       return "Signatures can't be checked on this computer, so signing is off here. Go by the page printed in the thread."
     default:
