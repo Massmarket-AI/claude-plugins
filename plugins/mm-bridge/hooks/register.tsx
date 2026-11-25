@@ -10261,8 +10261,8 @@ type StatsKept = { asked?: number; got?: number; stats?: DayStats; missingUntil?
 /**
  * (0.7.77, Rob 2026-11-25: "maybe some of the stats from daily it support image would be cool as well so they can see their hours
  * and parallization score maybe others like total tokens") Today's numbers from OW (`GET /api/ext/day-stats`, read-only), into the
- * store for every thread here: on the lease holder's tick, every STATS_EVERY_MS. The person's own always; the team's only when OW
- * answers them (the founder and the PMs). A failure keeps the last read; a 404 or 405 is not asked again for STATS_MISSING_MS.
+ * store for every thread here: on the lease holder's tick, every STATS_EVERY_MS. The person's own always; the team's when OW
+ * answers them (to everyone since OW #821). A failure keeps the last read; a 404 or 405 is not asked again for STATS_MISSING_MS.
  * ⛔ Never throws into the tick; never sends, pins or sounds anything.
  */
 async function statsPass($: EngineInterface): Promise<void> {
