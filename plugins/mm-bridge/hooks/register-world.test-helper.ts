@@ -102,8 +102,16 @@ export type WorldOptions = {
   dismissFails?: boolean
   /** No tracker token on this computer. */
   noToken?: boolean
-  /** The system's opener: it takes the link (`works`), exits with an error (left out), or is not on this computer (`missing`). */
-  opener?: 'works' | 'missing'
+  /**
+   * The system's opener: it takes the link (`works`), exits with an error (left out: 1; (0.7.80) a number: that code), is not on
+   * this computer (`missing`), (0.7.80) is still running when its time is up (`hangs`), or cannot be started (`refused`).
+   */
+  opener?: 'works' | 'missing' | 'hangs' | 'refused' | number
+  /**
+   * (0.7.80) What `xdg-mime query default x-scheme-handler/claude` answers on Linux: a desktop file's name, '' or left out for
+   * none, `fails` for an error exit, `missing` when it is not on this computer.
+   */
+  handler?: string
   /** A shell command in this thread: it runs (left out), it runs and fails (`error`), or it is refused before it runs (`deny`). */
   bash?: 'error' | 'deny'
   /** The feed's HTTP status for each fetch (200 when left out). */
@@ -165,7 +173,7 @@ export type WorldOptions = {
   teamNow?: () => { status: number; body?: unknown } | 'network'
   /** (0.7.76) How OW answers `GET /drafts-pulse`. Left out, 404: an OW without the route yet. */
   draftsPulse?: () => { status: number; body?: unknown } | 'network'
-  /** (0.7.78) How OW answers `GET /day-stats`. Left out, 404: an OW without the route yet. */
+  /** (0.7.85) How OW answers `GET /day-stats`. Left out, 404: an OW without the route yet. */
   dayStats?: () => { status: number; body?: unknown } | 'network'
   /** (0.7.53) How OW answers `GET /browser-now`. Left out, 404: an OW without the route yet. */
   browserNow?: () => { status: number; body?: unknown } | 'network'
@@ -408,6 +416,8 @@ export function world(on: On, opts: WorldOptions = {}) {
   // A pretend disk: the tracker token, and whatever record files a test puts under the app's data folder.
   const files = opts.files ?? {}
   const reads: string[] = []
+  /** (0.7.78) Every path the bridge stat'ed. */
+  const stats: string[] = []
   const hookReads: string[] = []
   const lists: string[] = []
   const written: Array<{ path: string; text: string }> = []
@@ -446,6 +456,7 @@ export function world(on: On, opts: WorldOptions = {}) {
   // (0.7.14) a stat of the pretend disk: a file's own size when the test gives one, else its text's length
   on('fs.stat', (_$, e) => {
     const path = asGiven(e.path)
+    stats.push(path)
     const file = files[path]
     return file ? { value: { kind: 'file' as const, size: file.size ?? file.text.length, mtimeMs: file.mtimeMs, isLink: false } } : { deny: `ENOENT: no such file or directory, stat '${path}'` }
   })
@@ -481,8 +492,18 @@ export function world(on: On, opts: WorldOptions = {}) {
       return { value: { exitCode: r.exitCode, stdout: r.stdout ?? '', stderr: r.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     ran.push(JSON.stringify(e))
+    // (0.7.80) the one question the bridge asks a Linux system after its opener failed
+    if (e.argv[0] === 'xdg-mime') {
+      if (opts.handler === 'missing') return { deny: 'spawn xdg-mime ENOENT' }
+      if (opts.handler === 'fails') return { value: { exitCode: 5, stdout: '', stderr: 'xdg-mime: no method available', isStdoutTruncated: false, isStderrTruncated: false } }
+      return { value: { exitCode: 0, stdout: opts.handler ? `${opts.handler}\n` : '\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (opts.opener === 'missing') return { deny: `spawn ${String(e.argv[0])} ENOENT` }
-    return { value: { exitCode: opts.opener === 'works' ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (opts.opener === 'hangs') return { deny: `Command timed out after 10000ms: ${String(e.argv[0])}` }
+    if (opts.opener === 'refused') return { deny: `spawn ${String(e.argv[0])} EACCES` }
+    const code = opts.opener === 'works' ? 0 : typeof opts.opener === 'number' ? opts.opener : 1
+    const stderr = code === 4 ? `xdg-open: no method available for opening '${String(e.argv.at(-1))}'\n` : ''
+    return { value: { exitCode: code, stdout: '', stderr, isStdoutTruncated: false, isStderrTruncated: false } }
   })
   /** Every shell command that reached the tool itself, as it reached it. */
   const shell: string[] = []
@@ -573,7 +594,7 @@ export function world(on: On, opts: WorldOptions = {}) {
   /** The chips this session asked the app for. */
   const minted = () => calls.filter(c => c.tool === 'spawn_task')
   return {
-    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, notices, ran, renders, shell, box, fills, resolves, statuses, closes, scopePosts, pinPosts, browserPosts, gitRuns,
+    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, stats, hookReads, lists, written, appended, notices, ran, renders, shell, box, fills, resolves, statuses, closes, scopePosts, pinPosts, browserPosts, gitRuns,
     /** The app calls that change a thread: a rename, a pin, a message, a chip. (Reading this session's own usage, and withdrawing a chip, change none.) */
     writes: () => calls.filter(c => !['get_session', 'list_sessions', 'get_usage', 'dismiss_task'].includes(c.tool)).map(c => [c.tool, c.args.session_id ?? '', c.args.title ?? c.args.pinned ?? ''].join(' | ')),
     /** The chips this session asked the app to withdraw, by their ids. */
@@ -1039,7 +1060,7 @@ export const trackPart = (drawn: string[]): string[] => {
 // (0.7.23) and the sync's pin report (`/bridge-pins`): what is pinned and what should be, never a pickup, a hold or a claim
 // (0.7.53) and Working manually in browser (`/browser-now`): its read records a new stretch's question, never an answer
 // (0.7.76) and the drafts pulse (`/drafts-pulse`): a key, nothing else
-// (0.7.78) and today's numbers (`/day-stats`), read-only
+// (0.7.85) and today's numbers (`/day-stats`), read-only
 export const onlyReads = (w: { fetched: string[] }) =>
   w.fetched.every(u => /\/api\/ext\/(?:closeout\?|skill-map$|client-time\?project_ids=|reply-package\?package_id=[0-9a-f-]+&format=pickup$|team-ask\?|bridge-pins$|team-now$|browser-now$|drafts-pulse$|day-stats$)/.test(u))
 export const skill = async ($: Engine, name: string, over: Record<string, unknown> = {}) => $.tool.call({ tool: 'Skill', skill: name, ...over } as never)

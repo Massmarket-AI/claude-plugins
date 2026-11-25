@@ -39,15 +39,19 @@ import {
   hoursDone,
   internalBehindAt,
   leadDueOf,
+  needsYouNow,
   noReplyNow,
   openAsks,
   ownPins,
   paceOf,
   paceWord,
+  partClock,
   pinsFor,
   queuedOf,
+  replyDueOf,
   senderName,
   shownDue,
+  soonerPartOf,
 } from './queue'
 import type { RowPin } from './threads'
 import { packageReady, rowPinWords } from './threads'
@@ -120,21 +124,38 @@ export function youAsk(it: QueueItem, now: number, stillOpen?: readonly string[]
   return { ask: dated > 0 ? `${dated} task${dated === 1 ? '' : 's'} of yours` : 'look at the thread', from: 'none' }
 }
 
-/** Where the row stands on its clock, and the time it is ordered by. */
-export function youClock(it: QueueItem, now: number): { clock: YouRow['clock']; at: number; when: string; short: string } {
+/** (0.7.82) The asks that are the reply's own: a row named for one of them shows the reply's own clock (`replyDueOf`). */
+const REPLY_SOURCES: ReadonlySet<YouSource> = new Set<YouSource>(['open', 'noreply', 'draft', 'package', 'mail'])
+
+/** (0.7.82) The reply's own due time when the row's ask is the reply's (`REPLY_SOURCES`) and something else is due before it, else NaN. */
+const replyClock = (it: QueueItem, from: YouSource): number => (REPLY_SOURCES.has(from) ? replyDueOf(it) : NaN)
+
+/**
+ * Where the row stands on its clock, and the time it is ordered by. ⛔ (0.7.82, Rob 2026-11-25: "Yes, fix it here") A row whose ask
+ * is the reply's says the reply's own due time (`when`, `short`), never a ticket's sooner one; where it stands and the time it is
+ * ordered by (`clock`, `at`) are the client's, as before, and `youWhy` names what is due first.
+ */
+export function youClock(it: QueueItem, now: number, from: YouSource = youAsk(it, now).from): { clock: YouRow['clock']; at: number; when: string; short: string } {
+  const reply = replyClock(it, from)
+  const words = (when: string, short: string): { when: string; short: string } =>
+    Number.isFinite(reply)
+      ? reply < now
+        ? { when: clockAndDue(reply, now), short: clockLead(reply, now) }
+        : { when: `due ${clockText(shownDue(reply), now)}`, short: `due ${clockText(shownDue(reply), now)}` }
+      : { when, short }
   const client = clientDueOf(it)
   // a client's own date has passed: late, worked from that date
-  if (client < now) return { clock: 'late', at: client, when: clockAndDue(client, now), short: clockLead(client, now) }
+  if (client < now) return { clock: 'late', at: client, ...words(clockAndDue(client, now), clockLead(client, now)) }
   // ⛔ (0.7.61) a team clock that has passed reads behind, never late; the client's own date after it, when there is one
   const behind = internalBehindAt(it, now)
   const lead = leadDueOf(it, now)
   if (Number.isFinite(behind)) {
     const due = Number.isFinite(lead) ? `, due ${clockText(shownDue(lead), now)}` : ''
-    return { clock: 'behind', at: behind, when: `behind since ${dueWhen(behind, now)}${due}`, short: 'behind' }
+    return { clock: 'behind', at: behind, ...words(`behind since ${dueWhen(behind, now)}${due}`, 'behind') }
   }
   if (Number.isFinite(lead)) {
     const due = `due ${clockText(shownDue(lead), now)}`
-    return { clock: pinsFor(it, now) ? 'soon' : 'later', at: lead, when: due, short: due }
+    return { clock: pinsFor(it, now) ? 'soon' : 'later', at: lead, ...words(due, due) }
   }
   return { clock: 'none', at: Infinity, when: 'no due date', short: 'no due date' }
 }
@@ -162,6 +183,9 @@ export function youWhy(it: QueueItem, now: number, clock: YouRow['clock'], from:
   if (clock === 'late') parts.push('late on a client date')
   else if (clock === 'behind') parts.push('behind on a team clock')
   else if (clock === 'soon') parts.push('due within 24 business hours')
+  // ⛔ (0.7.82) a reply's row: what is due before the reply, with its own clock (`task 15d late, due Nov 9`), so it never disappears
+  const part = Number.isFinite(replyClock(it, from)) ? soonerPartOf(it) : null
+  if (part) parts.push(partClock(part, now))
   const what: Partial<Record<YouSource, string>> = {
     open: 'your reply left items open',
     noreply: 'package ready, no reply owed',
@@ -289,7 +313,7 @@ export function youPage(it: QueueItem, now: number): string {
 /** One item as its You row. */
 export function youRow(it: QueueItem, now: number, o: { pin?: RowPin | undefined; stillOpen?: readonly string[]; waiting?: string; target?: string } = {}): YouRow {
   const { ask, from } = youAsk(it, now, o.stillOpen)
-  const c = youClock(it, now)
+  const c = youClock(it, now, from)
   const pace = youPace(it, now)
   return {
     projectId: it.projectId,
@@ -380,3 +404,44 @@ export function withWaits(rows: readonly YouRow[], waits: readonly MmYouWait[] |
 
 /** What the You section says when nothing needs the person. */
 export const NOTHING_NEEDS_YOU = 'Nothing needs you right now.'
+
+/**
+ * ⛔ (0.7.81, Rob 2026-11-25: "The need view is basically supposed to show them and help them confirm that they have everything
+ * pinned they're supposed to have pinned. It's also supposed to mirror the things that show up under each of their names on the
+ * team view." Then, to the recommendation that the pin rule decide all three: "Yes, build it") The clients Needs you lists: exactly
+ * the ones the sync's pin report says should be pinned (`rowPins`, from `pinReport`: R1's `pinsFor`, less a client a scheduled
+ * run or the checking loop holds off), which is the list OW draws under the person's name on the team view. Before 0.7.81 the
+ * list was every dated client of the person's, so a task due Friday or a thread waiting on a 4:15 PM run was listed and not
+ * pinned. A sync with no report (none built, or an older version's record): R1's own test, `pinsFor`.
+ */
+export function needsYouSet(items: readonly QueueItem[], rowPins: Readonly<Record<string, unknown>> | null | undefined, now: number): Set<string> {
+  const listed = items.filter(it => it && typeof it.projectId === 'string')
+  if (rowPins && typeof rowPins === 'object') return new Set(listed.filter(it => Object.prototype.hasOwnProperty.call(rowPins, it.projectId)).map(it => it.projectId))
+  return new Set(listed.filter(it => pinsFor(it, now)).map(it => it.projectId))
+}
+
+/** (0.7.81) The most clients the Coming up line names; past it, `(+n more)`. */
+export const COMING_UP_MAX = 6
+
+/**
+ * (0.7.81) The one line under Needs you for the person's clients that do not pin yet: due later than the next 24 business hours,
+ * held off by a scheduled run (`held`: project id → ` waits on a run 4:15 PM`, as its thread's name says it), or with nothing
+ * dated (a message with no reply due), last. Soonest first. '' when there are none. Clients with undated tickets alone stay in
+ * `No due date`, and the internal queue in `Your build queue`. Claude's words, approved with the rule.
+ */
+export function comingUpText(items: readonly QueueItem[], inNeeds: ReadonlySet<string>, held: Readonly<Record<string, string>> | null | undefined, now: number): string {
+  const rows: { at: number; text: string }[] = []
+  for (const it of items) {
+    if (!it || typeof it.projectId !== 'string' || inNeeds.has(it.projectId) || !needsYouNow(it)) continue
+    const lead = leadDueOf(it, now)
+    // (the bridge's own words, `runWaitSuffix`, kept on the sync record: one line, cut, with their clock's colon kept)
+    const wait = held && typeof held[it.projectId] === 'string' ? [...held[it.projectId].replace(/[\u0000-\u001f\u007f]+/g, ' ').trim()].slice(0, 60).join('') : ''
+    // (a client with nothing dated, such as a message with no reply due, stays one look away, last: as `No due date` keeps undated tickets)
+    const when = wait || (Number.isFinite(lead) ? `due ${clockText(shownDue(lead), now)}` : 'no due date')
+    rows.push({ at: Number.isFinite(lead) ? lead : Infinity, text: `${cleanName(it.client) || 'a client'} · ${when}` })
+  }
+  if (!rows.length) return ''
+  rows.sort((a, b) => a.at - b.at || a.text.localeCompare(b.text))
+  const shown = rows.slice(0, COMING_UP_MAX).map(r => r.text).join('; ')
+  return `Coming up, not pinned yet: ${shown}${more(rows.length - COMING_UP_MAX)}`
+}

@@ -662,10 +662,11 @@ describe('the app\'s own thread records: a thread links itself without being ope
     await mm($, '')
     expect(scans()).toBe(1)
     expect(w.reads).toEqual([at('local_a.json')])
-    // Update runs two passes over the feed (before and after linking) and scans once
+    // Update runs two passes over the feed (before and after linking) and scans once. (0.7.80) The thread has no link of the
+    // app's here, so its open fails and is noted in the bridge's own log, which is read to add the line: not the app's folder.
     await mm($, 'update Acme Roofing')
     expect(scans()).toBe(2)
-    expect(w.reads).toEqual([at('local_a.json')])
+    expect(w.reads.filter(p => !p.endsWith('/.claude/mm-hooks/bridge-notices.log'))).toEqual([at('local_a.json')])
     // nothing is ever written under the app's folder
     expect(w.written.filter(f => f.path.includes('claude-code-sessions'))).toEqual([])
   })
@@ -1996,7 +1997,8 @@ describe('a row says Start, Update or Open: one action, chosen by what the threa
     const before = { acted: w.acted().length, opened: w.opened.length }
     w.toasts.length = 0
     await ui.press({ key: `open:${ACME}` })
-    const said = `Open "${ACME_SHOWN}" under Pinned.`
+    // (0.7.80) and why
+    const said = `Couldn't open "${ACME_SHOWN}": the Claude app gave no link for this thread. Open it under Pinned.`
     expect(w.toasts).toEqual([said])
     expect(await lines(ui)).toContain(said)
     expect(w.ran).toEqual([])
@@ -2034,7 +2036,6 @@ describe('starts a program: the system\'s opener takes the person to the thread'
     acmeWorld(on, { threads: [{ ...thread('local_a', 'Roof quote', 30), link } as never, thread('local_x', 'Unrelated notes', 5)], ...over })
   const SENT_LINE = `Sent to Acme Roofing's thread: open "${ACME_SHOWN}" under Pinned.`
   const SHORT = 'Sent to Acme Roofing\'s thread.'
-  const WHERE = `Open "${ACME_SHOWN}" under Pinned.`
 
   for (const platform of PLATFORMS) {
     test(`${platform}: Update thread sends, then opens the thread; Open thread opens it and says nothing`, async ($, on) => {
@@ -2069,12 +2070,14 @@ describe('starts a program: the system\'s opener takes the person to the thread'
     expect(w.argvs().length).toBe(1)
   })
 
-  const FALLBACKS: Array<[string, WorldOptions, number]> = [
-    ['the opener exits with an error', { env: ENV.mac }, 1],
-    ['the opener is not on this computer', { env: ENV.linux, opener: 'missing' }, 1],
-    ['the platform cannot be told', { env: { ...DESKTOP, HOME: '/srv/someone' }, opener: 'works' }, 0],
+  /** (0.7.80) What a failed Open thread says: which thread, why, and where it is. */
+  const WHERE_BECAUSE = (why: string) => `Couldn't open "${ACME_SHOWN}": ${why}. Open it under Pinned.`
+  const FALLBACKS: Array<[string, WorldOptions, number, string]> = [
+    ['the opener exits with an error', { env: ENV.mac }, 1, 'open stopped with error code 1'],
+    ['the opener is not on this computer', { env: ENV.linux, opener: 'missing' }, 1, 'xdg-open is not installed on this computer'],
+    ['the platform cannot be told', { env: { ...DESKTOP, HOME: '/srv/someone' }, opener: 'works' }, 0, 'the bridge could not tell which system this computer runs'],
   ]
-  for (const [name, over, tries] of FALLBACKS) {
+  for (const [name, over, tries, why] of FALLBACKS) {
     test(`${name}: the sentences that say where the thread is, and nothing else is tried`, async ($, on) => {
       rowsAsBefore(on)
       const w = acmeLinked(on, over)
@@ -2086,9 +2089,10 @@ describe('starts a program: the system\'s opener takes the person to the thread'
       // the message went all the same, and the thread has it
       expect(await buttonsOf(ui, ACME)).toEqual(['Open thread', 'Drafts'])
       await ui.press({ key: `open:${ACME}` })
-      expect(w.toasts).toEqual([SHORT, WHERE])
-      expect(await lines(ui)).toContain(WHERE)
-      // one try per press at most, each the platform's opener with the link, and no second program after it
+      expect(w.toasts).toEqual([SHORT, WHERE_BECAUSE(why)])
+      expect(await lines(ui)).toContain(WHERE_BECAUSE(why))
+      // one try per press at most, each the platform's opener with the link, and no second program after it (the Linux
+      // question of 0.7.80 follows only an opener that ran and failed, or did not answer)
       expect(w.argvs().length).toBe(tries * 2)
       for (const argv of w.argvs()) {
         expect(PROGRAMS).toContain(argv[0])
@@ -2116,7 +2120,7 @@ describe('starts a program: the system\'s opener takes the person to the thread'
       await ui.press({ key: `update:${ACME}` })
       expect(await lines(ui)).toContain(SENT_LINE)
       await ui.press({ key: `open:${ACME}` })
-      expect(await lines(ui)).toContain(WHERE)
+      expect(await lines(ui)).toContain(WHERE_BECAUSE('the Claude app gave no link for this thread'))
       expect(w.ran).toEqual([])
       await ui.unmount()
     })
@@ -3501,9 +3505,12 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     // an ask from anyone else is not Builder B asking: still Builder B's
     w.setFeed({ member: FOUNDER, role: 'founder', drafts: [packageFor(ACME, 'Acme Roofing — Pat', { flagged_for_rob: true, project_owner_email: TEAMMATE_B })], mail: [], tickets: {}, asks: [askOf('builder-c@example.com')] })
     const other = await mm($, '')
-    expect(other).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
+    // ⛔ (0.7.81, Rob 2026-11-25) Needs you is what should be pinned: Builder C's ask is due in 47 hours, so it is on the Coming up
+    // line, not under Needs you (until 0.7.81: '1 client need you; 0 threads pinned. ...')
+    expect(other).toBe('Nothing needs you right now.')
     const again = await pane($)
     expect((await lines(again)).some(l => /needs your OK|· your OK ·/.test(l))).toBe(false)
+    expect((await lines(again)).some(l => l.startsWith('Coming up, not pinned yet: Acme Roofing · due '))).toBe(true)
     // (0.7.27) on the 9 AM image, not on his page
     expect((await buttons(again)).some(b => b[0] === 'mm-fold:team')).toBe(false)
     await again.unmount()
@@ -4034,7 +4041,8 @@ describe('(u) a client whose reply drafts a teammate holds: not pinned, not coun
     const mine = { ticket_id: 't9', project_id: BOLT, project_name: 'Bolt Staffing (Sam)', title: 'Send the rate card', due_at: new Date(NOW + 5 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME }
     const w = handedOver(on, {}, { tickets: { due_today: [mine] } })
     expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
-    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 5h left · Bolt Staffing · reply · 2 new · with J Smith', pinned: true })
+    // (0.7.82) the reply's own 22h, then my task's 5h (until 0.7.82 the reply read the task's 5h; `2 new` drops for length, as THREAD_TITLE_MAX says)
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 22h left · Bolt Staffing · reply · with J Smith · task 5h left', pinned: true })
     const ui = await pane($)
     // (0.7.5) its row in one line, who has the drafts at the end, and the task on its second (the reason is not drawn)
     expect(await lines(ui)).toContain('1. Bolt Staffing: deliver "Send the rate card"')
@@ -4607,7 +4615,7 @@ describe('B3: a thread is linked by itself only to the one client its sessions d
 // ======================================================================== 0.5.2 (Rob, 2026-10-13 evening)
 
 describe('R1: a pin means "needs you": pinned while something must be acted on within 24 business hours', () => {
-  test('a reply due in 30 business hours is on the list, its thread named and not pinned, though the client wrote today; it pins itself once within 24', async ($, on) => {
+  test('a reply due in 30 business hours is on the Coming up line, its thread named and not pinned, though the client wrote today; it pins itself once within 24', async ($, on) => {
     const due = new Date(NOW + 30 * HOUR).toISOString() // Tuesday 5 PM: 13 business hours today, 17 tomorrow
     const w = world(on, {
       feed: feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 1, { reply_due_at: due })], threads: [declared(BOLT, 'cli-bolt', 20)] }),
@@ -4616,7 +4624,11 @@ describe('R1: a pin means "needs you": pinned while something must be acted on w
     })
     // (0.7.12, Rob 10-30: "It usually says 'due in XYZ hours'") a pin needs a clock: R1's 24 business hours decide for every
     // client again. 0.7.11 pinned an ACTIVE client's thread at once, whatever its time; this is 0.7.10's test again.
-    expect(await mm($, '')).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
+    // ⛔ (0.7.81, Rob 2026-11-25) and Needs you counts only what should be pinned (until 0.7.81: '1 client need you; 0 threads pinned. ...')
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    const ui = await pane($)
+    expect((await lines(ui)).some(l => l.startsWith('Coming up, not pinned yet: Bolt Staffing · due '))).toBe(true)
+    await ui.unmount()
     expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 1d left · Bolt Staffing · reply', pinned: false })
     // six hours on, it is 24 business hours away: pinned
     await w.clock.advance(6 * HOUR)
@@ -4651,9 +4663,11 @@ describe('R4, R3 and (0.5.4) C1-C3: a chip minted by itself, ONE per client, in 
     await mm($, '')
     expect(w.acted()).toEqual([])
     const ui = await pane($)
-    // (0.7.73) both are rows, Cedar first by its deadline; the head names the ticket, and `needs a pin: no thread` is on the line of pace
+    // (0.7.73) the head names the ticket, and `needs a pin: no thread` is on the line of pace. ⛔ (0.7.81, Rob 2026-11-25) Needs you
+    // is what should be pinned: Cedar alone; Dune, further out than the pin's window, is on the Coming up line (until 0.7.81 a row)
     const rows = await lines(ui)
-    expect(rows.filter(l => /^\d+\. /.test(l))).toEqual(['1. Cedar Dental: deliver "Do it"', '2. Dune Freight: deliver "Do it"'])
+    expect(rows.filter(l => /^\d+\. /.test(l))).toEqual(['1. Cedar Dental: deliver "Do it"'])
+    expect(rows.some(l => l.startsWith('Coming up, not pinned yet: Dune Freight · due '))).toBe(true)
     expect(await meta(ui, 'Cedar Dental: deliver "Do it"')).toBe('🟢 on pace · due 4 PM · needs a pin: no thread · due within 24 business hours · your ticket')
     await ui.unmount()
     // the timer does, for Cedar alone (Dune is further out than the pin's window)
@@ -5222,9 +5236,11 @@ describe('R17: a client with nothing due', () => {
     await mm($, '')
     // (0.7.5) its one line ends ` · no thread`, never red and with no clock: nothing is due; (0.7.12) and it says so
     // (until 0.7.12: '1. 🟡 Cedar Dental · reply · no thread')
-    // (0.7.73) its head, and its line of pace: no due date, and no pin needed yet
-    expect(await lines(ui)).toContain('1. Cedar Dental: answer Client about "Question"')
-    expect(await meta(ui, 'Cedar Dental: answer Client about "Question"')).toBe('🟢 on pace · no due date · no pin needed yet · the client wrote')
+    // (0.7.73) its head, and its line of pace: no due date, and no pin needed yet. ⛔ (0.7.81, Rob 2026-11-25) Needs you lists only
+    // what should be pinned, so it is on the Coming up line instead, with no due date
+    expect(await lines(ui)).not.toContain('1. Cedar Dental: answer Client about "Question"')
+    expect(await lines(ui)).toContain('Nothing needs you right now.')
+    expect(await lines(ui)).toContain('Coming up, not pinned yet: Cedar Dental · no due date')
     await ui.unmount()
     expect(w.acted()).toEqual([])
   })

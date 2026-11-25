@@ -636,6 +636,17 @@ export type QueueItem = {
   internalDue?: number
   clientDue?: number | null
   clientOwn?: number | null
+  /**
+   * ⛔ (0.7.82, Rob 2026-11-25: "Yes, fix it here", to "Fix the bridge so a reply row shows the reply's own due date?") Set only
+   * on a reply row (kind `ready` or `reply`) whose client has something else due before the reply: a dated ticket of the
+   * viewer's, an internal ask, follow-up steps that wait for a go. The reply's OWN due time: its package's, or the client's
+   * oldest unanswered message's when that is earlier, since that is the reply's clock too. A row's words and its date come
+   * from the same item, so the row's clock is this, and the sooner part follows it with its own clock (`soonerPartOf`).
+   * `dueAt`, `actBy`, `own`, what pins and how a client ranks are unchanged. Until 0.7.82 a reply that arrived yesterday read
+   * `reply ready · 15d late` when an old ticket date sat on the same client (Remver, Mugen, ReGen, Homestretch, 2026-11-25).
+   * Absent on every other item, and on an item an older version stored: read `replyDueOf(it)`.
+   */
+  replyDue?: number
 }
 
 /**
@@ -876,6 +887,64 @@ export function internalBehindAt(it: Pick<QueueItem, 'dueAt' | 'clientDue' | 'in
  */
 export function leadDueOf(it: Pick<QueueItem, 'dueAt' | 'clientDue' | 'internalDue'>, now: number): number {
   return Number.isFinite(internalBehindAt(it, now)) ? clientDueOf(it) : hasDue(it) ? it.dueAt : Infinity
+}
+
+/**
+ * ⛔ (0.7.82, Rob 2026-11-25: "Yes, fix it here", to "Fix the bridge so a reply row shows the reply's own due date?") The reply's
+ * own due time on a reply row that something else dates sooner (`QueueItem.replyDue`), else NaN.
+ */
+export function replyDueOf(it: Pick<QueueItem, 'kind' | 'replyDue'>): number {
+  return (it.kind === 'ready' || it.kind === 'reply') && typeof it.replyDue === 'number' && Number.isFinite(it.replyDue) ? it.replyDue : NaN
+}
+
+/**
+ * ⛔ (0.7.82) The due time a row's clock shows: a row's words and its date come from the same item. On a reply row, the reply's
+ * own (`replyDueOf`), never a ticket's; on every other row, `leadDueOf`, as before. What pins, what is red and how a client
+ * ranks still read the client's soonest (`ownActBy`, `isRed`, `leadDueOf`).
+ */
+export function shownDueOf(it: Pick<QueueItem, 'kind' | 'replyDue' | 'dueAt' | 'clientDue' | 'internalDue'>, now: number): number {
+  const reply = replyDueOf(it)
+  return Number.isFinite(reply) ? reply : leadDueOf(it, now)
+}
+
+/**
+ * (0.7.82) What of a reply row's client is due before its reply: `task` (a dated ticket of the viewer's), `ask` (an internal ask),
+ * `go` (follow-up steps that wait for a go). `what` is how a row names it, `internal` whether its clock is one of ours
+ * (INTERNAL_CLOCK_BASES, or an owed ETA), which never reads late.
+ */
+export type SoonerPart = { kind: 'task' | 'ask' | 'go'; what: string; due: number; internal: boolean }
+
+/**
+ * ⛔ (0.7.82) The part of a reply row's client due before its reply, which the row names after the reply's clock so it never
+ * disappears (Rob's late ticket on Remver, 2026-11-25): the soonest CLIENT clock first, since that is what turns the row red
+ * (`isRed`), else one of our own clocks. Null on every other row, and on one a teammate has (`withTeammate`: no clock is shown).
+ */
+export function soonerPartOf(it: QueueItem): SoonerPart | null {
+  const reply = replyDueOf(it)
+  if (!Number.isFinite(reply) || withTeammate(it)) return null
+  const client = clientDueOf(it)
+  if (client < reply) {
+    if (openAsks(it).some(a => a.dueAt === client)) return { kind: 'ask', what: 'internal ask', due: client, internal: false }
+    if (goOf(it)?.firstAt === client) return { kind: 'go', what: 'follow-ups go', due: client, internal: false }
+    return { kind: 'task', what: 'task', due: client, internal: false }
+  }
+  const inner = typeof it.internalDue === 'number' && Number.isFinite(it.internalDue) ? it.internalDue : Infinity
+  if (!(inner < reply)) return null
+  const what = etaAsksOf(it).some(a => a.neededBy === inner) ? 'ETA needed' : assignAsksOf(it).some(a => a.assignBy === inner) ? 'assign an owner' : 'task'
+  return { kind: 'task', what, due: inner, internal: true }
+}
+
+/**
+ * (0.7.82) The sooner part with its own clock, as a thread's name and a pane row say it after the reply's: `task 15d late, due
+ * Nov 9`, `task 3h left`. One of our own clocks past its time reads `behind`, never late (0.7.60): `task behind, due Mon 3 PM`.
+ */
+export function partClock(p: SoonerPart, now: number): string {
+  return p.internal && p.due < now ? `${p.what} behind, due ${dueWhen(p.due, now)}` : `${p.what} ${clockAndDue(p.due, now)}`
+}
+
+/** (0.7.82) The same as a chip says it (`whenText`): `task overdue 15d, due Nov 9`, `task due 3 PM`. */
+export function partWhen(p: SoonerPart, now: number): string {
+  return p.internal && p.due < now ? `${p.what} behind, due ${dueWhen(p.due, now)}` : `${p.what} ${whenText(p.due, now)}`
 }
 
 /** (0.7.24) The client's follow-up steps that wait for a go, checked again (an item an older version stored, or a store edited by hand, is read as data); null with none. */
@@ -1578,6 +1647,27 @@ function ownReason(it: QueueItem): string {
   return whatOf(it)
 }
 
+/** (0.7.82) What of a reply row's client is due before its reply (`soonerPartOf`), in plain words: what a pinned thread's reason names. */
+function partReason(it: QueueItem, p: SoonerPart): string {
+  if (p.kind === 'ask') {
+    const asks = openAsks(it)
+    return `${asks[0]?.asker || 'a teammate'} asked you something in Discord${asks.length > 1 ? ` (${asks.length} asks)` : ''}`
+  }
+  if (p.kind === 'go') return `follow-up steps of ${it.client}'s wait for your go`
+  const eta = etaAsksOf(it).length
+  if (p.what === 'ETA needed' && eta) return `you owe an ETA on ${several(eta, 'ticket')}`
+  const owners = assignAsksOf(it).length
+  if (p.what === 'assign an owner' && owners) return `${several(owners, 'ticket')} ${owners === 1 ? 'needs' : 'need'} an owner from you`
+  const committed = committedCount(it)
+  if (committed === 1 && it.taskTitles[0]) return `your task "${cleanText(it.taskTitles[0], 60)}"`
+  if (committed > 0) return `${several(committed, 'task')} of yours`
+  return 'a task of yours'
+}
+
+/** (0.7.82) A reply row's own clock as a sentence closes on it: `The reply to Remver is due Wed 9 PM.`, once late `is 2h late, due 3 PM.` */
+const replyClause = (it: QueueItem, reply: number, now: number): string =>
+  ` The reply to ${it.client} is ${reply < now ? clockAndDue(reply, now) : `due ${clockText(shownDue(reply), now)}`}.`
+
 /**
  * (0.7.25) Why a client's thread is pinned, or why it is not, in one sentence the thread's band shows (Rob asked about 52
  * times in the six weeks to 2026-11-05 why a thread was pinned; 11-03: "Why does it say there's 23 hours left here? Do I
@@ -1601,12 +1691,18 @@ export function pinReason(it: QueueItem, now: number): string {
   if (ownPins(it, now)) {
     if (status?.why) return status.why
     let own = ownActBy(it)
+    // ⛔ (0.7.82, Rob 2026-11-25) on a reply row, what pins before the reply is the part due before it (`soonerPartOf`): the
+    // sentence names that part with its clock, and closes on the reply's own (`replyClause`), never the reply with a ticket's date
+    const reply = replyDueOf(it)
+    const part = soonerPartOf(it)
+    const reason = (at: number): string => (part && at < reply ? partReason(it, part) : ownReason(it))
+    const close = (at: number): string => (part && at < reply ? replyClause(it, reply, now) : '')
     // ⛔ (0.7.60) what pins is an internal clock that has passed: `behind`, never `late`. Where a client clock pins too, the
     // sentence is the client clock's.
     const clientOwn = clientOwnOf(it)
     if (own <= now && own < clientOwn) {
       if (pinsNow({ dueAt: Infinity, actBy: clientOwn }, now)) own = clientOwn
-      else if (!(own < it.dueAt && committedCount(it) > 0 && it.messages === 0)) return `Pinned for you, behind since ${dueWhen(own, now)}: ${ownReason(it)}.`
+      else if (!(own < it.dueAt && committedCount(it) > 0 && it.messages === 0)) return `Pinned for you, behind since ${dueWhen(own, now)}: ${reason(own)}.${close(own)}`
     }
     // (0.7.37) pinned with no time to count from, as the viewer's own go on follow-up steps whose first step OW could not
     // date (`go_first_at` null): there is no due time to print, and formatting Infinity threw a RangeError (Invalid Date)
@@ -1615,11 +1711,11 @@ export function pinReason(it: QueueItem, now: number): string {
     if (own < it.dueAt && committedCount(it) > 0 && it.messages === 0) {
       const due = clockText(shownDue(it.dueAt), now)
       return own <= now
-        ? `Pinned for you: ${ownReason(it)} is due ${due}, and to land on time its work had to start ${dueWhen(own, now)}.`
-        : `Pinned for you: ${ownReason(it)} is due ${due}, and to land on time its work must start by ${clockText(shownDue(own), now)}.`
+        ? `Pinned for you: ${reason(own)} is due ${due}, and to land on time its work had to start ${dueWhen(own, now)}.${close(own)}`
+        : `Pinned for you: ${reason(own)} is due ${due}, and to land on time its work must start by ${clockText(shownDue(own), now)}.${close(own)}`
     }
     const when = own <= now ? clockAndDue(own, now) : `due ${clockText(shownDue(own), now)} (${clockLead(own, now)})`
-    return `Pinned for you, ${when}: ${ownReason(it)}.`
+    return `Pinned for you, ${when}: ${reason(own)}.${close(own)}`
   }
   const c = checkNow(it, now)
   if (c) {
@@ -2518,6 +2614,8 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
   const ownAct = new Map<string, number>()
   const mailAct = new Map<string, number>()
   const okAct = new Map<string, number>()
+  // ⛔ (0.7.82) the reply's own due time on each client: its package's and its unanswered messages', soonest (`replyDue`)
+  const replyAct = new Map<string, number>()
   const soonest = (into: Map<string, number>, it: QueueItem, at: number): void => {
     if (Number.isFinite(at)) into.set(it.projectId, Math.min(into.get(it.projectId) ?? Infinity, at))
   }
@@ -2554,6 +2652,7 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
     it.dueAt = Math.min(it.dueAt, due)
     act(it, due)
     soonest(mailAct, it, due)
+    soonest(replyAct, it, due)
     if (it.kind === 'task') it.kind = 'reply'
     it.mail.push({ at: m.received_at, sender: m.sender ?? '?', subject: m.subject ?? '', snippet: m.snippet ?? '' })
     seen(it, 'mail', ms(m.received_at))
@@ -2669,6 +2768,7 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
       if (inReach) {
         it.dueAt = Math.min(it.dueAt, due)
         mine(it, due)
+        soonest(replyAct, it, due)
         if (noDue) undated(it)
         seen(it, 'pkg', ms(d.covers_through))
       }
@@ -2692,6 +2792,7 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
       if (fastOf(c, it.lastOut ?? 0, now) && inReach) {
         it.dueAt = Math.min(it.dueAt, due)
         mine(it, due)
+        soonest(replyAct, it, due)
         seen(it, 'pkg', ms(d.covers_through))
       }
     }
@@ -3076,6 +3177,11 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
       it.clientDue = it.dueAt
       it.dueAt = Math.min(it.dueAt, inner)
     }
+    // ⛔ (0.7.82, Rob 2026-11-25: "Yes, fix it here") a reply row that something else dates sooner keeps the reply's own due
+    // time for its clock (`replyDue`). Not a row named for follow-up steps that cover the message (`goWithMail`), and not a
+    // reply with no due time of its own (R17): those read as before.
+    const reply = replyAct.get(pid) ?? Infinity
+    if ((it.kind === 'ready' || it.kind === 'reply') && Number.isFinite(reply) && reply > it.dueAt && !goWithMail(it)) it.replyDue = reply
   }
 
   // (R17) a client with nothing dated is listed too, last
@@ -3234,9 +3340,11 @@ function taskWhat(it: QueueItem): string {
 
 /** What is due for a client and when, in words: `reply ready due tomorrow 8 AM`. */
 export function dueLine(it: QueueItem, now: number): string {
-  // (0.7.60) an internal clock past its time: `behind`, never `overdue`
-  const due = leadDueOf(it, now)
-  if (Number.isFinite(due)) return `${whatOf(it)} ${whenText(due, now)}`
+  // (0.7.60) an internal clock past its time: `behind`, never `overdue`. ⛔ (0.7.82) a reply row: the reply's own due time, and
+  // what is due before it after it (`reply ready due tomorrow 9 PM · task overdue 15d, due Nov 9`)
+  const due = shownDueOf(it, now)
+  const part = soonerPartOf(it)
+  if (Number.isFinite(due)) return `${whatOf(it)} ${whenText(due, now)}${part ? ` · ${partWhen(part, now)}` : ''}`
   const behind = internalBehindAt(it, now)
   // (R17) nothing due: what it is, and no clock
   return Number.isFinite(behind) ? `${whatOf(it)} behind, due ${dueWhen(behind, now)}` : whatOf(it)
@@ -3304,7 +3412,9 @@ export function titleFor(it: QueueItem, now: number): string {
   // founder, the teammate it is with when it is theirs to see through: 0.5.1)
   // (R17) nothing due: `🟡 <client> · <what>`, no clock and never red; (0.7.12) and `no due date` after it
   // (0.7.60) the clock from the client's own due time once an internal one has passed (`leadDueOf`): never `late` for it
-  const leadDue = leadDueOf(it, now)
+  // ⛔ (0.7.82, Rob 2026-11-25) a reply row's clock is the reply's own (`shownDueOf`), and what is due before it follows with its
+  // own clock: `🔴 1d left · Remver · reply ready · task 15d late, due Nov 9`. The dot is still the client's (`isRed`).
+  const leadDue = shownDueOf(it, now)
   const lead = theirs ? `🟡 with ${it.theirs ?? it.open?.by ?? ''}` : Number.isFinite(leadDue) ? `${isRed(it, now) ? '🔴' : '🟡'} ${clockAndDue(leadDue, now)}` : ''
   // (0.7.27) the worst status names it, when it is more urgent than what is due: `🟡 Acme Legal · behind · needs 2.4 h/day, paid 1.5 · due Mon Nov 30`
   const status = theirs ? null : statusOf(it, now)
@@ -3313,6 +3423,9 @@ export function titleFor(it: QueueItem, now: number): string {
   const rest: string[] = []
   if (it.open?.state === 'held_by_other' && !theirs) rest.push(`with ${it.open.by}`)
   if (it.flagged) rest.push('flagged')
+  // (0.7.82) what is due before the reply goes last, after what the reply's own words say, and is never dropped for length
+  const part = !status && lead && !theirs ? soonerPartOf(it) : null
+  if (part) rest.push(partClock(part, now))
   const full = [...parts, ...(count ? [count] : []), ...rest].join(' · ')
   // (0.7.12, "keep titles short") the count goes before anything that says what is due, when, or for whom
   return count && [...full].length > THREAD_TITLE_MAX ? [...parts, ...rest].join(' · ') : full
@@ -3328,8 +3441,9 @@ export function titleFor(it: QueueItem, now: number): string {
  */
 export function rowLine(it: QueueItem, now: number, opts: { fresh?: boolean; pins?: boolean } = {}): string {
   const theirs = withTeammate(it)
-  // (0.7.60) the clock from the client's own due time once an internal one has passed (`leadDueOf`)
-  const leadDue = leadDueOf(it, now)
+  // (0.7.60) the clock from the client's own due time once an internal one has passed (`leadDueOf`). ⛔ (0.7.82) a reply row's
+  // clock is the reply's own (`shownDueOf`), and what is due before it follows with its own clock (`partClock`)
+  const leadDue = shownDueOf(it, now)
   const due = !theirs && Number.isFinite(leadDue)
   const what = whatOf(it)
   // ⛔ (0.7.60) R4's red for a client with no thread that pins now: never when only an internal clock pins it
@@ -3352,6 +3466,9 @@ export function rowLine(it: QueueItem, now: number, opts: { fresh?: boolean; pin
   else if (check) parts.push(`with ${cleanText(check.by, 40) || 'a teammate'}`)
   else if (it.open?.state === 'held_by_other') parts.push(`with ${it.open.by}`)
   if (it.flagged) parts.push('flagged')
+  // (0.7.82) what is due before the reply, with its own clock, after what the reply's own words say
+  const part = !named && due ? soonerPartOf(it) : null
+  if (part) parts.push(partClock(part, now))
   if (opts.fresh) parts.push('no thread')
   return parts.join(' · ')
 }

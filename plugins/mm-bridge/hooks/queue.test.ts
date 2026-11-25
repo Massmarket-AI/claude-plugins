@@ -18,6 +18,9 @@ import {
 import type { Feed, FeedAsk, FeedFollowups, FeedQueueTicket, FeedTicket, QueueItem } from './queue'
 import { assignParagraph, autoUpdatable, etaParagraph, goKickoff, goParagraph, handoverText, kickoffText, queueParagraph, rowExtra, signatureOf, waitingText } from './threads'
 import { buildOf, paneText, recommend, rowFor, teamCount, teamHeading, teamLines, teamOf, teamPane, teamPerson } from './threads'
+import { isRed, replyDueOf, shownDueOf, soonerPartOf } from './queue'
+import { pinReport } from './threads'
+import { youRow } from './you'
 
 // Most tests here run on clocks in early October 2026, before the list's floor (LIST_FLOOR_MS, Wed Oct 14 12:00 AM
 // ET). On such a clock the list still reaches 3 business days back (WINDOW_BACK_MS), as it did when they were
@@ -1377,7 +1380,8 @@ describe('(u) a client whose reply drafts a teammate holds is not the viewer\'s 
     expect(ids(l.queue)).toEqual([P1])
     const it = l.queue[0] as QueueItem
     expect(withTeammate(it)).toBe(false)
-    expect(titleFor(it, MON)).toBe('🔴 1h left · Acme Roofing · reply · with J Smith')
+    // (0.7.82) the reply's own clock, then my task's: until 0.7.82 '🔴 1h left · Acme Roofing · reply · with J Smith' gave the reply the task's 1h
+    expect(titleFor(it, MON)).toBe('🔴 18h left · Acme Roofing · reply · with J Smith · task 1h left')
     expect(waitingText(it)).toBe('1 message waiting, 1 task due, drafts with J Smith')
     expect(holdSentence(it)).toContain('Ask J Smith before writing a second reply.')
   })
@@ -4040,5 +4044,115 @@ describe('0.7.24 beside 0.7.23: the founder\'s own go on a client whose package 
     expect(ownBesides(it)).toBe(false)
     expect(okLateOnly(it)).toBe(true)
     expect(pinsFor(it, wed)).toBe(false)
+  })
+})
+
+// ⛔ (0.7.82, Rob 2026-11-25: "Yes, fix it here", to "Fix the bridge so a reply row shows the reply's own due date?") A row's words
+// and its date come from the same item. The four rows of that morning (Remver, Mugen, ReGen, Homestretch) read `reply ready ·
+// 15d late` from an old ticket date on the same client; the reply's own clock was a day or less.
+describe('0.7.82: a reply row shows the reply\'s own due date, and what is due before it keeps its own', () => {
+  const WED = Date.parse('2026-11-25T17:30:00Z') // Wed Nov 25, 12:30 PM ET
+  const ME = 'builder-a@example.com'
+  const REMVER = '9e594776-0000-4000-8000-0000000000a1'
+  const PKG = '9e594776-1111-4111-8111-000000000001'
+  const ticket = (n: number, pid: string, due: string, basis = 'client_eta', title = `Deliver part ${n}`) => ({
+    ticket_id: `0000000${n}-aaaa-4aaa-8aaa-00000000000${n}`, project_id: pid, project_name: 'Remver Consulting', title, due_at: due,
+    due_source: 'commitment', commitment_basis: basis, assignee_email: ME,
+  })
+  const pkg = (over: Record<string, unknown> = {}) => ({
+    package_id: PKG, project_id: REMVER, project_name: 'Remver Consulting', status: 'prepared', covers_through: '2026-11-25T02:29:00Z',
+    due_at: '2026-11-26T02:29:00Z', drafts_ready: 2, project_owner_email: ME, ...over,
+  })
+  const msg = (received: string, due: string) => ({
+    message_id_key: `${REMVER}-${received}`, received_at: received, reply_due_at: due, sender: 'Pat Remver <pat@remver.example>', subject: 'Next steps',
+    snippet: 'hello', project_id: REMVER, project_name: 'Remver Consulting', reply_status: 'unanswered', project_owner_email: ME,
+  })
+  const oldTickets = [1, 2, 3, 4, 5].map(n => ticket(n, REMVER, '2026-11-09T22:00:00Z'))
+  const one = (f: Partial<Feed>, now = WED): QueueItem => buildQueue(feed({ member: ME, ...f }), now)[0] as QueueItem
+  const report = (it: QueueItem, now = WED, opts: { pinned?: boolean; stayedOff?: boolean } = {}) =>
+    pinReport({
+      now, listed: [it], links: { [it.projectId]: 'local_r' }, thread: () => ({ pinned: opts.pinned !== false }) as never, hidden: () => false,
+      stayedOff: new Set(opts.stayedOff ? ['local_r'] : []), capped: new Set(), byUs: () => true, client: () => it.client,
+    }).items
+
+  test('Remver: five old client-clock tickets and a fresh package: the reply row shows the package\'s due, the tickets follow with theirs', async () => {
+    const it = one({ drafts: [pkg()], tickets: { overdue: oldTickets } })
+    // the client still ranks, pins and reads red by its soonest client date: the tickets'
+    expect(it).toMatchObject({ kind: 'ready', packageId: PKG, tasks: 5, dueAt: Date.parse('2026-11-09T22:00:00Z'), replyDue: Date.parse('2026-11-26T02:29:00Z') })
+    expect(pinsFor(it, WED)).toBe(true)
+    expect(isRed(it, WED)).toBe(true)
+    expect(replyDueOf(it)).toBe(Date.parse('2026-11-26T02:29:00Z'))
+    expect(shownDueOf(it, WED)).toBe(Date.parse('2026-11-26T02:29:00Z'))
+    expect(soonerPartOf(it)).toEqual({ kind: 'task', what: 'task', due: Date.parse('2026-11-09T22:00:00Z'), internal: false })
+    // until 0.7.82: '🔴 11d late, due Nov 9 · Remver Consulting · reply ready'
+    expect(titleFor(it, WED)).toBe('🔴 9h left · Remver Consulting · reply ready · task 11d late, due Nov 9')
+    expect(rowLine(it, WED)).toBe('🔴 Remver Consulting · reply ready · 9h left · task 11d late, due Nov 9')
+    expect(dueLine(it, WED)).toBe('reply ready due 9:29 PM · task overdue 11d, due Nov 9')
+    expect(needsLine(it, WED)).toBe('Remver Consulting · reply ready due 9:29 PM · task overdue 11d, due Nov 9')
+    // the sentence names what pins it with its own clock, and closes on the reply's
+    expect(pinReason(it, WED)).toBe('Pinned for you, 11d late, due Nov 9: 5 tasks of yours. The reply to Remver Consulting is due 9:29 PM.')
+    // the You row: the reply's ask with the reply's clock; the client still sorts as late, and the late tickets are named
+    const you = youRow(it, WED)
+    expect(you).toMatchObject({ from: 'package', clock: 'late', at: Date.parse('2026-11-09T22:00:00Z'), when: 'due 9:29 PM', short: 'due 9:29 PM' })
+    expect(you.why).toBe('late on a client date · task 11d late, due Nov 9 · reply ready for your go')
+  })
+
+  test('a late ticket stays visible and still pins: on Team now it is a row of its own beside the reply\'s', async () => {
+    // the reply alone is due Mon 9:29 PM, more than 24 business hours out: it would not pin by itself
+    const far = pkg({ due_at: '2026-12-01T02:29:00Z' })
+    const alone = one({ drafts: [far] })
+    expect(alone.replyDue).toBeUndefined()
+    expect(pinsFor(alone, WED)).toBe(false)
+    expect(report(alone)).toEqual([])
+    const it = one({ drafts: [far], tickets: { overdue: [ticket(1, REMVER, '2026-11-09T22:00:00Z', 'client_eta', 'Ship the intake form')] } })
+    expect(pinsFor(it, WED)).toBe(true)
+    expect(titleFor(it, WED)).toBe('🔴 3d left · Remver Consulting · reply ready · task 11d late, due Nov 9')
+    expect(pinReason(it, WED)).toBe('Pinned for you, 11d late, due Nov 9: your task "Ship the intake form". The reply to Remver Consulting is due Mon 9:29 PM.')
+    // two items for the one thread, each with its own words and date, both with the thread's pin
+    expect(report(it)).toEqual([
+      { project_id: REMVER, client: 'Remver Consulting', kind: 'ready', tone: 'yellow', due_at: '2026-12-01T02:29:00.000Z', pinned: true, why_not: null, clock: 'client' },
+      { project_id: REMVER, client: 'Remver Consulting', kind: 'task', tone: 'red', due_at: '2026-11-09T22:00:00.000Z', pinned: true, why_not: null, clock: 'client' },
+    ])
+    // the person's unpin stands: both say why
+    expect(report(it, WED, { pinned: false, stayedOff: true }).map(i => [i.kind, i.pinned, i.why_not])).toEqual([['ready', false, 'person_unpinned'], ['task', false, 'person_unpinned']])
+  })
+
+  test('the client\'s oldest unanswered message dates the reply when it is earlier than the package, with or without a package', async () => {
+    // a message received Tue 10 AM, its reply due Wed 10 AM (3h late), before the package's Wed 9:29 PM
+    const early = msg('2026-11-24T15:00:00Z', '2026-11-25T15:00:00Z')
+    const ready = one({ drafts: [pkg()], mail: [early], tickets: { overdue: oldTickets } })
+    expect(ready).toMatchObject({ kind: 'ready', messages: 1, replyDue: Date.parse('2026-11-25T15:00:00Z') })
+    expect(titleFor(ready, WED)).toBe('🔴 3h late, due 10 AM · Remver Consulting · reply ready · task 11d late, due Nov 9')
+    expect(pinReason(ready, WED)).toBe('Pinned for you, 11d late, due Nov 9: 5 tasks of yours. The reply to Remver Consulting is 3h late, due 10 AM.')
+    // no package yet: the row is `reply`, at the message's own due time (ReGen, 2026-11-25: `reply · 6d late` from Nov 17 tickets)
+    const reply = one({ mail: [early], tickets: { overdue: [ticket(1, REMVER, '2026-11-17T16:00:00Z', 'eta_commit')] } })
+    expect(reply).toMatchObject({ kind: 'reply', replyDue: Date.parse('2026-11-25T15:00:00Z') })
+    expect(rowLine(reply, WED)).toBe('🔴 Remver Consulting · reply · 3h late, due 10 AM · task 6d late, due Nov 17')
+    expect(youRow(reply, WED)).toMatchObject({ from: 'mail', clock: 'late', when: '3h late, due 10 AM', short: '3h late' })
+    expect(report(reply).map(i => [i.kind, i.tone, i.due_at])).toEqual([['reply', 'red', '2026-11-25T15:00:00.000Z'], ['task', 'red', '2026-11-17T16:00:00.000Z']])
+  })
+
+  test('nothing due before the reply: the row reads exactly as before', async () => {
+    const it = one({ drafts: [pkg()], tickets: { due_soon: [ticket(1, REMVER, '2026-11-27T22:00:00Z')] } })
+    expect(it.replyDue).toBeUndefined()
+    expect(soonerPartOf(it)).toBeNull()
+    // (red: the reply itself is due today)
+    expect(titleFor(it, WED)).toBe('🔴 9h left · Remver Consulting · reply ready')
+    expect(report(it).map(i => [i.kind, i.due_at])).toEqual([['ready', '2026-11-26T02:29:00.000Z']])
+  })
+
+  test('one of our own clocks before the reply: the reply\'s clock, and that ticket behind, never late', async () => {
+    const owner = { ...ticket(1, REMVER, '2026-11-25T14:00:00Z', ASSIGN_BY_BASIS, 'Build the router'), ticket_id: '6b5cd083-aaaa-4aaa-8aaa-000000000006' }
+    // the reply is due Thu 3 PM; the owner was to be named by 9 AM today
+    const it = one({ drafts: [pkg({ due_at: '2026-11-26T20:00:00Z' })], tickets: { overdue: [owner] } })
+    expect(it).toMatchObject({ kind: 'ready', internalDue: Date.parse('2026-11-25T14:00:00Z'), replyDue: Date.parse('2026-11-26T20:00:00Z') })
+    expect(isRed(it, WED)).toBe(false)
+    expect(pinsFor(it, WED)).toBe(true)
+    expect(titleFor(it, WED)).toBe('🟡 1d left · Remver Consulting · reply ready · assign an owner behind, due 9 AM')
+    expect(pinReason(it, WED)).toBe('Pinned for you, behind since 9 AM: 1 ticket needs an owner from you. The reply to Remver Consulting is due Thu 3 PM.')
+    expect(report(it).map(i => [i.kind, i.tone, i.due_at, i.clock])).toEqual([
+      ['ready', 'yellow', '2026-11-26T20:00:00.000Z', 'client'],
+      ['behind', 'yellow', '2026-11-25T14:00:00.000Z', 'internal'],
+    ])
   })
 })

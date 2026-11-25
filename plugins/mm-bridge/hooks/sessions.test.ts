@@ -911,7 +911,8 @@ describe('S3: a press answers within 100 ms of fake time while OW takes 5 second
     const t1 = w.now()
     expect(await press(hub, `open:${pid(1)}`)).toBe(true)
     expect(w.now() - t1).toBeLessThanOrEqual(100)
-    expect(notice()).toBe('Open "22h left Client One reply" under Pinned.')
+    // (0.7.80) and why
+    expect(notice()).toBe('Couldn\'t open "22h left Client One reply": the Claude app gave no link for this thread. Open it under Pinned.')
     expect(w.sends().length).toBe(1)
 
     // Drafts on Client Two: its part of the pane, at once, with nothing fetched for it
