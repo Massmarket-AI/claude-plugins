@@ -1,4 +1,4 @@
-// (0.7.77) Today's numbers in the side pane (stats.ts): the person's own line under the You section's dots, and the team's at the top
+// (0.7.78) Today's numbers in the side pane (stats.ts): the person's own line under the You section's dots, and the team's at the top
 // of Team now for everyone, from OW's `GET /api/ext/day-stats`. Pure words first, then the bridge against a pretend
 // desktop app and OW (register-world.test-helper.ts), on the desktop and on the phone. Read-only: nothing here sends, pins or sounds.
 // Every person and client is made up.
@@ -44,7 +44,7 @@ const label = async (ui: Drawing, key: string): Promise<string | undefined> => (
 const MY_LINE = 'Today: 4.2 h · 3.0× parallel · 1.8M tokens'
 const TEAM_BLOCK = ['Today · as of 10:58 AM', '  Rob Example · 6.1 h · 3.4× · 12.3M tokens', '  Pat Builder · 4.2 h · 3.0× · 1.8M tokens', '  Asif Example · 2.8 h · 1.6×', '  Nayan Example · nothing tracked yet', '  Team · 13.1 h · 2.6× · 14.1M tokens']
 
-describe('0.7.77: the words (stats.ts)', () => {
+describe('0.7.78: the words (stats.ts)', () => {
   test('hours, parallel and tokens read as on the 9 AM image', () => {
     expect(hoursWords(4.2)).toBe('4.2 h')
     expect(hoursWords(0)).toBe('0.0 h')
@@ -99,7 +99,7 @@ describe('0.7.77: the words (stats.ts)', () => {
   })
 })
 
-describe('0.7.77: today\'s numbers in the pane', () => {
+describe('0.7.78: today\'s numbers in the pane', () => {
   test('desktop: one dim line under the dots; a press says what it counts; an answer with no team rows draws no team block', LONG, async ($, on) => {
     const w = world(on, { feed: feed(), dayStats: () => ok(member()) })
     await tickOnce($, w)

@@ -223,6 +223,8 @@ export type MmFolds = {
   more?: boolean
   /** (0.7.5) The tasks of the time list opened to their threads, by key (`MmTrackLine.toggle`). */
   tasks?: string[]
+  /** (0.7.77) The You rows whose Details are open in this thread, by project: at most 20. */
+  you?: string[]
   /** (0.7.53) The end-of-day list of browser stretches with no client yet, closed until opened. */
   confirm?: boolean
   /**
@@ -230,7 +232,7 @@ export type MmFolds = {
    * a group that is gone, and that must not open this one.
    */
   queueOlder?: boolean
-  /** (0.7.77) The person's own stats line under the You section's dots, opened to what it counts. */
+  /** (0.7.78) The person's own stats line under the You section's dots, opened to what it counts. */
   stats?: boolean
 }
 
@@ -272,11 +274,11 @@ export type MmTeamRead = { at: number; partial: string[]; people: MmTeamPerson[]
 /** (0.7.34) The pane's `Team now`: OW's last read; `missing` while OW has no such route. */
 export type MmTeamNow = { team?: MmTeamRead; got?: number; missing?: boolean }
 
-/** (0.7.77) One person's numbers for today, as OW's `GET /api/ext/day-stats` answers them (checked): the 9 AM team image's figures. */
+/** (0.7.78) One person's numbers for today, as OW's `GET /api/ext/day-stats` answers them (checked): the 9 AM team image's figures. */
 export type MmStatsPerson = { name: string; me: boolean; hours: number; workHours: number; parallel: number | null; tokens: number | null; sessions: number | null }
-/** (0.7.77) Today's numbers: the person's own, and the team's (one a person, then the team), for everyone on the team. */
+/** (0.7.78) Today's numbers: the person's own, and the team's (one a person, then the team), for everyone on the team. */
 export type MmDayStats = { at: number; day: string; me: MmStatsPerson | null; team: MmStatsPerson[] | null; total: MmStatsPerson | null }
-/** (0.7.77) The pane's stats, from the store (`drawStats`): OW's last read and when it was read. */
+/** (0.7.78) The pane's stats, from the store (`drawStats`): OW's last read and when it was read. */
 export type MmStats = { stats?: MmDayStats; got?: number }
 
 /** What the last button press did, shown above the list. */
@@ -306,13 +308,7 @@ export type MmNotice = { text: string; at: number }
  * `closed`): anywhere else the pane opens by itself, and the band offers no way to it (Rob, 2026-11-11: "We don't need to have
  * something cluttering up that space telling us to open the side panel").
  */
-/**
- * (0.7.73) `head` and `next`: the band's first line as the desktop draws it, `Needs you: 7 · 2 late` and a button with the next client's
- * words that opens its thread (hooks/you.ts `youBand`); `rest`, the lines after it. `text` stays the whole band in one sentence, for a
- * surface with no button. `missing` is still counted; Start missing threads is drawn only while `unstarted` clients that need a thread
- * have no Start card (0.7.73: the cards are made by themselves).
- */
-export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string; waiting?: string; head?: string; next?: { words: string; projectId: string; target?: string }; rest?: string; unstarted?: number }
+export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string; waiting?: string }
 
 /**
  * (0.6.0) One line of the pane's Tracking part. `open`: the app thread (`local_…`) a press on the line opens, on a
@@ -537,6 +533,8 @@ export type MmYouRow = {
   paceWords: string
   /** (0.7.73) The specifics under the row (you.ts `youDetails`): the client's newest message, the package, an ask, tickets, hours. Absent on a row an older build stored. */
   details?: string[]
+  /** (0.7.77) What the row's Details opens, as Markdown (you.ts `youPage`). Absent on a row an older build stored. */
+  page?: string
   pin: 'pinned' | 'needs_pin' | 'later'
   pinWhy?: string
   target?: string
@@ -574,7 +572,7 @@ declare module 'claude-code' {
       seenPackages: string[]
       /** (0.7.71) The band's Ship row, as this thread's folder stood when last looked at. */
       you: MmYou
-      /** (0.7.77) Today's numbers: the person's line under the You section's dots, and the team's at the top of Team now. */
+      /** (0.7.78) Today's numbers: the person's line under the You section's dots, and the team's at the top of Team now. */
       stats: MmStats
     }
   }

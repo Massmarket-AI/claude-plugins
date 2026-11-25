@@ -165,7 +165,7 @@ export type WorldOptions = {
   teamNow?: () => { status: number; body?: unknown } | 'network'
   /** (0.7.76) How OW answers `GET /drafts-pulse`. Left out, 404: an OW without the route yet. */
   draftsPulse?: () => { status: number; body?: unknown } | 'network'
-  /** (0.7.77) How OW answers `GET /day-stats`. Left out, 404: an OW without the route yet. */
+  /** (0.7.78) How OW answers `GET /day-stats`. Left out, 404: an OW without the route yet. */
   dayStats?: () => { status: number; body?: unknown } | 'network'
   /** (0.7.53) How OW answers `GET /browser-now`. Left out, 404: an OW without the route yet. */
   browserNow?: () => { status: number; body?: unknown } | 'network'
@@ -652,8 +652,8 @@ export const lines = async (ui: Drawing): Promise<string[]> => {
     return n === 0
   }
   // (0.7.34) a row's pin mark has tests of its own; the Needs you now heading is a button now, and reads as the heading it is
-  // (0.7.73) a You row's head is the press that opens its thread when it has one, and reads as the line it is
-  return all.flatMap(e => (e.type === 'Text' && !PIN_MARKS.has(e.text) && left(e.text) ? [e.text] : e.key === 'mm-needs-toggle' ? [e.text.replace(/\s+[▾▸]$/, '')] : e.type === 'Button' && String(e.key).startsWith('mm-you-open:') ? [String(e.props.label)] : []))
+  // (0.7.77) a You row's head is a line of text again; its Details toggle (`mm-you-more:`) and the page under it have tests of their own
+  return all.flatMap(e => (e.type === 'Text' && !PIN_MARKS.has(e.text) && left(e.text) ? [e.text] : e.key === 'mm-needs-toggle' ? [e.text.replace(/\s+[▾▸]$/, '')] : []))
 }
 /** (0.7.73) The texts of a You row's detail Box, as drawn (indented two spaces). */
 const detailTexts = (box: FoundElement): string[] =>
@@ -695,6 +695,18 @@ export const ACME_FRESH = "Acme Roofing: approve Acme Roofing's reply package"
 export const ACME_ROW = "Acme Roofing: approve Acme Roofing's reply package"
 export const BOLT_ROW = 'Bolt Staffing: answer Client about "Question" (+1 more)'
 export const CEDAR_ROW = 'Cedar Dental: deliver "Send the intake form"'
+/**
+ * (0.7.77) The same clients' rows drawn as the rows under the list are (`rowsAsBefore`): their one line as until 0.7.72, `NO THREAD` rows
+ * first and marked, what a test of a press itself reads around the press.
+ */
+export const BEFORE = {
+  CEDAR_FRESH: '🔴 Cedar Dental · task · 5h left · no thread',
+  BOLT_FRESH: '🔴 Bolt Staffing · reply · 22h left · 2 new · no thread',
+  ACME_FRESH: '🔴 Acme Roofing · reply ready · 21h left · no thread',
+  ACME_ROW: '🟡 Acme Roofing · reply ready · 21h left',
+  BOLT_ROW: '🟡 Bolt Staffing · reply · 22h left · 2 new',
+  CEDAR_ROW: '🔴 Cedar Dental · task · 5h left',
+} as const
 /** (0.7.73) A You row's second line: its pace dot and words first. */
 export const YOU_META = /^[🟢🟡🔴] /u
 export const YOU_NO_THREAD = 'needs a pin: no thread'
@@ -781,7 +793,7 @@ export const declared = (projectId: string, sessionId: string, hoursAgo: number)
 // beside them.
 
 export const tool = async ($: Engine, args: string): Promise<string> => String(((await $.tool.call({ tool: 'mcp__mm-bridge__mm', args } as never)) as { result?: unknown }).result ?? '')
-export const ONLY_UPDATE = 'Only the person can do this: press Update thread in the pane or type /mm update <client>.'
+export const ONLY_UPDATE = 'Only the person can do this: they type /mm update <client>, or right-click in the client\'s thread and choose Update this thread.'
 export const ONLY_START = 'Only the person starts a thread: they press Start thread in the pane or type /mm start <client>, which puts their words in the prompt box. On a turn the person typed to ask for it, call mm with "kickoffs <client>" (or "kickoffs" for every missing thread) and start each with start_session as it says.'
 export const NO_LIST = 'The app\'s thread list is not available here.'
 export const GONE = 'That thread is no longer available. The list has been refreshed.'
@@ -816,9 +828,23 @@ export const personClose = (on: On, pid: string) => {
   })
   return { close: () => { closing = true } }
 }
+/**
+ * ⛔ (0.7.77, Rob 2026-11-25: "I don't think we need the Update and Open Thread buttons, or the Draft button ... in the 'Needs You'")
+ * The You rows draw no Update, Open or Drafts. Those presses still run from every row drawn under the list (Checking your reply, With a
+ * teammate, No due date), from the thread's right-click menu, and on a list an older version stored, all through the one row drawing
+ * (`drawRow`) and the one `press`. A test of a press itself (what it sends, opens, refuses, holds) presses it on such a row: the list as
+ * an older version stored it, with no You rows, so the clients' rows are drawn as the rows under the list are, buttons and all.
+ */
+export const rowsAsBefore = (on: On) => {
+  on('state.set', { plugin: 'mm-bridge' }, async (_$, e, next) => {
+    if (e.key !== 'queue' || !e.value || typeof e.value !== 'object' || !('you' in (e.value as object))) return next(e)
+    const { you: _you, ...rest } = e.value as Record<string, unknown>
+    return next({ ...e, value: rest } as never)
+  })
+}
 /** A client's buttons on the pane, by their labels. */
-/** (0.7.73) Not the You row's own press on its words (`mm-you-open:<project>`), which opens the thread: the row's buttons under it. */
-export const buttonsOf = async (ui: Drawing, projectId: string): Promise<string[]> => (await buttons(ui)).filter(b => b[0].endsWith(projectId) && !b[0].startsWith('mm-you-open:')).map(b => b[1])
+/** (0.7.77) Not the You row's Details toggle (`mm-you-more:<project>`), which only opens the client's part under it: the row's actions. */
+export const buttonsOf = async (ui: Drawing, projectId: string): Promise<string[]> => (await buttons(ui)).filter(b => b[0].endsWith(projectId) && !b[0].startsWith('mm-you-more:')).map(b => b[1])
 /**
  * (0.7.5) The text the pane draws right under a row's one line: its second line where it has one, else what comes next.
  * (0.7.73) Past the You row's own line of pace, by when, pin and why (`meta`), which every You row has.
@@ -1013,7 +1039,7 @@ export const trackPart = (drawn: string[]): string[] => {
 // (0.7.23) and the sync's pin report (`/bridge-pins`): what is pinned and what should be, never a pickup, a hold or a claim
 // (0.7.53) and Working manually in browser (`/browser-now`): its read records a new stretch's question, never an answer
 // (0.7.76) and the drafts pulse (`/drafts-pulse`): a key, nothing else
-// (0.7.77) and today's numbers (`/day-stats`), read-only
+// (0.7.78) and today's numbers (`/day-stats`), read-only
 export const onlyReads = (w: { fetched: string[] }) =>
   w.fetched.every(u => /\/api\/ext\/(?:closeout\?|skill-map$|client-time\?project_ids=|reply-package\?package_id=[0-9a-f-]+&format=pickup$|team-ask\?|bridge-pins$|team-now$|browser-now$|drafts-pulse$|day-stats$)/.test(u))
 export const skill = async ($: Engine, name: string, over: Record<string, unknown> = {}) => $.tool.call({ tool: 'Skill', skill: name, ...over } as never)

@@ -1,4 +1,4 @@
-// (0.7.77, Rob 2026-11-25: "maybe some of the stats from daily it support image would be cool as well so they can see their hours
+// (0.7.78, Rob 2026-11-25: "maybe some of the stats from daily it support image would be cool as well so they can see their hours
 // and parallization score maybe others like total tokens. maybe there should be stats. i dont want to get overcluttered but a team
 // stats dashboard would be good too.") Today's numbers in the side pane. Pure: what OW's `GET /api/ext/day-stats` answers, checked,
 // and every word it is drawn with.

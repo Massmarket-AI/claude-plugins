@@ -768,7 +768,7 @@ describe('re-review of a446f5ab: Start after a chip was spent, a re-check after 
 
   test('L2: Update, then the person makes that thread another client\'s within the check: it is not linked back to the first (P9)', async () => {
     const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], mail: [mail(1, 'Client One'), mail(2, 'Client Two')] }
-    const w = fakeApp(feed, [{ sessionId: 'local_l2hub' }, { sessionId: 'local_l2a', title: 'A work', lastActivityAt: ago(1) }])
+    const w = fakeApp(feed, [{ sessionId: 'local_l2hub' }, { sessionId: 'local_l2a', title: 'A work', lastActivityAt: ago(1) }], [], { rowsAsBefore: true })
     w.put('mm.links', { [pid(1)]: 'local_l2a' })
     const hub = w.session('local_l2hub')
     await mm(hub, '')
@@ -852,7 +852,7 @@ describe('S3: a press answers within 100 ms of fake time while OW takes 5 second
   async function slowOw(tag: string) {
     const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], drafts: [], mail: [mail(1, 'Client One'), mail(2, 'Client Two')] }
     const hubId = `local_${tag}hub`
-    const w = fakeApp(feed, [{ sessionId: hubId }, { sessionId: `local_${tag}a`, title: 'Client One work' }])
+    const w = fakeApp(feed, [{ sessionId: hubId }, { sessionId: `local_${tag}a`, title: 'Client One work' }], [], { rowsAsBefore: true })
     w.put('mm.links', { [pid(1)]: `local_${tag}a` })
     const hub = w.session(hubId)
     await mm(hub, '')
@@ -867,10 +867,9 @@ describe('S3: a press answers within 100 ms of fake time while OW takes 5 second
   test('(0.5.14) the band carries Start missing threads, not Open list; a typed /mm opens the pane at once, drawn from the last sync; the refresh draws it again', async () => {
     const { w, hub } = await slowOw('s3l')
     const t0 = w.now()
-    // the band's buttons, in a thread whose pane has nothing drawn yet: (0.7.73) the next client first, then Start missing threads
-    // while Client Two has no thread and no Start card
+    // the band's one button, in a thread whose pane has nothing drawn yet: Client Two has no thread
     const band = await bandButtons(hub)
-    expect([...band.keys()]).toEqual(['mm-next', 'mm-start-missing'])
+    expect([...band.keys()]).toEqual(['mm-start-missing'])
     expect(band.get('mm-open-list')).toBeUndefined()
     // a typed /mm in another thread: the pane at once, from the 9 AM sync, and its answer once the feed has answered
     const other = w.session('local_s3la')
@@ -937,7 +936,7 @@ describe('S3: a press answers within 100 ms of fake time while OW takes 5 second
 
   test('Update on a thread the bridge linked by itself asks the feed first (B3), says it is checking at once, and sends once', async () => {
     const feed: Feed = { member: ME, role: 'founder', mail: [mail(1, 'Client One')], tickets: {}, threads: [{ project_id: pid(1), session_id: 'cli-s3b', last_activity_at: ago(1), sole: true }] }
-    const w = fakeApp(feed, [{ sessionId: 'local_s3bhub' }, { sessionId: 'local_s3ba', title: 'Client One work' }])
+    const w = fakeApp(feed, [{ sessionId: 'local_s3bhub' }, { sessionId: 'local_s3ba', title: 'Client One work' }], [], { rowsAsBefore: true })
     w.put('mm.threads', { 'cli-s3b': { app: 'local_s3ba', at: Date.parse(ago(0)) } })
     const hub = w.session('local_s3bhub')
     await mm(hub, '')
@@ -955,7 +954,7 @@ describe('S3: a press answers within 100 ms of fake time while OW takes 5 second
 
   test('Update on a thread the bridge linked by itself, whose session the feed now shows declared another project too: nothing is sent (B3)', async () => {
     const feed: Feed = { member: ME, role: 'founder', mail: [mail(1, 'Client One')], tickets: {}, threads: [{ project_id: pid(1), session_id: 'cli-s3c', last_activity_at: ago(1), sole: true }] }
-    const w = fakeApp(feed, [{ sessionId: 'local_s3chub' }, { sessionId: 'local_s3ca', title: 'Pipeline speed' }])
+    const w = fakeApp(feed, [{ sessionId: 'local_s3chub' }, { sessionId: 'local_s3ca', title: 'Pipeline speed' }], [], { rowsAsBefore: true })
     w.put('mm.threads', { 'cli-s3c': { app: 'local_s3ca', at: Date.parse(ago(0)) } })
     const hub = w.session('local_s3chub')
     await mm(hub, '')
@@ -984,7 +983,7 @@ describe('M1: Update, the one press that sends, reads the feed once before every
   async function linkedRow(tag: string, n: number) {
     const feed: Feed = { member: ME, role: 'founder', tickets: {}, threads: [], drafts: [], mail: [mail(n, 'Client Three')] }
     const hubId = `local_${tag}hub`
-    const w = fakeApp(feed, [{ sessionId: hubId }, { sessionId: `local_${tag}a`, title: 'Client Three work' }])
+    const w = fakeApp(feed, [{ sessionId: hubId }, { sessionId: `local_${tag}a`, title: 'Client Three work' }], [], { rowsAsBefore: true })
     w.put('mm.links', { [pid(n)]: `local_${tag}a` })
     const hub = w.session(hubId)
     await mm(hub, '')
@@ -1042,8 +1041,8 @@ describe('L3: a refresh that fails after a press shows in one line, until a sync
         return
       }
       const o = node as { props?: Record<string, unknown>; children?: unknown }
-      // (0.7.34) the Needs you now heading is a button now, and reads as the heading it is
-      if (typeof o.props?.label === 'string' && /^Needs you now/.test(o.props.label)) out.push(o.props.label.replace(/\s+[▾▸]$/, ''))
+      // (0.7.34) the Needs you now heading is a button now, and reads as the heading it is; (0.7.77) the You section's, Needs you (n)
+      if (typeof o.props?.label === 'string' && /^Needs you( now)? \(\d+\)/.test(o.props.label)) out.push(o.props.label.replace(/\s+[▾▸]$/, ''))
       walk(o.props?.children, depth + 1)
       walk(o.children, depth + 1)
     }
@@ -1168,7 +1167,7 @@ describe('C3 (0.5.4): a client with no thread has ONE chip, in the thread the pe
 })
 
 describe('C1 and C2 (0.5.4): a client with a thread has ONE chip, in that thread; the other threads point to it', () => {
-  test('six running threads: the linked one mints Do it here, the others nothing for it; their band says where it is; the no-thread client has one chip too; nothing is minted again (0.7.73: the band no longer says where a chip is)', async () => {
+  test('six running threads: the linked one mints Do it here, the others nothing for it; their band says where it is; the no-thread client has one chip too; nothing is minted again', async () => {
     const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(61, 'Client Six One', 1), mail(62, 'Client Six Two', 2)] }
     const ids = Array.from({ length: 6 }, (_, i) => `local_c1_${i + 1}`)
     const w = fakeApp(feed, ids.map(sessionId => ({ sessionId })), [], { every: true })
@@ -1188,16 +1187,14 @@ describe('C1 and C2 (0.5.4): a client with a thread has ONE chip, in that thread
     expect(liveChips(w).filter(c => c.projectId === pid(62)).length).toBe(1)
     expect(spawnedIn(w).map(c => String(c.args.title)).filter(t => t.startsWith('Do it here'))).toEqual(['Do it here: Client Six One: reply to the client'])
     expect(String(spawnedIn(w).find(c => String(c.args.title).startsWith('Do it here'))?.args.tldr)).toMatch(/\. Recommended: Do it here\.$/)
-    // a thread with neither chip: (0.7.73) its band says what needs the person and what is next, never where a chip is (the
-    // cards come by themselves; the band says only what failed)
+    // a thread with neither chip: its band says where each is (the chips pass draws it within 15 seconds)
     await w.advance(15_000)
     await settleAll()
     const holder62 = liveChips(w).find(c => c.projectId === pid(62))?.threadId
     const elsewhere = ids.find(id => id !== ids[0] && id !== holder62) as string
     const band = (w.view(elsewhere, 'band') as { text: string }).text
-    expect(band).toStartWith('Needs you: 2 · next: ')
-    expect(band).not.toContain('a chip is ready in')
-    expect(band).not.toContain('its chip is in')
+    expect(band).toContain(' · a chip is ready in Client Six One.')
+    expect(band).toMatch(/🔴 Client Six Two has no thread \(due [^)]+\): its chip is in \S/)
     // in the linked thread itself: no pointer to its own chip
     expect((w.view(ids[0] as string, 'band') as { text: string }).text).not.toContain('a chip is ready in')
     for (let i = 0; i < 2; i++) {
@@ -1388,7 +1385,7 @@ describe('0.5.3 claim in place, as 0.5.4 has it: the long thread\'s own fresh-th
 // ======================================================================== 0.5.6
 
 describe('0.5.6: Start moves the chip to the thread it is pressed in (Rob, 10-14: "Start in the thread that I click it on")', () => {
-  test('the chip in Y; Start pressed in X: X mints, Y\'s is superseded and Y withdraws it on its pass; one live chip; again in X: already here; a third thread says where it is now (0.7.73: on the row, not the band)', async () => {
+  test('the chip in Y; Start pressed in X: X mints, Y\'s is superseded and Y withdraws it on its pass; one live chip; again in X: already here; a third thread says where it is now', async () => {
     const feed: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [mail(81, 'Client Eight One', 3)] }
     const [Y, X, Z] = ['local_mvy', 'local_mvx', 'local_mvz']
     const w = fakeApp(feed, [{ sessionId: Y, title: 'Fabrikam Media HighLevel Build' }, { sessionId: X, title: 'Where I am' }, { sessionId: Z, title: 'Elsewhere' }], [], { every: true })
@@ -1422,11 +1419,9 @@ describe('0.5.6: Start moves the chip to the thread it is pressed in (Rob, 10-14
     }
     expect(spawnedIn(w).length).toBe(2)
     expect(liveChips(w).map(c => c.threadId)).toEqual([X])
-    // a third thread: (0.7.73) the band no longer says where the chip is (the card is there by itself: the band says only what
-    // failed), and the row still says where it is and that Start brings it there
-    expect((w.view(Z, 'band') as { text: string }).text).toStartWith('Needs you: 1 · next: Client Eight One, ')
-    expect((w.view(Z, 'band') as { text: string }).text).not.toContain('its chip is in')
-    expect((w.view(X, 'band') as { text: string }).text).not.toContain('its chip is in')
+    // a third thread: the band says where the chip is and that Start brings it there; the row says the same
+    expect((w.view(Z, 'band') as { text: string }).text).toMatch(/🔴 Client Eight One has no thread \(due [^)]+\): its chip is in Where I am\. Press Start thread in the pane to bring it here\./)
+    expect((w.view(X, 'band') as { text: string }).text).toMatch(/its chip is in Where I am\.(?! Press)/)
     await mm(zs, '')
     const rows = (w.view(Z, 'queue') as { rows: Array<{ projectId: string; reason: string }> }).rows
     expect(rows.find(r => r.projectId === pid(81))?.reason).toBe('its chip is in "Where I am"; Start thread moves it here')
@@ -2514,7 +2509,7 @@ describe('0.7.12: a pin needs a clock, late says when it was due, undated says s
       expect(q.header).toBe('Nothing needs you right now.')
       expect(allRows(q)).toEqual([])
       expect(q.older).toBeUndefined()
-      expect(bandOf(w)).toBe('Nothing needs you right now.')
+      expect(bandOf(w)).toBe('Nothing needs you in the next 24 hours.')
       expect((w.stored('mm.last') as { items: unknown[] }).items).toEqual([])
       // treated as done: our pin comes off and the thread is named clear
       expect(w.app.get('local_c1')).toMatchObject({ title: `✓ ${KIN} · clear 10 AM`, pinned: false })
