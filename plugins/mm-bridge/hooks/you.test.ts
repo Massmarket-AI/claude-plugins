@@ -1,5 +1,5 @@
 // (0.7.73) The "You" strip in the bridge itself: worked out from the store, this session's usage and the worklog hook's record, drawn
-// first in the side pane (desktop and mobile) and as one line in the band (desktop; the terminal's band has no buttons). Read-only. The
+// first in the side pane (desktop and mobile; (0.7.74) no longer in the band, which is 0.7.72's again). Read-only. The
 // bridge against a pretend desktop app, feed and store (register-world.test-helper.ts); every client is made up.
 
 import type { On } from 'claude-code'
@@ -134,36 +134,35 @@ describe('0.7.73: the "You" strip at the top of the side pane', () => {
   })
 })
 
-describe('0.7.73: the strip\'s one line in the band', () => {
-  test('desktop: beside the band\'s own line when something is not green', LONG, async ($, on) => {
-    const w = youWorld(on, { feed: feed({ drafts: [], tickets: {} }) })
+describe('0.7.74 (Rob 2026-11-25: "I also didn\'t want to add the U panel above where I type. I just wanted to remove the ship button. The way it was before was good for that"): the band as before, with no strip and no next', () => {
+  test('desktop, something not green and clients waiting: the band\'s own words and Start missing threads, as in 0.7.72; no You line, no next button, no Ship', LONG, async ($, on) => {
+    const w = youWorld(on, { feed: feed() })
     usage(on, { tokens: 10_000, five: 65 })
     await mm($, '')
     const first = await bandOf($)
     await w.clock.advance(1_000)
     await first.unmount()
     const band = await bandOf($)
-    expect((await lines(band)).some(l => l.includes('You: ') && l.includes('🟡 Plan conserve'))).toBe(true)
+    const all = await lines(band)
+    expect(all.some(l => l.startsWith('Needs you: '))).toBe(true)
+    expect(all.some(l => l.includes('You:') || l.includes('Plan conserve'))).toBe(false)
+    expect(all.some(l => l.includes(' · next:'))).toBe(false)
+    const keys = (await buttons(band)).map(([k]) => k)
+    expect(keys).toContain('mm-start-missing')
+    expect(keys).not.toContain('mm-next')
+    expect(keys.some(k => /ship/i.test(k))).toBe(false)
     await band.unmount()
   })
 
-  test('desktop: all green, no line; Remote Control turned off, the line comes within the minute', LONG, async ($, on) => {
+  test('desktop, nothing needs the person: the old words, and Start missing threads drawn dim as All threads started', LONG, async ($, on) => {
     const w = youWorld(on)
     usage(on, { tokens: 10_000 })
-    // a started session: its minute timer works the strip out again
-    await tickOnce($, w)
     await mm($, '')
-    const quiet = await bandOf($)
+    const band = await bandOf($)
     await w.clock.advance(1_000)
-    await quiet.unmount()
-    const still = await bandOf($)
-    expect((await lines(still)).some(l => l.includes('You:'))).toBe(false)
-    await still.unmount()
-    w.stored['mm.rcpin'] = { on: false }
-    await w.clock.advance(61_000)
-    const amber = await bandOf($)
-    expect((await lines(amber)).some(l => l.includes('You: 🟡 Remote Control off'))).toBe(true)
-    await amber.unmount()
+    expect(await lines(band)).toEqual(['Nothing needs you in the next 24 hours.'])
+    expect(await buttons(band)).toEqual([['mm-start-missing', 'All threads started']])
+    await band.unmount()
   })
 
   test('terminal: no strip in the band (the bridge\'s band is the desktop app\'s), and nothing breaks', async ($, on) => {
@@ -187,9 +186,15 @@ const acmeLinked = (over: WorldOptions = {}): WorldOptions => ({
   ...over,
   store: { 'mm.links': { [ACME]: 'local_a' }, ...(over.store ?? {}) },
 })
-/** The You rows' heads as drawn: a Text without a thread, the button that opens it with one. */
-const heads = async (ui: Parameters<typeof buttons>[0]) =>
-  (await ui.findAll({})).flatMap(e => (e.type === 'Text' && /^\d+\. /.test(e.text) ? [e.text] : e.type === 'Button' && String(e.key).startsWith('mm-you-open:') ? [String(e.props.label)] : []))
+/** The You rows' heads as drawn: (0.7.74) plain text, with or without a thread. */
+const heads = async (ui: Parameters<typeof buttons>[0]) => (await ui.findAll({})).flatMap(e => (e.type === 'Text' && /^\d+\. /.test(e.text) ? [e.text] : []))
+/** (0.7.74) A You row's Details page, as drawn under it once opened: the Markdown's text, or undefined while closed. */
+const page = async (ui: Parameters<typeof buttons>[0], projectId: string): Promise<string | undefined> => {
+  const box = (await ui.findAll({ type: 'Box' })).find(e => e.key === `mm-you-page:${projectId}`)
+  if (!box) return undefined
+  const md = (await ui.findAll({ type: 'Markdown' })).find(m => box.children.includes(m as never)) ?? (await ui.findAll({ type: 'Markdown' })).at(-1)
+  return String(md?.props.text ?? md?.text ?? '')
+}
 
 describe('0.7.73: the You section replaces Needs you now', () => {
   test('desktop: under the dots, one row per client, soonest deadline first, each with what is needed, by when, its pin and why', LONG, async ($, on) => {
@@ -207,14 +212,41 @@ describe('0.7.73: the You section replaces Needs you now', () => {
     expect(all).toContain('🟢 on pace · due 4 PM · needs a pin: no thread · due within 24 business hours · your ticket')
     expect(all).toContain('🟢 on pace · due Tue 8 AM · needs a pin: no thread · due within 24 business hours · reply ready for your go')
     expect(all).toContain('🟢 on pace · due Tue 9 AM · needs a pin: no thread · due within 24 business hours · the client wrote')
-    // no dropdown, and no Needs you now heading: the rows are always open; Team now stays closed below
+    // (0.7.74, Rob 2026-11-25: "Need you: still needs to be collapsible") the heading is its fold again, open at first; no Needs
+    // you now heading; Team now stays closed below
     const keys = (await buttons(ui)).map(([k]) => k)
-    expect(keys).not.toContain('mm-needs-toggle')
+    expect((await buttons(ui)).find(([k]) => k === 'mm-needs-toggle')?.[1]).toBe('Needs you (3)  ▾')
     expect(all.some(l => l.startsWith('Needs you now'))).toBe(false)
     expect((await buttons(ui)).find(([k]) => k === 'mm-teamnow-toggle')?.[1]).toMatch(/▸$/)
-    // each row keeps its own buttons under it: Start for a client with no thread, Drafts
-    expect(keys).toEqual(expect.arrayContaining([`start:${CEDAR}`, `drafts:${ACME}`, `start:${BOLT}`]))
+    // ⛔ (0.7.74, Rob 2026-11-25: "I don't think we need the Update and Open Thread buttons, or the Draft button ... in the 'Needs
+    // You'") Start for a client with no thread, and each row's Details; no Update, Open or Drafts, and no press on a row's words
+    expect(keys).toEqual(expect.arrayContaining([`start:${CEDAR}`, `start:${BOLT}`, `mm-you-more:${ACME}`, `mm-you-more:${BOLT}`, `mm-you-more:${CEDAR}`]))
+    expect(keys.filter(k => /^(update|open|drafts|mm-you-open):/.test(k))).toEqual([])
     await ui.unmount()
+  })
+
+  test('(0.7.74, Rob 2026-11-25: "Need you: still needs to be collapsible") the fold hides the rows, is remembered on this computer, and opens again', LONG, async ($, on) => {
+    const w = youWorld(on, { feed: feed() })
+    usage(on, { tokens: 10_000 })
+    await mm($, '')
+    const ui = await pane($)
+    await w.clock.advance(1_000)
+    await ui.press({ key: 'mm-needs-toggle' })
+    expect((await buttons(ui)).find(([k]) => k === 'mm-needs-toggle')?.[1]).toBe('Needs you (3)  ▸')
+    expect(await heads(ui)).toEqual([])
+    expect((await buttons(ui)).map(([k]) => k).filter(k => k.endsWith(CEDAR) || k.endsWith(ACME) || k.endsWith(BOLT))).toEqual([])
+    // the dots above it stay
+    expect((await lines(ui))[0]).toBe('You')
+    await ui.unmount()
+    // closed in every pane on this computer until it is opened again
+    const again = await pane($)
+    expect(await heads(again)).toEqual([])
+    await again.press({ key: 'mm-needs-toggle' })
+    expect(await heads(again)).toEqual([`1. ${CEDAR_ROW_HEAD}`, `2. ${ACME_ROW_HEAD}`, `3. ${BOLT_ROW_HEAD}`])
+    await again.unmount()
+    // read-only: folding asked for nothing
+    expect(w.acted()).toEqual([])
+    expect(w.prompts).toEqual([])
   })
 
   test('mobile: the same rows, in the same order', LONG, async ($, on) => {
@@ -246,20 +278,54 @@ describe('0.7.73: the You section replaces Needs you now', () => {
     expect(w.prompts).toEqual([])
   })
 
-  test('a client with its own thread: a press on its row opens that thread, and nothing is sent, pinned or filled', LONG, async ($, on) => {
+  test('(0.7.74, Rob 2026-11-25: "I would just click the thread in the left-hand panel") a client with its own thread: its row\'s words are no press, and no Update, Open or Drafts is drawn for it', LONG, async ($, on) => {
     const w = youWorld(on, acmeLinked({ feed: feed() }))
     usage(on, { tokens: 10_000 })
     await mm($, '')
     const ui = await pane($)
     await w.clock.advance(1_000)
     expect(await heads(ui)).toContain(`2. ${ACME_ROW_HEAD}`)
-    const acted = w.acted().length
-    await ui.press({ key: `mm-you-open:${ACME}` })
-    expect(w.ran.some(r => r.includes(LINK_A))).toBe(true)
-    expect(w.acted().slice(acted)).toEqual([])
+    expect((await buttons(ui)).filter(([k]) => k.endsWith(ACME)).map(([k]) => k)).toEqual([`mm-you-more:${ACME}`])
+    await ui.unmount()
+  })
+
+  test('(0.7.74, Rob 2026-11-25: "I think we need some more detail") Details under a row opens the client\'s whole part there, on desktop and mobile, and closes on a second press; read-only', LONG, async ($, on) => {
+    const w = youWorld(on, acmeLinked({ feed: feed() }))
+    usage(on, { tokens: 10_000 })
+    await mm($, '')
+    for (const surface of ['desktop', 'mobile'] as const) {
+      const ui = await $.ui.mount({ plugin: 'mm-bridge', surface, component: 'Pane', requestId: 'mm-queue', props: PANE })
+      await w.clock.advance(1_000)
+      expect((await buttons(ui)).find(([k]) => k === `mm-you-more:${ACME}`)?.[1], surface).toBe('  Details  ▸')
+      expect(await page(ui, ACME), surface).toBeUndefined()
+      await ui.press({ key: `mm-you-more:${ACME}` })
+      expect((await buttons(ui)).find(([k]) => k === `mm-you-more:${ACME}`)?.[1], surface).toBe('  Details  ▾')
+      const text = await page(ui, ACME)
+      expect(text?.split('\n')[0], surface).toBe('- Nothing we sent to Acme Roofing is in the feed.')
+      expect(text, surface).toContain('Reply package: ready, covers mail through 8 AM')
+      // only Acme's part opened
+      expect(await page(ui, BOLT), surface).toBeUndefined()
+      await ui.press({ key: `mm-you-more:${ACME}` })
+      expect(await page(ui, ACME), surface).toBeUndefined()
+      await ui.unmount()
+    }
+    expect(w.acted()).toEqual([])
     expect(w.prompts).toEqual([])
     expect(w.fills).toEqual([])
+  })
+
+  test('(0.7.74) an opened Details stays open in another pane on this computer, until closed', LONG, async ($, on) => {
+    const w = youWorld(on, { feed: feed() })
+    usage(on, { tokens: 10_000 })
+    await mm($, '')
+    const ui = await pane($)
+    await w.clock.advance(1_000)
+    await ui.press({ key: `mm-you-more:${BOLT}` })
     await ui.unmount()
+    const again = await pane($)
+    expect((await page(again, BOLT))?.length).toBeGreaterThan(0)
+    expect(await page(again, ACME)).toBeUndefined()
+    await again.unmount()
   })
 
   test('late first, the most overdue first, in business days; a client date late reads late', LONG, async ($, on) => {
@@ -299,48 +365,6 @@ describe('0.7.73: the You section replaces Needs you now', () => {
     await w.clock.advance(1_000)
     expect((await lines(again)).some(l => l.includes('waiting on you: Send the reply to Pat now'))).toBe(true)
     await again.unmount()
-  })
-})
-
-describe('0.7.73: the band says what needs you and what is next', () => {
-  test('desktop: Needs you: 3 and the soonest deadline as next; none of the lines about work the bridge does by itself', LONG, async ($, on) => {
-    const w = youWorld(on, acmeLinked({ feed: feed() }))
-    usage(on, { tokens: 10_000 })
-    await mm($, '')
-    const band = await bandOf($)
-    await w.clock.advance(1_000)
-    const all = await lines(band)
-    expect(all).toContain('Needs you: 3 · next:')
-    expect((await buttons(band)).find(([k]) => k === 'mm-next')?.[1]).toBe('Cedar Dental, deliver "Send the intake form", due 4 PM')
-    for (const gone of ['An update is ready to claim', "'s thread.", 'All threads started', 'chip is in', 'a chip is ready', 'Nothing needs you in the next 24 hours']) expect(all.some(l => l.includes(gone))).toBe(false)
-    expect((await buttons(band)).map(([, label]) => label)).not.toContain('All threads started')
-    await band.unmount()
-  })
-
-  test('next is the most overdue first; a press on it opens its thread, and nothing is sent', LONG, async ($, on) => {
-    const w = youWorld(on, acmeLinked({ feed: feed({ drafts: [], mail: [{ message_id_key: 'a1', received_at: ago(90), reply_due_at: ago(74), sender: 'pat@acme.example', subject: 'Roof', snippet: '', project_id: ACME, project_name: 'Acme Roofing', reply_status: 'unanswered', project_owner_email: ME }] }) }))
-    usage(on, { tokens: 10_000 })
-    await mm($, '')
-    const band = await bandOf($)
-    await w.clock.advance(1_000)
-    expect(await lines(band)).toContain('Needs you: 2 · 1 late · next:')
-    expect((await buttons(band)).find(([k]) => k === 'mm-next')?.[1]).toBe('Acme Roofing, answer Pat, 1d late')
-    const acted = w.acted().length
-    await band.press({ key: 'mm-next' })
-    expect(w.ran.some(r => r.includes(LINK_A))).toBe(true)
-    expect(w.acted().slice(acted)).toEqual([])
-    await band.unmount()
-  })
-
-  test('nothing needs the person: a few words, and no button', LONG, async ($, on) => {
-    const w = youWorld(on)
-    usage(on, { tokens: 10_000 })
-    await mm($, '')
-    const band = await bandOf($)
-    await w.clock.advance(1_000)
-    expect(await lines(band)).toContain('Nothing needs you right now.')
-    expect((await buttons(band)).map(([k]) => k)).not.toContain('mm-next')
-    await band.unmount()
   })
 })
 

@@ -223,6 +223,8 @@ export type MmFolds = {
   more?: boolean
   /** (0.7.5) The tasks of the time list opened to their threads, by key (`MmTrackLine.toggle`). */
   tasks?: string[]
+  /** (0.7.74) The You rows whose Details are open in this thread, by project: at most 20. */
+  you?: string[]
   /** (0.7.53) The end-of-day list of browser stretches with no client yet, closed until opened. */
   confirm?: boolean
   /**
@@ -297,13 +299,7 @@ export type MmNotice = { text: string; at: number }
  * `closed`): anywhere else the pane opens by itself, and the band offers no way to it (Rob, 2026-11-11: "We don't need to have
  * something cluttering up that space telling us to open the side panel").
  */
-/**
- * (0.7.73) `head` and `next`: the band's first line as the desktop draws it, `Needs you: 7 · 2 late` and a button with the next client's
- * words that opens its thread (hooks/you.ts `youBand`); `rest`, the lines after it. `text` stays the whole band in one sentence, for a
- * surface with no button. `missing` is still counted; Start missing threads is drawn only while `unstarted` clients that need a thread
- * have no Start card (0.7.73: the cards are made by themselves).
- */
-export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string; waiting?: string; head?: string; next?: { words: string; projectId: string; target?: string }; rest?: string; unstarted?: number }
+export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string; waiting?: string }
 
 /**
  * (0.6.0) One line of the pane's Tracking part. `open`: the app thread (`local_…`) a press on the line opens, on a
@@ -528,6 +524,8 @@ export type MmYouRow = {
   paceWords: string
   /** (0.7.73) The specifics under the row (you.ts `youDetails`): the client's newest message, the package, an ask, tickets, hours. Absent on a row an older build stored. */
   details?: string[]
+  /** (0.7.74) What the row's Details opens, as Markdown (you.ts `youPage`). Absent on a row an older build stored. */
+  page?: string
   pin: 'pinned' | 'needs_pin' | 'later'
   pinWhy?: string
   target?: string

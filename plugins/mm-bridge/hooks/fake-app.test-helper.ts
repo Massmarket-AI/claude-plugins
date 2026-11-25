@@ -44,7 +44,12 @@ export const next = (e: unknown) => e
  * `every`: the clock's repeating timers run too (a session's minute tick and its 15-second chips pass); left
  * out, only its one-off timers do, as before.
  */
-export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessionId: string }>, unlisted: readonly string[] = [], opts: { every?: boolean; tools?: 'spawn' | 'start' | 'both'; now?: number } = {}) {
+export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessionId: string }>, unlisted: readonly string[] = [], opts: { every?: boolean; tools?: 'spawn' | 'start' | 'both'; now?: number; rowsAsBefore?: boolean } = {}) {
+  /**
+   * ⛔ (0.7.74, Rob 2026-11-25: no Update, Open or Drafts in Needs you) `rowsAsBefore`: the list as an older version stored it, with no You
+   * rows, so the clients' rows are drawn as the rows under the list are, buttons and all: how a test of a press itself presses it (the
+   * same `drawRow` and `press` the rows under the list and the right-click menu use). See register-world.test-helper.ts `rowsAsBefore`.
+   */
   /** (0.5.7) The session tools as the engine lists them; left out, the listing names neither, as before 0.5.7. */
   const toolNames = opts.tools
     ? [...(opts.tools !== 'start' ? ['mcp__ccd_session__spawn_task'] : []), ...(opts.tools !== 'spawn' ? ['mcp__ccd_session__start_session'] : []), 'mcp__ccd_session__dismiss_task']
@@ -222,6 +227,10 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
       state: {
         get: async (ref: { key: string }) => ({ value: state.get(ref.key), version: 1 }),
         set: async (ref: { key: string }, value: unknown) => {
+          if (opts.rowsAsBefore && ref.key === 'queue' && value && typeof value === 'object' && 'you' in value) {
+            const { you: _you, ...rest } = value as Record<string, unknown>
+            value = rest
+          }
           state.set(ref.key, value)
           return { isSet: true, version: 2 }
         },

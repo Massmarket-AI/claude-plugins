@@ -8,7 +8,7 @@
  * 2. Late: their items past due, in business time (Mon to Fri, Eastern: the house rule). Red for a client's date, amber for a team clock
  *    that is behind (an internal clock never reads late, 0.7.61).
  * 3. Replies ready: reply packages of theirs ready to approve. Amber while any wait.
- * 4. Sessions: how many threads run on this computer, and how many say they wait on the person (`mm waiting`). Amber while any wait.
+ * 4. Sessions: how many threads are open on this computer, and how many say they wait on the person (`mm waiting`). Amber while any wait.
  * 5. Pace (0.7.73, Rob 2026-11-24, in place of this thread's fill, which the theme's glow already shows): whether each client of theirs is on
  *    pace to finish on time. Green on pace or ahead, amber behind (a pace row, a start-by passed, a team clock), red late on a client date.
  * 6. Plan usage tier: normal, conserve or save, with exactly the thresholds of the control tower's `usage-tier.mjs` (TIERS below).
@@ -75,8 +75,10 @@ export function repliesDot(ready: readonly string[]): Dot {
 // ---------------------------------------------------------------- 4. sessions
 
 export function sessionsDot(running: number, waiting: readonly string[]): Dot {
-  const short = waiting.length ? `${running}·${waiting.length}` : String(running)
-  const runs = `${running} ${running === 1 ? 'thread runs' : 'threads run'} on this computer`
+  // (0.7.74, Rob 2026-11-25: "Why does it say 'sessions 30.1'? What does that mean?") `30·1` read as a decimal: the count waiting is named
+  const short = waiting.length ? `${running} · ${waiting.length} waiting` : String(running)
+  // a thread counts while its bridge ticked in the last 5 minutes: open in the app, working or not
+  const runs = `${running} ${running === 1 ? 'thread is' : 'threads are'} open on this computer`
   if (!waiting.length) return { key: 'sessions', level: 'green', short, says: `${runs}; none waits on you.` }
   return { key: 'sessions', level: 'amber', short, says: `${runs}; ${waiting.length} ${waiting.length === 1 ? 'waits' : 'wait'} on you: ${listOf(waiting)}.` }
 }

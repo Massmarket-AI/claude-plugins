@@ -3723,12 +3723,27 @@ function noteBody(it: QueueItem, member: string): string {
  * asks and its queue alone.
  */
 export function clientMarkdown(it: QueueItem, now: number, pages: Readonly<Record<string, string>> = {}, self = ''): string {
-  const asks = [asksMarkdown(it, now, pages), queueMarkdown(it)].filter(Boolean).join('\n\n')
   // (0.7.9, Rob 10-29) when its thread is due to be updated by itself, under the title: `This thread updates itself ...`
-  const out = [`## ${it.projectName}`, self ? `${titleFor(it, now)}\n\nThis thread ${self}.` : `${titleFor(it, now)}`]
+  const out = [`## ${it.projectName}`, self ? `${titleFor(it, now)}\n\nThis thread ${self}.` : `${titleFor(it, now)}`, ...clientSections(it, now, pages)]
+  // (0.7.4) nothing of a reply's in play (no client message, no package): no word of reply drafts, whatever else lists
+  // the client (Rob, 2026-10-27: a task alone "doesn't necessarily create the need for a new reply")
+  const noReply = !it.mail.length && !it.packageId && !(it.open ?? null)
+  if (!noReply) out.push('', draftsLine(it))
+  return out.join('\n')
+}
+
+/**
+ * The body of a client's part (`clientMarkdown`) with no heading, no title and no word to the model about its drafts: the messages
+ * waiting (each one's sender, day and time, subject and first 220 characters), the committed tasks, the ETAs and owners owed, the
+ * undated tickets, the follow-ups that wait for a go, the asks and the internal queue, and the teammates' tickets. (0.7.74) Also
+ * the You row's Details (`youPage`).
+ */
+export function clientSections(it: QueueItem, now: number, pages: Readonly<Record<string, string>> = {}): string[] {
+  const asks = [asksMarkdown(it, now, pages), queueMarkdown(it)].filter(Boolean).join('\n\n')
+  const out: string[] = []
   if (it.mail.length) {
     out.push('', '### Waiting on our reply')
-    for (const m of it.mail.sort((a, b) => a.at.localeCompare(b.at))) {
+    for (const m of [...it.mail].sort((a, b) => a.at.localeCompare(b.at))) {
       out.push(`- **${m.sender}** · ${etParts(Date.parse(m.at)).day} ${etParts(Date.parse(m.at)).time} · ${m.subject}`)
       if (m.snippet) out.push(`  > ${m.snippet.replace(/\s+/g, ' ').slice(0, 220)}`)
     }
@@ -3753,9 +3768,6 @@ export function clientMarkdown(it: QueueItem, now: number, pages: Readonly<Recor
   // (0.7.24) follow-up steps that wait for a go
   const go = goMarkdown(it, now)
   if (go) out.push('', go)
-  // (0.7.4) nothing of a reply's in play (no client message, no package): no word of reply drafts, whatever else lists
-  // the client (Rob, 2026-10-27: a task alone "doesn't necessarily create the need for a new reply")
-  const noReply = !it.mail.length && !it.packageId && !(it.open ?? null)
   if (asks) out.push('', asks)
   // (0.7.4, for the founder) his teammates' late internal tickets, last: theirs, not his
   const mates = matesMarkdown(it, now)
@@ -3763,8 +3775,7 @@ export function clientMarkdown(it: QueueItem, now: number, pages: Readonly<Recor
   // (0.7.18, for the PM) his teammates' tickets to check on, last with them: theirs, not his
   const watched = watchMarkdown(it, now)
   if (watched) out.push('', watched)
-  if (!noReply) out.push('', draftsLine(it))
-  return out.join('\n')
+  return out
 }
 
 /**
