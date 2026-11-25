@@ -484,6 +484,10 @@ export type MmCardFeedback = { label: string; said: 'sent' | 'busy' | 'go' | 'ch
  * (`pr: 'none'`). `pr` is what `gh pr view` said for the branch at `head` (`unknown`: gh is not here, or did not answer). Hidden (`show`
  * false) on the default branch, in a folder that is not a git checkout, and in the control tower, whose edits go to main with no PR.
  */
+/** (0.7.72) One dot of the "You" strip (hooks/health.ts): which, its level, its short count and the line a press shows. */
+export type MmYouDot = { key: 'pins' | 'late' | 'replies' | 'sessions' | 'fill' | 'tier' | 'track' | 'rc'; level: 'green' | 'amber' | 'red'; short: string; says: string }
+/** (0.7.72) The strip as this thread last worked it out, the band's one line, and the dot whose line is open in the pane. */
+export type MmYou = { dots: MmYouDot[]; line: string; at: number; open?: MmYouDot['key'] }
 export type MmShip = { show: boolean; branch: string; unpushed: number; pr: 'open' | 'merged' | 'closed' | 'none' | 'unknown'; head: string; at: number }
 
 declare module 'claude-code' {
@@ -518,6 +522,7 @@ declare module 'claude-code' {
       seenPackages: string[]
       /** (0.7.71) The band's Ship row, as this thread's folder stood when last looked at. */
       ship: MmShip
+      you: MmYou
     }
   }
 }

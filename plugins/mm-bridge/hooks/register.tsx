@@ -243,7 +243,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.71'
+export const VERSION = '0.7.72'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -268,6 +268,8 @@ const SESS = { plugin: 'mm-bridge', key: 'sess' } as const
 const NUDGE = { plugin: 'mm-bridge', key: 'nudge' } as const
 /** (0.7.71) The band's Ship row (ship.ts). */
 const SHIP = { plugin: 'mm-bridge', key: 'ship' } as const
+/** (0.7.72) The "You" strip, as this thread last worked it out. */
+const YOU = { plugin: 'mm-bridge', key: 'you' } as const
 /** (0.7.0) The band's line for a client's thread whose work matches no line on the quote. */
 const LINE = { plugin: 'mm-bridge', key: 'lineAsk' } as const
 const PANE_VIEW = 'mm-view'
@@ -4127,6 +4129,10 @@ import { ALERTS_DUE, ALERTS_EVERY_MS, ALERTS_SWITCH, ALERT_GAP_MS, ALERT_TITLE, 
 import type { AlertDue, AlertPlan, NewPin } from './alerts'
 import { SHIP_BUTTON, SHIP_DRAFT, SHIP_EVERY_MS, SHIP_TYPE, SHIP_WORDS, shipState, shipText } from './ship'
 import type { Run as ShipRun } from './ship'
+import { YOU_EVERY_MS, YOU_HEADING, compactLine, compactPoint, dotLabel, fillPercent, tierOf, youDots, youNeedsLook, youRed } from './health'
+import type { Overdue } from './health'
+import { clientDueOf, internalBehindAt } from './queue'
+import type { MmYou } from '../types'
 
 /**
  * The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that
@@ -5405,6 +5411,118 @@ async function pressShip($: EngineInterface): Promise<void> {
   const filled = await fillWords($, SHIP_WORDS)
   if (filled === 'draft') $.ui.toast(SHIP_DRAFT)
   else if (filled === 'none') $.ui.toast(SHIP_TYPE)
+}
+
+// ---------------------------------------------------------------- (0.7.72) the "You" strip
+
+/** (0.7.72) Each session's compaction point from its one breakdown (`$.session.usage({ breakdown: 'summary' })`), once it had one. */
+const youPoint = new Map<string, { threshold?: number; rawMax?: number }>()
+/** (0.7.72) The sessions working the strip out now: one at a time each. */
+const youLooking = new Set<string>()
+
+/**
+ * (0.7.72, Rob 2026-11-24: "Yep", Phase 2c) Works out the "You" strip (health.ts, which says what each dot counts) and keeps it in this
+ * session's state, where the pane and the band read it. Desktop only, a person's session only; written only when it changed.
+ * ⛔ Read-only: it reads the store, this session's usage and the worklog hook's own record, and never sends, pins or unpins anything.
+ */
+async function youPass($: EngineInterface): Promise<void> {
+  let id = ''
+  try {
+    if ((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) !== 'claude-desktop') return
+    const sess = await sessOf($)
+    if (sess.interactive === false || sess.unattended === true) return
+    id = await instanceId($)
+    if (youLooking.has(id)) return
+    youLooking.add(id)
+    const now = await $.clock.now()
+    const me = await knownSelf($)
+    const last = await storeGet<Last | null>($, 'mm.last', null)
+    const items = last && Array.isArray(last.items) ? last.items : []
+    const nameOf = (pid: string): string => cleanName(items.find(i => i.projectId === pid)?.client ?? '') || 'a client'
+    // 1. the clients whose thread should be pinned for the person (the pin report's rows), and whether each is
+    const needing = Object.entries(last?.rowPins ?? {})
+      .filter(([pid, pin]) => isUuid(pid) && pin && typeof pin === 'object')
+      .map(([pid, pin]) => ({ client: nameOf(pid), pinned: pin.pinned === true, ...(pin.pinned !== true ? { why: rowPinWords(pin).replace(/^not pinned(?:: )?/, '') } : {}) }))
+      .map(n => (n.why ? n : { client: n.client, pinned: n.pinned }))
+    // 2. past due: a client's own date (late), else a team clock that has passed (behind, 0.7.61)
+    const overdue: Overdue[] = []
+    for (const it of items) {
+      const client = cleanName(it.client) || 'a client'
+      if (clientDueOf(it) < now) overdue.push({ client, clientClock: true })
+      else if (Number.isFinite(internalBehindAt(it, now))) overdue.push({ client, clientClock: false })
+    }
+    // 3. reply packages ready for the person's go
+    const ready = items.filter(it => packageReady(it)).map(it => cleanName(it.client) || 'a client')
+    // 4. the threads running on this computer, and those that say they wait on the person
+    const seen = await storeGet<Seen>($, 'mm.seen', {})
+    const running = Math.max(1, Object.entries(seen).filter(([sid, s]) => THREAD_ID.test(sid) && (sid === me || now - (Number(s?.tick) || -Infinity) <= ALIVE_MS)).length)
+    const pins = await storeGet<Record<string, Pin>>($, 'mm.pins', {})
+    const waiting = Object.keys(declaredOf(await storeGet<unknown>($, 'mm.waiting', {}))).map(sid => cleanName(pins[sid]?.client ?? '') || 'a thread')
+    // 5. and 6. this thread's fill and the plan's usage, from the status line's own figures
+    const usage = await $.session.usage()
+    let point = youPoint.get(id)
+    if (!point) {
+      try {
+        const b = (await $.session.usage({ breakdown: 'summary' })).context.breakdown
+        point = { ...(typeof b?.autoCompactThreshold === 'number' ? { threshold: b.autoCompactThreshold } : {}), ...(typeof b?.rawMaxTokens === 'number' ? { rawMax: b.rawMaxTokens } : {}) }
+      } catch {
+        point = {}
+      }
+      if (point.threshold || point.rawMax) youPoint.set(id, point)
+    }
+    const compacts = compactPoint({ ...point, envWindow: await $.env.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW'), window: usage?.context?.window })
+    const tokens = typeof usage?.context?.tokens === 'number' ? usage.context.tokens : undefined
+    const dots = youDots({
+      needing,
+      overdue,
+      ready,
+      running,
+      waiting,
+      fill: { percent: fillPercent(tokens, compacts), ...(tokens !== undefined ? { tokens } : {}), point: compacts },
+      tier: tierOf(Array.isArray(usage?.rateLimits) ? usage.rateLimits : [], now),
+      task: await declaredTask($),
+      rc: await rcPinOn($),
+    })
+    const { value: had } = await $.state.get(YOU)
+    const next: MmYou = { dots, line: compactLine(dots), at: now, ...(had?.open && dots.some(d => d.key === had.open) ? { open: had.open } : {}) }
+    if (!had || !sameValue({ ...had, at: 0 }, { ...next, at: 0 })) await $.state.set(YOU, next)
+  } catch {
+    // the strip stays as it was
+  } finally {
+    if (id) youLooking.delete(id)
+  }
+}
+
+/**
+ * (0.7.72) This thread's declared task: the worklog hook's own record of it (`~/.claude/mm-hooks/state/declarations/<session id>.json`,
+ * `declared_task`), else what the bridge kept when Claude ran the hook with `--task` here. Null: none declared.
+ */
+async function declaredTask($: EngineInterface): Promise<string | null> {
+  const clean = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? v.trim().replace(/\s+/g, ' ').slice(0, 120) : null)
+  try {
+    const sid = String(await $.session.id())
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sid)) {
+      const raw = JSON.parse(String(await $.fs.read(`${await home($)}/.claude/mm-hooks/state/declarations/${sid}.json`))) as { declared_task?: unknown }
+      const task = clean(raw?.declared_task)
+      if (task) return task
+    }
+  } catch {
+    // no record of the hook's for this session: what the bridge kept
+  }
+  try {
+    const key = await threadKey($)
+    return key ? clean((await currentFor($, key))?.task ?? pendingTasks.get(key)) : null
+  } catch {
+    return null
+  }
+}
+
+/** (0.7.72) A dot of the strip pressed: its line opens under the strip, and a second press closes it. Nothing else. */
+async function pressYou($: EngineInterface, key: MmYou['dots'][number]['key']): Promise<void> {
+  const { value: had } = await $.state.get(YOU)
+  if (!had) return
+  const { open: _was, ...rest } = had
+  await $.state.set(YOU, had.open === key ? rest : { ...rest, open: key })
 }
 
 // ---------------------------------------------------------------- (0.7.71) alerts: a new pin notifies, a pin or a package sounds
@@ -11046,6 +11164,8 @@ export const register: Register = on => {
       // (0.7.71) a notification handed to this thread for its new pin is raised from its own session (a late one of another
       // thread's too), on a timer of its own beside the tick
       $.clock.every(ALERTS_EVERY_MS, () => void deliverAlerts($).catch(err => noteFailure($, 'alerts', err)))
+      // (0.7.72) the "You" strip, worked out again each minute (and at the end of each turn, and when a surface first draws it)
+      $.clock.every(YOU_EVERY_MS, () => void youPass($))
     }
     // (0.7.71) the band's Ship row: this thread's folder looked at as it starts, then every few minutes (and after each turn)
     void shipPass($)
@@ -11100,6 +11220,8 @@ export const register: Register = on => {
     })().catch(() => {})
     // (0.7.71) a turn may have committed or pushed: the Ship row looked at again
     void shipPass($)
+    // (0.7.72) and the turn filled the thread: the "You" strip again
+    void youPass($)
     return done
   })
 
@@ -11271,19 +11393,26 @@ export const register: Register = on => {
     const { value: nudge } = await $.state.get(NUDGE)
     const { value: lineAsk } = await $.state.get(LINE)
     const { value: ship } = await $.state.get(SHIP)
+    // (0.7.72) the "You" strip's one line, beside the band's own when something is not green; alone only for something red
+    const { value: you } = await $.state.get(YOU)
+    if (!you) void youPass($)
+    const youNow = you && Array.isArray(you.dots) ? you.dots : []
+    const youLine = youNow.length && youNeedsLook(youNow) && typeof you?.line === 'string' ? you.line : ''
+    const youAlone = Boolean(youLine) && youRed(youNow) && !band?.text
     const asking = Boolean(nudge?.show)
     const lining = !asking && Boolean(lineAsk?.show && lineAsk.client && lineAsk.signal)
     const shipping = Boolean(ship?.show && ship.branch)
     // nothing to say, or a survey holds the band: the engine's own
-    if (e.props.hasSurvey || (!band?.text && !asking && !lining && !shipping)) return next(e)
+    if (e.props.hasSurvey || (!band?.text && !asking && !lining && !shipping && !youAlone)) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e) as Partial<ReturnType<typeof $.ui.resolve>> & Pick<ReturnType<typeof $.ui.resolve>, 'Box' | 'Text'>
     const missing = Number(band?.missing) || 0
     // a surface that draws no button there says how to open the list instead
     const row = !band?.text ? null : !Button ? (
-      <Text>{bandWords(band.text, false)}</Text>
+      <Text>{youLine ? `${bandWords(band.text, false)} · ${youLine}` : bandWords(band.text, false)}</Text>
     ) : (
       <Box flexDirection="row" gap={1}>
         <Text>{bandWords(band.text, true)}</Text>
+        {youLine ? <Text key="mm-you-line" dimColor>{youLine}</Text> : null}
         {missing > 0 ? (
           <Button key="mm-start-missing" label={startMissingLabel(missing)} variant="primary" onPress={() => void pressStartAll($)} />
         ) : (
@@ -11343,16 +11472,18 @@ export const register: Register = on => {
         {Button ? <Button key="mm-ship-btn" label={SHIP_BUTTON} variant="primary" onPress={() => void pressShip($)} /> : <Text dimColor>{SHIP_TYPE}</Text>}
       </Box>
     )
-    if ([line, asks, shipRow].filter(Boolean).length > 1) {
+    const youRow = youAlone ? <Text key="mm-you-alone">{youLine}</Text> : null
+    if ([line, asks, shipRow, youRow].filter(Boolean).length > 1) {
       return (
         <Box flexDirection="column">
           {line}
+          {youRow}
           {asks}
           {shipRow}
         </Box>
       )
     }
-    return line ?? asks ?? shipRow ?? next(e)
+    return line ?? youRow ?? asks ?? shipRow ?? next(e)
   })
 
   // The pane an older version opened for a client's drafts: a thread that still has it open sees the
@@ -11611,8 +11742,23 @@ export const register: Register = on => {
     const updated = hasList && queue ? queue.note : tracking?.at ? `Updated ${localClock(tracking.at)}` : ''
     // (0.7.38, Rob 2026-11-07: "Any Reply package should appear above the team member tracking") Top to bottom: this thread's
     // client part (its reply package), Needs you now and its rows, then Team now, then the rest.
+    // (0.7.72) the "You" strip, first: the person's own health, a dot each, each press opening its line under the strip
+    const { value: you } = await $.state.get(YOU)
+    if (!you) void youPass($)
+    const youShown = you && Array.isArray(you.dots) ? you.dots : []
+    const youOpen = youShown.find(d => d.key === you?.open)
+    const youStrip = !youShown.length ? null : (
+      <Box key="mm-you" flexDirection="column" marginBottom={1}>
+        <Box flexDirection="row" flexWrap="wrap" gap={1}>
+          <Text bold>{YOU_HEADING}</Text>
+          {youShown.map(d => (Button ? <Button key={`mm-you:${d.key}`} plain label={dotLabel(d)} onPress={() => void pressYou($, d.key)} /> : <Text key={`mm-you:${d.key}`}>{dotLabel(d)}</Text>))}
+        </Box>
+        {youOpen ? <Text key="mm-you-says" dimColor>{youOpen.says}</Text> : null}
+      </Box>
+    )
     const drawn = (
       <Box flexDirection="column">
+        {youStrip}
         {tracking?.second ? <Text dimColor>{tracking.second}</Text> : null}
         {client.text ? (
           <Box key="mm-client" flexDirection="column" marginBottom={1}>
