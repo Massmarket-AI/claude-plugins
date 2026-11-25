@@ -1176,7 +1176,8 @@ describe('the groups under the list: With a teammate, then No due date ((0.7.12)
     const stays = mine.queue.find(i => i.projectId === BOLT) as QueueItem
     const ordinary = rowFor(stays, recommend([], undefined, NOW), NOW)
     expect(ordinary.note).toBeUndefined()
-    expect(ordinary).toMatchObject({ title: '🔴 Bolt Staffing · reply · 5h left · 2 new · with J Smith', waiting: '2 messages waiting, 1 task due, drafts with J Smith' })
+    // (0.7.81) the reply's own 22h, then my task's 5h: until 0.7.81 the reply read the task's 5h
+    expect(ordinary).toMatchObject({ title: '🔴 Bolt Staffing · reply · 22h left · 2 new · with J Smith · task 5h left', waiting: '2 messages waiting, 1 task due, drafts with J Smith' })
     expect(rowButtons(ordinary)).toEqual(['start', 'drafts'])
   })
 })

@@ -21,7 +21,7 @@ import type { MmRow, MmTeam } from '../types'
 import {
   ANSWER_LABEL, isAnswerType,
   MAY_NEED_OK, NOBODY, assignAsksOf, assignOnly, checkingTitle, cleanText, cleanTitle, clockAndDue, clockText, committedCount, decidesText, etaAsksOf, etaOnly, fastState, hasDue, heldInternal, holdSentence, isUuid, matesOf, openAsks,
-  checkNow, clientDueOf, internalBehindAt, leadDueOf, newestFirst, olderTotal, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, tasksBesidesUndated, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
+  checkNow, clientDueOf, internalBehindAt, leadDueOf, replyDueOf, soonerPartOf, newestFirst, olderTotal, ownPins, pinsFor, queueLine, queueMore, queueTotal, queuedOf, rowLine, shownDue, shownQueue, shownText, skillFor, stillOpenTitle, tasksBesidesUndated, titleNames, undatedCount, undatedOnly, whoseLate, withHolder, withTeammate,
   TEAM_BEHIND, TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine, teamLateSplit,
   goOf, goOnly, goWithMail, stepWord,
   NO_REPLY_WHAT, afterPackage, checkDot, noReplyNow, owesNoReply, paceOf, paceOnly, paceStatus, paceWord, statusOf,
@@ -1166,7 +1166,9 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
   const who = `${it.projectName} (OW project ${id})`
   // (R17) nothing due: the kickoff says no due time (the clause is left out, never "due Invalid Date")
   const due = hasDue(it) ? dueText(it.dueAt) : ''
-  const replyDue = due ? `, reply due ${due}` : ''
+  // ⛔ (0.7.81, Rob 2026-11-25) the reply's own due time, never a ticket's sooner one on the same client (`replyDueOf`)
+  const ownReply = replyDueOf(it)
+  const replyDue = Number.isFinite(ownReply) ? `, reply due ${dueText(ownReply)}` : due ? `, reply due ${due}` : ''
   const tasksDue = due ? ` due ${due}` : ''
   const o = it.open ?? null
   /** (0.5.28, internal asks) The viewer's open asks, each checked again before its paragraph goes in. */
@@ -2795,6 +2797,24 @@ export function pinReport(o: {
     // thread, when one does: its kind, its colour and its date
     const status = c ? (c.pace ? paceStatus(c.pace, o.now) : null) : statusOf(it, o.now)
     const notStarted = c !== null && c.pace === undefined && c.notStarted && checkDot(c, o.now) === '🟡'
+    // ⛔ (0.7.81, Rob 2026-11-25: "Yes, fix it here") a reply row that something else dates sooner (`soonerPartOf`): two items for
+    // the one thread, each with its own words and date. The reply's, at its own due time, and the sooner part's (`task`, `ask`,
+    // `go`; `behind` for one of our own clocks past its time), so a late ticket stays on Team now and the 9 AM image. Until
+    // 0.7.81 one item said `ready` at the ticket's date (Remver: `reply ready · 15d late`). Both carry the thread's one pin.
+    const part = c === null && !status ? soonerPartOf(it) : null
+    const reply = part ? replyDueOf(it) : NaN
+    if (part && Number.isFinite(reply)) {
+      const one = { project_id: it.projectId, client: capText(cleanText(it.client, 80), 80), pinned, why_not: whyNot, ...(whyText ? { why_text: whyText } : {}) }
+      items.push({ ...one, kind: capText(String(it.kind ?? ''), 16), tone: reply <= o.now ? 'red' : 'yellow', due_at: new Date(reply).toISOString(), clock: 'client' })
+      items.push({
+        ...one,
+        kind: part.internal && part.due < o.now ? 'behind' : part.kind,
+        tone: !part.internal && part.due <= o.now ? 'red' : 'yellow',
+        due_at: new Date(part.due).toISOString(),
+        clock: part.internal ? 'internal' : 'client',
+      })
+      continue
+    }
     // ⛔ (0.7.60) the clock its name shows is the client's own due time once an internal one has passed (`leadDueOf`); with
     // none, the internal one, sent as such
     const lead = leadDueOf(it, o.now)

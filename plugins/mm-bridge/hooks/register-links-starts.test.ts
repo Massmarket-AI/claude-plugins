@@ -4038,7 +4038,8 @@ describe('(u) a client whose reply drafts a teammate holds: not pinned, not coun
     const mine = { ticket_id: 't9', project_id: BOLT, project_name: 'Bolt Staffing (Sam)', title: 'Send the rate card', due_at: new Date(NOW + 5 * HOUR).toISOString(), due_source: 'commitment', assignee_email: ME }
     const w = handedOver(on, {}, { tickets: { due_today: [mine] } })
     expect(await mm($, '')).toBe('1 client need you; 1 thread pinned. The list is in the side pane.')
-    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 5h left · Bolt Staffing · reply · 2 new · with J Smith', pinned: true })
+    // (0.7.81) the reply's own 22h, then my task's 5h (until 0.7.81 the reply read the task's 5h; `2 new` drops for length, as THREAD_TITLE_MAX says)
+    expect(w.threads.get('local_b')).toMatchObject({ title: '🔴 22h left · Bolt Staffing · reply · with J Smith · task 5h left', pinned: true })
     const ui = await pane($)
     // (0.7.5) its row in one line, who has the drafts at the end, and the task on its second (the reason is not drawn)
     expect(await lines(ui)).toContain('1. Bolt Staffing: deliver "Send the rate card"')

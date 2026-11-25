@@ -44,10 +44,13 @@ import {
   ownPins,
   paceOf,
   paceWord,
+  partClock,
   pinsFor,
   queuedOf,
+  replyDueOf,
   senderName,
   shownDue,
+  soonerPartOf,
 } from './queue'
 import type { RowPin } from './threads'
 import { packageReady, rowPinWords } from './threads'
@@ -120,21 +123,38 @@ export function youAsk(it: QueueItem, now: number, stillOpen?: readonly string[]
   return { ask: dated > 0 ? `${dated} task${dated === 1 ? '' : 's'} of yours` : 'look at the thread', from: 'none' }
 }
 
-/** Where the row stands on its clock, and the time it is ordered by. */
-export function youClock(it: QueueItem, now: number): { clock: YouRow['clock']; at: number; when: string; short: string } {
+/** (0.7.81) The asks that are the reply's own: a row named for one of them shows the reply's own clock (`replyDueOf`). */
+const REPLY_SOURCES: ReadonlySet<YouSource> = new Set<YouSource>(['open', 'noreply', 'draft', 'package', 'mail'])
+
+/** (0.7.81) The reply's own due time when the row's ask is the reply's (`REPLY_SOURCES`) and something else is due before it, else NaN. */
+const replyClock = (it: QueueItem, from: YouSource): number => (REPLY_SOURCES.has(from) ? replyDueOf(it) : NaN)
+
+/**
+ * Where the row stands on its clock, and the time it is ordered by. ⛔ (0.7.81, Rob 2026-11-25: "Yes, fix it here") A row whose ask
+ * is the reply's says the reply's own due time (`when`, `short`), never a ticket's sooner one; where it stands and the time it is
+ * ordered by (`clock`, `at`) are the client's, as before, and `youWhy` names what is due first.
+ */
+export function youClock(it: QueueItem, now: number, from: YouSource = youAsk(it, now).from): { clock: YouRow['clock']; at: number; when: string; short: string } {
+  const reply = replyClock(it, from)
+  const words = (when: string, short: string): { when: string; short: string } =>
+    Number.isFinite(reply)
+      ? reply < now
+        ? { when: clockAndDue(reply, now), short: clockLead(reply, now) }
+        : { when: `due ${clockText(shownDue(reply), now)}`, short: `due ${clockText(shownDue(reply), now)}` }
+      : { when, short }
   const client = clientDueOf(it)
   // a client's own date has passed: late, worked from that date
-  if (client < now) return { clock: 'late', at: client, when: clockAndDue(client, now), short: clockLead(client, now) }
+  if (client < now) return { clock: 'late', at: client, ...words(clockAndDue(client, now), clockLead(client, now)) }
   // ⛔ (0.7.61) a team clock that has passed reads behind, never late; the client's own date after it, when there is one
   const behind = internalBehindAt(it, now)
   const lead = leadDueOf(it, now)
   if (Number.isFinite(behind)) {
     const due = Number.isFinite(lead) ? `, due ${clockText(shownDue(lead), now)}` : ''
-    return { clock: 'behind', at: behind, when: `behind since ${dueWhen(behind, now)}${due}`, short: 'behind' }
+    return { clock: 'behind', at: behind, ...words(`behind since ${dueWhen(behind, now)}${due}`, 'behind') }
   }
   if (Number.isFinite(lead)) {
     const due = `due ${clockText(shownDue(lead), now)}`
-    return { clock: pinsFor(it, now) ? 'soon' : 'later', at: lead, when: due, short: due }
+    return { clock: pinsFor(it, now) ? 'soon' : 'later', at: lead, ...words(due, due) }
   }
   return { clock: 'none', at: Infinity, when: 'no due date', short: 'no due date' }
 }
@@ -162,6 +182,9 @@ export function youWhy(it: QueueItem, now: number, clock: YouRow['clock'], from:
   if (clock === 'late') parts.push('late on a client date')
   else if (clock === 'behind') parts.push('behind on a team clock')
   else if (clock === 'soon') parts.push('due within 24 business hours')
+  // ⛔ (0.7.81) a reply's row: what is due before the reply, with its own clock (`task 15d late, due Nov 9`), so it never disappears
+  const part = Number.isFinite(replyClock(it, from)) ? soonerPartOf(it) : null
+  if (part) parts.push(partClock(part, now))
   const what: Partial<Record<YouSource, string>> = {
     open: 'your reply left items open',
     noreply: 'package ready, no reply owed',
@@ -289,7 +312,7 @@ export function youPage(it: QueueItem, now: number): string {
 /** One item as its You row. */
 export function youRow(it: QueueItem, now: number, o: { pin?: RowPin | undefined; stillOpen?: readonly string[]; waiting?: string; target?: string } = {}): YouRow {
   const { ask, from } = youAsk(it, now, o.stillOpen)
-  const c = youClock(it, now)
+  const c = youClock(it, now, from)
   const pace = youPace(it, now)
   return {
     projectId: it.projectId,
