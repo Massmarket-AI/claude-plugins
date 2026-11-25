@@ -102,8 +102,16 @@ export type WorldOptions = {
   dismissFails?: boolean
   /** No tracker token on this computer. */
   noToken?: boolean
-  /** The system's opener: it takes the link (`works`), exits with an error (left out), or is not on this computer (`missing`). */
-  opener?: 'works' | 'missing'
+  /**
+   * The system's opener: it takes the link (`works`), exits with an error (left out: 1; (0.7.80) a number: that code), is not on
+   * this computer (`missing`), (0.7.80) is still running when its time is up (`hangs`), or cannot be started (`refused`).
+   */
+  opener?: 'works' | 'missing' | 'hangs' | 'refused' | number
+  /**
+   * (0.7.80) What `xdg-mime query default x-scheme-handler/claude` answers on Linux: a desktop file's name, '' or left out for
+   * none, `fails` for an error exit, `missing` when it is not on this computer.
+   */
+  handler?: string
   /** A shell command in this thread: it runs (left out), it runs and fails (`error`), or it is refused before it runs (`deny`). */
   bash?: 'error' | 'deny'
   /** The feed's HTTP status for each fetch (200 when left out). */
@@ -477,8 +485,18 @@ export function world(on: On, opts: WorldOptions = {}) {
       return { value: { exitCode: r.exitCode, stdout: r.stdout ?? '', stderr: r.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     ran.push(JSON.stringify(e))
+    // (0.7.80) the one question the bridge asks a Linux system after its opener failed
+    if (e.argv[0] === 'xdg-mime') {
+      if (opts.handler === 'missing') return { deny: 'spawn xdg-mime ENOENT' }
+      if (opts.handler === 'fails') return { value: { exitCode: 5, stdout: '', stderr: 'xdg-mime: no method available', isStdoutTruncated: false, isStderrTruncated: false } }
+      return { value: { exitCode: 0, stdout: opts.handler ? `${opts.handler}\n` : '\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (opts.opener === 'missing') return { deny: `spawn ${String(e.argv[0])} ENOENT` }
-    return { value: { exitCode: opts.opener === 'works' ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (opts.opener === 'hangs') return { deny: `Command timed out after 10000ms: ${String(e.argv[0])}` }
+    if (opts.opener === 'refused') return { deny: `spawn ${String(e.argv[0])} EACCES` }
+    const code = opts.opener === 'works' ? 0 : typeof opts.opener === 'number' ? opts.opener : 1
+    const stderr = code === 4 ? `xdg-open: no method available for opening '${String(e.argv.at(-1))}'\n` : ''
+    return { value: { exitCode: code, stdout: '', stderr, isStdoutTruncated: false, isStderrTruncated: false } }
   })
   /** Every shell command that reached the tool itself, as it reached it. */
   const shell: string[] = []
