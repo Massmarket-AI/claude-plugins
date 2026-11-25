@@ -1,5 +1,5 @@
 /**
- * (0.7.72) The "You" section's client rows, and the band's "next": one row per client that needs the person, saying what is needed
+ * (0.7.73) The "You" section's client rows, and the band's "next": one row per client that needs the person, saying what is needed
  * from them (the item's own ask, never "open the thread"), by when (business days), why it is pinned and whether it is. Rob,
  * 2026-11-24: "It should be an expansion of the U column that's always visible that we're working on, but have detail on all the
  * clients: needed by that team member, what's needed from them, by what deadline, why it's pinned." It replaces Needs you now.
@@ -49,7 +49,7 @@ import {
 } from './queue'
 import type { RowPin } from './threads'
 import { packageReady, rowPinWords } from './threads'
-import type { MmYouRow, MmYouSource } from '../types'
+import type { MmYouRow, MmYouSource, MmYouWait } from '../types'
 
 export type YouRow = MmYouRow
 export type YouSource = MmYouSource
@@ -130,7 +130,10 @@ export function youClock(it: QueueItem, now: number): { clock: YouRow['clock']; 
     const due = Number.isFinite(lead) ? `, due ${clockText(shownDue(lead), now)}` : ''
     return { clock: 'behind', at: behind, when: `behind since ${dueWhen(behind, now)}${due}`, short: 'behind' }
   }
-  if (Number.isFinite(lead)) return { clock: pinsFor(it, now) ? 'soon' : 'later', at: lead, when: `due ${clockText(shownDue(lead), now)}`, short: `due ${clockText(shownDue(lead), now)}` }
+  if (Number.isFinite(lead)) {
+    const due = `due ${clockText(shownDue(lead), now)}`
+    return { clock: pinsFor(it, now) ? 'soon' : 'later', at: lead, when: due, short: due }
+  }
   return { clock: 'none', at: Infinity, when: 'no due date', short: 'no due date' }
 }
 
@@ -168,6 +171,9 @@ export function youPin(pin: RowPin | undefined): Pick<YouRow, 'pin' | 'pinWhy'> 
   if (pin.pinned === true) return { pin: 'pinned' }
   return { pin: 'needs_pin', pinWhy: rowPinWords(pin).replace(/^not pinned(?::\s*)?/, '') || 'not pinned' }
 }
+
+/** The row's pin as the pane says it: `pinned`, `needs a pin: you unpinned it`, `no pin needed yet`. */
+export const youPinText = (r: Pick<YouRow, 'pin' | 'pinWhy'>): string => (r.pin === 'pinned' ? 'pinned' : r.pin === 'needs_pin' ? `needs a pin: ${r.pinWhy || 'not pinned'}` : 'no pin needed yet')
 
 /** One item as its You row. */
 export function youRow(it: QueueItem, now: number, o: { pin?: RowPin | undefined; stillOpen?: readonly string[]; waiting?: string; target?: string } = {}): YouRow {
@@ -217,9 +223,46 @@ export function youRows(items: readonly QueueItem[], now: number, o: { pins?: Re
     .sort(youSort)
 }
 
+/** (0.7.68) What a thread waits on, by the kind it declared (`mm waiting <type>`). */
+const WAIT_WORDS: Readonly<Record<string, string>> = { send: 'a go to send', money: 'a money call', 'only-you': 'something only you can do', risk: 'a risk call' }
+
+/**
+ * The threads that declared `mm waiting` (MmYouWait), into the rows: beside the client's own row when the thread is that client's (its
+ * why ends with the question), else a row of its own whose ask is the question, pinned (the declaration pins it), with no due date.
+ */
+export function withWaits(rows: readonly YouRow[], waits: readonly MmYouWait[] | undefined): YouRow[] {
+  const out = rows.map(r => ({ ...r }))
+  for (const w of Array.isArray(waits) ? waits : []) {
+    if (!w || typeof w.sid !== 'string' || typeof w.question !== 'string' || !w.question) continue
+    const question = cleanText(w.question, 120)
+    const mine = w.projectId ? out.find(r => r.projectId === w.projectId) : undefined
+    if (mine) {
+      if (!mine.why.includes('waiting on you')) mine.why = [mine.why, `waiting on you: ${question}`].filter(Boolean).join(' · ')
+      if (!mine.target) mine.target = w.sid
+      continue
+    }
+    if (out.some(r => r.target === w.sid)) continue
+    out.push({
+      projectId: w.projectId ?? w.sid,
+      client: cleanName(w.client) || 'a thread',
+      ask: `answer: ${question}`,
+      from: 'waiting',
+      when: 'no due date',
+      short: 'waiting on you',
+      clock: 'none',
+      at: null,
+      why: `waiting on you for ${WAIT_WORDS[w.type] ?? 'an answer'}`,
+      pin: 'pinned',
+      target: w.sid,
+    })
+  }
+  return out.sort(youSort)
+}
+
 /** The ask as the band shortens it: its first clause, at most 48 characters. */
 export function shortAsk(ask: string): string {
-  const first = ask.split(/:\s| \(/)[0] ?? ask
+  // a waiting thread's ask is its question: the question, not the word before it
+  const first = /^answer: /.test(ask) ? `answer: ${ask.slice(8)}` : (ask.split(/:\s| \(/)[0] ?? ask)
   const words = first.replace(/ about ".*$/, '')
   return [...words].length > 48 ? `${[...words].slice(0, 47).join('').trimEnd()}…` : words
 }

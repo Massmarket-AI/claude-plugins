@@ -3074,17 +3074,30 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 /**
+ * (0.7.73) The three New York formatters `etParts` uses, made once and kept: making them on every call cost about a millisecond
+ * each, and the You rows and the band call it many times a pass (the concurrency tests ran twice as long). Same output as before.
+ */
+let etFormatsMade: { date: Intl.DateTimeFormat; day: Intl.DateTimeFormat; time: Intl.DateTimeFormat } | null = null
+function etFormats(): { date: Intl.DateTimeFormat; day: Intl.DateTimeFormat; time: Intl.DateTimeFormat } {
+  etFormatsMade ??= {
+    date: new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }),
+    day: new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short' }),
+    time: new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }),
+  }
+  return etFormatsMade
+}
+
+/**
  * A moment in New York: its weekday (`Mon`), its calendar date as a key, its time (`3 PM`, `3:30 PM`), and (0.7.12) its
  * month and day (`Oct 14`) and its date as a whole number of days (`serial`), to count calendar days back by.
  */
 function etParts(t: number): { day: string; date: string; time: string; md: string; serial: number } {
   try {
     const d = new Date(t)
-    const date = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d)
-    const day = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short' }).format(d)
-    const time = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' })
-      .format(d)
-      .replace(':00', '')
+    const f = etFormats()
+    const date = f.date.format(d)
+    const day = f.day.format(d)
+    const time = f.time.format(d).replace(':00', '')
     const [m = 1, dd = 1, y = 1970] = date.split('/').map(Number)
     return { day, date, time, md: `${MONTHS[m - 1] ?? ''} ${dd}`, serial: Math.round(Date.UTC(y, m - 1, dd) / DAY) }
   } catch {

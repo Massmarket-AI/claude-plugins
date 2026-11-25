@@ -1,4 +1,4 @@
-// (0.7.72) The "You" strip in the bridge itself: worked out from the store, this session's usage and the worklog hook's record, drawn
+// (0.7.73) The "You" strip in the bridge itself: worked out from the store, this session's usage and the worklog hook's record, drawn
 // first in the side pane (desktop and mobile) and as one line in the band (desktop; the terminal's band has no buttons). Read-only. The
 // bridge against a pretend desktop app, feed and store (register-world.test-helper.ts); every client is made up.
 
@@ -6,7 +6,7 @@ import type { On } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 import type { Feed } from './queue'
 import type { WorldOptions } from './register-world.test-helper'
-import { NOW, LONG, SELF_CLI, PANE, BAND_PROPS, feed, world, mm, pane, bandOf, buttons, lines, tickOnce } from './register-world.test-helper'
+import { NOW, LONG, ACME, BOLT, CEDAR, ME, SELF_CLI, PANE, BAND_PROPS, ago, feed, thread, world, mm, pane, bandOf, buttons, lines, tickOnce } from './register-world.test-helper'
 
 const DECLARED = `/home/someone/.claude/mm-hooks/state/declarations/${SELF_CLI}.json`
 const clear = (): Feed => feed({ drafts: [], mail: [], tickets: {} })
@@ -30,7 +30,7 @@ const youWorld = (on: On, over: WorldOptions = {}) =>
 /** The strip's buttons, as [key, label]. */
 const strip = async (ui: Parameters<typeof buttons>[0]) => (await buttons(ui)).filter(([k]) => k.startsWith('mm-you:'))
 
-describe('0.7.72: the "You" strip at the top of the side pane', () => {
+describe('0.7.73: the "You" strip at the top of the side pane', () => {
   test('desktop: eight dots in order, each with its count; a press opens its line under the strip, a second press closes it', LONG, async ($, on) => {
     const w = youWorld(on)
     usage(on, { tokens: 340_000, five: 90, week: 20 })
@@ -135,7 +135,7 @@ describe('0.7.72: the "You" strip at the top of the side pane', () => {
   })
 })
 
-describe('0.7.72: the strip\'s one line in the band', () => {
+describe('0.7.73: the strip\'s one line in the band', () => {
   test('desktop: beside the band\'s own line when something is not green', LONG, async ($, on) => {
     const w = youWorld(on, { feed: feed({ drafts: [], tickets: {} }) })
     usage(on, { tokens: 300_000 })
@@ -173,6 +173,160 @@ describe('0.7.72: the strip\'s one line in the band', () => {
     usage(on, { tokens: 950_000 })
     const band = await $.ui.mount({ plugin: 'mm-bridge', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND_PROPS, isCollapsed: false } })
     expect((await lines(band)).some(l => l.includes('You:'))).toBe(false)
+    await band.unmount()
+  })
+})
+
+// ---------------------------------------------------------------- (0.7.73) the clients that need the person, in the You section
+
+const ACME_ROW_HEAD = "Acme Roofing: approve Acme Roofing's reply package"
+const BOLT_ROW_HEAD = 'Bolt Staffing: answer Client about "Question" (+1 more)'
+const CEDAR_ROW_HEAD = 'Cedar Dental: deliver "Send the intake form"'
+/** Acme's thread as the app lists it, linked, with the app's own link for it. */
+const LINK_A = 'claude://claude.ai/epitaxy/local_a'
+const acmeLinked = (over: WorldOptions = {}): WorldOptions => ({
+  threads: [{ ...thread('local_a', 'Roof quote', 1), link: LINK_A } as never],
+  ...over,
+  store: { 'mm.links': { [ACME]: 'local_a' }, ...(over.store ?? {}) },
+})
+/** The You rows' heads as drawn: a Text without a thread, the button that opens it with one. */
+const heads = async (ui: Parameters<typeof buttons>[0]) =>
+  (await ui.findAll({})).flatMap(e => (e.type === 'Text' && /^\d+\. /.test(e.text) ? [e.text] : e.type === 'Button' && String(e.key).startsWith('mm-you-open:') ? [String(e.props.label)] : []))
+
+describe('0.7.73: the You section replaces Needs you now', () => {
+  test('desktop: under the dots, one row per client, soonest deadline first, each with what is needed, by when, its pin and why', LONG, async ($, on) => {
+    const w = youWorld(on, { feed: feed() })
+    usage(on, { tokens: 10_000 })
+    await mm($, '')
+    const ui = await pane($)
+    await w.clock.advance(1_000)
+    const all = await lines(ui)
+    expect(all[0]).toBe('You')
+    expect(all).toContain('Needs you (3)')
+    expect(await heads(ui)).toEqual([`1. ${CEDAR_ROW_HEAD}`, `2. ${ACME_ROW_HEAD}`, `3. ${BOLT_ROW_HEAD}`])
+    // by when, in business time: today's clock, then tomorrow's
+    expect(all).toContain('due 4 PM')
+    expect(all).toContain('due Tue 8 AM')
+    expect(all).toContain('due Tue 9 AM')
+    // why, and the pin
+    expect(all.some(l => l.startsWith('· ') && l.includes('reply ready for your go'))).toBe(true)
+    expect(all.some(l => l.startsWith('· ') && l.includes('the client wrote'))).toBe(true)
+    expect(all.some(l => /^· (pinned|needs a pin: .+|no pin needed yet)$/.test(l))).toBe(true)
+    // no dropdown, and no Needs you now heading: the rows are always open; Team now stays closed below
+    const keys = (await buttons(ui)).map(([k]) => k)
+    expect(keys).not.toContain('mm-needs-toggle')
+    expect(all.some(l => l.startsWith('Needs you now'))).toBe(false)
+    expect((await buttons(ui)).find(([k]) => k === 'mm-teamnow-toggle')?.[1]).toMatch(/▸$/)
+    // each row keeps its own buttons under it: Start for a client with no thread, Drafts
+    expect(keys).toEqual(expect.arrayContaining([`start:${CEDAR}`, `drafts:${ACME}`, `start:${BOLT}`]))
+    await ui.unmount()
+  })
+
+  test('mobile: the same rows, in the same order', LONG, async ($, on) => {
+    const w = youWorld(on, { feed: feed() })
+    usage(on, { tokens: 10_000 })
+    await mm($, '')
+    const ui = await $.ui.mount({ plugin: 'mm-bridge', surface: 'mobile', component: 'Pane', requestId: 'mm-queue', props: PANE })
+    await w.clock.advance(1_000)
+    expect(await heads(ui)).toEqual([`1. ${CEDAR_ROW_HEAD}`, `2. ${ACME_ROW_HEAD}`, `3. ${BOLT_ROW_HEAD}`])
+    expect(await lines(ui)).toContain('Needs you (3)')
+    await ui.unmount()
+  })
+
+  test('a client with its own thread: a press on its row opens that thread, and nothing is sent, pinned or filled', LONG, async ($, on) => {
+    const w = youWorld(on, acmeLinked({ feed: feed() }))
+    usage(on, { tokens: 10_000 })
+    await mm($, '')
+    const ui = await pane($)
+    await w.clock.advance(1_000)
+    expect(await heads(ui)).toContain(`2. ${ACME_ROW_HEAD}`)
+    const acted = w.acted().length
+    await ui.press({ key: `mm-you-open:${ACME}` })
+    expect(w.ran.some(r => r.includes(LINK_A))).toBe(true)
+    expect(w.acted().slice(acted)).toEqual([])
+    expect(w.prompts).toEqual([])
+    expect(w.fills).toEqual([])
+    await ui.unmount()
+  })
+
+  test('late first, the most overdue first, in business days; a client date late reads late', LONG, async ($, on) => {
+    const late = (key: string, project: string, name: string, dueHoursAgo: number) => ({
+      message_id_key: key, received_at: ago(dueHoursAgo + 30), reply_due_at: ago(dueHoursAgo), sender: 'Kim Park <kim@example.com>',
+      subject: `Re: ${name} follow-up`, snippet: 'hi', project_id: project, project_name: name, reply_status: 'unanswered', project_owner_email: ME,
+    })
+    // Bolt was due 50 business hours ago (2d late), Acme 26 (1d late); Cedar's task is due today
+    const w = youWorld(on, { feed: feed({ drafts: [], mail: [late('a1', ACME, 'Acme Roofing', 26), late('b1', BOLT, 'Bolt Staffing (Sam)', 50)] }) })
+    usage(on, { tokens: 10_000 })
+    await mm($, '')
+    const ui = await pane($)
+    await w.clock.advance(1_000)
+    expect(await heads(ui)).toEqual(['1. Bolt Staffing: answer Kim Park about "Bolt Staffing (Sam) follow-up"', '2. Acme Roofing: answer Kim Park about "Acme Roofing follow-up"', `3. ${CEDAR_ROW_HEAD}`])
+    const all = await lines(ui)
+    expect(all.find(l => l.startsWith('2d late'))).toMatch(/^2d late, due /)
+    expect(all.find(l => l.startsWith('1d late'))).toMatch(/^1d late, due /)
+    await ui.unmount()
+  })
+
+  test('a thread that waits on the person (mm waiting): its question beside its client\'s row', LONG, async ($, on) => {
+    const w = youWorld(on, {
+      ...acmeLinked({ feed: feed() }),
+      store: {
+        'mm.links': { [ACME]: 'local_a' },
+        'mm.waiting': { local_a: { type: 'send', ask: 'Send the reply to Pat now', at: NOW } },
+        'mm.pins': { local_a: { projectId: ACME, client: 'Acme Roofing', byUs: true, waiting: true } },
+        'mm.rcpin': { on: true },
+      },
+    })
+    usage(on, { tokens: 10_000 })
+    await mm($, '')
+    const ui = await pane($)
+    await w.clock.advance(1_000)
+    await ui.unmount()
+    const again = await pane($)
+    await w.clock.advance(1_000)
+    expect((await lines(again)).some(l => l.includes('waiting on you: Send the reply to Pat now'))).toBe(true)
+    await again.unmount()
+  })
+})
+
+describe('0.7.73: the band says what needs you and what is next', () => {
+  test('desktop: Needs you: 3 and the soonest deadline as next; none of the lines about work the bridge does by itself', LONG, async ($, on) => {
+    const w = youWorld(on, acmeLinked({ feed: feed() }))
+    usage(on, { tokens: 10_000 })
+    await mm($, '')
+    const band = await bandOf($)
+    await w.clock.advance(1_000)
+    const all = await lines(band)
+    expect(all).toContain('Needs you: 3 · next:')
+    expect((await buttons(band)).find(([k]) => k === 'mm-next')?.[1]).toBe('Cedar Dental, deliver "Send the intake form", due 4 PM')
+    for (const gone of ['An update is ready to claim', "'s thread.", 'All threads started', 'chip is in', 'a chip is ready', 'Nothing needs you in the next 24 hours']) expect(all.some(l => l.includes(gone))).toBe(false)
+    expect((await buttons(band)).map(([, label]) => label)).not.toContain('All threads started')
+    await band.unmount()
+  })
+
+  test('next is the most overdue first; a press on it opens its thread, and nothing is sent', LONG, async ($, on) => {
+    const w = youWorld(on, acmeLinked({ feed: feed({ drafts: [], mail: [{ message_id_key: 'a1', received_at: ago(40), reply_due_at: ago(26), sender: 'pat@acme.example', subject: 'Roof', snippet: '', project_id: ACME, project_name: 'Acme Roofing', reply_status: 'unanswered', project_owner_email: ME }] }) }))
+    usage(on, { tokens: 10_000 })
+    await mm($, '')
+    const band = await bandOf($)
+    await w.clock.advance(1_000)
+    expect(await lines(band)).toContain('Needs you: 2 · 1 late · next:')
+    expect((await buttons(band)).find(([k]) => k === 'mm-next')?.[1]).toBe('Acme Roofing, answer Pat, 1d late')
+    const acted = w.acted().length
+    await band.press({ key: 'mm-next' })
+    expect(w.ran.some(r => r.includes(LINK_A))).toBe(true)
+    expect(w.acted().slice(acted)).toEqual([])
+    await band.unmount()
+  })
+
+  test('nothing needs the person: a few words, and no button', LONG, async ($, on) => {
+    const w = youWorld(on)
+    usage(on, { tokens: 10_000 })
+    await mm($, '')
+    const band = await bandOf($)
+    await w.clock.advance(1_000)
+    expect(await lines(band)).toContain('Nothing needs you right now.')
+    expect((await buttons(band)).map(([k]) => k)).not.toContain('mm-next')
     await band.unmount()
   })
 })

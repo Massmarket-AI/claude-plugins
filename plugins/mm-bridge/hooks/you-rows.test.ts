@@ -1,4 +1,4 @@
-// (0.7.72) The You section's client rows and the band's "next" (you.ts): what is needed, by when in business days, why, the pin, and the
+// (0.7.73) The You section's client rows and the band's "next" (you.ts): what is needed, by when in business days, why, the pin, and the
 // order. Pure functions over made-up items; every client is made up.
 
 import { describe, expect, test } from 'claude-code/testing'
@@ -31,7 +31,7 @@ const item = (over: Partial<QueueItem> & { client: string }): QueueItem => ({
 })
 const mail = (sender: string, subject: string, at = '2026-11-24T13:00:00Z') => ({ at, sender, subject, snippet: '' })
 
-describe('0.7.72: what is needed, from the item itself', () => {
+describe('0.7.73: what is needed, from the item itself', () => {
   test('a reply package ready for the go: approve the reply, to the newest sender, about their subject', () => {
     const it = item({ client: 'Crucial Hire', kind: 'ready', packageId: 'pkg', messages: 2, mail: [mail('Zach Hill <zach@crucial.example>', 'Re: Invite failures', '2026-11-24T14:00:00Z'), mail('amy@crucial.example', 'Older', '2026-11-23T14:00:00Z')] })
     expect(youAsk(it, NOW)).toEqual({ ask: 'approve the reply to Zach Hill about "Invite failures"', from: 'package' })
@@ -90,7 +90,7 @@ describe('0.7.72: what is needed, from the item itself', () => {
   })
 })
 
-describe('0.7.72: by when, in business days', () => {
+describe('0.7.73: by when, in business days', () => {
   test('due later today: the clock; a client date past: how late, and when it was due', () => {
     expect(youClock(item({ client: 'A', dueAt: Date.parse('2026-11-24T20:45:00Z') }), NOW)).toMatchObject({ clock: 'soon', when: 'due 3:45 PM', short: 'due 3:45 PM' })
     const late = youClock(item({ client: 'B', dueAt: Date.parse('2026-11-23T15:00:00Z') }), NOW)
@@ -115,7 +115,7 @@ describe('0.7.72: by when, in business days', () => {
   })
 })
 
-describe('0.7.72: the pin, and why', () => {
+describe('0.7.73: the pin, and why', () => {
   test('pinned; needs a pin, with the pane\'s own words; not on the pin report: no pin needed yet', () => {
     expect(youPin({ pinned: true })).toEqual({ pin: 'pinned' })
     expect(youPin({ pinned: false, why: 'person_unpinned' })).toEqual({ pin: 'needs_pin', pinWhy: 'you unpinned it' })
@@ -130,7 +130,7 @@ describe('0.7.72: the pin, and why', () => {
   })
 })
 
-describe('0.7.72: the order, and the band\'s next', () => {
+describe('0.7.73: the order, and the band\'s next', () => {
   const rows = youRows(
     [
       item({ projectId: P(1), client: 'Soon Co', dueAt: Date.parse('2026-11-24T20:45:00Z'), kind: 'ready', packageId: 'pkg' }),

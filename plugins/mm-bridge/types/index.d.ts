@@ -116,7 +116,7 @@ export type MmQueue = {
   /** (0.7.5) The viewer's internal queue, drawn under the list as `Your build queue · N`. Absent for a viewer with none. */
   build?: MmBuild
   /**
-   * (0.7.72) The You section's client rows: the list's clients, each with what is needed from the person, by when, why and its pin, late
+   * (0.7.73) The You section's client rows: the list's clients, each with what is needed from the person, by when, why and its pin, late
    * first and then by deadline (hooks/you.ts). It replaces the Needs you now dropdown. Absent on a list an older version stored.
    */
   you?: MmYouRow[]
@@ -298,11 +298,12 @@ export type MmNotice = { text: string; at: number }
  * something cluttering up that space telling us to open the side panel").
  */
 /**
- * (0.7.72) `head` and `next`: the band's first line as the desktop draws it, `Needs you: 7 · 2 late` and a button with the next client's
+ * (0.7.73) `head` and `next`: the band's first line as the desktop draws it, `Needs you: 7 · 2 late` and a button with the next client's
  * words that opens its thread (hooks/you.ts `youBand`); `rest`, the lines after it. `text` stays the whole band in one sentence, for a
- * surface with no button. `missing` is still counted, and no longer drawn (0.7.72: Start cards are made by themselves).
+ * surface with no button. `missing` is still counted; Start missing threads is drawn only while `unstarted` clients that need a thread
+ * have no Start card (0.7.73: the cards are made by themselves).
  */
-export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string; waiting?: string; head?: string; next?: { words: string; projectId: string; target?: string }; rest?: string }
+export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string; waiting?: string; head?: string; next?: { words: string; projectId: string; target?: string }; rest?: string; unstarted?: number }
 
 /**
  * (0.6.0) One line of the pane's Tracking part. `open`: the app thread (`local_…`) a press on the line opens, on a
@@ -488,30 +489,24 @@ export type MmCardAsked = { packageId: string; label: string; toolUseId: string;
  */
 export type MmCardFeedback = { label: string; said: 'sent' | 'busy' | 'go' | 'changed' | 'filled' | 'draft' | 'none' }
 
-/**
- * (0.7.71) The Ship row of the band: this thread's folder is a git checkout on a branch other than its default, with commits past the default
- * branch, and some of them not pushed (`unpushed`, every one of them when the branch has no upstream) or no pull request for the branch yet
- * (`pr: 'none'`). `pr` is what `gh pr view` said for the branch at `head` (`unknown`: gh is not here, or did not answer). Hidden (`show`
- * false) on the default branch, in a folder that is not a git checkout, and in the control tower, whose edits go to main with no PR.
- */
-export type MmShip = { show: boolean; branch: string; unpushed: number; pr: 'open' | 'merged' | 'closed' | 'none' | 'unknown'; head: string; at: number }
+/** (0.7.71 to 0.7.73) The band's Ship row's state, `ship`: gone in 0.7.73 (no Ship row). A value an older version left is never read. */
 
-/** (0.7.72) One dot of the "You" strip (hooks/health.ts): which, its level, its short count and the line a press shows. */
+/** (0.7.73) One dot of the "You" strip (hooks/health.ts): which, its level, its short count and the line a press shows. */
 export type MmYouDot = { key: 'pins' | 'late' | 'replies' | 'sessions' | 'fill' | 'tier' | 'track' | 'rc'; level: 'green' | 'amber' | 'red'; short: string; says: string }
 /**
- * (0.7.72) A thread that declared `mm waiting` and so waits on the person: its client's project when it is linked to one, its name, the
+ * (0.7.73) A thread that declared `mm waiting` and so waits on the person: its client's project when it is linked to one, its name, the
  * question, and the thread (`target`) a press opens. The You section shows it beside that client's row, or as a row of its own.
  */
 export type MmYouWait = { sid: string; projectId?: string; client: string; question: string; type: string }
 /**
- * (0.7.72) The strip as this thread last worked it out, the band's one line, the dot whose line is open in the pane, and the threads that
+ * (0.7.73) The strip as this thread last worked it out, the band's one line, the dot whose line is open in the pane, and the threads that
  * wait on the person (`mm waiting`).
  */
 export type MmYou = { dots: MmYouDot[]; line: string; at: number; open?: MmYouDot['key']; waits?: MmYouWait[] }
-/** (0.7.72) Where a You row's "what's needed" came from (hooks/you.ts). */
+/** (0.7.73) Where a You row's "what's needed" came from (hooks/you.ts). */
 export type MmYouSource = 'open' | 'noreply' | 'draft' | 'ok' | 'package' | 'mail' | 'ask' | 'eta' | 'owner' | 'go' | 'task' | 'pace' | 'queue' | 'none' | 'waiting'
 /**
- * (0.7.72) One client that needs the person, as the You section draws it (hooks/you.ts): what is needed (`ask`, from `from`), by when
+ * (0.7.73) One client that needs the person, as the You section draws it (hooks/you.ts): what is needed (`ask`, from `from`), by when
  * (`when` in the pane, `short` in the band), where it stands on its clock (`late` only for a client's date), the time it is ordered by
  * (`at`, null with none), why it needs them, and its pin: pinned, needs a pin (`pinWhy`), or no pin needed yet. `target`: the thread a
  * press opens.
@@ -562,7 +557,6 @@ declare module 'claude-code' {
       /** (0.7.38) The ready reply packages this thread's pane listed last: a new one scrolls the pane to its top. */
       seenPackages: string[]
       /** (0.7.71) The band's Ship row, as this thread's folder stood when last looked at. */
-      ship: MmShip
       you: MmYou
     }
   }

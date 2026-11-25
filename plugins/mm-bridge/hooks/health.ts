@@ -1,5 +1,5 @@
 /**
- * (0.7.72) The "You" strip: the person's own health as a row of small dots, at the top of the bridge's side pane, and one compact line in
+ * (0.7.73) The "You" strip: the person's own health as a row of small dots, at the top of the bridge's side pane, and one compact line in
  * the band beside "Needs you". Rob, 2026-11-24 ("Yep"), Phase 2c of the approved plan. ⛔ Read-only: it never sends, pins or unpins
  * anything, and it makes no sound.
  *

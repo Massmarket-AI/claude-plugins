@@ -1,4 +1,4 @@
-// (0.7.72) The "You" strip's indicators, each at and around its thresholds (health.ts). Every client is made up.
+// (0.7.73) The "You" strip's indicators, each at and around its thresholds (health.ts). Every client is made up.
 
 import { describe, expect, test } from 'claude-code/testing'
 import { FILL_AMBER, FILL_RED, TIERS, WEEK_MS, compactLine, compactPoint, fillDot, fillPercent, lateDot, pinsDot, rcDot, repliesDot, sessionsDot, strip, tierDot, tierOf, trackDot } from './health'
@@ -6,7 +6,7 @@ import { FILL_AMBER, FILL_RED, TIERS, WEEK_MS, compactLine, compactPoint, fillDo
 const NOW = Date.parse('2026-11-24T15:00:00Z')
 const resetIn = (ms: number) => new Date(NOW + ms).toISOString()
 
-describe('0.7.72: Pins', () => {
+describe('0.7.73: Pins', () => {
   test('all that need the person pinned: green; none: green', () => {
     expect(pinsDot([{ client: 'Acme Roofing', pinned: true }, { client: 'Bolt Staffing', pinned: true }])).toEqual({ key: 'pins', level: 'green', short: '2/2', says: 'All 2 threads that need you are pinned.' })
     expect(pinsDot([]).level).toBe('green')
@@ -19,7 +19,7 @@ describe('0.7.72: Pins', () => {
   })
 })
 
-describe('0.7.72: Late, in business days', () => {
+describe('0.7.73: Late, in business days', () => {
   test('nothing past due: green; a team clock behind: amber; a client date late: red', () => {
     expect(lateDot([]).level).toBe('green')
     expect(lateDot([{ client: 'Acme Roofing', clientClock: false }]).level).toBe('amber')
@@ -30,7 +30,7 @@ describe('0.7.72: Late, in business days', () => {
   })
 })
 
-describe('0.7.72: Replies ready, Sessions', () => {
+describe('0.7.73: Replies ready, Sessions', () => {
   test('replies: none green, any amber', () => {
     expect(repliesDot([]).level).toBe('green')
     expect(repliesDot(['Acme Roofing'])).toMatchObject({ level: 'amber', short: '1', says: '1 reply package is ready for your go: Acme Roofing.' })
@@ -41,7 +41,7 @@ describe('0.7.72: Replies ready, Sessions', () => {
   })
 })
 
-describe('0.7.72: This thread\'s fill', () => {
+describe('0.7.73: This thread\'s fill', () => {
   test(`the compaction point: the threshold, else the window measured against, else CLAUDE_CODE_AUTO_COMPACT_WINDOW, else the model's window`, () => {
     expect(compactPoint({ threshold: 450_000, rawMax: 500_000, envWindow: '400000', window: 1_000_000 })).toBe(450_000)
     expect(compactPoint({ rawMax: 500_000, envWindow: '400000', window: 1_000_000 })).toBe(500_000)
@@ -64,7 +64,7 @@ describe('0.7.72: This thread\'s fill', () => {
   })
 })
 
-describe('0.7.72: Plan usage tier, exactly usage-tier.mjs', () => {
+describe('0.7.73: Plan usage tier, exactly usage-tier.mjs', () => {
   const at = (five: number | null, week: number | null, resetMs = 3 * 24 * 3600 * 1000) =>
     tierOf([...(five !== null ? [{ kind: 'five_hour', percentUsed: five }] : []), ...(week !== null ? [{ kind: 'seven_day', percentUsed: week, resetsAt: resetIn(resetMs) }] : [])], NOW)
   test('the thresholds are the control tower\'s', () => {
@@ -107,7 +107,7 @@ describe('0.7.72: Plan usage tier, exactly usage-tier.mjs', () => {
   })
 })
 
-describe('0.7.72: Time tracking, Remote Control, and the band\'s one line', () => {
+describe('0.7.73: Time tracking, Remote Control, and the band\'s one line', () => {
   test('a declared task is green, none amber; Remote Control on green, off amber', () => {
     expect(trackDot('Phase 1 nurture copy').level).toBe('green')
     expect(trackDot(null).level).toBe('amber')
