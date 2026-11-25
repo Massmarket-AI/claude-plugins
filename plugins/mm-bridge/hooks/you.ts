@@ -30,6 +30,7 @@ import {
   clockText,
   cleanName,
   cleanText,
+  clientSections,
   committedCount,
   dueWhen,
   etaAsksOf,
@@ -225,7 +226,7 @@ export const YOU_DETAIL_MAX = 3
  * it), a teammate's ask, the tickets beyond the one the head names, and the hours (needed against paid a day, logged today, the
  * date). In that order, at most YOU_DETAIL_MAX.
  */
-export function youDetails(it: QueueItem, now: number, from: YouSource): string[] {
+export function youDetails(it: QueueItem, now: number, from: YouSource, max = YOU_DETAIL_MAX): string[] {
   const out: string[] = []
   const m = newestMail(it)
   if (m && it.messages > 0) {
@@ -237,9 +238,11 @@ export function youDetails(it: QueueItem, now: number, from: YouSource): string[
   }
   const o = it.open ?? null
   if (o && o.noReply !== true) {
+    // (0.7.77) a head that already says "send your draft" is not said again: only what it does not say
+    const said = from === 'draft'
     const parts = [
-      o.state === 'held_by_other' && o.by ? `${cleanText(o.by, 40)} holds it` : o.state === 'held_by_me' ? 'you hold it' : o.state === 'stale' ? 'out of date' : '',
-      o.unsent > 0 ? `${plural(o.unsent, 'draft')} ${o.state === 'held_by_me' || o.state === 'held_by_other' ? 'not sent' : 'ready'}` : '',
+      said ? '' : o.state === 'held_by_other' && o.by ? `${cleanText(o.by, 40)} holds it` : o.state === 'held_by_me' ? 'you hold it' : o.state === 'stale' ? 'out of date' : '',
+      said || o.unsent <= 0 ? '' : `${plural(o.unsent, 'draft')} ${o.state === 'held_by_me' || o.state === 'held_by_other' ? 'not sent' : 'ready'}`,
       o.newer > 0 ? `${plural(o.newer, 'message')} came after it` : '',
     ].filter(Boolean)
     if (parts.length) out.push(`Reply package: ${parts.join(' · ')}`)
@@ -264,7 +267,23 @@ export function youDetails(it: QueueItem, now: number, from: YouSource): string[
         : `Hours: needs ${hrs(p.need)} h a day, ${hrs(p.paid)} paid${p.logged !== null ? ` · ${hrs(p.logged)} h logged today` : ''}${by ? ` · due ${by}` : ''}`,
     )
   }
-  return out.slice(0, YOU_DETAIL_MAX)
+  return out.slice(0, max)
+}
+
+/**
+ * (0.7.77, Rob 2026-11-25: "it doesn't seem to be giving that much more new info under each item ... I think we need some more detail")
+ * What a row's Details opens: when we last wrote to the client, the reply package, the hours, then the client's whole part as its own
+ * thread shows it (`clientSections`: every message waiting with its words, the tasks, the asks, the follow-ups), as Markdown.
+ */
+export function youPage(it: QueueItem, now: number): string {
+  const client = cleanName(it.client) || 'the client'
+  const top: string[] = []
+  if (typeof it.lastOut === 'number' && Number.isFinite(it.lastOut) && it.lastOut > 0) top.push(`- We last wrote to ${client} ${agoWords(it.lastOut, now)} (${clockText(it.lastOut, now)}).`)
+  else top.push(`- Nothing we sent to ${client} is in the feed.`)
+  for (const line of youDetails(it, now, 'none', Infinity)) if (/^(Reply package|Hours):/.test(line)) top.push(`- ${line}`)
+  const rest = clientSections(it, now)
+  while (rest.length && rest[0] === '') rest.shift()
+  return [...top, ...(rest.length ? ['', ...rest] : [])].join('\n')
 }
 
 /** One item as its You row. */
@@ -285,6 +304,7 @@ export function youRow(it: QueueItem, now: number, o: { pin?: RowPin | undefined
     pace: pace.level,
     paceWords: pace.words,
     details: youDetails(it, now, from),
+    page: youPage(it, now),
     ...youPin(o.pin),
     ...(o.target ? { target: o.target } : {}),
   }
@@ -358,35 +378,5 @@ export function withWaits(rows: readonly YouRow[], waits: readonly MmYouWait[] |
   return out.sort(youSort)
 }
 
-/** The ask as the band shortens it: its first clause, at most 48 characters. */
-export function shortAsk(ask: string): string {
-  // a waiting thread's ask is its question: the question, not the word before it
-  const first = /^answer: /.test(ask) ? `answer: ${ask.slice(8)}` : (ask.split(/:\s| \(/)[0] ?? ask)
-  const words = first.replace(/ about ".*$/, '')
-  return [...words].length > 48 ? `${[...words].slice(0, 47).join('').trimEnd()}…` : words
-}
-
-/** What the band says when nothing needs the person. */
+/** What the You section says when nothing needs the person. */
 export const NOTHING_NEEDS_YOU = 'Nothing needs you right now.'
-/** And when something does, but none of it has a date. */
-export const NOTHING_DUE = 'nothing due'
-
-/**
- * The band's first line: `Needs you: 7 · 2 late` and the next row's words, `Crucial Hire, approve the reply, due 3:45 PM`, which the
- * band draws as the button that opens that thread. With nothing: NOTHING_NEEDS_YOU.
- */
-export function youBand(rows: readonly YouRow[]): { head: string; next?: { words: string; projectId: string; target?: string } } {
-  if (!rows.length) return { head: NOTHING_NEEDS_YOU }
-  const late = rows.filter(r => r.clock === 'late').length
-  const behind = rows.filter(r => r.clock === 'behind').length
-  const head = [`Needs you: ${rows.length}`, ...(late ? [`${late} late`] : []), ...(behind ? [`${behind} behind`] : [])].join(' · ')
-  // late first, then by deadline (`youSort`): the rows with no date come last, so with none dated, nothing is due. A thread's
-  // open question is next all the same (it waits on the person now); otherwise the band says so (Rob 2026-11-24: "with nothing
-  // due it says so in a few words")
-  const n = rows.find(r => r.at !== null) ?? rows.find(r => r.from === 'waiting')
-  if (!n) return { head: `${head} · ${NOTHING_DUE}` }
-  return { head, next: { words: `${n.client}, ${shortAsk(n.ask)}, ${n.short}`, projectId: n.projectId, ...(n.target ? { target: n.target } : {}) } }
-}
-
-/** The band's first line as one sentence, for a surface that draws no button. */
-export const youBandText = (b: ReturnType<typeof youBand>): string => (b.next ? `${b.head} · next: ${b.next.words}` : b.head)

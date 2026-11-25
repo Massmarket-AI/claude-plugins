@@ -18,7 +18,7 @@ import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
   LABEL, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, secondThreadSentence, startKickoff, threadLink, titleLooksLike, titleSuggestion,
-  REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, chipTitle, ownPackage, readyPackage, seenNow, selfUpdateAt, selfUpdateText, updatePace, waitingText,
+  REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, bandText, chipTitle, ownPackage, readyPackage, seenNow, selfUpdateAt, selfUpdateText, updatePace, waitingText,
   FRESH_THREAD_BYTES, draftsComing, freshParagraph, prepDue, replacedBy,
   buildHeading, buildMore, buildOf, buildShown,
   teamCount, teamHeading, teamOf, teamPane, teamPerson,
@@ -244,7 +244,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.76'
+export const VERSION = '0.7.77'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -574,7 +574,8 @@ const VIEW_NOTICE = 'Your thread list is now grouped by date, newest activity fi
 const THREAD_GONE = 'That thread is no longer available. The list has been refreshed.'
 /** What Claude is told when it calls the tool with a verb only the person may use. */
 const ONLY_THE_PERSON = {
-  update: 'Only the person can do this: press Update thread in the pane or type /mm update <client>.',
+  // (0.7.77) Needs you draws no Update (Rob 2026-11-25): the person types it, or picks it from the client's thread's right-click menu
+  update: 'Only the person can do this: they type /mm update <client>, or right-click in the client\'s thread and choose Update this thread.',
   start: 'Only the person starts a thread: they press Start thread in the pane or type /mm start <client>, which puts their words in the prompt box. On a turn the person typed to ask for it, call mm with "kickoffs <client>" (or "kickoffs" for every missing thread) and start each with start_session as it says.',
 } as const
 
@@ -4176,11 +4177,11 @@ import { agentListReadable, askedOf, busyOf, cardDrawable, cardHooks, cardOf, ca
 import { holderName } from './queue'
 import { ALERTS_DUE, ALERTS_EVERY_MS, ALERTS_SWITCH, ALERT_GAP_MS, ALERT_TITLE, SOUND_ASSET, SOUND_GAIN, alertedOf, alertsOn, claimDue, moreAlertText, pinAlertText, pinSig, planAlerts, waitingAlertText, waitingSig } from './alerts'
 import type { AlertDue, AlertPlan, NewPin } from './alerts'
-import { LEVEL_GLYPH, YOU_EVERY_MS, YOU_HEADING, compactLine, dotLabel, tierOf, youDots, youNeedsLook, youRed } from './health'
+import { LEVEL_GLYPH, YOU_EVERY_MS, YOU_HEADING, compactLine, dotLabel, tierOf, youDots } from './health'
 import type { Overdue } from './health'
 import { clientDueOf, internalBehindAt } from './queue'
 import type { MmYou, MmYouRow, MmYouWait } from '../types'
-import { NOTHING_NEEDS_YOU, withWaits, youBand, youBandText, youPace, youPinText, youRows } from './you'
+import { NOTHING_NEEDS_YOU, withWaits, youPace, youPinText, youRows } from './you'
 
 /**
  * The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that
@@ -5334,8 +5335,6 @@ const versionChecked = new Map<string, number>()
 /** (0.7.42) Whether a card's version (the whole hash, or the 12-character tag its page named) is this hash. */
 export const sameVersion = (current: string, sha: string): boolean => (current.length === 64 ? current === sha : current.length === 12 && sha.startsWith(current))
 
-/** (0.7.73) The band's line for an update the bridge could not send by itself: the one case it says anything about an update. */
-export const updateFailedNote = (client: string): string => `Couldn't update ${shownText(cleanName(client), 60) || 'a client'}'s thread by itself: press Update thread on its row.`
 
 /** (0.7.41) The button on the band's waiting line: it opens the side pane at the client's part, as Drafts does. */
 export const WAITING_OPEN = 'Open the side pane'
@@ -5346,11 +5345,6 @@ const TOLD_MAX = 200
 /** (0.7.41) What the chat and the band say while a reply package of the client waits in the side pane. */
 export const waitingLine = (client: string): string => `A reply package for ${shownText(cleanName(client), 60) || 'this client'} is waiting in the side pane. Open it there to read and sign it.`
 
-/**
- * (0.7.73) The band's You rows as last worked out, and what from: the band is drawn again after every sync and press in every thread, and
- * the rows' clock words take business-time sums. Kept for the minute they read true in.
- */
-let bandRowsMemo: { key: string; rows: MmYouRow[] } | null = null
 
 /** (R9) A client of the last sync with no thread of any kind (an older version's record: Start with no thread to act on). */
 function isFresh(last: Last, projectId: string): boolean {
@@ -5393,59 +5387,42 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
     const c = liveChip(chips, pid)
     return c ? placeOf(c) : undefined
   }
+  // (C2) the chips of the person's clients with a thread, held by other threads: one entry for each thread
+  const elsewhere = new Map<string, string>()
+  for (const c of chips) {
+    if (c.superseded || !c.auto || c.gen !== CHIP_GEN || c.threadId === me || links[c.projectId] === undefined) continue
+    if (!items.some(i => i.projectId === c.projectId)) continue
+    if (!elsewhere.has(c.threadId)) elsewhere.set(c.threadId, placeOf(c))
+  }
   // (0.5.4) this thread's own refresh failed after the sync on record: the band says so too, until a newer sync
   const { value: queue } = await $.state.get(QUEUE)
   const ownFailed = Boolean(queue?.warning && (queue.warnedAt ?? 0) >= last.at)
   const recOf = (pid: string) => storedRec(last, pid)
-  // (0.7.73, Rob 2026-11-24: "Updates happen on their own, and chips to start the needed threads also happen on their own, so should
-  // have something else there") The first line says what needs the person and what to do next: `Needs you: 7 · 2 late` and the next
-  // client's ask, late first and then by deadline, as the You section orders them (you.ts). No `An update is ready to claim`, no
-  // `Updated X's thread`, no line of where a chip is (C2, C3) and no Start missing threads: those happen by themselves, and the band
-  // says only when they fail.
-  const stale = Boolean(last.error) || !(Number.isFinite(last.at) && now - last.at <= STALE_SYNC_MS) || ownFailed
-  const stillOpen: Record<string, readonly string[]> = {}
-  const targets: Record<string, string> = {}
-  const needing = items.filter(needsYouNow)
-  for (const i of needing) {
-    const fast = fastState(i, now)
+  const linkedTarget = (i: QueueItem): boolean => {
     const t = recOf(i.projectId)?.target
-    if (fast?.state === 'still_open' && t && !t.suggested) stillOpen[i.projectId] = fast.items
-    if (t && !t.suggested && THREAD_ID.test(t.sid) && links[i.projectId] === t.sid) targets[i.projectId] = t.sid
+    return Boolean(t && !t.suggested && links[i.projectId] === t.sid)
   }
-  const { value: youState } = await $.state.get(YOU)
-  // the rows as the You section has them; worked out again only when the sync, the minute, the threads or the waits change (`bandRowsMemo`)
-  const memoKey = JSON.stringify([last.at, last.member, needing.length, Math.floor(now / 60_000), targets, Object.keys(stillOpen), youState?.waits ?? null])
-  if (bandRowsMemo?.key !== memoKey) bandRowsMemo = { key: memoKey, rows: withWaits(youRows(needing, now, { ...(last.rowPins ? { pins: last.rowPins } : {}), stillOpen, targets }), youState?.waits) }
-  const youNow = bandRowsMemo.rows
-  const first = youBand(youNow)
-  // ⛔ (R9) a failed or stale read is never an all-clear
-  const head = stale && !youNow.length ? '' : first.head
-  // what failed and needs the person: a client that needs a thread and has no Start card, an update that could not be sent, a stale read
-  const toStart = needingThreads(last, links, now)
-  const unstarted = toStart.filter(i => !liveChip(chips, i.projectId))
-  const problems: string[] = []
-  const one = noThread.length === 1 ? noThread[0] : undefined
-  if (one && !chipIn(one.projectId)) problems.push(`Open a thread for ${cleanName(one.client)} (due ${clockText(one.dueAt, now)}): type /mm start ${cleanName(one.client)}.`)
-  else if (unstarted.length > 1) problems.push(`${unstarted.length} clients need a thread and have no Start card: ${unstarted.slice(0, 3).map(i => cleanName(i.client)).join(', ')}${unstarted.length > 3 ? ` and ${unstarted.length - 3} more` : ''}.`)
-  // (0.5.7) the notes of the last NOTE_SHOW_MS: (0.7.73) an update that failed; never `Updated X's thread`, which an older version wrote
-  for (const n of await storeGet<BandNote[]>($, 'mm.notes', [])) if (n && typeof n.text === 'string' && now - n.at < NOTE_SHOW_MS && !String(n.key ?? '').startsWith('updated\n')) problems.push(n.text)
-  if (stale) problems.push(REFRESH_FAILED)
-  // (0.5.5) a later mod installed on this machine (`checkVersions`, no call from here): at the end of the first line, else alone
-  const newer = newerMod.get(await instanceId($))?.version
-  const newerText = newer ? `A newer Claude mod (${newer}) is installed: quit and reopen Claude to load it.` : ''
-  const headText = head ? youBandText({ ...first, head }) : ''
-  const rest = [...problems, ...(!headText && newerText ? [newerText] : [])].join(' ')
-  const text = [headText ? (newerText ? `${headText.replace(/\.$/, '')} · ${newerText}` : headText) : '', rest].filter(Boolean).join(' ')
+  const stillOpen = items.find(i => fastState(i, now)?.state === 'still_open' && Boolean(recOf(i.projectId)?.target) && !recOf(i.projectId)?.target?.suggested)
+  const update = items.find(i => recOf(i.projectId)?.state === 'update' && linkedTarget(i) && pinsFor(i, now))
+  const text = bandText({
+    pinned: Number(last.pinned) || 0,
+    // (fix round 1, L7) anything due within the window, with a thread or not, says Needs you
+    pinsNow: items.some(i => pinsFor(i, now)),
+    noThread: noThread.map(i => ({ client: cleanName(i.client), due: clockText(i.dueAt, now), chipIn: chipIn(i.projectId), chipHere: Boolean(me) && liveChip(chips, i.projectId)?.threadId === me })),
+    chipsElsewhere: [...elsewhere.values()],
+    stillOpen: stillOpen ? cleanName(stillOpen.client) : undefined,
+    update: update ? cleanName(update.client) : undefined,
+    stale: Boolean(last.error) || !(Number.isFinite(last.at) && now - last.at <= STALE_SYNC_MS) || ownFailed,
+    // (0.5.5) what this session's last look found (`checkVersions`): no call from here
+    newer: newerMod.get(await instanceId($))?.version || undefined,
+    // (0.5.7) the notes of the last NOTE_SHOW_MS
+    notes: (await storeGet<BandNote[]>($, 'mm.notes', [])).filter(n => n && typeof n.text === 'string' && now - n.at < NOTE_SHOW_MS).map(n => n.text),
+  })
   if (!text) return { text: '', at: last.at }
-  // (0.5.14) Start missing threads: counted as Start all counts them (`needingThreads`), and (0.7.11) the clients off the list whose
-  // thread is in another Claude profile; (0.7.73) drawn only while a client that needs a thread has no Start card
-  const missing = toStart.length + awayOffList(last, links).length
-  const shape: Pick<MmBand, 'head' | 'next' | 'rest' | 'unstarted'> = {
-    ...(head ? { head } : {}),
-    ...(head && first.next ? { next: first.next } : {}),
-    ...(rest || (headText && newerText) ? { rest: [headText && newerText ? newerText : '', rest].filter(Boolean).join(' ') } : {}),
-    ...(unstarted.length ? { unstarted: unstarted.length } : {}),
-  }
+  // (0.5.14) the Start missing threads button, always on the band: how many clients a press of it would start now, as
+  // Start all counts them (`needingThreads`); 0 draws All threads started
+  // (0.7.11) and the clients off the list whose thread is in another Claude profile, with none of their own here
+  const missing = needingThreads(last, links, now).length + awayOffList(last, links).length
   // In a waiting client's thread the line carries the button that opens its part of the pane.
   const mine = me ? ownerOf(me, links) : undefined
   const own = mine ? items.find(i => i.projectId === mine) : undefined
@@ -5456,7 +5433,7 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
   // (0.7.41) and, while a reply package of that client waits in the side pane, the line that says so (`waitingLine`): it goes
   // when the last sync no longer lists the package (sent, closed or handed on), as the package leaves the pane
   const waiting = own && closedHere && pickupOf(own) ? waitingLine(own.client) : ''
-  const band: MmBand = own ? { text, ...shape, ...(closedHere ? { drafts: true } : {}), at: last.at, missing, ...(waiting ? { waiting } : {}) } : { text, ...shape, at: last.at, missing }
+  const band: MmBand = own ? { text, ...(closedHere ? { drafts: true } : {}), at: last.at, missing, ...(waiting ? { waiting } : {}) } : { text, at: last.at, missing }
   // (0.7.25) and, in a client's own thread, why it is pinned or why no pin is needed
   const why = mine && me ? await whyHere($, last, mine, me, now) : ''
   return why ? { ...band, why } : band
@@ -5796,19 +5773,6 @@ async function declaredTask($: EngineInterface): Promise<string | null> {
     return key ? clean((await currentFor($, key))?.task ?? pendingTasks.get(key)) : null
   } catch {
     return null
-  }
-}
-
-/**
- * (0.7.73) The band's next, pressed: that client's thread opens (`openTracked`, the person's own press, as Open thread is), or with no
- * thread of its own, the list (/mm), where its row has Start. ⛔ Opens; never sends, pins or unpins.
- */
-async function pressNext($: EngineInterface, next: NonNullable<MmBand['next']>): Promise<void> {
-  try {
-    if (typeof next.target === 'string' && THREAD_ID.test(next.target)) await openTracked($, next.target)
-    else await runCommand($, 'queue', 'person', true)
-  } catch (err) {
-    await say($, errorText(err)).catch(() => {})
   }
 }
 
@@ -6911,8 +6875,6 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
       return
     }
     let why: string | null
-    // (0.7.73) the update failed (an error, not another thread or message going first): the band says so, as a problem
-    let failed = ''
     try {
       // ⛔ (0.5.11, Opus 10-15) the words for a send no person pressed for: the package is never taken (`auto`)
       // (0.7.14) a long thread is also asked to put up a card for a fresh one (`freshNote`)
@@ -6927,11 +6889,9 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
       why = r === null ? null : typeof r === 'object' ? 'a message to this client was already going out' : r
     } catch (err) {
       why = errorText(err)
-      failed = why
     }
     await settle(why === null, why ?? '')
     await logAuto($, `${why === null ? 'updated' : 'not updated'} ${client} (${pid}) sig ${sig} in ${sid}: ${made.reason}${why === null ? '' : `; ${short(why, 160)}`}`)
-    if (failed) await bandNote($, updateFailedNote(client), `failed\n${key}`)
     if (why !== null) return
     const at = await $.clock.now()
     sentHere.set(`${pid}\n${sid}`, signature)
@@ -6950,7 +6910,7 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
     settleLater($, `${sid}#auto`, async () => {
       if (!(await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]) await putSent($, pid, has)
     })
-    // ⛔ (0.7.73, Rob 2026-11-24: "Updates happen on their own") no band line for an update that went: only one that failed says so
+    await bandNote($, `Updated ${client}'s thread.`, `updated\n${key}`)
     // ⛔ (0.7.19) a session behind a later bridge that has run here runs no sync of its own accord: the sync after the update
     // is asked of the lease's holder (`askSync`: a request in the store, read at its next tick)
     if (behindBy(await instanceId($))) await askSync($).catch(err => noteFailure($, 'auto update: the sync after it', err))
@@ -8581,7 +8541,8 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
   }
   if (how.typed) {
     if (!target) return { said: `No thread for ${it.client} yet: use /mm start ${it.client}.` }
-    if (target.suggested) return { said: `No linked thread for ${it.client} yet. Press Update thread on its row to use "${cleanTitle(target.title)}", or type /mm start ${it.client}.` }
+    // (0.7.77) its row in Needs you has no Update: the person links the look-alike from inside it
+    if (target.suggested) return { said: `No linked thread for ${it.client} yet. To use "${cleanTitle(target.title)}", open it and type /mm link ${it.client} there; or type /mm start ${it.client}.` }
   } else {
     const refused = how.shown ? await anothers(how.shown) : null
     if (refused) return { said: refused }
@@ -8632,7 +8593,8 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
     return { said: `${it.client}'s thread already has this. Open "${cleanTitle(pass.live.get(target.sid)?.title ?? target.title)}" under Pinned.` }
   }
   const here = target.sid === (await selfId($))
-  if (here && how.typed) return { said: `You are already in ${it.client}'s thread. Press Update thread on its row in the pane to pick it up here.` }
+  // (0.7.77) its row in Needs you has no Update: the thread's right-click menu has it
+  if (here && how.typed) return { said: `You are already in ${it.client}'s thread. Right-click in it and choose ${MENU_UPDATE} to pick it up here.` }
 
   const failed = (why: string): Answer => ({ said: `Could not send to ${it.client}'s thread: ${why}` })
   // ⛔ (0.7.44, Rob 2026-11-10: "If needed, the threads can detach themselves") a thread the app shows as a child detaches itself
@@ -9300,6 +9262,19 @@ async function togglePanel($: EngineInterface, key: keyof Panel, wasOpen: boolea
   }
 }
 
+/** (0.7.77) A You row's Details opened, or closed again, in this thread: at most 20 kept open. Nothing is fetched, called or changed. */
+async function toggleYou($: EngineInterface, projectId: string): Promise<void> {
+  try {
+    const { value } = await $.state.get(FOLDS)
+    const open = new Set(Array.isArray(value?.you) ? value.you.filter(k => typeof k === 'string') : [])
+    if (open.has(projectId)) open.delete(projectId)
+    else open.add(projectId)
+    await $.state.set(FOLDS, { ...(value ?? {}), you: [...open].slice(-20) } satisfies MmFolds)
+  } catch {
+    // a part that does not open is not worth an error
+  }
+}
+
 /** (0.7.5) A task of the time list opened to its threads, or closed again: at most 20 kept open. */
 async function toggleTask($: EngineInterface, key: string): Promise<void> {
   try {
@@ -9431,7 +9406,7 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
     await $.store.set('mm.autostart', { on: arg === 'on' })
     return arg === 'on'
       ? 'Auto-update is on: a client\'s thread is updated by itself when something new arrives, an old thread too. A client with no thread gets a card to start it.'
-      : 'Auto-update is off: a client\'s thread waits for you to press Update. A client with no thread gets a card to start it.'
+      : 'Auto-update is off: a client\'s thread waits for you to type /mm update <client>. A client with no thread gets a card to start it.'
   }
   // (0.5.19, Rob 10-20) whether Remote Control follows the pin on this computer (off unless turned on)
   if (verb === 'rc') {
@@ -11732,7 +11707,7 @@ export const register: Register = on => {
           ANSWER_TOOL_TEXT +
           ' ' +
           RUN_WAIT_TOOL_TEXT +
-          ' Updating a thread is for the person only: they press Update in the pane or type /mm update <client>. Use it only when the person asks; it never sends anything to a client.',
+          ' Updating a thread is for the person only: they type /mm update <client>, or choose Update this thread in its right-click menu. Use it only when the person asks; it never sends anything to a client.',
         inputSchema: { type: 'object', properties: { args: { type: 'string', description: 'what follows /mm' } } },
         isDeferred: false,
       })
@@ -11933,32 +11908,23 @@ export const register: Register = on => {
     const { value: band } = await $.state.get(BAND)
     const { value: nudge } = await $.state.get(NUDGE)
     const { value: lineAsk } = await $.state.get(LINE)
-    // (0.7.73) the "You" strip's one line, beside the band's own when something is not green; alone only for something red
-    const { value: you } = await $.state.get(YOU)
-    if (!you) void youPass($)
-    const youNow = you && Array.isArray(you.dots) ? you.dots : []
-    const youLine = youNow.length && youNeedsLook(youNow) && typeof you?.line === 'string' ? you.line : ''
-    const youAlone = Boolean(youLine) && youRed(youNow) && !band?.text
     const asking = Boolean(nudge?.show)
     const lining = !asking && Boolean(lineAsk?.show && lineAsk.client && lineAsk.signal)
     // nothing to say, or a survey holds the band: the engine's own
-    if (e.props.hasSurvey || (!band?.text && !asking && !lining && !youAlone)) return next(e)
+    if (e.props.hasSurvey || (!band?.text && !asking && !lining)) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e) as Partial<ReturnType<typeof $.ui.resolve>> & Pick<ReturnType<typeof $.ui.resolve>, 'Box' | 'Text'>
     const missing = Number(band?.missing) || 0
-    // (0.7.73) the first line as `Needs you: 7 · 2 late` and a button with the next client's words, which opens its thread
-    const nextUp = band?.next && typeof band.next.words === 'string' && band.next.words ? band.next : null
-    const head = typeof band?.head === 'string' && band.head ? band.head : ''
     // a surface that draws no button there says how to open the list instead
     const row = !band?.text ? null : !Button ? (
-      <Text>{youLine ? `${bandWords(band.text, false)} · ${youLine}` : bandWords(band.text, false)}</Text>
+      <Text>{bandWords(band.text, false)}</Text>
     ) : (
-      <Box flexDirection="row" flexWrap="wrap" gap={1}>
-        {head ? <Text>{nextUp ? `${head} · next:` : head}</Text> : null}
-        {head && nextUp ? <Button key="mm-next" plain label={nextUp.words} onPress={() => void pressNext($, nextUp)} /> : null}
-        {head ? (typeof band.rest === 'string' && band.rest ? <Text>{band.rest}</Text> : null) : <Text>{band.text}</Text>}
-        {youLine ? <Text key="mm-you-line" dimColor>{youLine}</Text> : null}
-        {/* (0.7.73) Start missing threads only while a client that needs a thread has no Start card: the cards come by themselves */}
-        {missing > 0 && (Number(band.unstarted) || 0) > 0 ? <Button key="mm-start-missing" label={startMissingLabel(missing)} variant="primary" onPress={() => void pressStartAll($)} /> : null}
+      <Box flexDirection="row" gap={1}>
+        <Text>{bandWords(band.text, true)}</Text>
+        {missing > 0 ? (
+          <Button key="mm-start-missing" label={startMissingLabel(missing)} variant="primary" onPress={() => void pressStartAll($)} />
+        ) : (
+          <Button key="mm-start-missing" label={startMissingLabel(0)} dimColor onPress={() => void pressStartAll($)} />
+        )}
         {/* (0.7.41) while a package waits, its own line carries the button that opens the pane */}
         {band.drafts && !band.waiting ? <Button key="mm-open-drafts" label="Drafts" onPress={() => void openDrafts($)} /> : null}
       </Box>
@@ -12006,17 +11972,18 @@ export const register: Register = on => {
       </Box>
     )
     const asks = ask ?? lineRow
-    const youRow = youAlone ? <Text key="mm-you-alone">{youLine}</Text> : null
-    if ([line, asks, youRow].filter(Boolean).length > 1) {
+    // (0.7.73) no Ship row (Rob 2026-11-24: "Why would we need a button for that?"), and (Rob 2026-11-25: "I also didn't want to add the U
+    // panel above where I type ... The way it was before was good for that"; "basically what it was doing before was good, and the Start
+    // Missing Threads button for when threads need to be started") nothing of the You section here: the band is as it was before 0.7.71
+    if ([line, asks].filter(Boolean).length > 1) {
       return (
         <Box flexDirection="column">
           {line}
-          {youRow}
           {asks}
         </Box>
       )
     }
-    return line ?? youRow ?? asks ?? next(e)
+    return line ?? asks ?? next(e)
   })
 
   // The pane an older version opened for a client's drafts: a thread that still has it open sees the
@@ -12110,7 +12077,7 @@ export const register: Register = on => {
       </Box>
     )
     /** A row's note, its browser lines, what our reply left open, and its buttons: under a row of the groups and under a You row. */
-    const rowTail = (row: Row) => (
+    const rowTail = (row: Row, verbs: (v: RowButton) => boolean = () => true) => (
       <Box flexDirection="column">
         {row.note ? <Text dimColor>{row.note}</Text> : null}
         {/* (0.7.53) Working manually in browser, beside the client's row: the site, the page title, and whether a thread covers it */}
@@ -12125,7 +12092,7 @@ export const register: Register = on => {
           : null}
         {isStillOpenRow(row) ? (row.stillOpen as string[]).map(item => <Text dimColor>{`- ${item}`}</Text>) : null}
         <Box flexDirection="row" gap={1}>
-          {rowButtons(row).map(verb =>
+          {rowButtons(row).filter(verbs).map(verb =>
             verb === 'drafts' ? (
               <Button key={`${verb}:${row.projectId}`} label={LABEL[verb]} onPress={() => void press($, verb, row)} />
             ) : (
@@ -12147,7 +12114,8 @@ export const register: Register = on => {
         <Box key={`mm-you-row:${r.projectId}`} flexDirection="column" marginTop={1}>
           <Box flexDirection="row" gap={1}>
             {r.pin !== 'later' ? <Text color={r.pin === 'pinned' ? 'success' : 'warning'}>{r.pin === 'pinned' ? '●' : '○'}</Text> : null}
-            {r.target ? <Button key={`mm-you-open:${r.projectId}`} plain label={head} onPress={() => void openTracked($, r.target as string)} /> : <Text>{head}</Text>}
+            {/* (0.7.77, Rob 2026-11-25: "I would just click the thread in the left-hand panel if I needed to get to it") no press */}
+            <Text>{head}</Text>
           </Box>
           {/* (0.7.73) one line: on pace to finish on time (its dot carries the colour), by when, the pin, and why; red where it is late */}
           {r.clock === 'late' ? <Text color="error">{youMeta(r)}</Text> : <Text dimColor>{youMeta(r)}</Text>}
@@ -12157,9 +12125,20 @@ export const register: Register = on => {
               {r.details.map(d => <Text dimColor>{`  ${d}`}</Text>)}
             </Box>
           ) : null}
+          {/* (0.7.77, Rob 2026-11-25: "I think we need some more detail") the client's whole part, one press away, under its row */}
+          {typeof r.page === 'string' && r.page ? (
+            <Button key={`mm-you-more:${r.projectId}`} plain label={`  Details  ${openYou.has(r.projectId) ? '▾' : '▸'}`} onPress={() => void toggleYou($, r.projectId)} />
+          ) : null}
+          {typeof r.page === 'string' && r.page && openYou.has(r.projectId) ? (
+            <Box key={`mm-you-page:${r.projectId}`} flexDirection="column" marginLeft={2}>
+              <Markdown text={r.page} />
+            </Box>
+          ) : null}
           {/* the row's own second line where it has one: drafts not sent, why Update goes to a look-alike thread, when it updates itself */}
           {row && rowDetail(row) ? <Text dimColor>{rowDetail(row)}</Text> : null}
-          {row ? rowTail(row) : null}
+          {/* ⛔ (0.7.77, Rob 2026-11-25: "I don't think we need the Update and Open Thread buttons, or the Draft button ... in the
+              'Needs You'") only what has no thread to click in the app's list: Start, Restore, and Claim for what a reply left open */}
+          {row ? rowTail(row, verb => verb !== 'update' && verb !== 'open' && verb !== 'drafts') : null}
         </Box>
       )
     }
@@ -12281,7 +12260,7 @@ export const register: Register = on => {
     // (0.7.53) a browser line goes under its client's first drawn row: Needs you now while open, then the groups opened; the rest in one block
     if (hasList && queue) {
       // (0.7.73) the You section's rows, in its order (a list an older version stored: Needs you now's, while open)
-      const youDrawn = youList ? youList.map(r => queue.rows.find(x => x.projectId === r.projectId)).filter((r): r is Row => Boolean(r)) : needsOpen ? rowGroups(queue.rows).flatMap(g => g.rows.map(r => r.row)) : []
+      const youDrawn = youList ? (needsOpen ? youList.map(r => queue.rows.find(x => x.projectId === r.projectId)).filter((r): r is Row => Boolean(r)) : []) : needsOpen ? rowGroups(queue.rows).flatMap(g => g.rows.map(r => r.row)) : []
       const drawnRows = [...youDrawn, ...groups.filter(g => folds?.[g.key]).flatMap(g => g.rows.map(r => r.row))]
       for (const r of drawnRows) if (!browserHome.has(r.projectId)) browserHome.set(r.projectId, r)
     }
@@ -12298,6 +12277,7 @@ export const register: Register = on => {
     const trackOpen = folds?.track === true
     const moreOpen = folds?.more === true
     const openTasks = new Set(Array.isArray(folds?.tasks) ? folds.tasks : [])
+    const openYou = new Set(Array.isArray(folds?.you) ? folds.you : [])
     const trackBody = tracking ? tracking.lines.filter(l => l.part !== 'more') : []
     const trackMore = tracking ? tracking.lines.filter(l => l.part === 'more') : []
     const drawTrack = (l: MmTrackLine, n: number) => {
@@ -12332,7 +12312,8 @@ export const register: Register = on => {
         {/* (0.7.34, Rob 2026-11-07: "Beside saying 'Needs you now,' it can say if there are any threads not started and have a 'Start missing threads' button only.") */}
         {hasList && queue ? (
           <Box key="mm-needs-head" flexDirection="row" flexWrap="wrap" gap={1} {...(youList && youShown.length ? { marginTop: 1 } : {})}>
-            {youList ? <Text bold>{youList.length ? `Needs you (${youList.length})` : NOTHING_NEEDS_YOU}</Text> : queue.rows.length ? <Button key="mm-needs-toggle" plain label={`${queue.header}  ${needsOpen ? '▾' : '▸'}`} onPress={() => void togglePanel($, 'needs', needsOpen)} /> : <Text bold>{queue.header}</Text>}
+            {/* (0.7.77, Rob 2026-11-25: "Need you: still needs to be collapsible") a fold again, remembered as Needs you now's was */}
+            {youList ? youList.length ? <Button key="mm-needs-toggle" plain label={`Needs you (${youList.length})  ${needsOpen ? '▾' : '▸'}`} onPress={() => void togglePanel($, 'needs', needsOpen)} /> : <Text bold>{NOTHING_NEEDS_YOU}</Text> : queue.rows.length ? <Button key="mm-needs-toggle" plain label={`${queue.header}  ${needsOpen ? '▾' : '▸'}`} onPress={() => void togglePanel($, 'needs', needsOpen)} /> : <Text bold>{queue.header}</Text>}
             {offer > 0 ? <Text dimColor>{notStartedText(offer)}</Text> : null}
             {offer > 0 ? <Button key="mm-start-all" label={START_MISSING} variant="primary" onPress={() => void pressStartAll($)} /> : null}
           </Box>
@@ -12343,7 +12324,7 @@ export const register: Register = on => {
         {hasList && queue?.warning ? <Text>{queue.warning}</Text> : null}
         {/* ⛔ (0.7.59, Rob 2026-11-16: "Yes, build it") the pins the app refused, and what the person can do about it */}
         {hasList && queue && refusedPinCount(queue.rows) > 0 ? <Text color="warning">{refusedPinsText(refusedPinCount(queue.rows))}</Text> : null}
-        {youList ? youList.map((r, i) => drawYou(r, i + 1)) : hasList && queue && needsOpen ? rowGroups(queue.rows).flatMap(group => group.rows.map(({ row, n, mark }) => drawRow(row, `${mark}${n}.`))) : null}
+        {youList ? (needsOpen ? youList.map((r, i) => drawYou(r, i + 1)) : null) : hasList && queue && needsOpen ? rowGroups(queue.rows).flatMap(group => group.rows.map(({ row, n, mark }) => drawRow(row, `${mark}${n}.`))) : null}
       </Box>
     )
     // ⛔ (0.7.38) a reply package drawn here comes before everything (`revealNewPackages` scrolls the pane to it); the rest of the
