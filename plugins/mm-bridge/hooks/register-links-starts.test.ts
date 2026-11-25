@@ -7311,7 +7311,7 @@ describe('New people: the founder and a PM route, start or dismiss someone no pr
       // (0.7.5) the list first, then the section
       // (0.7.73) each row is its head and its line of pace
       expect([drawn[1], drawn[3], drawn[5]]).toEqual([`1. ${CEDAR_FRESH}`, `2. ${ACME_FRESH}`, `3. ${BOLT_FRESH}`])
-      expect([drawn[2], drawn[4], drawn[6]].every(l => YOU_META.test(l))).toBe(true)
+      expect([drawn[2], drawn[4], drawn[6]].every(l => YOU_META.test(l ?? ''))).toBe(true)
       expect(drawn.slice(7, 7 + SECTION.length)).toEqual(SECTION)
       expect(await peopleButtons(ui)).toEqual([...directoryButtons(MARCUS), ...personButtons(PRIYA), ...personButtons(DANA)])
       expect((await ui.findAll({ type: 'Link' })).map(l => [l.props.label, l.props.href])).toEqual([
