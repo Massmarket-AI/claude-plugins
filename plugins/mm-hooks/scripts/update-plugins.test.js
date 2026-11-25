@@ -25,6 +25,7 @@ const SCRIPT = path.join(SCRIPTS, "update-plugins.js");
 const HOUR = 60 * 60 * 1000;
 const HOOKS = "mm-hooks@massmarket";
 const BRIDGE = "mm-bridge@massmarket";
+const THEME = "massmarket-theme@massmarket";
 
 const tmp = (prefix) => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -93,7 +94,8 @@ function latestServer(versions) {
 
 /**
  * A fake `claude` that appends { args, cwd } to argv.log. cfg: failOn (an argv prefix that exits 1 with failMessage),
- * sleepMs, and bump ({ <id>: version } that `plugin update <id>` writes into installed_plugins.json, as the real CLI does).
+ * sleepMs, bump ({ <id>: version } that `plugin update <id>` writes into installed_plugins.json, as the real CLI does) and
+ * installs ({ <id>: version } that `plugin install <id>` adds there as a user-scope row).
  */
 function fakeCli(cfg = {}) {
   const dir = tmp("mm-up-cli-");
@@ -112,6 +114,13 @@ if (args[0] === "plugin" && args[1] === "update" && cfg.bump && cfg.bump[args[2]
   const file = path.join(process.env.MM_HOOK_HOME, ".claude", "plugins", "installed_plugins.json");
   const doc = JSON.parse(fs.readFileSync(file, "utf8"));
   for (const row of doc.plugins[args[2]]) if (row.scope === "user") row.version = cfg.bump[args[2]];
+  fs.writeFileSync(file, JSON.stringify(doc, null, 2));
+}
+if (args[0] === "plugin" && args[1] === "install" && cfg.installs && cfg.installs[args[2]]) {
+  const file = path.join(process.env.MM_HOOK_HOME, ".claude", "plugins", "installed_plugins.json");
+  let doc = { version: 2, plugins: {} };
+  try { doc = JSON.parse(fs.readFileSync(file, "utf8")); } catch (_) {}
+  doc.plugins[args[2]] = [{ scope: "user", version: cfg.installs[args[2]], installedAt: new Date().toISOString() }];
   fs.writeFileSync(file, JSON.stringify(doc, null, 2));
 }
 process.stdout.write("done\\n");
@@ -200,9 +209,11 @@ test("current: no CLI call, result current, nothing printed", async () => {
     assert.deepEqual(su.plugins[HOOKS], { from: "1.0.10", latest: "1.0.10", action: "current" });
     assert.deepEqual(su.plugins[BRIDGE], { from: "0.6.0", latest: "0.6.0", action: "current" });
     assert.equal(su.behind_since, undefined);
-    assert.equal(srv.hits.length, 2);
+    assert.deepEqual(su.plugins[THEME], { action: "install-waiting" }, "the theme is not on this fake GitHub: no install yet");
+    assert.equal(su.install_once[THEME].state, "waiting");
+    assert.equal(srv.hits.length, 3);
     assert.equal(logLines(home).length, 1);
-    assert.match(logLines(home)[0], / current mm-hooks:current:1\.0\.10 mm-bridge:current:0\.6\.0$/);
+    assert.match(logLines(home)[0], / current mm-hooks:current:1\.0\.10 mm-bridge:current:0\.6\.0 massmarket-theme:install-waiting$/);
     assert.equal(settingsBytes(home), before, "settings.json untouched");
     assert.equal(fs.existsSync(path.join(hookDir(home), "plugin-update.lock")), false, "the lock is released");
   } finally {
@@ -234,7 +245,7 @@ test("behind with auto-update off: marketplace update, then plugin update for th
     assert.deepEqual(su.plugins[BRIDGE], { from: "0.6.0", latest: "0.6.1", to: "0.6.1", action: "updated" });
     assert.equal(su.plugins[HOOKS].action, "current");
     assert.equal(su.behind_since, undefined, "nothing is behind any more");
-    assert.match(logLines(home)[0], / updated mm-hooks:current:1\.0\.10 mm-bridge:updated:0\.6\.0->0\.6\.1 cli=MM_CLAUDE_BIN$/);
+    assert.match(logLines(home)[0], / updated mm-hooks:current:1\.0\.10 mm-bridge:updated:0\.6\.0->0\.6\.1 massmarket-theme:install-waiting cli=MM_CLAUDE_BIN$/);
     assert.equal(settingsBytes(home), before, "settings.json untouched");
   } finally {
     await srv.close();
@@ -555,6 +566,268 @@ test("⛔ a held lock: the check does nothing; a lock older than 20 minutes is t
   }
 });
 
+// ───────────────────────────────────────────────────────────── install once: massmarket-theme (Rob, 2026-11-24)
+
+/** The record of the install-once plugin, and the CLI calls that named it. */
+const themeRecord = (home) => statusOf(home).self_update.install_once[THEME];
+const themeCalls = (cli) => cli.calls().filter((c) => c.args.indexOf(THEME) !== -1);
+/** Take the theme out of installed_plugins.json, as `claude plugin uninstall` does. */
+const removeTheme = (home) => {
+  const doc = installedOf(home);
+  delete doc.plugins[THEME];
+  fs.writeFileSync(path.join(home, ".claude", "plugins", "installed_plugins.json"), JSON.stringify(doc));
+};
+
+test("install once: a computer that never had the theme gets it once, at user scope, last, never -y", async () => {
+  const srv = await latestServer({ "mm-hooks": "1.0.11", "mm-bridge": "0.6.0", "massmarket-theme": "0.6.1" });
+  try {
+    const home = makeHome();
+    const cli = fakeCli({ bump: { [HOOKS]: "1.0.11" }, installs: { [THEME]: "0.6.1" } });
+    const env = envFor(home, { MM_CLAUDE_BIN: cli.bin, MM_PLUGIN_LATEST_BASE: srv.base });
+    await runChild(env);
+    assert.deepEqual(
+      cli.calls().map((c) => c.args),
+      [
+        ["plugin", "marketplace", "update", "massmarket"],
+        ["plugin", "update", HOOKS, "--scope", "user"],
+        ["plugin", "install", THEME, "--scope", "user"],
+      ],
+      "one marketplace refresh, the update, then the install last"
+    );
+    noYes(cli.calls());
+    for (const c of cli.calls()) assert.equal(c.cwd, fs.realpathSync(home));
+    const su = statusOf(home).self_update;
+    assert.equal(su.result, "updated");
+    assert.deepEqual(su.plugins[THEME], { latest: "0.6.1", to: "0.6.1", action: "installed" });
+    assert.equal(su.plugins[HOOKS].action, "updated");
+    assert.equal(themeRecord(home).state, "installed");
+    assert.equal(themeRecord(home).attempts, 1);
+    assert.equal(themeRecord(home).version, "0.6.1");
+    assert.match(logLines(home)[0], / updated mm-hooks:updated:1\.0\.10->1\.0\.11 mm-bridge:current:0\.6\.0 massmarket-theme:installed:0\.6\.1 cli=MM_CLAUDE_BIN$/);
+
+    // The next check: it is installed, so it is only kept current like the others.
+    await runChild(env);
+    assert.equal(themeCalls(cli).length, 1, "installed once, and only once");
+    assert.deepEqual(statusOf(home).self_update.plugins[THEME], { from: "0.6.1", latest: "0.6.1", action: "current" });
+    assert.equal(themeRecord(home).state, "installed");
+
+    // Alone (nothing else due): the install still refreshes the marketplace first, and the result says installed.
+    const home2 = makeHome();
+    const srv2 = await latestServer({ "mm-hooks": "1.0.10", "mm-bridge": "0.6.0", "massmarket-theme": "0.6.1" });
+    try {
+      const cli2 = fakeCli({ installs: { [THEME]: "0.6.1" } });
+      await runChild(envFor(home2, { MM_CLAUDE_BIN: cli2.bin, MM_PLUGIN_LATEST_BASE: srv2.base }));
+      assert.deepEqual(cli2.calls().map((c) => c.args), [["plugin", "marketplace", "update", "massmarket"], ["plugin", "install", THEME, "--scope", "user"]]);
+      assert.equal(statusOf(home2).self_update.result, "installed");
+    } finally {
+      await srv2.close();
+    }
+  } finally {
+    await srv.close();
+  }
+});
+
+test("⛔ install once: removed after it was installed, it is never installed again", async () => {
+  const srv = await latestServer({ "mm-hooks": "1.0.10", "mm-bridge": "0.6.0", "massmarket-theme": "0.6.1" });
+  try {
+    const home = makeHome();
+    const cli = fakeCli({ installs: { [THEME]: "0.6.1" } });
+    const env = envFor(home, { MM_CLAUDE_BIN: cli.bin, MM_PLUGIN_LATEST_BASE: srv.base });
+    await runChild(env);
+    assert.equal(themeCalls(cli).length, 1);
+
+    removeTheme(home);
+    for (let i = 0; i < 3; i++) await runChild(env);
+    assert.equal(themeCalls(cli).length, 1, "the person removed it: it stays removed");
+    assert.deepEqual(statusOf(home).self_update.plugins[THEME], { action: "not-installed" });
+    assert.equal(themeRecord(home).state, "installed", "the record stands");
+    assert.equal(statusOf(home).self_update.result, "current");
+
+    // Through the SessionStart step too: with the record on file the 6-hour throttle holds, and once it has passed the
+    // check still installs nothing.
+    await runHook(env);
+    await sleep(300);
+    assert.equal(themeCalls(cli).length, 1);
+    const s = statusOf(home);
+    s.self_update.last_attempt_at = new Date(Date.now() - 7 * HOUR).toISOString();
+    fs.writeFileSync(path.join(hookDir(home), "plugin-sync.json"), JSON.stringify(s));
+    const before = logLines(home).length;
+    await runHook(env);
+    assert.ok(await waitForLog(home, before + 1));
+    assert.equal(themeCalls(cli).length, 1);
+
+    // sync-hook.js rewrites plugin-sync.json every session: the record survives it.
+    await new Promise((resolve) => spawn(process.execPath, [path.join(SCRIPTS, "sync-hook.js")], { env: envFor(home), stdio: "ignore" }).on("exit", resolve));
+    assert.equal(themeRecord(home).state, "installed");
+
+    // A check that fails before it reads anything keeps the record (installed_plugins.json unreadable).
+    fs.writeFileSync(path.join(home, ".claude", "plugins", "installed_plugins.json"), "{ not json");
+    await runChild(env);
+    assert.equal(statusOf(home).self_update.result, "failed");
+    assert.equal(themeRecord(home).state, "installed");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("⛔ install once: a theme already here, or here before (any scope, the plugin cache, a settings entry), is never installed", async () => {
+  const srv = await latestServer({ "mm-hooks": "1.0.10", "mm-bridge": "0.6.0", "massmarket-theme": "0.6.1" });
+  try {
+    // Installed by hand: recorded as found and kept current; removed later, it stays removed.
+    const home = makeHome({ installed: { [HOOKS]: "1.0.10", [BRIDGE]: "0.6.0", [THEME]: "0.6.1" } });
+    const cli = fakeCli({ installs: { [THEME]: "0.6.1" } });
+    const env = envFor(home, { MM_CLAUDE_BIN: cli.bin, MM_PLUGIN_LATEST_BASE: srv.base });
+    await runChild(env);
+    assert.equal(themeRecord(home).state, "found");
+    assert.equal(statusOf(home).self_update.plugins[THEME].action, "current");
+    removeTheme(home);
+    await runChild(env);
+    assert.deepEqual(cli.calls(), [], "never installed");
+
+    // Each other trace of an earlier install counts the same.
+    const traces = [
+      (h) => {
+        const doc = installedOf(h);
+        doc.plugins[THEME] = [{ scope: "project", projectPath: "/somewhere", version: "0.6.0" }];
+        fs.writeFileSync(path.join(h, ".claude", "plugins", "installed_plugins.json"), JSON.stringify(doc));
+      },
+      (h) => fs.mkdirSync(path.join(h, ".claude", "plugins", "cache", "massmarket", "massmarket-theme", "0.6.0"), { recursive: true }),
+      (h) => fs.writeFileSync(path.join(h, ".claude", "settings.json"), JSON.stringify({ enabledPlugins: { [THEME]: true } })),
+    ];
+    for (const [i, lay] of traces.entries()) {
+      const h = makeHome();
+      lay(h);
+      const c = fakeCli({ installs: { [THEME]: "0.6.1" } });
+      await runChild(envFor(h, { MM_CLAUDE_BIN: c.bin, MM_PLUGIN_LATEST_BASE: srv.base }));
+      assert.deepEqual(c.calls(), [], "trace " + i + ": no install");
+      assert.equal(themeRecord(h).state, "found", "trace " + i);
+    }
+
+    // A plugin-sync.json that does not parse: its history is unknown, so nothing is installed.
+    const h = makeHome();
+    fs.writeFileSync(path.join(hookDir(h), "plugin-sync.json"), "{ broken");
+    const c = fakeCli({ installs: { [THEME]: "0.6.1" } });
+    await runChild(envFor(h, { MM_CLAUDE_BIN: c.bin, MM_PLUGIN_LATEST_BASE: srv.base }));
+    assert.deepEqual(c.calls(), []);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("⛔ install once: a theme the person turned off is never installed, and never later either", async () => {
+  const srv = await latestServer({ "mm-hooks": "1.0.10", "mm-bridge": "0.6.0", "massmarket-theme": "0.6.1" });
+  try {
+    const home = makeHome({ settings: { enabledPlugins: { [THEME]: false } } });
+    const before = settingsBytes(home);
+    const cli = fakeCli({ installs: { [THEME]: "0.6.1" } });
+    const env = envFor(home, { MM_CLAUDE_BIN: cli.bin, MM_PLUGIN_LATEST_BASE: srv.base });
+    await runChild(env);
+    assert.deepEqual(cli.calls(), [], "nothing run at all");
+    assert.equal(srv.hits.some((x) => x.includes("massmarket-theme")), false, "not even looked up");
+    assert.equal(themeRecord(home).state, "turned-off");
+    assert.equal(settingsBytes(home), before, "still off: settings.json untouched");
+
+    // The off entry gone later: the record still says no.
+    fs.writeFileSync(path.join(home, ".claude", "settings.json"), "{}");
+    await runChild(env);
+    assert.deepEqual(cli.calls(), []);
+    assert.equal(themeRecord(home).state, "turned-off");
+
+    // Installed and turned off: left as it is, never updated or turned on.
+    const h = makeHome({ installed: { [HOOKS]: "1.0.10", [BRIDGE]: "0.6.0", [THEME]: "0.6.0" }, settings: { enabledPlugins: { [THEME]: false } } });
+    const c = fakeCli();
+    await runChild(envFor(h, { MM_CLAUDE_BIN: c.bin, MM_PLUGIN_LATEST_BASE: srv.base }));
+    assert.deepEqual(c.calls(), []);
+    assert.deepEqual(statusOf(h).self_update.plugins[THEME], { from: "0.6.0", action: "turned-off" });
+  } finally {
+    await srv.close();
+  }
+});
+
+test("install once: a failed install is logged, the session is not slowed, and it is tried at most 3 times", async () => {
+  const srv = await latestServer({ "mm-hooks": "1.0.10", "mm-bridge": "0.6.0", "massmarket-theme": "0.6.1" });
+  try {
+    const home = makeHome({ status: { plugin: "mm-hooks", self_update: { last_attempt_at: new Date(Date.now() - 1 * HOUR).toISOString(), result: "current" } } });
+    // Each CLI call takes 1.5 s and the install fails: the hook must return without waiting for any of it.
+    const cli = fakeCli({ failOn: "plugin install", failMessage: "Error: Plugin massmarket-theme not found in marketplace massmarket\n", sleepMs: 1500 });
+    const env = envFor(home, { MM_CLAUDE_BIN: cli.bin, MM_PLUGIN_LATEST_BASE: srv.base });
+    const t0 = Date.now();
+    await runHook(env);
+    assert.ok(Date.now() - t0 < 1500, "the hook returns at once");
+    assert.equal(themeRecord(home).state, "pending", "a computer with no record checks at once, even 1 hour after the last check");
+    assert.ok(await waitForLog(home, 1), "the detached check ran");
+    let su = statusOf(home).self_update;
+    assert.equal(su.result, "failed");
+    assert.equal(su.error, "claude plugin install massmarket-theme@massmarket --scope user exited 1: Error: Plugin massmarket-theme not found in marketplace massmarket");
+    assert.equal(su.plugins[THEME].action, "install-failed");
+    assert.deepEqual(Object.assign({}, themeRecord(home), { at: undefined }), { state: "failed", attempts: 1, error: su.error, at: undefined });
+    assert.match(logLines(home)[0], / failed mm-hooks:current:1\.0\.10 mm-bridge:current:0\.6\.0 massmarket-theme:install-failed:0\.6\.1 cli=MM_CLAUDE_BIN error="claude plugin install massmarket-theme@massmarket/);
+    noYes(cli.calls());
+
+    // A second session within 6 hours: the record is there now, so the throttle holds.
+    await runHook(env);
+    await sleep(300);
+    assert.equal(themeCalls(cli).length, 1);
+
+    // Later checks try again, 3 attempts in all, then give up for good.
+    const fast = fakeCli({ failOn: "plugin install" });
+    const env2 = envFor(home, { MM_CLAUDE_BIN: fast.bin, MM_PLUGIN_LATEST_BASE: srv.base });
+    await runChild(env2);
+    assert.equal(themeRecord(home).attempts, 2);
+    assert.equal(themeRecord(home).state, "failed");
+    await runChild(env2);
+    assert.equal(themeRecord(home).attempts, 3);
+    assert.equal(themeRecord(home).state, "gave-up");
+    await runChild(env2);
+    await runChild(env2);
+    assert.equal(themeCalls(fast).length, 2, "never a fourth attempt");
+    su = statusOf(home).self_update;
+    assert.equal(su.result, "current");
+    assert.equal(su.plugins[THEME].action, "not-installed");
+
+    // An install whose CLI exits 0 but leaves no user-scope row is a failure too.
+    const h = makeHome();
+    const c = fakeCli(); // installs nothing
+    await runChild(envFor(h, { MM_CLAUDE_BIN: c.bin, MM_PLUGIN_LATEST_BASE: srv.base }));
+    assert.equal(statusOf(h).self_update.result, "failed");
+    assert.equal(statusOf(h).self_update.error, "claude plugin install finished but massmarket-theme is not installed");
+    assert.equal(themeRecord(h).state, "failed");
+    assert.equal(themeRecord(h).attempts, 1);
+
+    // A failed update before it: the install is not tried, and no attempt is counted.
+    const h2 = makeHome();
+    const srv2 = await latestServer({ "mm-hooks": "1.0.11", "mm-bridge": "0.6.0", "massmarket-theme": "0.6.1" });
+    try {
+      const c2 = fakeCli({ failOn: "plugin update", installs: { [THEME]: "0.6.1" } });
+      await runChild(envFor(h2, { MM_CLAUDE_BIN: c2.bin, MM_PLUGIN_LATEST_BASE: srv2.base }));
+      assert.equal(themeCalls(c2).length, 0);
+      assert.equal(statusOf(h2).self_update.plugins[THEME].action, "skipped-after-failure");
+      assert.equal(themeRecord(h2).state, "pending", "the next check tries");
+      assert.equal(themeRecord(h2).attempts, undefined);
+    } finally {
+      await srv2.close();
+    }
+  } finally {
+    await srv.close();
+  }
+});
+
+test("install once, pure: what each history decides", () => {
+  const base = { id: THEME, installedAny: false, inCache: false, settings: {}, statusOk: true };
+  assert.deepEqual(up.installOnceState(base), { candidate: true });
+  assert.deepEqual(up.installOnceState(Object.assign({}, base, { statusOk: false })), {});
+  for (const state of ["installed", "found", "turned-off", "gave-up"]) assert.deepEqual(up.installOnceState(Object.assign({}, base, { record: { state } })), {}, state);
+  for (const state of ["pending", "waiting"]) assert.deepEqual(up.installOnceState(Object.assign({}, base, { record: { state } })), { candidate: true }, state);
+  assert.deepEqual(up.installOnceState(Object.assign({}, base, { record: { state: "failed", attempts: 2 } })), { candidate: true });
+  assert.equal(up.installOnceState(Object.assign({}, base, { record: { state: "failed", attempts: 3 } })).record.state, "gave-up");
+  assert.deepEqual(up.installOnceState(Object.assign({}, base, { settings: { enabledPlugins: { [THEME]: false } } })), { record: { state: "turned-off" } });
+  assert.equal(up.installOnceState(Object.assign({}, base, { installedAny: true })).record.state, "found");
+  assert.deepEqual(up.INSTALL_ONCE_IDS, [THEME], "the theme is the only plugin this step may install");
+  assert.deepEqual(up.installOnceUnseen({ install_once: { [THEME]: { state: "waiting" } } }), []);
+  assert.deepEqual(up.installOnceUnseen({}), [THEME]);
+  assert.deepEqual(up.installOnceUnseen(undefined), [THEME]);
+});
+
 // ───────────────────────────────────────────────────────────── the SessionStart step (the fast path)
 
 test("as a SessionStart hook: starts the check detached, prints nothing, exits 0; a second session within 6 hours does nothing", async () => {
@@ -598,7 +871,7 @@ test("the throttle: a check 1 hour ago holds the next one back, 7 hours ago lets
       [5.9, false],
       [7, true],
     ]) {
-      const home = makeHome({ status: { plugin: "mm-hooks", self_update: { last_attempt_at: new Date(Date.now() - agoHours * HOUR).toISOString(), result: "current" } } });
+      const home = makeHome({ status: { plugin: "mm-hooks", self_update: { last_attempt_at: new Date(Date.now() - agoHours * HOUR).toISOString(), result: "current", install_once: { [THEME]: { state: "found", at: "2026-11-24T00:00:00.000Z" } } } } });
       await runHook(envFor(home, { MM_CLAUDE_BIN: fakeCli().bin, MM_PLUGIN_LATEST_BASE: srv.base }));
       if (runs) assert.ok(await waitForLog(home, 1), agoHours + " h ago: runs");
       else {
