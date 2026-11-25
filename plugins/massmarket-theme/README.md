@@ -10,20 +10,22 @@ massmarket.ai homepage hero.
 - Your messages sit in a plain square box: white by day and black at night, with a hairline edge
   (`/look boxes flip` turns it around: black by day, cream at night). Claude's replies and tool rows
   have no box; their words sit on the page.
-- As a thread nears compacting, the mesh grows and deepens (from half the way there). No extra color
-  is added.
+- The mesh grows and deepens when a fresh thread would be much cheaper than this one: each step re-reads the
+  whole thread, and once a thread has sat past its cache's life (an hour) the next message re-reads all of it
+  at full price. A large thread being worked on stays calm, since its warm cache is worth keeping; a large
+  thread gone cold glows. No extra color is added.
 
 ## /look
 
 | Command | What it does |
 | --- | --- |
-| `/look` | Says what the look is doing now and how full this thread is. |
+| `/look` | Says what the look is doing now, and what a fresh thread would save over this one. |
 | `/look auto` | Light from sunrise to sunset, dark at night (the default). |
 | `/look hours 7 19` | Fixed hours instead: light from 7, dark from 19 (any two hours from 0 to 23). |
 | `/look light` | Always light. |
 | `/look dark` | Always dark. |
 | `/look app` | Follows the app's own light or dark setting. |
-| `/look glow on` or `/look glow off` | Turns the mesh growing near compacting on or off. |
+| `/look glow on` or `/look glow off` | Turns the mesh's growing with that saving on or off. |
 | `/look boxes match` or `/look boxes flip` | Your messages' box in the page's own color (white by day, black at night; the default) or the reverse (black by day, cream at night). |
 
 The choice is kept on this computer, across threads.
