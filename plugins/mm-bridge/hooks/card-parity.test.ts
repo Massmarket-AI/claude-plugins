@@ -27,7 +27,7 @@ describe('0.7.33 the card against the page: real pairs, from the two renderers t
     expect(pageGap(SMS_PAGE, realTree())).toBe('')
   })
 
-  for (const name of ['everything', 'source links', "rob's mail, plan not approved", "rob's mail, plan approved", 'html email', 'no reply', 'closed no reply', 'later messages', 'ticket check unreadable', 'follow-ups live', 'follow-ups switched off', 'tickets from the call', 'tickets from the call, all decided', 'tickets from the call, unread', 'tickets from the call, ticket check off', 'ticket gap under enforce, a teammate', "ticket gap under enforce, rob's machine", 'quotes', 'quotes, revised', 'date moves', 'date moves, ticket check off', 'answered', 'every ticket answered', 'quotes, columns', 'linkedin reply']) {
+  for (const name of ['everything', 'source links', "rob's mail, plan not approved", "rob's mail, plan approved", 'html email', 'no reply', 'closed no reply', 'later messages', 'ticket check unreadable', 'follow-ups live', 'follow-ups switched off', 'tickets from the call', 'tickets from the call, all decided', 'tickets from the call, unread', 'tickets from the call, ticket check off', 'ticket gap under enforce, a teammate', "ticket gap under enforce, rob's machine", 'quotes', 'quotes, revised', 'date moves', 'date moves, ticket check off', 'answered', 'every ticket answered', 'quotes, columns', 'linkedin reply', 'sent after the build']) {
     test(`${name}: the page and the card agree`, () => {
       const { page, tree } = pair(name)
       expect(contentPieces(page).length).toBeGreaterThan(5)
@@ -125,6 +125,27 @@ describe('0.7.33 the card against the page: real pairs, from the two renderers t
     const links = (...lines: MmCardNode[]) => cardOf(sec('Links', { c: 'rp-links', k: lines }))
     expect(pageGap(page, links(para('Plan', 'rp-li'), para([{ s: 'Doc: ' }, { s: 'https://x.example/doc', href: 'https://x.example/doc' }], 'rp-li')))).toBe('')
     expect(pageGap(page, links(para('Plan', 'rp-li'), para([{ s: 'Doc', href: 'https://x.example/doc' }], 'rp-li')))).toBe(MISSING('Doc: https://x.example/doc'))
+  })
+})
+
+describe('our emails sent after the package was built (OW 2026-11-11): the card draws them as the page prints them', () => {
+  const edit = (tree: MmCardTree, from: string, to: string) => JSON.parse(JSON.stringify(tree).replaceAll(from, to)) as MmCardTree
+
+  test('the page and the card agree: the warning, each email in full with its Cc and subject, and the lines for what was not read', () => {
+    const { page, tree } = pair('sent after the build')
+    expect(page).toContain('**We already wrote to them after these drafts were written.** These 2 emails went after the package was built')
+    expect(page).toContain('#### zz_pm@x.example → dana@x.example · Thu Nov 5, 3:10 PM ET · email we sent\nCc: zz_out_cc@x.example\nSubject: ZZ_out_subject\n')
+    expect(page).toContain("_Its words were not read (doc `dddddddd`): read it in the sending mailbox's Sent before the go._")
+    expect(pageGap(page, tree)).toBe('')
+  })
+
+  test('the card leaving any of it off is a gap: the warning, the words, the Cc, the subject, a line for what was not read', () => {
+    const { page, tree } = pair('sent after the build')
+    expect(pageGap(page, edit(tree, 'We already wrote to them after these drafts were written.', 'We wrote.'))).toContain('the page holds a line the card does not (We already wrote')
+    expect(pageGap(page, edit(tree, 'ZZ_out_words: the booking link is live.', 'ZZ_out_words: soon.'))).toContain('the page holds a line the card does not (Hi Dana,')
+    expect(pageGap(page, edit(tree, 'Cc: zz_out_cc@x.example', 'Cc: someone@x.example'))).toBe(MISSING('Cc: zz_out_cc@x.example'))
+    expect(pageGap(page, edit(tree, 'Subject: ZZ_out_second_subject', 'Subject: ZZ_other'))).toBe(MISSING('Subject: ZZ_out_second_subject'))
+    expect(pageGap(page, edit(tree, 'could not be read: check', 'was not read: check'))).toContain('the page holds a line the card does not (Our emails sent after this package was built could')
   })
 })
 
