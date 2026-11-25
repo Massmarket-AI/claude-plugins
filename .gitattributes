@@ -13,3 +13,6 @@
 # These lines come after the * line on purpose: the later line wins.
 plugins/mm-hooks/extension/** -text
 plugins/mm-hooks/extension.json -text
+
+# (0.7.71) The bridge's own sound: a binary file, never converted.
+plugins/mm-bridge/sounds/** binary

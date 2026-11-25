@@ -2832,3 +2832,61 @@ describe('0.7.19: the newest bridge on this machine holds the sync, against the 
     expect(leaseOf(w)).toBeUndefined()
   })
 })
+
+// (0.7.71, Rob 2026-11-24, the approved Phase 2 plan: alert only when someone has to act) A new pin raises one notification, from the
+// pinned thread's own session (the phone hears a thread over its own Remote Control), and the sound from the thread whose sync made it.
+// The record of what was alerted, and the switch, are the computer's (the store every thread here shares), so a second thread pinning
+// the same thing again never alerts, and /mm alerts off typed in one thread holds in all of them.
+describe('0.7.71: the alert record and the alerts switch are the computer\'s, whichever thread syncs', () => {
+  const ONE = pid(1)
+  const app = (opts: { every?: boolean } = {}) => {
+    const f: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [] }
+    const w = fakeApp(f, [{ sessionId: 'local_a' }, { sessionId: 'local_b' }, { sessionId: 'local_one', title: 'One work' }], [], opts)
+    w.put('mm.links', { [ONE]: 'local_one' })
+    return { w, f, a: w.session('local_a'), b: w.session('local_b') }
+  }
+  const pinnedOne = (w: ReturnType<typeof fakeApp>) => w.app.get('local_one')?.pinned === true
+
+  test('thread A pins Client One: A plays the sound, and Client One\'s own thread raises the one notification within 30 s; it goes and comes back, and thread B pins it again for the same thing: nothing more', async () => {
+    const { w, f, a, b } = app({ every: true })
+    const one = w.session('local_one')
+    for (const t of [a, b, one]) await startIn(t)
+    await w.advance(5_000)
+    await mm(a, '')
+    expect(w.notified).toEqual([])
+    f.mail = [mail(1, 'Client One')]
+    await w.advance(60_000)
+    await mm(a, '')
+    expect(pinnedOne(w)).toBe(true)
+    expect(w.played).toEqual([{ thread: 'local_a', asset: 'sounds/arrive.wav', gain: 0.6 }])
+    expect(w.notified).toEqual([])
+    await w.advance(30_000)
+    expect(w.notified.map(n => [n.thread, n.title, n.key])).toEqual([['local_one', 'Massmarket', `pin:${ONE}`]])
+    expect(w.notified[0]?.text).toMatch(/^Pinned for you: .*Client One/)
+    await w.advance(120_000)
+    expect(w.notified).toHaveLength(1)
+    f.mail = []
+    await w.advance(60_000)
+    await mm(b, '')
+    expect(pinnedOne(w)).toBe(false)
+    f.mail = [mail(1, 'Client One')]
+    await w.advance(60_000)
+    await mm(b, '')
+    expect(pinnedOne(w)).toBe(true)
+    expect(w.notified).toHaveLength(1)
+    expect(w.played).toHaveLength(1)
+  })
+
+  test('/mm alerts off typed in thread A holds when thread B syncs: the pin is made, with no notification and no sound', async () => {
+    const { w, f, a, b } = app()
+    expect(await mm(a, 'alerts off')).toContain('Alerts are off on this computer')
+    expect(await mm(b, 'alerts')).toBe('Alerts are off on this computer. Type /mm alerts on or /mm alerts off.')
+    await mm(b, '')
+    f.mail = [mail(1, 'Client One')]
+    await w.advance(60_000)
+    await mm(b, '')
+    expect(pinnedOne(w)).toBe(true)
+    expect(w.notified).toEqual([])
+    expect(w.played).toEqual([])
+  })
+})
