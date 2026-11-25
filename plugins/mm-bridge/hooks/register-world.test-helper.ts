@@ -163,7 +163,7 @@ export type WorldOptions = {
   scopeProposal?: (body: Record<string, unknown>) => { status: number; body?: unknown } | 'network'
   /** (0.7.34) How OW answers `GET /team-now`. Left out, 404: an OW without the route yet. */
   teamNow?: () => { status: number; body?: unknown } | 'network'
-  /** (0.7.75) How OW answers `GET /day-stats`. Left out, 404: an OW without the route yet. */
+  /** (0.7.74) How OW answers `GET /day-stats`. Left out, 404: an OW without the route yet. */
   dayStats?: () => { status: number; body?: unknown } | 'network'
   /** (0.7.53) How OW answers `GET /browser-now`. Left out, 404: an OW without the route yet. */
   browserNow?: () => { status: number; body?: unknown } | 'network'
@@ -1005,7 +1005,7 @@ export const trackPart = (drawn: string[]): string[] => {
 /** Every fetch the bridge made is a read of one of its own GET routes: never a pickup, a hold or a resolve. */
 // (0.7.23) and the sync's pin report (`/bridge-pins`): what is pinned and what should be, never a pickup, a hold or a claim
 // (0.7.53) and Working manually in browser (`/browser-now`): its read records a new stretch's question, never an answer
-// (0.7.75) and today's numbers (`/day-stats`), read-only
+// (0.7.74) and today's numbers (`/day-stats`), read-only
 export const onlyReads = (w: { fetched: string[] }) =>
   w.fetched.every(u => /\/api\/ext\/(?:closeout\?|skill-map$|client-time\?project_ids=|reply-package\?package_id=[0-9a-f-]+&format=pickup$|team-ask\?|bridge-pins$|team-now$|browser-now$|day-stats$)/.test(u))
 export const skill = async ($: Engine, name: string, over: Record<string, unknown> = {}) => $.tool.call({ tool: 'Skill', skill: name, ...over } as never)

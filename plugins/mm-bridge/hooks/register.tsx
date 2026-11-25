@@ -243,7 +243,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.75'
+export const VERSION = '0.7.74'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -268,7 +268,7 @@ const SESS = { plugin: 'mm-bridge', key: 'sess' } as const
 const NUDGE = { plugin: 'mm-bridge', key: 'nudge' } as const
 /** (0.7.73) The "You" strip, as this thread last worked it out. */
 const YOU = { plugin: 'mm-bridge', key: 'you' } as const
-/** (0.7.75) Today's numbers, from the store (`drawStats`). */
+/** (0.7.74) Today's numbers, from the store (`drawStats`). */
 const STATS = { plugin: 'mm-bridge', key: 'stats' } as const
 /** (0.7.0) The band's line for a client's thread whose work matches no line on the quote. */
 const LINE = { plugin: 'mm-bridge', key: 'lineAsk' } as const
@@ -378,9 +378,9 @@ const BROWSER_ANSWERED_MS = 24 * 3_600_000
 const BROWSER_ANSWERED_MAX = 50
 /** (0.7.34) Team now on a pane whose OW has no such route yet. */
 const TEAM_MISSING = 'Team now is not available yet.'
-/** (0.7.75) How often today's numbers are read (OW works them out at most once in that time, for everyone). */
+/** (0.7.74) How often today's numbers are read (OW works them out at most once in that time, for everyone). */
 const STATS_EVERY_MS = 10 * 60_000
-/** (0.7.75) How long an OW without `GET /day-stats` is not asked again: an hour, so the numbers come soon after OW has the route. */
+/** (0.7.74) How long an OW without `GET /day-stats` is not asked again: an hour, so the numbers come soon after OW has the route. */
 const STATS_MISSING_MS = 60 * 60_000
 /** (0.7.34) How long a client's mail with no package holds back the chip for a client with no thread: then it comes without one. */
 const CHIP_NO_DRAFTS_MS = 2 * 60 * 60_000
@@ -5755,7 +5755,7 @@ async function tick($: EngineInterface): Promise<void> {
       }
       // (0.7.34) Team now, for every thread here
       await teamPass($)
-      // (0.7.75) today's numbers, for every thread here
+      // (0.7.74) today's numbers, for every thread here
       await statsPass($)
       // (0.7.53) Working manually in browser, for every thread here
       await browserPass($)
@@ -9145,7 +9145,7 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
   if (verb === 'team') {
     await teamPass($, true)
     const now = await $.clock.now()
-    // (0.7.75) and today's numbers above it, for the founder and the PMs (as the pane's Team now has them)
+    // (0.7.74) and today's numbers above it, for the founder and the PMs (as the pane's Team now has them)
     const stats = teamStatsText((await storeGet<StatsKept>($, 'mm.stats', {})).stats, now)
     const team = teamText((await storeGet<TeamKept>($, 'mm.team', {})).team, now)
     return stats ? `${stats}\n\n${team}` : team
@@ -9915,11 +9915,11 @@ async function teamPass($: EngineInterface, force = false): Promise<void> {
   }
 }
 
-/** (0.7.75) What the bridge keeps of today's numbers (`mm.stats`): the last good read, when it was asked, and, while OW has no such route, until when not to ask. */
+/** (0.7.74) What the bridge keeps of today's numbers (`mm.stats`): the last good read, when it was asked, and, while OW has no such route, until when not to ask. */
 type StatsKept = { asked?: number; got?: number; stats?: DayStats; missingUntil?: number }
 
 /**
- * (0.7.75, Rob 2026-11-25: "maybe some of the stats from daily it support image would be cool as well so they can see their hours
+ * (0.7.74, Rob 2026-11-25: "maybe some of the stats from daily it support image would be cool as well so they can see their hours
  * and parallization score maybe others like total tokens") Today's numbers from OW (`GET /api/ext/day-stats`, read-only), into the
  * store for every thread here: on the lease holder's tick, every STATS_EVERY_MS. The person's own always; the team's only when OW
  * answers them (the founder and the PMs). A failure keeps the last read; a 404 or 405 is not asked again for STATS_MISSING_MS.
@@ -9959,7 +9959,7 @@ async function statsPass($: EngineInterface): Promise<void> {
   }
 }
 
-/** (0.7.75) This thread's pane catches up with the store's numbers: a redraw only when a newer read is there. */
+/** (0.7.74) This thread's pane catches up with the store's numbers: a redraw only when a newer read is there. */
 async function drawStats($: EngineInterface): Promise<void> {
   try {
     const kept = await storeGet<StatsKept>($, 'mm.stats', {})
@@ -12006,7 +12006,7 @@ export const register: Register = on => {
     if (!you) void youPass($)
     const youShown = you && Array.isArray(you.dots) ? you.dots : []
     const youOpen = youShown.find(d => d.key === you?.open)
-    // (0.7.75) today's numbers: the person's own line under the dots (a press says what it counts), and the team's for Team now
+    // (0.7.74) today's numbers: the person's own line under the dots (a press says what it counts), and the team's for Team now
     const { value: statsView } = await $.state.get(STATS)
     const dayStats = statsView?.stats ?? null
     const statsLine = myStatsLine(dayStats, teamClock)
@@ -12073,7 +12073,7 @@ export const register: Register = on => {
             {youShown.map(d => <Button key={`mm-you:${d.key}`} plain label={dotLabel(d)} onPress={() => void pressYou($, d.key)} />)}
           </Box>
         ) : null}
-        {/* (0.7.75, Rob 2026-11-25: "i dont want to get overcluttered") one dim line of today's numbers; a press says what each counts */}
+        {/* (0.7.74, Rob 2026-11-25: "i dont want to get overcluttered") one dim line of today's numbers; a press says what each counts */}
         {statsLine ? <Button key="mm-stats" plain dimColor label={statsLine} onPress={() => void toggleFold($, 'stats')} /> : null}
         {statsLine && statsOpen && dayStats ? <Text key="mm-stats-says" dimColor>{myStatsSays(dayStats, teamClock)}</Text> : null}
         {youOpen ? <Text key="mm-you-says" dimColor>{youOpen.says}</Text> : null}
@@ -12139,7 +12139,7 @@ export const register: Register = on => {
         <Box key="mm-teamnow" flexDirection="column" marginTop={1}>
           <Button key="mm-teamnow-toggle" plain label={`${teamHeadingNow(teamNow?.team)}  ${teamOpen ? '▾' : '▸'}`} onPress={() => void togglePanel($, 'teamNow', teamOpen)} />
           {teamOpen && teamNow?.missing ? <Text dimColor>{TEAM_MISSING}</Text> : null}
-          {/* (0.7.75) the founder's and the PMs' Team now opens on today's numbers, one line a person (OW answers them to them alone) */}
+          {/* (0.7.74) the founder's and the PMs' Team now opens on today's numbers, one line a person (OW answers them to them alone) */}
           {teamStats.length ? (
             <Box key="mm-teamstats" flexDirection="column" marginTop={1}>
               {teamStats.map((l, n) => (
