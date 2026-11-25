@@ -5123,7 +5123,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       return () => last
     }
     /** The row of one `mm card` call, as the desktop draws it once the call has answered. */
-    const row = ($: Engine, toolUseId: string, output: unknown, surface: 'desktop' | 'terminal' = 'desktop') =>
+    const row = ($: Engine, toolUseId: string, output: unknown, surface: 'desktop' | 'terminal' | 'mobile' = 'desktop') =>
       $.ui.mount({
         plugin: 'mm-bridge', surface, component: 'ToolUse', requestId: toolUseId,
         props: { tool_use_id: toolUseId, tool: 'mcp__mm-bridge__mm', input: { args: `card ${PKG}` }, isRunning: false, isErrored: false, isInterrupted: false, output } as never,
@@ -5642,6 +5642,113 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       expect(await r.findAll({ type: 'Input' })).toEqual([])
       expect(await u.findAll({ type: 'Input' })).toEqual([])
       for (const m of [r, u]) await m.unmount()
+    })
+
+    // (0.7.70, Rob 2026-11-24: approve reply packages from the phone) The mobile app draws a tree that keeps a tool row as one quiet line, and
+    // as a card under the row only when the Box holding the row and the rest has a border or a background.
+    describe('0.7.70 on the phone: the same card, under the row, in a bordered Box, with the same one-press go', () => {
+      /** A few milliseconds of real time, for the press's record and note (they are written off the clock). */
+      const pause = (ms: number) => new Promise<void>(res => void (globalThis as unknown as { setTimeout: (f: () => void, ms: number) => unknown }).setTimeout(res, ms))
+      /** The engine's own row, beneath the plugins: what `next(e)` draws. */
+      const engineRow = (on: On) => on('ui.render', { component: 'ToolUse' }, (t$, e) => (t$.ui.resolve(e) as { Text: (p: { children: string }) => unknown }).Text({ children: 'the engine\'s own row' }) as never)
+
+      test('the live ready row keeps the engine\'s row and draws the whole card under it, in a Box with a border, the desktop\'s own lines', async ($, on) => {
+        world(on, own)
+        engineRow(on)
+        const asked = watchAsked(on)
+        const u = await shown($)
+        const said = await tool($, `card ${PKG}`)
+        const phone = await row($, String(asked()?.toolUseId), said, 'mobile')
+        const card = await phone.find({ type: 'Box', key: `mm-card-phone:${PKG}` })
+        expect(card?.props.borderStyle).toBe('round')
+        const shown2 = await lines(phone)
+        expect(shown2[0]).toBe('the engine\'s own row')
+        expect(shown2.join('\n')).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
+        expect(shown2.join('\n')).toContain('Every question answered?')
+        // the desktop's row draws the same card lines (it replaces the row there)
+        const desk = await row($, String(asked()?.toolUseId), said)
+        expect(await lines(desk)).toEqual(shown2.slice(1))
+        // no Changes field on the phone, which draws none; the box waits for the turn there too
+        expect(await phone.findAll({ type: 'Input' })).toEqual([])
+        expect(await hasBox(phone)).toBe(false)
+        await endTurn($)
+        expect(await hasBox(phone)).toBe(true)
+        expect(await hasBox(desk)).toBe(true)
+        for (const m of [phone, desk, u]) await m.unmount()
+      })
+
+      test('a press on the phone is the desktop\'s press: the record, the note, then exactly "Send package <12>" into the thread as the person\'s go', async ($, on) => {
+        const w = world(on, own)
+        engineRow(on)
+        const asked = watchAsked(on)
+        const u = await shown($)
+        const said = await tool($, `card ${PKG}`)
+        const phone = await row($, String(asked()?.toolUseId), said, 'mobile')
+        await endTurn($)
+        await phone.press({ key: `mm-card-sign-btn:${LABEL}` })
+        for (let i = 0; i < 200 && !recorded(w); i++) await pause(2)
+        const record = JSON.parse(recorded(w)?.text.trim().split('\n').at(-1) ?? '{}') as Record<string, unknown>
+        expect(record).toMatchObject({ v: 1, session_id: SELF_CLI, package_id: PKG, package_sha256: SMS_TREE.package_sha256, label: LABEL })
+        for (let i = 0; i < 200 && !w.appended.some(t => t.includes(SIGNED_START)); i++) await pause(2)
+        const note = (JSON.parse(w.appended.find(t => t.includes(SIGNED_START)) ?? '{}') as { content?: Array<{ text: string }> }).content?.[0]?.text ?? ''
+        expect(CARD_PRESS_NOTE.exec(note)?.[1]).toBe(LABEL)
+        expect(w.prompts).toEqual([])
+        await w.clock.advance(3_100)
+        for (let i = 0; i < 200 && !w.prompts.length; i++) await pause(2)
+        expect(w.prompts).toEqual([{ text: `Send package ${LABEL}`, origin: { kind: 'plugin', name: 'mm-bridge', asUser: true } }])
+        expect(w.fills).toEqual([])
+        for (let i = 0; i < 200 && !(await lines(phone)).join('\n').includes(SEALED); i++) await pause(2)
+        expect((await lines(phone)).join('\n')).toContain(SEALED)
+        expect((await lines(u)).join('\n')).toContain(SEALED)
+        for (const m of [phone, u]) await m.unmount()
+      })
+
+      test('while the desktop\'s reply line holds the card, the phone\'s row still draws it (the phone has no such line)', async ($, on) => {
+        world(on, own)
+        engineRow(on)
+        const asked = watchAsked(on)
+        const u = await shown($)
+        const said = await tool($, `card ${PKG}`)
+        const live = String(asked()?.toolUseId)
+        // the desktop's reply line under the call takes the card
+        const reply = await $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'AssistantMessage', requestId: 'msg_1', props: { text: `The card is below. Package ${LABEL}.`, isFirstOfReply: true } as never })
+        expect((await lines(reply)).join('\n')).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
+        const desk = await row($, live, said)
+        expect(await lines(desk)).toEqual([`The card for Package ${LABEL} is drawn in full below, under your thread's line.`])
+        const phone = await row($, live, said, 'mobile')
+        expect((await lines(phone)).join('\n')).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
+        expect((await phone.find({ type: 'Box', key: `mm-card-phone:${PKG}` }))?.props.borderStyle).toBe('round')
+        for (const m of [phone, desk, reply, u]) await m.unmount()
+      })
+
+      test('a line in place of the card is the row and that line, with no border: a quiet line', async ($, on) => {
+        world(on, own)
+        engineRow(on)
+        const asked = watchAsked(on)
+        const u = await shown($)
+        const first = await tool($, `card ${PKG}`)
+        const firstId = String(asked()?.toolUseId)
+        await tool($, `card ${PKG}`)
+        const old = await row($, firstId, first, 'mobile')
+        expect(await lines(old)).toEqual(['the engine\'s own row', `Shown again below. Package ${LABEL}.`])
+        expect(await old.find({ type: 'Box', key: `mm-card-phone:${PKG}` })).toBeUndefined()
+        const quiet = await old.find({ type: 'Box', key: `mm-card-phone-line:${PKG}` })
+        expect(quiet?.props.borderStyle).toBeUndefined()
+        expect(quiet?.props.backgroundColor).toBeUndefined()
+        expect(await buttons(old)).toEqual([])
+        for (const m of [old, u]) await m.unmount()
+      })
+
+      test('any other call on the phone is the engine\'s row, untouched', async ($, on) => {
+        world(on, own)
+        engineRow(on)
+        const r = await $.ui.mount({
+          plugin: 'mm-bridge', surface: 'mobile', component: 'ToolUse', requestId: 'toolu_x',
+          props: { tool_use_id: 'toolu_x', tool: 'mcp__mm-bridge__mm', input: { args: 'status' }, isRunning: false, isErrored: false, isInterrupted: false, output: 'member: x' } as never,
+        })
+        expect(await lines(r)).toEqual(['the engine\'s own row'])
+        await r.unmount()
+      })
     })
   })
 })
