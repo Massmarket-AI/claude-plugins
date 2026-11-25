@@ -9,7 +9,7 @@ import { drawnText, pageGap } from './card-parity'
 import { CARD_PAIRS } from './card-pairs.test-helper'
 import { NEXT_LABEL as NEXT, NEXT_PAGE, NEXT_SHA, NEXT_TREE, SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
 import { ME, fakeApp, hooks, mm, pid, press } from './fake-app.test-helper'
-import { CARD_NOT_SHOWN, DRAW_FAILED, RESULT_HINT, RESULT_HINT_BELOW, ROW_AGAIN, ROW_BELOW, ROW_FAILURES_MAX, ROW_GONE, ROW_LEFT, ROW_REPLACED, ROW_REPLACED_PANE, SHOWN_WAIT_MS, firstRowFailure, resetShown, sameVersion } from './register'
+import { CARD_NOT_SHOWN, DRAW_FAILED, EARLIER_WAIT_MS, RESULT_HINT, RESULT_HINT_BELOW, ROW_AGAIN, ROW_BELOW, ROW_FAILURES_MAX, ROW_GONE, ROW_LEFT, ROW_REPLACED, ROW_REPLACED_PANE, SHOWN_WAIT_MS, firstRowFailure, noteCardAnswer, resetShown, sameVersion } from './register'
 import type { Feed } from './queue'
 
 const tree = (): MmCardTree => readTree(JSON.parse(JSON.stringify(SMS_TREE))) as MmCardTree
@@ -2952,5 +2952,268 @@ describe('0.7.43 the quote view: each row of a quote PDF on one line of four cel
       expect(kids(kids(one)[4] as El)[0]?.props?.italic).toBeUndefined()
       expect(kids(kids(sub)[0] as El)[0]?.props).toMatchObject({ italic: true, dimColor: true })
     }
+  })
+})
+
+describe('0.7.75 a card an earlier process owed: drawn under its line in the new one, or the thread prints the page', () => {
+  type Hook = ($: unknown, e: Record<string, unknown>, next: (e: unknown) => unknown) => Promise<unknown>
+  const lineHook = hooks['ui.render:{"component":"AssistantMessage"}'] as Hook
+  const rowHook = hooks['ui.render:{"component":"ToolUse"}'] as Hook
+  const bandHook = hooks['ui.render:{"component":"AbovePrompt"}'] as Hook
+  const startHook = hooks['turn.start'] as Hook
+  const endHook = hooks['turn.complete'] as Hook
+  const PKG = SMS_TREE.package_id as string
+  const ENGINE = { engine: 'drawing' }
+  const engine = () => ENGINE
+  const pass = async (e: unknown) => e
+  /** The card is drawn: its closing line (the box under it opens only once the thread has checked that version, as 0.7.48's block has it). */
+  const DRAWN = 'One go sends 1 item. Package '
+  /** Tags of this block's own. */
+  const tag = (n: number) => `abcdef${String(200 + n).padStart(6, '0')}`
+  /** The ready answer's first sentence, which `noteCardAnswer` reads the tag from. */
+  const READY = (label: string) => `card ready: Package ${label}. The whole package is checked and drawn in this thread, under the one line you print now.`
+  const line = (id: string, text: string) => ({ surface: 'desktop', component: 'AssistantMessage', requestId: id, props: { text, isFirstOfReply: true } })
+  const band = () => ({ surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false } })
+  const useRow = (id: string, label: string) => ({
+    surface: 'desktop', component: 'ToolUse', requestId: id,
+    props: { tool_use_id: id, tool: 'mcp__mm-bridge__mm', input: { args: `card ${PKG}` }, isRunning: false, isErrored: false, isInterrupted: false, output: READY(label) },
+  })
+  const begin = (t: { $: unknown }) => startHook(t.$, { turnId: 't1' }, pass)
+  const end = (t: { $: unknown }) => endHook(t.$, { answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' }, pass)
+  const settle = async () => {
+    for (let i = 0; i < 80; i++) await Promise.resolve()
+  }
+  /** Time passes a second at a time, and each timer that comes due runs and settles. */
+  const wait = async (t: { advance: (ms: number) => Promise<void> }, ms: number) => {
+    await settle()
+    for (let left = ms; left > 0; left -= 1_000) {
+      await t.advance(Math.min(1_000, left))
+      await settle()
+    }
+  }
+  /** The thread's record as the store holds it. */
+  const recOf = (disk: Map<string, unknown>) => (disk.get('mm.cardShown') as Record<string, { asked?: Record<string, unknown>; line?: string; told?: string[] }> | undefined)?.[TRANSCRIPT]
+
+  /**
+   * One process of the thread: a module as a new process has it (`resetShown`), a state of its own (`thread`), and the plugin's store, which
+   * every process of the thread shares (`disk`: the store's file). `transcript`: what `$.session.messages()` answers.
+   */
+  const proc = (disk: Map<string, unknown>, transcript: unknown[] = []) => {
+    resetShown()
+    const t = thread()
+    const asks: string[] = []
+    const $ = t.$ as unknown as { ui: unknown; prompt: Record<string, unknown>; store: unknown; session: Record<string, unknown> }
+    $.ui = { resolve: () => ({ Box: 'Box', Text: 'Text', Button: 'Button', Link: 'Link', Svg: 'Svg', Input: 'Input', Markdown: 'Markdown' }), invalidate: () => undefined }
+    $.prompt.submit = async (input: { text: string }) => {
+      asks.push(input.text)
+      return { text: input.text }
+    }
+    $.store = {
+      get: async (key: string) => (disk.has(key) ? JSON.parse(JSON.stringify(disk.get(key))) : undefined),
+      set: async (key: string, value: unknown) => void disk.set(key, JSON.parse(JSON.stringify(value))),
+    }
+    $.session.messages = async () => transcript
+    /** This process has read the client part and drawn its card (the pickup read and the render done). */
+    const drawn = (label: string) => {
+      t.state.set('card', cardOf({ tree: { ...tree(), label } }))
+      t.state.set('cardChecked', { [label]: 0 })
+      t.state.set('view', { text: '## Example Dental · reply package', heading: '' })
+    }
+    return { ...t, asks, drawn }
+  }
+  /** The process that answered: its turn asks `mm card`, gets ready and ends, with nobody looking at the thread. Nothing is told. */
+  const answered = async (disk: Map<string, unknown>, label: string, call: string) => {
+    const p = proc(disk)
+    p.drawn(label)
+    await begin(p)
+    await p.advance(1_000)
+    await noteCardAnswer(p.$, { args: `card ${PKG}`, toolUseId: call, ownCall: true }, READY(label))
+    await end(p)
+    await wait(p, SHOWN_WAIT_MS * 3)
+    expect(p.asks).toEqual([])
+    return p
+  }
+
+  test('the 2026-11-19 sequence: ready, then the process gone; the thread opened in a new one draws the card under its line, and tells nothing', async () => {
+    const disk = new Map<string, unknown>()
+    const label = tag(1)
+    await answered(disk, label, 'toolu_e1')
+    // what a new process of the thread reads
+    expect(recOf(disk)?.asked).toMatchObject({ packageId: PKG, label, toolUseId: 'toolu_e1' })
+    expect(recOf(disk)?.line).toBeUndefined()
+    expect(recOf(disk)?.told).toEqual([])
+    // the new process: no state, no module record, the same store. The thread is drawn before its client part is read
+    const p = proc(disk)
+    await bandHook(p.$, band(), engine)
+    await wait(p, 4_000)
+    expect(p.asks).toEqual([])
+    // the part is read and the card drawn on this computer: the call's row draws the card (before 0.7.75: ROW_GONE), then the line takes it
+    p.drawn(label)
+    expect(texts(await rowHook(p.$, useRow('toolu_e1', label), engine)).join('\n')).toContain(DRAWN)
+    expect(texts(await lineHook(p.$, line('msg_e1', `The card is below. Package ${label}.`), engine)).join('\n')).toContain(DRAWN)
+    expect(texts(await rowHook(p.$, useRow('toolu_e1', label), engine))).toEqual([ROW_BELOW(label)])
+    await wait(p, EARLIER_WAIT_MS * 2)
+    expect(p.asks).toEqual([])
+    // and the line is on the record, for the next process
+    expect(recOf(disk)?.line).toBe('desktop:msg_e1')
+  })
+
+  test('a new process that never gets the card drawn: the page is asked for EARLIER_WAIT_MS after the thread is drawn, once, and no later process asks again', async () => {
+    const disk = new Map<string, unknown>()
+    const label = tag(2)
+    await answered(disk, label, 'toolu_e2')
+    const p = proc(disk)
+    await bandHook(p.$, band(), engine)
+    await wait(p, EARLIER_WAIT_MS - 2_000)
+    expect(p.asks).toEqual([])
+    await wait(p, SHOWN_WAIT_MS * 2)
+    expect(p.asks).toEqual([CARD_NOT_SHOWN(label)])
+    expect(recOf(disk)?.told).toEqual([label])
+    // a later draw here, and another process: the tag was told
+    await bandHook(p.$, band(), engine)
+    await wait(p, EARLIER_WAIT_MS * 2)
+    expect(p.asks).toHaveLength(1)
+    const q = proc(disk)
+    q.drawn(label)
+    await bandHook(q.$, band(), engine)
+    await wait(q, EARLIER_WAIT_MS * 2)
+    expect(q.asks).toEqual([])
+  })
+
+  test('the card drawable at once in the new process, but no line takes it: told SHOWN_WAIT_MS after it was drawable', async () => {
+    const disk = new Map<string, unknown>()
+    const label = tag(3)
+    await answered(disk, label, 'toolu_e3')
+    const p = proc(disk)
+    p.drawn(label)
+    await bandHook(p.$, band(), engine)
+    // a line that names the tag in another form takes no card
+    expect(await lineHook(p.$, line('msg_e3', `The card is below; the go comes from its box. Package \`${label}\`.`), engine)).toBe(ENGINE)
+    await wait(p, SHOWN_WAIT_MS * 2 - 2_000)
+    expect(p.asks).toEqual([])
+    await wait(p, 4_000)
+    expect(p.asks).toEqual([CARD_NOT_SHOWN(label)])
+  })
+
+  test('owed again only while it is still owed: not for a package no longer waiting, a go or a note after the call, or a newer call answered here', async () => {
+    // the last sync lists the package nowhere: sent, closed or handed on
+    const gone = new Map<string, unknown>()
+    await answered(gone, tag(4), 'toolu_e4a')
+    gone.set('mm.last', { at: 0, items: [] })
+    const a = proc(gone)
+    await bandHook(a.$, band(), engine)
+    await wait(a, EARLIER_WAIT_MS * 2)
+    expect(a.asks).toEqual([])
+    // the transcript holds the person's go after the call, or a note an older version told
+    for (const [n, said] of [[5, (label: string) => `Send package ${label}`], [6, (label: string) => CARD_NOT_SHOWN(label)]] as const) {
+      const disk = new Map<string, unknown>()
+      const label = tag(n)
+      await answered(disk, label, `toolu_e${n}`)
+      const transcript = [
+        { role: 'assistant', text: 'Asking for the card.', toolUses: [{ tool_use_id: `toolu_e${n}`, tool: 'mcp__mm-bridge__mm' }] },
+        { role: 'assistant', text: `The card is below. Package ${label}.`, toolUses: [] },
+        { role: 'user', text: said(label), toolUses: [] },
+      ]
+      const p = proc(disk, transcript)
+      await bandHook(p.$, band(), engine)
+      await wait(p, EARLIER_WAIT_MS * 2)
+      expect(p.asks, String(n)).toEqual([])
+    }
+    // a transcript that holds the call and nothing after it settles nothing: owed
+    const open = new Map<string, unknown>()
+    await answered(open, tag(7), 'toolu_e7')
+    const o = proc(open, [{ role: 'assistant', text: '', toolUses: [{ tool_use_id: 'toolu_e7', tool: 'mcp__mm-bridge__mm' }] }])
+    await bandHook(o.$, band(), engine)
+    await wait(o, EARLIER_WAIT_MS + SHOWN_WAIT_MS)
+    expect(o.asks).toEqual([CARD_NOT_SHOWN(tag(7))])
+    // the new process asks for the card again before the thread is drawn: its own call is the live one, owed at its own turn's end
+    const again = new Map<string, unknown>()
+    await answered(again, tag(8), 'toolu_e8a')
+    const n = proc(again)
+    n.drawn(tag(9))
+    await begin(n)
+    await noteCardAnswer(n.$, { args: `card ${PKG}`, toolUseId: 'toolu_e8b', ownCall: true }, READY(tag(9)))
+    await bandHook(n.$, band(), engine)
+    expect(texts(await lineHook(n.$, line('msg_e8', `The card is below. Package ${tag(9)}.`), engine)).join('\n')).toContain(DRAWN)
+    await end(n)
+    await wait(n, EARLIER_WAIT_MS * 2)
+    expect(n.asks).toEqual([])
+    expect(recOf(again)?.asked).toMatchObject({ toolUseId: 'toolu_e8b', label: tag(9) })
+  })
+
+  test('the line that took the card in an earlier process keeps it: an older line of the same tag, drawn first from the top, does not take it', async () => {
+    const disk = new Map<string, unknown>()
+    const label = tag(10)
+    const p = proc(disk)
+    p.drawn(label)
+    await begin(p)
+    await noteCardAnswer(p.$, { args: `card ${PKG}`, toolUseId: 'toolu_e10', ownCall: true }, READY(label))
+    expect(texts(await lineHook(p.$, line('msg_e10b', `The card is below. Package ${label}.`), engine)).join('\n')).toContain(DRAWN)
+    await end(p)
+    await wait(p, SHOWN_WAIT_MS * 2)
+    expect(recOf(disk)?.line).toBe('desktop:msg_e10b')
+    // the new process draws the thread from the top: the older line first, then the line after the call
+    const q = proc(disk)
+    q.drawn(label)
+    expect(await lineHook(q.$, line('msg_e10a', `Earlier: the card was below. Package ${label}.`), engine)).toBe(ENGINE)
+    expect(texts(await lineHook(q.$, line('msg_e10b', `The card is below. Package ${label}.`), engine)).join('\n')).toContain(DRAWN)
+    await wait(q, EARLIER_WAIT_MS * 2)
+    expect(q.asks).toEqual([])
+  })
+
+  test('a reload of the code during the turn (the state kept): owed, but never told while the turn runs; checked at its end', async () => {
+    // no line by the turn's end: told after it
+    const disk = new Map<string, unknown>()
+    const label = tag(11)
+    const p = proc(disk)
+    p.drawn(label)
+    await begin(p)
+    await noteCardAnswer(p.$, { args: `card ${PKG}`, toolUseId: 'toolu_e11', ownCall: true }, READY(label))
+    // the plugins are reloaded: this module starts over, the state stands (`busyOf` says the turn is under way)
+    resetShown()
+    await bandHook(p.$, band(), engine)
+    await wait(p, EARLIER_WAIT_MS * 2)
+    expect(p.asks).toEqual([])
+    await end(p)
+    await wait(p, SHOWN_WAIT_MS * 3)
+    expect(p.asks).toEqual([CARD_NOT_SHOWN(label)])
+    // the line drawn at the turn's end takes the card: nothing told
+    const disk2 = new Map<string, unknown>()
+    const second = tag(12)
+    const q = proc(disk2)
+    q.drawn(second)
+    await begin(q)
+    await noteCardAnswer(q.$, { args: `card ${PKG}`, toolUseId: 'toolu_e12', ownCall: true }, READY(second))
+    resetShown()
+    await bandHook(q.$, band(), engine)
+    await wait(q, SHOWN_WAIT_MS * 2)
+    expect(texts(await lineHook(q.$, line('msg_e12', `The card is below. Package ${second}.`), engine)).join('\n')).toContain(DRAWN)
+    await end(q)
+    await wait(q, EARLIER_WAIT_MS * 2)
+    expect(q.asks).toEqual([])
+  })
+
+  test('the record: written for the main thread\'s own ready answer only, a new one for each, the tags told kept across them', async () => {
+    const disk = new Map<string, unknown>()
+    const p = proc(disk)
+    // a sub-agent's call, a not-ready answer, a typed /mm card (no tool_use_id): no record
+    await noteCardAnswer(p.$, { args: `card ${PKG}`, toolUseId: 'toolu_e13a', ownCall: false }, READY(tag(13)))
+    await noteCardAnswer(p.$, { args: `card ${PKG}`, toolUseId: 'toolu_e13b', ownCall: true }, 'card not ready: the card is still being drawn. Print the whole page.')
+    await noteCardAnswer(p.$, { args: `card ${PKG}`, toolUseId: undefined, ownCall: true }, READY(tag(13)))
+    expect(disk.get('mm.cardShown')).toBeUndefined()
+    expect(await askedOf(p.$)).toBeNull()
+    await noteCardAnswer(p.$, { args: `card ${PKG}`, toolUseId: 'toolu_e13c', ownCall: true }, READY(tag(13)))
+    expect(recOf(disk)?.asked).toMatchObject({ packageId: PKG, label: tag(13), toolUseId: 'toolu_e13c' })
+    expect(await askedOf(p.$)).toMatchObject({ packageId: PKG, label: tag(13), toolUseId: 'toolu_e13c' })
+    // a told tag, then a newer ready answer: the line starts over, the tags told stay
+    disk.set('mm.cardShown', { [TRANSCRIPT]: { ...recOf(disk), line: 'desktop:msg_old', told: [tag(14)] } })
+    const q = proc(disk)
+    await noteCardAnswer(q.$, { args: `card ${PKG}`, toolUseId: 'toolu_e13d', ownCall: true }, READY(tag(15)))
+    expect(recOf(disk)).toMatchObject({ asked: { label: tag(15), toolUseId: 'toolu_e13d' }, told: [tag(14)] })
+    expect(recOf(disk)?.line).toBeUndefined()
+    // another thread's record is left as it is
+    disk.set('mm.cardShown', { ...(disk.get('mm.cardShown') as object), 'another-session': { asked: { packageId: PKG, label: tag(16), toolUseId: 'toolu_x', at: 1 }, told: [] } })
+    await noteCardAnswer(q.$, { args: `card ${PKG}`, toolUseId: 'toolu_e13e', ownCall: true }, READY(tag(17)))
+    expect((disk.get('mm.cardShown') as Record<string, unknown>)['another-session']).toEqual({ asked: { packageId: PKG, label: tag(16), toolUseId: 'toolu_x', at: 1 }, told: [] })
   })
 })
