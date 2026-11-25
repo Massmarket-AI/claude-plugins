@@ -18,7 +18,7 @@ import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
   LABEL, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, secondThreadSentence, startKickoff, threadLink, titleLooksLike, titleSuggestion,
-  REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, chipTitle, ownPackage, seenNow, selfUpdateAt, selfUpdateText, waitingText,
+  REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, chipTitle, ownPackage, readyPackage, seenNow, selfUpdateAt, selfUpdateText, updatePace, waitingText,
   FRESH_THREAD_BYTES, draftsComing, freshParagraph, prepDue, replacedBy,
   buildHeading, buildMore, buildOf, buildShown,
   teamCount, teamHeading, teamOf, teamPane, teamPerson,
@@ -74,7 +74,8 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 //    kickoffText's `auto`, the marker first), through Update's own send and guards, once this bridge has seen the
 //    client unchanged for AUTO_QUIET_MS ((0.7.14) never waiting for its drafts: mail goes in saying they follow, and they
 //    go in as a second update when ready; a thread they never reach is asked for prep AUTO_NO_DRAFTS_MS after the mail
-//    was first seen), within AUTO_UPDATES_PER_SYNC from one sync and AUTO_UPDATES_PER_HOUR and AUTO_UPDATES_PER_DAY
+//    was first seen; (0.7.76) and a reply package the thread lacks, its drafts stored and finished, goes at once, set off
+//    by OW's drafts pulse within a minute: `updatePace`, `pulsePass`), within AUTO_UPDATES_PER_SYNC from one sync and AUTO_UPDATES_PER_HOUR and AUTO_UPDATES_PER_DAY
 //    on this computer, never into a thread the person used in the last AUTO_IDLE_MS, never from a thread into itself,
 //    and only where the time-tracking hook counts it as automatic (`autoUpdates`). It stamps nothing and claims
 //    nothing: an automatic send is nobody's act (R11).
@@ -243,7 +244,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.75'
+export const VERSION = '0.7.76'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -274,6 +275,20 @@ const PANE_VIEW = 'mm-view'
 const PANE_QUEUE = 'mm-queue'
 const SYNC_MS = 5 * 60_000
 const TICK_MS = 60_000
+/**
+ * (0.7.76, Rob 2026-11-24: "Update should have hit as soon as the transcript finished processing") How often the thread that
+ * polls asks OW's drafts pulse (`GET /drafts-pulse`, `pulsePass`): a key that changes when a reply draft is written or a
+ * package's build ends. A changed key syncs at once, so new drafts reach the feed within a minute instead of at the next of
+ * the five-minute syncs (SYNC_MS). Three small reads on OW, against the closeout's dozens.
+ */
+const PULSE_MS = 60_000
+/** (0.7.76) After OW answers the pulse 404 or 405 (an OW without the route yet), it is not asked again for this long. */
+const PULSE_MISSING_MS = 30 * 60_000
+/**
+ * (0.7.76) A pulse answered this recently says this computer reads an OW that marks a package still being built (the feed's
+ * `building`, the same OW release): only then does a finished package go at once (`updatePace`).
+ */
+const PULSE_KNOWN_MS = 10 * 60_000
 /** (0.5.3) How often a thread withdraws its own chips that are no longer wanted, from the store alone (`chipsPass`). */
 const CHIPS_PASS_MS = 15_000
 /** How long the sync's lease (`mm.lease`) holds after its last write: a holder that stops writing it lets it run out after this. */
@@ -5984,7 +5999,9 @@ async function tick($: EngineInterface): Promise<void> {
       // sync on record was made by an older bridge (`olderSync`): an older thread's press, skill load or update applied
       // its own version's rules, and this sync puts the pins and names right within the minute, not five minutes on.
       const asked = Number(await storeGet<number>($, 'mm.ask', 0)) || 0
-      if (!last || now - last.at >= SYNC_MS || asked > last.at || took || olderSync(last)) {
+      // (0.7.76) and at once when OW's drafts pulse moved: a reply draft was written or a package's build ended (`pulsePass`)
+      const pulsed = await pulsePass($, now)
+      if (!last || now - last.at >= SYNC_MS || asked > last.at || took || olderSync(last) || pulsed) {
         try {
           synced = await syncPass($)
         } catch (err) {
@@ -6582,6 +6599,9 @@ async function selfLiner(
   const links = pass.links ?? (await storeGet<Record<string, string>>($, 'mm.links', {}))
   const sent = pass.sent ?? (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))
   const seen = await storeGet<Record<string, FirstSeen>>($, 'mm.firstSeen', {})
+  // (0.7.76) the same pace the send keeps (`updatePace`): a finished package this thread lacks says it goes shortly. From
+  // this process's own copy (`pulseSeenAt`), never another store read here: the line is words, the send asks the store
+  const knows = pulseSeenAt > 0 && pulseSeenAt <= now && now - pulseSeenAt <= PULSE_KNOWN_MS
   return (it, rec) => {
     const pid = it.projectId
     const pick = autoUpdateTarget(rec, links[pid])
@@ -6590,7 +6610,7 @@ async function selfLiner(
     const given = sent[pid]
     if (given && given.sid === pick.sid && (hasWaiting(given.sig, it) || ownPackage(given, pick.sid, it))) return ''
     const prev = seen[pid]
-    return selfUpdateText(selfUpdateAt(seenNow(prev && typeof prev === 'object' ? prev : undefined, it, sigHash(signature), now)), now)
+    return selfUpdateText(selfUpdateAt(seenNow(prev && typeof prev === 'object' ? prev : undefined, it, sigHash(signature), now), updatePace(it, given, pick.sid, knows)), now)
   }
 }
 
@@ -6650,6 +6670,10 @@ async function autoUpdates($: EngineInterface): Promise<void> {
   const sent = await storeGet<Record<string, Sent>>($, 'mm.sent', {})
   const chips = await chipsOf($, now)
   const starting = await storeGet<Record<string, { until?: number }>>($, 'mm.starting', {})
+  // (0.7.76) an OW that says when a package is still being built: read only once a ready package needs it (`paceOf`)
+  let knows: boolean | undefined
+  const paceOf = async (it: QueueItem, given: Sent | undefined, sid: string) =>
+    readyPackage(it) ? updatePace(it, given, sid, (knows ??= await knowsBuilding($, now))) : updatePace(it, given, sid, false)
   for (const it of last.items.slice().sort(byDue)) {
     const pid = it.projectId
     // (0.7.14) the thread has this, sent while its drafts could still come, and none came: it is asked for prep now
@@ -6677,7 +6701,7 @@ async function autoUpdates($: EngineInterface): Promise<void> {
       await ownWork($, it, sid, signature, given, now)
       continue
     }
-    if (!autoUpdateDue(was, now)) continue
+    if (!autoUpdateDue(was, now, await paceOf(it, given, sid))) continue
     const hook = await hookCountsAuto($, now)
     if (!hook.ok) {
       if (!hookLogged.has(`hook\n${hook.why}`)) {
@@ -6833,9 +6857,10 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
     const cur = buildLists(read, now).queue.find(i => i.projectId === pid)
     if (!cur || !autoUpdatable(cur, now) || signatureOf(cur) !== signature) return
     const was = seenOf(await storeGet<Record<string, FirstSeen>>($, 'mm.firstSeen', {}), pid, signature)
-    if (!autoUpdateDue(was, now)) return
-    if (!(await stillTheClients($, pid, { sid, title: found.title ?? '', suggested: false }, sid, links, read, { live: new Map([[sid, found]]) }))) return
+    // (0.7.76) still due as the feed has it now: a package whose build began meanwhile waits for it (`updatePace`)
     const given = (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[pid]
+    if (!autoUpdateDue(was, now, updatePace(cur, given, sid, await knowsBuilding($, now)))) return
+    if (!(await stillTheClients($, pid, { sid, title: found.title ?? '', suggested: false }, sid, links, read, { live: new Map([[sid, found]]) }))) return
     // (0.7.14) the follow-up that asks for prep goes only while it is still due: the drafts did not come meanwhile
     if (prep ? !prepDue(given, sid, cur, now, was) : (given && given.sid === sid && hasWaiting(given.sig, cur)) || sentHere.get(`${pid}\n${sid}`) === signature) return
     // (0.7.14) mail with no package while Lane-2 may still build the drafts: the words say they follow (`draftsComing`)
@@ -10099,6 +10124,72 @@ async function sendPinReport($: EngineInterface, report: PinReport, now: number)
     // the next sync tries again; nothing of the report is kept or noted
   }
 }
+
+/**
+ * (0.7.76) What the bridge keeps of OW's drafts pulse (`mm.pulse`): when it was last asked, the last key OW gave and when (`okAt`),
+ * the key the last sync it set off was for (`synced`), and, while OW has no such route, until when not to ask.
+ */
+type PulseKept = { asked?: number; key?: string; okAt?: number; synced?: string; missingUntil?: number }
+
+/**
+ * (0.7.76, Rob 2026-11-24: "Update should have hit as soon as the transcript finished processing") OW's drafts pulse
+ * (`GET /api/ext/drafts-pulse`, read-only: a key over the newest reply-draft write and the packages still being built, no id,
+ * name or content), asked on the lease holder's tick every PULSE_MS. True when its key moved since the sync it last set off:
+ * the tick then syncs at once, and that sync's updates by themselves are chosen at once (a finished package goes at once,
+ * `updatePace`). The key that sets off a sync is spent before the sync runs, so a feed that fails is asked again at the
+ * five-minute cadence, never every minute. The first key this computer reads is recorded without a sync. A 404 or 405 is
+ * not asked again for PULSE_MISSING_MS; any other failure keeps what was there. ⛔ Never throws into the tick.
+ */
+async function pulsePass($: EngineInterface, now: number): Promise<boolean> {
+  try {
+    const kept = await storeGet<PulseKept>($, 'mm.pulse', {})
+    if (Number(kept.missingUntil) > now) return false
+    // (a tick early by a few seconds, as the first one after a start is, does not wait a whole minute more)
+    if (now - (Number(kept.asked) || 0) < PULSE_MS - TEAM_SLACK_MS) return false
+    await patchStore<PulseKept>($, 'mm.pulse', {}, p => {
+      p.asked = now
+    })
+    const asked = await within($, $.http.fetch(`${EXT}/drafts-pulse`, { headers: await authHeaders($) }))
+    if (!asked.ok) return false
+    const r = asked.value
+    if (r.status === 404 || r.status === 405) {
+      await patchStore<PulseKept>($, 'mm.pulse', {}, p => {
+        p.missingUntil = now + PULSE_MISSING_MS
+        delete p.okAt
+      })
+      pulseSeenAt = 0
+      return false
+    }
+    if (r.status < 200 || r.status >= 300) return false
+    const body = JSON.parse(r.text) as { ok?: unknown; key?: unknown } | null
+    const key = body && body.ok === true && typeof body.key === 'string' && /^[0-9a-f]{8,64}$/.test(body.key) ? body.key : ''
+    if (!key) return false
+    let moved = false
+    await patchStore<PulseKept>($, 'mm.pulse', {}, p => {
+      moved = typeof p.synced === 'string' && p.synced !== key
+      p.key = key
+      p.okAt = now
+      p.synced = key
+      delete p.missingUntil
+    })
+    pulseSeenAt = now
+    return moved
+  } catch {
+    // the next tick asks again; the five-minute sync carries on as before
+    return false
+  }
+}
+
+/** (0.7.76) This computer reads an OW that marks a package still being built: its pulse answered in the last PULSE_KNOWN_MS. */
+async function knowsBuilding($: EngineInterface, now: number): Promise<boolean> {
+  const kept = await storeGet<PulseKept>($, 'mm.pulse', {})
+  const okAt = Number(kept.okAt)
+  pulseSeenAt = Number.isFinite(okAt) ? okAt : 0
+  return Number.isFinite(okAt) && okAt <= now && now - okAt <= PULSE_KNOWN_MS
+}
+
+/** (0.7.76) When this process last saw a pulse answered (`mm.pulse.okAt`, as `pulsePass` or `knowsBuilding` had it): 0, none. */
+let pulseSeenAt = 0
 
 /** (0.7.34) What the bridge keeps of Team now (`mm.team`): the last good read, when it was asked, and, while OW has no such route, until when not to ask. */
 type TeamKept = { asked?: number; got?: number; team?: TeamNow; seen?: TeamSeen; missingUntil?: number }
