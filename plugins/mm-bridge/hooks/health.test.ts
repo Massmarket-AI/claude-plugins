@@ -1,7 +1,7 @@
 // (0.7.73) The "You" strip's indicators, each at and around its thresholds (health.ts). Every client is made up.
 
 import { describe, expect, test } from 'claude-code/testing'
-import { FILL_AMBER, FILL_RED, TIERS, WEEK_MS, compactLine, compactPoint, fillDot, fillPercent, lateDot, pinsDot, rcDot, repliesDot, sessionsDot, strip, tierDot, tierOf, trackDot } from './health'
+import { TIERS, WEEK_MS, compactLine, lateDot, paceDot, pinsDot, rcDot, repliesDot, sessionsDot, strip, tierDot, tierOf, trackDot } from './health'
 
 const NOW = Date.parse('2026-11-24T15:00:00Z')
 const resetIn = (ms: number) => new Date(NOW + ms).toISOString()
@@ -41,26 +41,17 @@ describe('0.7.73: Replies ready, Sessions', () => {
   })
 })
 
-describe('0.7.73: This thread\'s fill', () => {
-  test(`the compaction point: the threshold, else the window measured against, else CLAUDE_CODE_AUTO_COMPACT_WINDOW, else the model's window`, () => {
-    expect(compactPoint({ threshold: 450_000, rawMax: 500_000, envWindow: '400000', window: 1_000_000 })).toBe(450_000)
-    expect(compactPoint({ rawMax: 500_000, envWindow: '400000', window: 1_000_000 })).toBe(500_000)
-    expect(compactPoint({ envWindow: ' 400000 ', window: 1_000_000 })).toBe(400_000)
-    expect(compactPoint({ envWindow: 'lots', window: 1_000_000 })).toBe(1_000_000)
-    expect(compactPoint({ threshold: 0, rawMax: -1 })).toBeNull()
+describe('0.7.73: Pace, in place of this thread\'s fill (Rob 2026-11-24: "A color that represents if you\'re on pace to complete it on time")', () => {
+  test('every client on pace: green; all of them ahead today: green, ahead; none: green', () => {
+    expect(paceDot([{ client: 'Acme Roofing', level: 'green', words: 'on pace' }, { client: 'Bolt Staffing', level: 'green', words: 'ahead today' }])).toEqual({ key: 'pace', level: 'green', short: 'on pace', says: 'All 2 clients are on pace to finish on time.' })
+    expect(paceDot([{ client: 'Acme Roofing', level: 'green', words: 'ahead today' }])).toMatchObject({ level: 'green', short: 'ahead' })
+    expect(paceDot([])).toMatchObject({ level: 'green', short: 'on pace', says: 'Nothing of yours has a clock to keep pace with.' })
   })
-  test(`green below ${FILL_AMBER}%, amber from ${FILL_AMBER}%, red from ${FILL_RED}%`, () => {
-    expect(fillDot(fillPercent(69 * 4_000, 400_000)).level).toBe('green')
-    expect(fillDot(fillPercent(70 * 4_000, 400_000)).level).toBe('amber')
-    expect(fillDot(fillPercent(84 * 4_000, 400_000)).level).toBe('amber')
-    const red = fillDot(fillPercent(85 * 4_000, 400_000), 85 * 4_000, 400_000)
-    expect(red).toMatchObject({ level: 'red', short: '85%' })
-    expect(red.says).toBe('This thread is 85% of the way to compacting (340k of 400k tokens). It compacts soon: start the next job in a new thread.')
-  })
-  test('no reading yet (a fresh or just-compacted thread): a dash, green', () => {
-    expect(fillPercent(undefined, 400_000)).toBeNull()
-    expect(fillPercent(1000, null)).toBeNull()
-    expect(fillDot(null)).toMatchObject({ level: 'green', short: '–' })
+  test('one behind: amber, and the press names it and why; one late: red', () => {
+    const behind = paceDot([{ client: 'Acme Roofing', level: 'amber', words: 'not started' }, { client: 'Bolt Staffing', level: 'green', words: 'on pace' }])
+    expect(behind).toMatchObject({ level: 'amber', short: '1 behind', says: '1 behind: Acme Roofing (not started). The rest are on pace.' })
+    const late = paceDot([{ client: 'Acme Roofing', level: 'amber', words: 'behind' }, { client: 'Cedar Dental', level: 'red', words: '1d late' }])
+    expect(late).toMatchObject({ level: 'red', short: '1 late', says: '1 late (Cedar Dental); 1 behind (Acme Roofing). The rest are on pace.' })
   })
 })
 
@@ -115,10 +106,10 @@ describe('0.7.73: Time tracking, Remote Control, and the band\'s one line', () =
     expect(rcDot(false)).toMatchObject({ level: 'amber', short: 'off' })
   })
   test('the band: one word when all is green, else each dot that is not, in the strip\'s order', () => {
-    const green = [pinsDot([]), lateDot([]), repliesDot([]), sessionsDot(2, []), fillDot(10), tierDot(tierOf([], NOW)), trackDot('x'), rcDot(true)]
-    expect(strip(green).map(d => d.key)).toEqual(['pins', 'late', 'replies', 'sessions', 'fill', 'tier', 'track', 'rc'])
+    const green = [pinsDot([]), lateDot([]), repliesDot([]), sessionsDot(2, []), paceDot([]), tierDot(tierOf([], NOW)), trackDot('x'), rcDot(true)]
+    expect(strip(green).map(d => d.key)).toEqual(['pins', 'late', 'replies', 'sessions', 'pace', 'tier', 'track', 'rc'])
     expect(compactLine(green)).toBe('🟢 You: all clear')
-    const mixed = [rcDot(false), fillDot(88), pinsDot([{ client: 'Acme Roofing', pinned: false }]), lateDot([])]
-    expect(compactLine(mixed)).toBe('You: 🟡 Pins 0/1 · 🔴 This thread 88% · 🟡 Remote Control off')
+    const mixed = [rcDot(false), paceDot([{ client: 'Cedar Dental', level: 'red', words: '1d late' }]), pinsDot([{ client: 'Acme Roofing', pinned: false }]), lateDot([])]
+    expect(compactLine(mixed)).toBe('You: 🟡 Pins 0/1 · 🔴 Pace 1 late · 🟡 Remote Control off')
   })
 })

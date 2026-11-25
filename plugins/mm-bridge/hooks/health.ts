@@ -9,7 +9,8 @@
  *    that is behind (an internal clock never reads late, 0.7.61).
  * 3. Replies ready: reply packages of theirs ready to approve. Amber while any wait.
  * 4. Sessions: how many threads run on this computer, and how many say they wait on the person (`mm waiting`). Amber while any wait.
- * 5. This thread's fill: context tokens over the compaction point. Amber from 70%, red from 85%.
+ * 5. Pace (0.7.73, Rob 2026-11-24, in place of this thread's fill, which the theme's glow already shows): whether each client of theirs is on
+ *    pace to finish on time. Green on pace or ahead, amber behind (a pace row, a start-by passed, a team clock), red late on a client date.
  * 6. Plan usage tier: normal, conserve or save, with exactly the thresholds of the control tower's `usage-tier.mjs` (TIERS below).
  * 7. Time tracking: whether this thread has declared its task with the worklog hook. Amber until it has.
  * 8. Remote Control: whether it follows the pin on this computer (`/mm rc`). Amber while off.
@@ -18,19 +19,19 @@
 /** A dot's level. */
 export type Level = 'green' | 'amber' | 'red'
 /** Which indicator. */
-export type DotKey = 'pins' | 'late' | 'replies' | 'sessions' | 'fill' | 'tier' | 'track' | 'rc'
+export type DotKey = 'pins' | 'late' | 'replies' | 'sessions' | 'pace' | 'tier' | 'track' | 'rc'
 /** One dot: its level, its short words (`6/7`), and the line a press or a hover says. */
 export type Dot = { key: DotKey; level: Level; short: string; says: string }
 
 /** The order the strip draws them in. */
-export const DOT_ORDER: readonly DotKey[] = ['pins', 'late', 'replies', 'sessions', 'fill', 'tier', 'track', 'rc']
+export const DOT_ORDER: readonly DotKey[] = ['pins', 'late', 'replies', 'sessions', 'pace', 'tier', 'track', 'rc']
 /** Each dot's name, as the pane heads it. */
 export const DOT_NAME: Readonly<Record<DotKey, string>> = {
   pins: 'Pins',
   late: 'Late',
   replies: 'Replies ready',
   sessions: 'Sessions',
-  fill: 'This thread',
+  pace: 'Pace',
   tier: 'Plan',
   track: 'Time tracking',
   rc: 'Remote Control',
@@ -80,36 +81,19 @@ export function sessionsDot(running: number, waiting: readonly string[]): Dot {
   return { key: 'sessions', level: 'amber', short, says: `${runs}; ${waiting.length} ${waiting.length === 1 ? 'waits' : 'wait'} on you: ${listOf(waiting)}.` }
 }
 
-// ---------------------------------------------------------------- 5. this thread's fill
+// ---------------------------------------------------------------- 5. pace
 
-/** Amber from this share of the compaction point, red from the next. */
-export const FILL_AMBER = 70
-export const FILL_RED = 85
+/** A client's pace as you.ts `youPace` reads it: its level and its words (`on pace`, `ahead today`, `behind`, `2d late`). */
+export type Paced = { client: string; level: Level; words: string }
 
-/**
- * The compaction point, in tokens: the breakdown's `autoCompactThreshold`, else its `rawMaxTokens`, else CLAUDE_CODE_AUTO_COMPACT_WINDOW,
- * else the model's window. A figure that is not a positive number is skipped.
- */
-export function compactPoint(o: { threshold?: unknown; rawMax?: unknown; envWindow?: unknown; window?: unknown }): number | null {
-  for (const v of [o.threshold, o.rawMax, typeof o.envWindow === 'string' ? Number(o.envWindow.trim()) : o.envWindow, o.window]) {
-    const n = typeof v === 'number' ? v : NaN
-    if (Number.isFinite(n) && n > 0) return n
-  }
-  return null
-}
-
-/** The thread's fill as a whole percentage of the compaction point, or null before the first answer. */
-export function fillPercent(tokens: unknown, point: number | null): number | null {
-  if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens < 0 || !point) return null
-  return Math.round((tokens / point) * 100)
-}
-
-export function fillDot(percent: number | null, tokens?: number, point?: number | null): Dot {
-  if (percent === null) return { key: 'fill', level: 'green', short: '–', says: 'This thread has no reading yet: it shows after its next answer.' }
-  const level: Level = percent >= FILL_RED ? 'red' : percent >= FILL_AMBER ? 'amber' : 'green'
-  const of = typeof tokens === 'number' && point ? ` (${thousands(tokens)} of ${thousands(point)} tokens)` : ''
-  const tail = level === 'red' ? ' It compacts soon: start the next job in a new thread.' : level === 'amber' ? ' Getting full.' : ''
-  return { key: 'fill', level, short: `${percent}%`, says: `This thread is ${percent}% of the way to compacting${of}.${tail}` }
+export function paceDot(clients: readonly Paced[]): Dot {
+  const late = clients.filter(c => c.level === 'red')
+  const behind = clients.filter(c => c.level === 'amber')
+  if (late.length) return { key: 'pace', level: 'red', short: `${late.length} late`, says: `${[`${late.length} late (${listOf(late.map(c => c.client))})`, behind.length ? `${behind.length} behind (${listOf(behind.map(c => c.client))})` : ''].filter(Boolean).join('; ')}. The rest are on pace.` }
+  if (behind.length) return { key: 'pace', level: 'amber', short: `${behind.length} behind`, says: `${behind.length} behind: ${listOf(behind.map(c => `${c.client} (${c.words})`))}. The rest are on pace.` }
+  const ahead = clients.filter(c => c.words.startsWith('ahead'))
+  if (clients.length && ahead.length === clients.length) return { key: 'pace', level: 'green', short: 'ahead', says: `Every client of yours is ahead today: ${listOf(ahead.map(c => c.client))}.` }
+  return { key: 'pace', level: 'green', short: 'on pace', says: clients.length ? `All ${clients.length} ${clients.length === 1 ? 'client is' : 'clients are'} on pace to finish on time.` : 'Nothing of yours has a clock to keep pace with.' }
 }
 
 // ---------------------------------------------------------------- 6. plan usage tier
@@ -188,7 +172,7 @@ export type YouInput = {
   ready: readonly string[]
   running: number
   waiting: readonly string[]
-  fill: { percent: number | null; tokens?: number; point?: number | null }
+  pace: readonly Paced[]
   tier: ReturnType<typeof tierOf>
   task: string | null
   rc: boolean
@@ -196,7 +180,7 @@ export type YouInput = {
 
 /** The eight dots, in the strip's order. */
 export const youDots = (i: YouInput): Dot[] =>
-  strip([pinsDot(i.needing), lateDot(i.overdue), repliesDot(i.ready), sessionsDot(i.running, i.waiting), fillDot(i.fill.percent, i.fill.tokens, i.fill.point), tierDot(i.tier), trackDot(i.task), rcDot(i.rc)])
+  strip([pinsDot(i.needing), lateDot(i.overdue), repliesDot(i.ready), sessionsDot(i.running, i.waiting), paceDot(i.pace), tierDot(i.tier), trackDot(i.task), rcDot(i.rc)])
 
 /** A dot as its button reads: the glyph, the name and the short count (`🟡 Pins 6/7`). */
 export const dotLabel = (d: Pick<Dot, 'key' | 'level' | 'short'>): string => `${LEVEL_GLYPH[d.level]} ${DOT_NAME[d.key]} ${d.short}`
@@ -224,4 +208,3 @@ function listOf(names: readonly string[]): string {
   return `${uniq.slice(0, 3).join(', ')} and ${uniq.length - 3} more`
 }
 
-const thousands = (n: number): string => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n))

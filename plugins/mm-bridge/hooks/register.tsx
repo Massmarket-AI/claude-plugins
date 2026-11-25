@@ -4147,11 +4147,11 @@ import { agentListReadable, askedOf, busyOf, cardDrawable, cardHooks, cardOf, ca
 import { holderName } from './queue'
 import { ALERTS_DUE, ALERTS_EVERY_MS, ALERTS_SWITCH, ALERT_GAP_MS, ALERT_TITLE, SOUND_ASSET, SOUND_GAIN, alertedOf, alertsOn, claimDue, moreAlertText, pinAlertText, pinSig, planAlerts, waitingAlertText, waitingSig } from './alerts'
 import type { AlertDue, AlertPlan, NewPin } from './alerts'
-import { YOU_EVERY_MS, YOU_HEADING, compactLine, compactPoint, dotLabel, fillPercent, tierOf, youDots, youNeedsLook, youRed } from './health'
+import { LEVEL_GLYPH, YOU_EVERY_MS, YOU_HEADING, compactLine, dotLabel, tierOf, youDots, youNeedsLook, youRed } from './health'
 import type { Overdue } from './health'
 import { clientDueOf, internalBehindAt } from './queue'
 import type { MmYou, MmYouRow, MmYouWait } from '../types'
-import { NOTHING_NEEDS_YOU, withWaits, youBand, youBandText, youPinText, youRows } from './you'
+import { NOTHING_NEEDS_YOU, withWaits, youBand, youBandText, youPace, youPinText, youRows } from './you'
 
 /**
  * The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that
@@ -5422,14 +5422,13 @@ async function rcFollowsPin($: EngineInterface): Promise<void> {
 
 // ---------------------------------------------------------------- (0.7.73) the "You" strip
 
-/** (0.7.73) Each session's compaction point from its one breakdown (`$.session.usage({ breakdown: 'summary' })`), once it had one. */
-const youPoint = new Map<string, { threshold?: number; rawMax?: number }>()
 /** (0.7.73) The sessions working the strip out now: one at a time each. */
 const youLooking = new Set<string>()
 
 /**
  * (0.7.73, Rob 2026-11-24: "Yep", Phase 2c) Works out the "You" strip (health.ts, which says what each dot counts) and keeps it in this
  * session's state, where the pane and the band read it. Desktop only, a person's session only; written only when it changed.
+ * (0.7.73) `here`: this thread's own client's pace, which the massmarket-theme mod reads to colour its glow.
  * ⛔ Read-only: it reads the store, this session's usage and the worklog hook's own record, and never sends, pins or unpins anything.
  */
 async function youPass($: EngineInterface): Promise<void> {
@@ -5471,33 +5470,31 @@ async function youPass($: EngineInterface): Promise<void> {
       const pid = pins[sid]?.projectId
       return { sid, ...(typeof pid === 'string' && isUuid(pid) ? { projectId: pid } : {}), client: cleanName(pins[sid]?.client ?? '') || 'a thread', question: d.ask, type: d.type }
     })
-    // 5. and 6. this thread's fill and the plan's usage, from the status line's own figures
+    // 5. (0.7.73) pace: whether each client that needs the person is on pace to finish on time (you.ts `youPace`)
+    const pace = items.filter(needsYouNow).map(it => ({ client: cleanName(it.client) || 'a client', ...youPace(it, now) }))
+    // 6. the plan's usage, from the status line's own figures
     const usage = await $.session.usage()
-    let point = youPoint.get(id)
-    if (!point) {
-      try {
-        const b = (await $.session.usage({ breakdown: 'summary' })).context.breakdown
-        point = { ...(typeof b?.autoCompactThreshold === 'number' ? { threshold: b.autoCompactThreshold } : {}), ...(typeof b?.rawMaxTokens === 'number' ? { rawMax: b.rawMaxTokens } : {}) }
-      } catch {
-        point = {}
-      }
-      if (point.threshold || point.rawMax) youPoint.set(id, point)
-    }
-    const compacts = compactPoint({ ...point, envWindow: await $.env.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW'), window: usage?.context?.window })
-    const tokens = typeof usage?.context?.tokens === 'number' ? usage.context.tokens : undefined
+    // and this thread's own client's pace, for the theme's glow: its colour the project's status, its strength the thread's fill
+    const own = await ownIn($, items)
+    const linked = own ? undefined : me ? ownerOf(me, await storeGet<Record<string, string>>($, 'mm.links', {})) : undefined
+    const here: MmYou['here'] = own
+      ? { projectId: own.projectId, client: cleanName(own.client) || 'this client', ...youPace(own, now) }
+      : linked && isUuid(linked)
+        ? { projectId: linked, client: cleanName(pins[me as string]?.client ?? '') || 'this client', level: 'green', words: 'nothing due' }
+        : undefined
     const dots = youDots({
       needing,
       overdue,
       ready,
       running,
       waiting,
-      fill: { percent: fillPercent(tokens, compacts), ...(tokens !== undefined ? { tokens } : {}), point: compacts },
+      pace,
       tier: tierOf(Array.isArray(usage?.rateLimits) ? usage.rateLimits : [], now),
       task: await declaredTask($),
       rc: await rcPinOn($),
     })
     const { value: had } = await $.state.get(YOU)
-    const next: MmYou = { dots, line: compactLine(dots), at: now, ...(had?.open && dots.some(d => d.key === had.open) ? { open: had.open } : {}), ...(waits.length ? { waits } : {}) }
+    const next: MmYou = { dots, line: compactLine(dots), at: now, ...(had?.open && dots.some(d => d.key === had.open) ? { open: had.open } : {}), ...(waits.length ? { waits } : {}), ...(here ? { here } : {}) }
     if (!had || !sameValue({ ...had, at: 0 }, { ...next, at: 0 })) await $.state.set(YOU, next)
   } catch {
     // the strip stays as it was
@@ -11633,10 +11630,14 @@ export const register: Register = on => {
             {r.target ? <Button key={`mm-you-open:${r.projectId}`} plain label={head} onPress={() => void openTracked($, r.target as string)} /> : <Text>{head}</Text>}
           </Box>
           <Box flexDirection="row" flexWrap="wrap" gap={1}>
-            {r.clock === 'late' ? <Text color="error">{r.when}</Text> : <Text dimColor>{r.when}</Text>}
+            {/* (0.7.73) on pace to finish on time: its colour and its words first */}
+            {r.pace ? <Text color={r.pace === 'red' ? 'error' : r.pace === 'amber' ? 'warning' : 'success'}>{`${LEVEL_GLYPH[r.pace]} ${r.paceWords}`}</Text> : null}
+            {r.clock === 'late' ? <Text color="error">{`· ${r.when}`}</Text> : <Text dimColor>{`· ${r.when}`}</Text>}
             {r.pin === 'needs_pin' ? <Text color="warning">{`· ${youPinText(r)}`}</Text> : <Text dimColor>{`· ${youPinText(r)}`}</Text>}
             {r.why ? <Text dimColor>{`· ${r.why}`}</Text> : null}
           </Box>
+          {/* the row's own second line where it has one: drafts not sent, why Update goes to a look-alike thread, when it updates itself */}
+          {row && rowDetail(row) ? <Text dimColor>{rowDetail(row)}</Text> : null}
           {row ? rowTail(row) : null}
         </Box>
       )

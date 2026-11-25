@@ -35,6 +35,7 @@ import {
   etaAsksOf,
   goFirstText,
   goOf,
+  hoursDone,
   internalBehindAt,
   leadDueOf,
   noReplyNow,
@@ -137,6 +138,23 @@ export function youClock(it: QueueItem, now: number): { clock: YouRow['clock']; 
   return { clock: 'none', at: Infinity, when: 'no due date', short: 'no due date' }
 }
 
+/**
+ * (0.7.73, Rob 2026-11-24: "A color that represents if you're on pace to complete it on time. Or when they're ahead of schedule") Whether
+ * the client is on pace to finish on time: red late on a client date, or a pace row that reads late; amber behind (a pace row behind or
+ * overbooked, a start-by passed with the work not started, a team clock passed); green ahead (today's paid hours logged) or on pace.
+ */
+export function youPace(it: QueueItem, now: number): { level: 'green' | 'amber' | 'red'; words: string } {
+  const client = clientDueOf(it)
+  if (client < now) return { level: 'red', words: clockLead(client, now) }
+  const p = paceOf(it)
+  if (p?.state === 'late') return { level: 'red', words: 'late on hours' }
+  if (p?.state === 'behind' || p?.state === 'overbooked') return { level: 'amber', words: p.state }
+  if (typeof it.startBy === 'number' && Number.isFinite(it.startBy) && it.startBy <= now) return { level: 'amber', words: 'not started' }
+  if (Number.isFinite(internalBehindAt(it, now))) return { level: 'amber', words: 'behind on a team clock' }
+  if (p && hoursDone(p)) return { level: 'green', words: 'ahead today' }
+  return { level: 'green', words: 'on pace' }
+}
+
 /** Why the row needs the person, in a few words: what pins it, and (0.7.68) the thread's own `mm waiting` question. */
 export function youWhy(it: QueueItem, now: number, clock: YouRow['clock'], from: YouSource, waiting?: string): string {
   const parts: string[] = []
@@ -179,6 +197,7 @@ export const youPinText = (r: Pick<YouRow, 'pin' | 'pinWhy'>): string => (r.pin 
 export function youRow(it: QueueItem, now: number, o: { pin?: RowPin | undefined; stillOpen?: readonly string[]; waiting?: string; target?: string } = {}): YouRow {
   const { ask, from } = youAsk(it, now, o.stillOpen)
   const c = youClock(it, now)
+  const pace = youPace(it, now)
   return {
     projectId: it.projectId,
     client: cleanName(it.client) || 'a client',
@@ -189,6 +208,8 @@ export function youRow(it: QueueItem, now: number, o: { pin?: RowPin | undefined
     clock: c.clock,
     at: Number.isFinite(c.at) ? c.at : null,
     why: youWhy(it, now, c.clock, from, o.waiting),
+    pace: pace.level,
+    paceWords: pace.words,
     ...youPin(o.pin),
     ...(o.target ? { target: o.target } : {}),
   }
@@ -252,6 +273,8 @@ export function withWaits(rows: readonly YouRow[], waits: readonly MmYouWait[] |
       clock: 'none',
       at: null,
       why: `waiting on you for ${WAIT_WORDS[w.type] ?? 'an answer'}`,
+      pace: 'amber',
+      paceWords: 'waiting on you',
       pin: 'pinned',
       target: w.sid,
     })

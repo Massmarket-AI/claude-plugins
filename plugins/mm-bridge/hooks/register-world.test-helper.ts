@@ -784,7 +784,8 @@ export const personClose = (on: On, pid: string) => {
   return { close: () => { closing = true } }
 }
 /** A client's buttons on the pane, by their labels. */
-export const buttonsOf = async (ui: Drawing, projectId: string): Promise<string[]> => (await buttons(ui)).filter(b => b[0].endsWith(projectId)).map(b => b[1])
+/** (0.7.73) Not the You row's own press on its words (`mm-you-open:<project>`), which opens the thread: the row's buttons under it. */
+export const buttonsOf = async (ui: Drawing, projectId: string): Promise<string[]> => (await buttons(ui)).filter(b => b[0].endsWith(projectId) && !b[0].startsWith('mm-you-open:')).map(b => b[1])
 /** (0.7.5) The text the pane draws right under a row's one line: its second line where it has one, else what comes next. */
 export const under = async (ui: Drawing, row: string): Promise<string | undefined> => {
   const all = await lines(ui)
