@@ -4097,6 +4097,7 @@ import { teamFrom, teamHeadingNow, teamLines, teamText, withMoves } from './team
 import { ANSWER_INTERNAL, ANSWER_PERSONAL, ASK_HEADING, BROWSER_HEADING, CONFIRM_NOTE, PROFILE_TIP, SAVING, askText, blockLineText, confirmHeading, confirmText, parseBrowserNow, rowLineText, savedText, withoutAnswered } from './browser'
 import type { BrowserRead } from './browser'
 import type { TeamNow, TeamSeen } from './team'
+import { sampleNotBuilt } from './card-parity'
 import { agentListReadable, askedOf, busyOf, cardDrawable, cardHooks, cardOf, cardVerdict, checkMissOf, checkedOf, clearCard, currentOf, drawCard, feedbackOf, isOnScreen, marksOf, noteAsked, noteDrawn, notePending, noteVersion, onWindows, prepareCard, pressAsk, pressCheck, pressFeedback, pressSign, refreshCard, resetCard, showKept, togglePage, turnBegan, turnEnded, turnMark, type Els, type PageRead } from './card'
 import { holderName } from './queue'
 
@@ -4758,6 +4759,9 @@ function cardReady(label: string): string {
 function cardReadyOffScreen(label: string): string {
   return `card ready: Package ${label}. The whole package is checked and drawn in this thread, under the one line you print now; the side pane draws it too when this thread is open on a screen. Do not print the page. Print one line saying the card is below, the go comes from its box, and they can say "print the page" if they can't see it or any of it doesn't show, ending "Package ${label}.", then wait for the person.`
 }
+/** (0.7.69) The answer when the page's Findings say a lead sample the package promises is not built (`sampleNotBuilt`): not through `cardNotReady`, which says to print the page. */
+const CARD_SAMPLE_NOT_BUILT =
+  'card not ready: a lead sample this package promises is not built yet. Build it first (client-reply-prep §9.2a step 2), then ask mm card again. Do not ask for the go on this package until then.'
 function cardNotReady(reason: string): string {
   return `card not ready: ${reason}. Print the whole page.`
 }
@@ -4821,6 +4825,8 @@ async function cardCommand($: EngineInterface, arg: string, ownCall: boolean): P
     const last = await storeGet<Last | null>($, 'mm.last', null)
     const signer = held.tree?.signer ?? (last?.member ? holderName(last.member) : 'Approver')
     const outcome = await refreshCard($, { packageId, signer, home: await home($), note: line => logAuto($, line) }, read)
+    // (0.7.69) the card is drawn again first, so that it shows the hold (`holdOf` 'sample'); then this reason wins over every check below
+    if (sampleNotBuilt(read.markdown)) return CARD_SAMPLE_NOT_BUILT
     if (outcome === 'no-hash') return cardNotReady(read.sha ? 'the page could not be read to compare' : 'OW gave no usable hash for this package')
     const card = await cardOf($)
     const why = cardVerdict(card, packageId)
