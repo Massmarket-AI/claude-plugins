@@ -15,8 +15,8 @@ import type { On } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 import type { Feed } from './queue'
 import {
-  RUN_GRACE_MS, RUN_WAIT_REFUSED, RUN_WAIT_TOOL_TEXT, baselineOf, newSince, reportedAt, runMissedTitle, runState, runTime, runWaitArgs,
-  runWaitNoted, runWaitNotedUnlinked, runWaitSuffix, runWaitWhy, runWaitsOf,
+  RUN_GRACE_MS, RUN_WAIT_REFUSED, RUN_WAIT_TOOL_TEXT, baselineOf, failWordIn, newSince, noteEntries, reportedAt, runMissedTitle, runReport, runState,
+  runTime, runWaitArgs, runWaitNoted, runWaitNotedUnlinked, runWaitSuffix, runWaitWhy, runWaitsOf,
 } from './threads'
 import type { PinReport, RunWait } from './threads'
 import type { WorldOptions } from './register-world.test-helper'
@@ -48,7 +48,9 @@ const ticketWith = (notes: { text: string | 'network' }) => (url: string) =>
   notes.text === 'network' ? ('network' as const) : url.includes(RUN_TICKET) ? { status: 200, body: { ok: true, ticket: { ticket_id: RUN_TICKET, resolution_notes: notes.text } } } : { status: 404, body: { error: 'Ticket not found.' } }
 const note = (at: number, text: string) => `[${new Date(at).toISOString()}] agent@example.com: note — ${text}`
 const acmeWorld = (on: On, over: WorldOptions = {}) => world(on, { feed: committed(), ...over, store: { ...linked, ...(over.store ?? {}) } })
-const declare = ($: Parameters<typeof tool>[0], when: string) => tool($, `waiting scheduled ${when} ticket ${RUN_TICKET} -- the day-one launch check`)
+/** (0.7.83) Every run's own note carries "check:" (the wait's words). */
+const TAG = 'check:'
+const declare = ($: Parameters<typeof tool>[0], when: string, extra = '') => tool($, `waiting scheduled ${when} ticket ${RUN_TICKET} note "${TAG}"${extra} -- the day-one launch check`)
 
 describe('0.7.70: what the thread says, as the bridge reads it', () => {
   test('runTime: New York wall time (EDT and EST), an ISO time with its offset; anything else is not a time', () => {
@@ -62,17 +64,27 @@ describe('0.7.70: what the thread says, as the bridge reads it', () => {
   })
 
   test('runWaitArgs: the runs in order, the ticket and what they check; refused in one line otherwise', () => {
-    expect(runWaitArgs(`scheduled ${ET('16:15')}, ${ET('14:00')} ticket ${RUN_TICKET.toUpperCase()} -- Day one and day three`, NOW)).toEqual({
-      runs: [runTime(ET('14:00')), runTime(ET('16:15'))], ticket: RUN_TICKET, what: 'Day one and day three',
+    expect(runWaitArgs(`scheduled ${ET('16:15')}, ${ET('14:00')} ticket ${RUN_TICKET.toUpperCase()} note "check (" -- Day one and day three`, NOW)).toEqual({
+      runs: [runTime(ET('14:00')), runTime(ET('16:15'))], ticket: RUN_TICKET, what: 'Day one and day three', tag: 'check (', fails: [],
+    })
+    // (0.7.83) fail words besides SHORT, in either order with the note words, straight or curly quotes
+    expect(runWaitArgs(`scheduled ${ET('14:00')} ticket ${RUN_TICKET} fail "FAILED, NOT SENT" note \u201cDay one check\u201d fail "SHORT" -- Day one`, NOW)).toEqual({
+      runs: [runTime(ET('14:00'))], ticket: RUN_TICKET, what: 'Day one', tag: 'Day one check', fails: ['FAILED', 'NOT SENT'],
     })
     const bad = [
+      // (0.7.83) the note words are required: 4 to 80 characters, once
+      `scheduled ${ET('14:00')} ticket ${RUN_TICKET} -- no note words`,
+      `scheduled ${ET('14:00')} ticket ${RUN_TICKET} note "ck" -- too short`,
+      `scheduled ${ET('14:00')} ticket ${RUN_TICKET} note "check (" note "again" -- twice`,
+      `scheduled ${ET('14:00')} ticket ${RUN_TICKET} note "check (" fail "A1, B2, C3, D4, E5" -- five fail words`,
+      `scheduled ${ET('14:00')} ticket ${RUN_TICKET} note "check (" fail "!!" -- no letter`,
       `scheduled ${ET('14:00')} -- no ticket`,
-      `scheduled ${ET('14:00')} ticket c371d9ef -- a short id`,
-      `scheduled ${ET('14:00')} ticket ${RUN_TICKET} --`,
-      `scheduled ${ET('08:30')} ticket ${RUN_TICKET} -- more than 2 hours ago`,
-      `scheduled 2026-10-27 09:00 ticket ${RUN_TICKET} -- more than 14 days out`,
-      `scheduled ${['12:00', '12:10', '12:20', '12:30', '12:40', '12:50', '13:00'].map(ET).join(', ')} ticket ${RUN_TICKET} -- seven runs`,
-      `scheduled soon ticket ${RUN_TICKET} -- no time`,
+      `scheduled ${ET('14:00')} ticket c371d9ef note "check (" -- a short id`,
+      `scheduled ${ET('14:00')} ticket ${RUN_TICKET} note "check (" --`,
+      `scheduled ${ET('08:30')} ticket ${RUN_TICKET} note "check (" -- more than 2 hours ago`,
+      `scheduled 2026-10-27 09:00 ticket ${RUN_TICKET} note "check (" -- more than 14 days out`,
+      `scheduled ${['12:00', '12:10', '12:20', '12:30', '12:40', '12:50', '13:00'].map(ET).join(', ')} ticket ${RUN_TICKET} note "check (" -- seven runs`,
+      `scheduled soon ticket ${RUN_TICKET} note "check (" -- no time`,
     ]
     for (const b of bad) expect(runWaitArgs(b, NOW)).toBe(RUN_WAIT_REFUSED)
     expect(RUN_WAIT_REFUSED).not.toContain('\n')
@@ -87,6 +99,10 @@ describe('0.7.70: what the thread says, as the bridge reads it', () => {
     // a later run's report never stands for an earlier one's
     expect(runState({ at: NOW, runs: [{ at: NOW + HOUR }, { at: NOW + 3 * HOUR, seen: NOW + 4 * HOUR }] }, NOW + 6 * HOUR).kind).toBe('missed')
     expect(runState({ at: NOW, runs: [{ at: NOW + HOUR, seen: NOW + HOUR + MIN }] }, NOW + 9 * HOUR)).toEqual({ kind: 'done', last: NOW + HOUR })
+    // (0.7.83) a run whose note says a fail word: failed, whatever comes after it
+    const fail = { at: NOW + HOUR + MIN, word: 'SHORT' }
+    expect(runState({ at: NOW, runs: [{ at: NOW + HOUR, seen: NOW + HOUR + MIN, fail }, { at: NOW + 3 * HOUR }] }, NOW + 2 * HOUR)).toEqual({ kind: 'failed', due: NOW + HOUR, at: fail.at, word: 'SHORT' })
+    expect(runState({ at: NOW, runs: [{ at: NOW + HOUR, seen: NOW + HOUR + MIN }, { at: NOW + 3 * HOUR, seen: NOW + 3 * HOUR, fail }] }, NOW + 9 * HOUR).kind).toBe('failed')
   })
 
   test('reportedAt: the first OW note stamped at or after the run; none before it counts', () => {
@@ -100,7 +116,7 @@ describe('0.7.70: what the thread says, as the bridge reads it', () => {
   test('newSince: a newer message, package or task, or a ticket of the viewer\'s that opens or reopens; nothing else', () => {
     const it = { newest: { mail: 10, pkg: 0, task: 20 }, taskIds: [TASK] }
     const base = baselineOf(it)
-    expect(base).toEqual({ mail: 10, pkg: 0, task: 20, ids: [TASK] })
+    expect(base).toEqual({ mail: 10, pkg: 0, task: 20, ids: [TASK], asks: [] })
     expect(newSince(it, base)).toBe(false)
     expect(newSince({ ...it, newest: { ...it.newest, mail: 11 } }, base)).toBe(true)
     expect(newSince({ ...it, newest: { ...it.newest, pkg: 1 } }, base)).toBe(true)
@@ -112,15 +128,68 @@ describe('0.7.70: what the thread says, as the bridge reads it', () => {
     expect(newSince(undefined, base)).toBe(false)
   })
 
+  test('(0.7.83) newSince: a teammate\'s ask (or a handoff) the wait did not have ends it, even with a ticket due later than it was asked', () => {
+    const ask = (id: string, askedAt: number) => ({ id, asker: 'Sam', askedAt, dueAt: askedAt + 24 * HOUR, snippet: 'Can you check the seat?', hasDraft: false, link: '', draftSha: null })
+    const ASK1 = 'ab000000-0000-4000-8000-000000000001'
+    const ASK2 = 'ab000000-0000-4000-8000-000000000002'
+    // the task's time is its due time, tomorrow: an ask made today is older than that, so `newest.task` cannot tell it
+    const it = { newest: { mail: 0, pkg: 0, task: NOW + 24 * HOUR }, taskIds: [TASK], asks: [ask(ASK1, NOW - HOUR)] }
+    const base = baselineOf(it)
+    expect(base.asks).toEqual([ASK1])
+    expect(newSince(it, base)).toBe(false)
+    expect(newSince({ ...it, asks: [ask(ASK1, NOW - HOUR), ask(ASK2, NOW + MIN)] }, base)).toBe(true)
+    // the ask answered (gone from the feed): nothing new
+    expect(newSince({ ...it, asks: [] }, base)).toBe(false)
+    // a baseline from before 0.7.83 holds no ask ids: an ask asked after the wait began is new, one from before is not
+    const { asks: _none, ...old } = base
+    expect(newSince(it, old, NOW)).toBe(false)
+    expect(newSince({ ...it, asks: [ask(ASK2, NOW + MIN)] }, old, NOW)).toBe(true)
+  })
+
+  test('(0.7.83) runReport: only a note with the wait\'s words is the run\'s report; one that says a fail word, whole and in capitals, fails it', () => {
+    const run = { at: NOW }
+    const notes = [
+      note(NOW - HOUR, 'Day one check: set up'),
+      note(NOW + 5 * MIN, 'Cyris thread: looked at the seat, nothing SHORT here'),
+      note(NOW + 20 * MIN, 'Day one check (2026-10-12): ON PLAN. Nothing short; no fix owed.'),
+      `  continued line of the same note`,
+    ].join('\n')
+    expect(noteEntries(notes).map(e => e.at)).toEqual([NOW - HOUR, NOW + 5 * MIN, NOW + 20 * MIN])
+    expect(noteEntries(notes)[2]?.text.endsWith('\n  continued line of the same note')).toBe(true)
+    // with the words: the run's own note, on plan ("short" in small letters is no fail word)
+    expect(runReport(notes, { tag: 'day one CHECK' }, run)).toEqual({ seen: NOW + 20 * MIN })
+    // a wait with no words (on record from before 0.7.83): the first note counts, as before, and its SHORT fails the run
+    expect(runReport(notes, {}, run)).toEqual({ seen: NOW + 5 * MIN, fail: { at: NOW + 5 * MIN, word: 'SHORT' } })
+    // the run's verdict
+    const short = `${notes}\n${note(NOW + 21 * MIN, 'Day three check (2026-10-12): SHORT. Requests sent 0 of 5.')}`
+    expect(runReport(short, { tag: 'check (' }, run)).toEqual({ seen: NOW + 20 * MIN, fail: { at: NOW + 21 * MIN, word: 'SHORT' } })
+    // a later run's note is its own: not read for this run's fail words
+    expect(runReport(short, { tag: 'check (' }, run, NOW + 21 * MIN)).toEqual({ seen: NOW + 20 * MIN })
+    // a fail word the wait names
+    expect(runReport(note(NOW + MIN, 'Fix check: FAILED to open the seat'), { tag: 'fix check', fails: ['FAILED'] }, run)).toEqual({ seen: NOW + MIN, fail: { at: NOW + MIN, word: 'FAILED' } })
+    expect(runReport(notes, { tag: 'launch check' }, run)).toEqual({})
+    expect(runReport(null, { tag: 'check (' }, run)).toEqual({})
+    expect(failWordIn('SHORTFALL and SHORTS', ['SHORT'])).toBeUndefined()
+    expect(failWordIn('verdict: SHORT.', ['SHORT'])).toBe('SHORT')
+    expect(failWordIn('a (b) c', ['(b)'])).toBe('(b)')
+  })
+
   test('runWaitsOf: a damaged entry is none', () => {
     const good = { what: 'x', ticket: RUN_TICKET, at: NOW, runs: [{ at: NOW + HOUR }], base: { mail: 0, pkg: 0, task: 0, ids: [] } }
     expect(runWaitsOf({ local_a: good, local_b: { ...good, ticket: 'c371d9ef' }, local_c: { ...good, runs: [] }, local_d: { ...good, runs: [{ at: 'soon' }] }, nope: good })).toEqual({ local_a: good })
+    // (0.7.83) the note words, the fail words, a failed run and the asks are kept; a damaged failure is dropped
+    const full = { ...good, tag: 'check (', fails: ['FAILED'], runs: [{ at: NOW + HOUR, seen: NOW + 2 * HOUR, fail: { at: NOW + 2 * HOUR, word: 'SHORT' } }], base: { ...good.base, asks: [TASK] } }
+    expect(runWaitsOf({ local_a: full })).toEqual({ local_a: full })
+    expect(runWaitsOf({ local_a: { ...full, runs: [{ at: NOW + HOUR, fail: { at: 'x' } }] } }).local_a?.runs).toEqual([{ at: NOW + HOUR }])
     expect(runWaitsOf(null)).toEqual({})
   })
 
   test('the words: what it answers, the end of the name, the band\'s sentences', () => {
     const w = { what: 'the day-one launch check', ticket: RUN_TICKET, runs: [{ at: runTime(ET('14:00')) }] }
-    expect(runWaitNoted(w)).toBe(`Recorded: this thread waits on a scheduled run (Mon, Oct 12 2 PM ET), each noting ticket c3710000. The bridge takes its own pin off at its next sync and keeps it off until a run's result needs the person (anything new for this client) or a run has not noted the ticket within 2 hours of its time; then it pins the thread again. "waiting clear" takes it back.`)
+    expect(runWaitNoted({ ...w, tag: 'check (', fails: ['FAILED'] })).toBe(`Recorded: this thread waits on a scheduled run (Mon, Oct 12 2 PM ET), each noting ticket c3710000 in a note that carries "check (". The bridge takes its own pin off at its next sync and keeps it off until a run's result needs the person (anything new for this client), a run's note says SHORT or FAILED, or a run has not noted the ticket within 2 hours of its time; then it pins the thread again. Once every run has reported, the wait is over and the usual pin rules act. "waiting clear" takes it back.`)
+    expect(runWaitSuffix({ kind: 'failed', due: NOW, at: NOW + MIN, word: 'SHORT' }, NOW)).toBe('run reported SHORT')
+    expect(runWaitWhy(w, { kind: 'failed', due: runTime(ET('14:00')), at: runTime(ET('14:20')), word: 'SHORT' })).toBe('Pinned for you: a scheduled run (the day-one launch check) noted ticket c3710000 Mon, Oct 12 2:20 PM ET, and its note says SHORT. Read what it found.')
+    expect(runMissedTitle('Acme Roofing', 'run reported SHORT')).toBe('🔴 Acme Roofing · run reported SHORT')
     expect(runWaitSuffix({ kind: 'waiting', due: runTime(ET('14:00')) }, NOW)).toBe('waits on a run 2 PM')
     expect(runWaitSuffix({ kind: 'waiting', due: runTime('2026-10-15 16:15') }, NOW)).toBe('waits on a run Thu 4:15 PM')
     expect(runWaitSuffix({ kind: 'missed', due: NOW, since: NOW + RUN_GRACE_MS }, NOW)).toBe('run missed')
@@ -135,7 +204,7 @@ describe('0.7.70: a thread that waits only on a scheduled run is unpinned until 
     const w = acmeWorld(on, { bridgePins: () => ({ status: 200, body: { ok: true } }) })
     await tickOnce($, w)
     expect(pinnedHere(w)).toBe(true)
-    expect(await declare($, ET('14:00'))).toBe(runWaitNoted({ runs: [{ at: runTime(ET('14:00')) }], ticket: RUN_TICKET }))
+    expect(await declare($, ET('14:00'))).toBe(runWaitNoted({ runs: [{ at: runTime(ET('14:00')) }], ticket: RUN_TICKET, tag: TAG }))
     expect(waitHere(w)?.base?.ids).toEqual([TASK])
     await settle(w)
     expect(pinnedHere(w)).toBe(false)
@@ -172,21 +241,110 @@ describe('0.7.70: a thread that waits only on a scheduled run is unpinned until 
     expect(pinnedHere(w)).toBe(true)
   })
 
-  test('on plan: the run notes its ticket and nothing new comes of it; the thread stays unpinned', LONG, async ($, on) => {
+  test('on plan: the run notes its ticket and nothing new comes of it; the thread stays unpinned while the next run is due', LONG, async ($, on) => {
     const notes = { text: note(NOW - 3 * HOUR, 'checks set up') }
     const w = acmeWorld(on, { ticketStatus: ticketWith(notes) })
     await tickOnce($, w)
-    await declare($, ET('10:30'))
+    await declare($, `${ET('10:30')}, 2026-10-14 16:15`)
     await settle(w)
     expect(pinnedHere(w)).toBe(false)
     notes.text += `\n${note(NOW + 5 * MIN, 'Day one check: on plan. Nothing short; no fix owed.')}`
     await minutesOn(w, 6)
     expect(waitHere(w)?.runs[0]?.seen).toBe(NOW + 5 * MIN)
-    expect(titleHere(w).endsWith(' · runs reported')).toBe(true)
+    expect(titleHere(w).endsWith(' · waits on a run Wed 4:15 PM')).toBe(true)
     // past the grace and past the task's own due time: still not pinned
     await w.clock.advance(6 * HOUR)
     await minutesOn(w, 1)
     expect(pinnedHere(w)).toBe(false)
+  })
+
+  test('⛔ (0.7.83) once every run has reported, the wait is over: the usual rules act at once, and the task due today pins the thread', LONG, async ($, on) => {
+    const notes = { text: '' }
+    const w = acmeWorld(on, { ticketStatus: ticketWith(notes) })
+    await tickOnce($, w)
+    await declare($, ET('10:30'))
+    await settle(w)
+    expect(pinnedHere(w)).toBe(false)
+    notes.text = note(NOW + 5 * MIN, 'Day one check: on plan. Nothing short; no fix owed.')
+    await minutesOn(w, 6)
+    expect(waitHere(w)).toBeUndefined()
+    expect(pinnedHere(w)).toBe(true)
+    expect(titleHere(w)).not.toContain('runs reported')
+  })
+
+  test('⛔ (0.7.83) only a note with the wait\'s words is the run\'s report: another thread\'s note after the run\'s time leaves it missed', LONG, async ($, on) => {
+    const notes = { text: '' }
+    const w = world(on, { feed: silent(), store: linked, ticketStatus: ticketWith(notes) })
+    await tickOnce($, w)
+    await declare($, ET('09:10'))
+    await settle(w)
+    // the thread's own note on the ticket, under the same sign-in as the run's, after the run's time
+    notes.text = note(NOW + MIN, 'Looked at the seat from the client thread; nothing to add')
+    await minutesOn(w, 12)
+    expect(waitHere(w)?.runs[0]?.seen).toBeUndefined()
+    expect(pinnedHere(w)).toBe(true)
+    expect(titleHere(w)).toBe(runMissedTitle('Acme Roofing'))
+  })
+
+  test('⛔ (0.7.83) a run whose note says SHORT, its ticket never filed: pinned at once, as a missed run is; the person\'s unpin after that stands', LONG, async ($, on) => {
+    const notes = { text: '' }
+    const w = world(on, { feed: silent(), store: linked, ticketStatus: ticketWith(notes) })
+    await tickOnce($, w)
+    await declare($, `${ET('10:30')}, 2026-10-14 16:15`)
+    await settle(w)
+    expect(pinnedHere(w)).toBe(false)
+    notes.text = [note(NOW + 5 * MIN, 'Day one check: SHORT. Requests sent 0 of 5.'), note(NOW + 5 * MIN + 2_000, 'Short: requests 0 of 5.')].join('\n')
+    await minutesOn(w, 6)
+    expect(pinnedHere(w)).toBe(true)
+    expect(titleHere(w)).toBe(runMissedTitle('Acme Roofing', 'run reported SHORT'))
+    expect(pinRecord(w)).toEqual({ projectId: ACME, client: 'Acme Roofing', byUs: true, waiting: true })
+    expect(waitHere(w)?.runs[0]?.fail).toEqual({ at: NOW + 5 * MIN, word: 'SHORT' })
+    ;(w.threads.get(SELF) as { pinned: boolean }).pinned = false
+    await minutesOn(w, 11)
+    expect(pinnedHere(w)).toBe(false)
+  })
+
+  test('⛔ (0.7.83) a SHORT note with the feed pinning too: the feed\'s pin keeps the thread, named for the failed run; a fail word the wait named counts the same', LONG, async ($, on) => {
+    const notes = { text: '' }
+    const w = acmeWorld(on, { ticketStatus: ticketWith(notes) })
+    await tickOnce($, w)
+    await declare($, ET('10:30'), ' fail "NOT SENT"')
+    await settle(w)
+    expect(pinnedHere(w)).toBe(false)
+    notes.text = note(NOW + 5 * MIN, 'Day one check: 3 follow-ups NOT SENT.')
+    await minutesOn(w, 6)
+    expect(pinnedHere(w)).toBe(true)
+    expect(titleHere(w).endsWith(' · run reported NOT SENT')).toBe(true)
+    expect(waitHere(w)).toBeDefined()
+  })
+
+  test('(0.7.83) a wait on record from before 0.7.83 (no note words, no ask ids) reads as it did, and its SHORT note pins the thread', LONG, async ($, on) => {
+    const notes = { text: '' }
+    const old: RunWait = { what: 'the day-one launch check', ticket: RUN_TICKET, at: NOW - HOUR, runs: [{ at: runTime(ET('10:30')) }, { at: runTime('2026-10-14 16:15') }], project: ACME }
+    const w = world(on, { feed: silent(), store: { ...linked, 'mm.runwait': { [SELF]: old } }, ticketStatus: ticketWith(notes) })
+    await tickOnce($, w)
+    expect(pinnedHere(w)).toBe(false)
+    expect(waitHere(w)?.base?.asks).toEqual([])
+    notes.text = note(NOW + 5 * MIN, 'Day one check (2026-10-12, after the 15:20 ET pass): SHORT. Requests sent 0 of 5.')
+    await minutesOn(w, 6)
+    expect(pinnedHere(w)).toBe(true)
+    expect(titleHere(w)).toBe(runMissedTitle('Acme Roofing', 'run reported SHORT'))
+  })
+
+  test('⛔ (0.7.83) a teammate\'s ask about the client ends the wait, though the task\'s due time is later than the ask', LONG, async ($, on) => {
+    // the task has no creation time, so its time is its due time (5 hours out): later than an ask made now
+    const undated = { ...task(TASK, 5 * HOUR, ''), created_at: undefined }
+    const base = { drafts: [], mail: [], tickets: { due_today: [undated] }, projects: [{ project_id: ACME, name: 'Acme Roofing — Pat' }] }
+    const w = world(on, { feed: feed(base as Partial<Feed>), store: linked })
+    await tickOnce($, w)
+    await declare($, ET('14:00'))
+    await settle(w)
+    expect(pinnedHere(w)).toBe(false)
+    const ask = { ask_id: 'ab000000-0000-4000-8000-000000000009', project_id: ACME, project_name: 'Acme Roofing — Pat', asker_name: 'Sam', asker_email: 'sam@example.com', asked_email: ME, asked_at: new Date(NOW + MIN).toISOString(), due_at: new Date(NOW + 24 * HOUR).toISOString(), snippet: 'Can you look at the seat?' }
+    w.setFeed(feed({ ...base, asks: [ask] } as Partial<Feed>))
+    await minutesOn(w, 6)
+    expect(waitHere(w)).toBeUndefined()
+    expect(pinnedHere(w)).toBe(true)
   })
 
   test('a result that needs the person: the run files a new ticket for them; the wait ends and the thread is pinned again', LONG, async ($, on) => {
@@ -218,7 +376,7 @@ describe('0.7.70: a thread that waits only on a scheduled run is unpinned until 
     const w = acmeWorld(on, { ticketStatus: ticketWith(notes) })
     await tickOnce($, w)
     // due 1 h 50 min ago: missed 10 minutes from now
-    await declare($, ET('09:10'))
+    await declare($, `${ET('09:10')}, 2026-10-14 16:15`)
     await settle(w)
     expect(pinnedHere(w)).toBe(false)
     await minutesOn(w, 12)
@@ -228,7 +386,7 @@ describe('0.7.70: a thread that waits only on a scheduled run is unpinned until 
     notes.text = note(NOW + 15 * MIN, 'Day one check: on plan.')
     await minutesOn(w, 6)
     expect(pinnedHere(w)).toBe(false)
-    expect(titleHere(w).endsWith(' · runs reported')).toBe(true)
+    expect(titleHere(w).endsWith(' · waits on a run Wed 4:15 PM')).toBe(true)
   })
 
   test('missed with nothing else on the feed: pinned as the bridge\'s on its own; the person\'s unpin after that stands', LONG, async ($, on) => {
@@ -275,7 +433,7 @@ describe('0.7.70: a thread that waits only on a scheduled run is unpinned until 
     const notes = { text: '' }
     const w = world(on, { feed: committed(), ticketStatus: ticketWith(notes), self: { sessionId: SELF, title: 'Seat watch fix', pinned: true, isArchived: false, lastActivityAt: ago(0) } })
     await tickOnce($, w)
-    expect(await declare($, ET('09:10'))).toBe(runWaitNotedUnlinked({ runs: [{ at: runTime(ET('09:10')) }], ticket: RUN_TICKET }))
+    expect(await declare($, ET('09:10'))).toBe(runWaitNotedUnlinked({ runs: [{ at: runTime(ET('09:10')) }], ticket: RUN_TICKET, tag: TAG }))
     expect(waitHere(w)?.project).toBeUndefined()
     // the thread's own unpin, as the answer tells it to
     ;(w.threads.get(SELF) as { pinned: boolean }).pinned = false

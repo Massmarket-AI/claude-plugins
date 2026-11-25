@@ -1659,21 +1659,37 @@ export function answerArgs(arg: string): { clear: true } | { type: AnswerType; a
  * when it was declared (`at`), each run's due time and, once the bridge found it, when its report was stamped (`seen`), and
  * what the client had for the viewer then (`base`). ⛔ LOCAL ONLY, as a declaration is: the pin report sends no part of it.
  */
-export type RunWait = { what: string; ticket: string; at: number; runs: WaitRun[]; base?: RunBaseline; project?: string; repinned?: number }
+export type RunWait = {
+  what: string; ticket: string; at: number; runs: WaitRun[]; base?: RunBaseline; project?: string; repinned?: number
+  /** (0.7.83) The words every run's own note carries (`note "<words>"`), any case: only a note with them is a run's report. */
+  tag?: string
+  /** (0.7.83) The words besides RUN_FAIL_WORDS that make a run's note a failed result (`fail "<word>"`), capitals as written. */
+  fails?: string[]
+}
 // (0.7.70) `base` absent: the last sync's item for the client did not carry the ticket ids yet (a sync of a bridge before 0.7.70),
 // so the first pass after the declaration takes it.
 // (0.7.70) `project`: the project the thread was linked to when it declared the wait, absent for a thread linked to none (an
 // internal thread of the person's own): that one unpins itself, and the bridge only pins it again for a missed run (`repinned`,
 // when it did) and takes that pin off once the run's note lands.
+// ⛔ (0.7.83, Rob 2026-11-25: "I want to make sure that that doesn't cause us to drop the ball (if somehow something doesn't get
+// repinned due to a failed run or who knows what)". Claude's four fixes, approved: "Yes, send them".) `tag`: every note from the
+// person's threads is written under the same sign-in, so any thread's note on the ticket after a run's time read as that run's
+// report, and a run that failed read as one that reported. A wait declared from 0.7.83 on names the words its run's note carries;
+// a wait on record from before has none, and reads as it did (the first note counts), never more loosely.
 
-/** (0.7.70) One scheduled run: when it is due, and (`seen`) the stamp of the first note on the wait's ticket at or after then. */
-export type WaitRun = { at: number; seen?: number }
+/**
+ * (0.7.70) One scheduled run: when it is due, and (`seen`) the stamp of its report on the wait's ticket. (0.7.83) `fail`: that
+ * report, or another note of the run's before the next run's time, says a fail word (`word`), stamped `at`.
+ */
+export type WaitRun = { at: number; seen?: number; fail?: { at: number; word: string } }
 
 /**
  * (0.7.70) What the client had for the viewer when the wait began (`baselineOf`): the newest time of each kind (`newest`) and
  * the ids of the viewer's own tickets (`taskIds`). Anything past it is something new (`newSince`), and ends the wait.
+ * (0.7.83) `asks`: the ids of the viewer's open asks about the client then (a teammate's Discord ask, a handoff). Absent on a
+ * wait on record from before 0.7.83: an ask asked after the wait began is new (`newSince`), and the first pass records the rest.
  */
-export type RunBaseline = { mail: number; pkg: number; task: number; ids: string[] }
+export type RunBaseline = { mail: number; pkg: number; task: number; ids: string[]; asks?: string[] }
 
 /**
  * (0.7.70) How long after its due time a run has to note its ticket before the bridge reads it as failed and pins the thread
@@ -1685,59 +1701,132 @@ export const RUN_GRACE_MS = 2 * 60 * 60_000
 export const RUN_AHEAD_MAX_MS = 14 * 24 * 60 * 60_000
 /** (0.7.70) The most runs one wait holds (a day-one and a day-three check is two). */
 export const RUN_WAIT_RUNS_MAX = 6
-/**
- * (0.7.70) How long a wait whose runs all reported stands, the client still listed and nothing new: 21 days after its last run,
- * the three weeks after which a quiet ticket closes. Past it the usual rules act on the thread again (quiet is never done).
- */
-export const RUN_DONE_KEEP_MS = 21 * 24 * 60 * 60_000
+// ⛔ (0.7.83) A wait whose runs all reported no longer stands (0.7.70 kept it 21 days while its client was listed with nothing
+// new, so a dated ticket still open could go late unpinned): the pass that finds the last report ends it, and the usual rules
+// act on the thread from that pass.
 
-/** (0.7.70) What the client has for the viewer now, as a wait's baseline. No item: nothing. */
-export function baselineOf(it: Pick<QueueItem, 'newest' | 'taskIds'> | undefined): RunBaseline {
+/**
+ * ⛔ (0.7.83) The words that make a run's note a failed result on every wait, whole words, capitals as written: a check's
+ * verdict (`SHORT`, as launch-check.py writes it; its on-plan note says "Nothing short", which is no match). Such a note pins the
+ * thread at once, as a missed run does: a run that files the person a ticket ends the wait anyway, but one whose ticket did not
+ * get filed has only its note to say so.
+ */
+export const RUN_FAIL_WORDS = ['SHORT']
+/** (0.7.83) The most fail words one wait names besides RUN_FAIL_WORDS. */
+export const RUN_FAILS_MAX = 4
+
+/** (0.7.83) The fail words a wait's notes are read for: RUN_FAIL_WORDS and its own. */
+export const failWordsOf = (w: Pick<RunWait, 'fails'>): string[] => [...new Set([...RUN_FAIL_WORDS, ...(w.fails ?? [])])]
+
+/** (0.7.83) The ids of the viewer's open asks an item holds, lower case. */
+const askIdsOf = (it: Pick<QueueItem, 'asks'> | undefined): string[] =>
+  Array.isArray(it?.asks) ? [...new Set(it.asks.map(a => (a && typeof a.id === 'string' ? a.id.toLowerCase() : '')).filter(isUuid))] : []
+
+/** (0.7.70) What the client has for the viewer now, as a wait's baseline. No item: nothing. (0.7.83) And its open asks' ids. */
+export function baselineOf(it: Pick<QueueItem, 'newest' | 'taskIds' | 'asks'> | undefined): RunBaseline {
   const n = it?.newest
   const ids = Array.isArray(it?.taskIds) ? [...new Set(it.taskIds.filter(isUuid).map(id => id.toLowerCase()))] : []
-  return { mail: Number(n?.mail) || 0, pkg: Number(n?.pkg) || 0, task: Number(n?.task) || 0, ids }
+  return { mail: Number(n?.mail) || 0, pkg: Number(n?.pkg) || 0, task: Number(n?.task) || 0, ids, asks: askIdsOf(it) }
 }
 
 /**
  * ⛔ (0.7.70) Whether the client has something for the viewer that it did not have when the wait began: a newer message, package
  * or task or ask, or a ticket of the viewer's own that opened or reopened since (a watchdog's ticket, a run's "short" ticket).
  * That is a result that needs the person, and it ends the wait. No item (the client is on none of the lists): nothing new.
+ * ⛔ (0.7.83) Or an open ask of the viewer's that the baseline does not hold (a teammate's ask, a handoff): `newest.task` can sit
+ * at a ticket's due time, later than an ask that came after the wait began, so an ask is told by its id. A baseline from before
+ * 0.7.83 holds no ask ids: an ask asked after `since` (the wait's own time) is new.
  */
-export function newSince(it: Pick<QueueItem, 'newest' | 'taskIds'> | undefined, base: RunBaseline): boolean {
+export function newSince(it: Pick<QueueItem, 'newest' | 'taskIds' | 'asks'> | undefined, base: RunBaseline, since?: number): boolean {
   if (!it) return false
   const now = baselineOf(it)
   if (now.mail > base.mail || now.pkg > base.pkg || now.task > base.task) return true
   const had = new Set(base.ids)
-  return now.ids.some(id => !had.has(id))
+  if (now.ids.some(id => !had.has(id))) return true
+  if (Array.isArray(base.asks)) {
+    const asked = new Set(base.asks)
+    return now.asks?.some(id => !asked.has(id)) === true
+  }
+  return Number.isFinite(since) && Array.isArray(it.asks) && it.asks.some(a => a && Number(a.askedAt) > (since as number))
 }
 
 /**
  * (0.7.70) Where a wait stands: `waiting` for its next run (due `due`); `missed`, a run past its due time and RUN_GRACE_MS with no
  * report (since `since`), which pins the thread again; `done`, every run reported (the last due `last`). Runs are read in order:
- * a later run's report never stands for an earlier one's.
+ * a later run's report never stands for an earlier one's. (0.7.83) `failed`: a run's note said a fail word (`word`, stamped
+ * `at`), which pins the thread again as a missed run does, and stays until the thread clears or renews the wait.
  */
-export type RunState = { kind: 'waiting'; due: number } | { kind: 'missed'; due: number; since: number } | { kind: 'done'; last: number }
+export type RunState =
+  | { kind: 'waiting'; due: number }
+  | { kind: 'missed'; due: number; since: number }
+  | { kind: 'failed'; due: number; at: number; word: string }
+  | { kind: 'done'; last: number }
 export function runState(w: Pick<RunWait, 'runs' | 'at'>, now: number): RunState {
   const runs = [...w.runs].sort((a, b) => a.at - b.at)
-  const open = runs.find(r => !Number.isFinite(r.seen))
-  if (!open) return { kind: 'done', last: runs.length ? (runs[runs.length - 1] as WaitRun).at : w.at }
-  const since = open.at + RUN_GRACE_MS
-  return now >= since ? { kind: 'missed', due: open.at, since } : { kind: 'waiting', due: open.at }
+  for (const r of runs) {
+    if (r.fail) return { kind: 'failed', due: r.at, at: r.fail.at, word: r.fail.word }
+    if (Number.isFinite(r.seen)) continue
+    const since = r.at + RUN_GRACE_MS
+    return now >= since ? { kind: 'missed', due: r.at, since } : { kind: 'waiting', due: r.at }
+  }
+  return { kind: 'done', last: runs.length ? (runs[runs.length - 1] as WaitRun).at : w.at }
+}
+
+/**
+ * (0.7.83) A ticket's notes, one per OW stamp: every OW change and note is a line that opens `[<ISO time>] <who>: ...` (OW
+ * `composeResolutionNote`), and the lines after it up to the next stamp are its own. In order of their stamps.
+ */
+export function noteEntries(notes: unknown): Array<{ at: number; text: string }> {
+  if (typeof notes !== 'string') return []
+  const out: Array<{ at: number; text: string }> = []
+  let cur: { at: number; text: string } | undefined
+  for (const line of notes.split('\n')) {
+    const m = /^\[(\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:?\d{2}))\]\s?(.*)$/.exec(line)
+    const t = m ? Date.parse(m[1] as string) : NaN
+    if (m && Number.isFinite(t)) {
+      cur = { at: t, text: m[2] as string }
+      out.push(cur)
+    } else if (cur) cur.text += `\n${line}`
+  }
+  return out.sort((a, b) => a.at - b.at)
 }
 
 /**
  * (0.7.70) The stamp of the first note on a ticket at or after `after`, from its `resolution_notes` as OW's ticket-status GET
- * gives them: every OW change and note is a line that opens `[<ISO time>] <who>: ...` (OW `composeResolutionNote`). Undefined
- * with none.
+ * gives them. Undefined with none.
  */
 export function reportedAt(notes: unknown, after: number): number | undefined {
-  if (typeof notes !== 'string' || !Number.isFinite(after)) return undefined
-  let best: number | undefined
-  for (const m of notes.matchAll(/^\[(\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:?\d{2}))\]/gm)) {
-    const t = Date.parse(m[1] as string)
-    if (Number.isFinite(t) && t >= after && (best === undefined || t < best)) best = t
+  if (!Number.isFinite(after)) return undefined
+  return noteEntries(notes).find(e => e.at >= after)?.at
+}
+
+/** (0.7.83) Whether a note says one of these words, whole, capitals as written: the first it says, or undefined. */
+export function failWordIn(text: string, words: string[]): string | undefined {
+  return words.find(word => {
+    if (!word) return false
+    const plain = word.replace(/[.*+?^$()|[\]{}\\]/g, '\\$&')
+    return new RegExp('(?<![A-Za-z0-9])' + plain + '(?![A-Za-z0-9])').test(text)
+  })
+}
+
+/**
+ * ⛔ (0.7.83) A run's report, as the notes on its ticket stand: the first note stamped at or after the run's time that carries the
+ * wait's words (`tag`, any case; a wait with none: any note, as before 0.7.83), and whether that note, or another of the run's
+ * (with the words, stamped before the next run's time), says a fail word (`failWordsOf`). Nothing found: `{}`.
+ */
+export function runReport(notes: unknown, w: Pick<RunWait, 'tag' | 'fails'>, run: Pick<WaitRun, 'at'>, next?: number): Pick<WaitRun, 'seen' | 'fail'> {
+  if (!Number.isFinite(run.at)) return {}
+  const tag = typeof w.tag === 'string' && w.tag.trim() ? w.tag.trim().toLowerCase() : undefined
+  const ours = noteEntries(notes).filter(e => e.at >= run.at && (tag === undefined || e.text.toLowerCase().includes(tag)))
+  const report = ours[0]
+  if (!report) return {}
+  const words = failWordsOf(w)
+  for (const e of ours) {
+    if (e !== report && next !== undefined && e.at >= next) break
+    const word = failWordIn(e.text, words)
+    if (word) return { seen: report.at, fail: { at: e.at, word } }
   }
-  return best
+  return { seen: report.at }
 }
 
 /** (0.7.70) The waits on record, each checked again (a thread id, a ticket id, a time, one to RUN_WAIT_RUNS_MAX runs): a damaged entry is none. */
@@ -1753,32 +1842,42 @@ export function runWaitsOf(raw: unknown): Record<string, RunWait> {
     for (const r of runs) {
       const t = r && typeof r === 'object' ? (r as { at?: unknown }).at : undefined
       const seen = r && typeof r === 'object' ? (r as { seen?: unknown }).seen : undefined
+      const fail = r && typeof r === 'object' ? (r as { fail?: unknown }).fail : undefined
       if (typeof t !== 'number' || !Number.isFinite(t)) continue
-      kept.push({ at: t, ...(typeof seen === 'number' && Number.isFinite(seen) ? { seen } : {}) })
+      const f = fail && typeof fail === 'object' ? (fail as { at?: unknown; word?: unknown }) : undefined
+      const failed = f && typeof f.at === 'number' && Number.isFinite(f.at) && typeof f.word === 'string' && f.word ? { at: f.at, word: f.word } : undefined
+      kept.push({ at: t, ...(typeof seen === 'number' && Number.isFinite(seen) ? { seen } : {}), ...(failed ? { fail: failed } : {}) })
     }
     if (kept.length !== runs.length) continue
     const b = base && typeof base === 'object' ? (base as Record<string, unknown>) : undefined
     const ids = b && Array.isArray(b.ids) ? b.ids.filter(isUuid) : []
-    const { project, repinned } = w as Record<string, unknown>
+    const asks = b && Array.isArray(b.asks) ? { asks: b.asks.filter(isUuid) } : {}
+    const { project, repinned, tag, fails } = w as Record<string, unknown>
+    const words = Array.isArray(fails) ? fails.filter((x): x is string => typeof x === 'string' && x.length > 0).slice(0, RUN_FAILS_MAX) : []
     out[sid] = {
-      what, ticket, at, runs: kept.sort((x, y) => x.at - y.at), ...(b ? { base: { mail: Number(b.mail) || 0, pkg: Number(b.pkg) || 0, task: Number(b.task) || 0, ids } } : {}),
+      what, ticket, at, runs: kept.sort((x, y) => x.at - y.at), ...(b ? { base: { mail: Number(b.mail) || 0, pkg: Number(b.pkg) || 0, task: Number(b.task) || 0, ids, ...asks } } : {}),
       ...(isUuid(project) ? { project } : {}), ...(typeof repinned === 'number' && Number.isFinite(repinned) ? { repinned } : {}),
+      ...(typeof tag === 'string' && tag.trim() ? { tag } : {}), ...(words.length ? { fails: words } : {}),
     }
   }
   return out
 }
 
-/** (0.7.70) The mm tool's words for a scheduled wait, after the four kinds. */
-export const RUN_WAIT_TOOL_TEXT = `"waiting scheduled <when>[, <when>] ticket <ticket id> -- <what the run checks>" says this thread waits only on scheduled runs that are already set up (a launchd one-shot, a runner's check), each <when> as YYYY-MM-DD HH:MM New York time (or an ISO time with its offset) within 14 days, every run noting its result on that OW ticket: the bridge takes its own pin off and keeps it off, whatever is due for the client then, until a run's result needs the person (anything new for the client: a ticket, a message, a package) or a run has not noted the ticket within 2 hours of its time, and then pins it again. Never for a run that is not set up yet, or while anything else in the thread still needs the person.`
+/** (0.7.70) The mm tool's words for a scheduled wait, after the four kinds. (0.7.83) The note words, the fail words, and the end. */
+export const RUN_WAIT_TOOL_TEXT = `"waiting scheduled <when>[, <when>] ticket <ticket id> note "<words>" [fail "<word>"] -- <what the run checks>" says this thread waits only on scheduled runs that are already set up (a launchd one-shot, a runner's check), each <when> as YYYY-MM-DD HH:MM New York time (or an ISO time with its offset) within 14 days, every run noting its result on that OW ticket in a note that carries <words> (4 to 80 characters that every run's own note has and no other note does, such as "check ("; every thread's note is written under the same sign-in, so the words are what tell the run's note from the rest): the bridge takes its own pin off and keeps it off, whatever is due for the client then, until a run's result needs the person (anything new for the client: a ticket, a message, a package, a teammate's ask), a run's note says SHORT or a fail word given (whole words, capitals as written), or a run has not noted the ticket within 2 hours of its time, and then pins it again. Once every run has reported, the wait is over and the usual pin rules act. Never for a run that is not set up yet, or while anything else in the thread still needs the person.`
 
 /** (0.7.70) What it answers for words it cannot read. */
-export const RUN_WAIT_REFUSED = 'Not recorded: say "waiting scheduled <when>[, <when>] ticket <ticket id> -- <what the run checks>", each <when> as YYYY-MM-DD HH:MM New York time (or an ISO time with its offset), no earlier than 2 hours ago and within 14 days, at most 6 runs, and the full id of the OW ticket the runs note their results on.'
+export const RUN_WAIT_REFUSED = 'Not recorded: say "waiting scheduled <when>[, <when>] ticket <ticket id> note "<words>" -- <what the run checks>", each <when> as YYYY-MM-DD HH:MM New York time (or an ISO time with its offset), no earlier than 2 hours ago and within 14 days, at most 6 runs, the full id of the OW ticket the runs note their results on, and in quotes the words (4 to 80 characters) every run\'s own note on it carries. Add fail "<word>" for each word besides SHORT that means a run failed, at most 4.'
+
+/** (0.7.83) The fail words a wait is read for, for its answers: `SHORT`, or `SHORT or FAILED`. */
+const failWordsText = (w: Pick<RunWait, 'fails'>): string => failWordsOf(w).join(' or ')
 
 /** (0.7.70) What it answers once the wait is on record. */
-export function runWaitNoted(w: Pick<RunWait, 'runs' | 'ticket'>): string {
+export function runWaitNoted(w: Pick<RunWait, 'runs' | 'ticket' | 'tag' | 'fails'>): string {
   const times = w.runs.map(r => dueText(r.at)).join(', ')
   const n = w.runs.length
-  return `Recorded: this thread waits on ${n === 1 ? 'a scheduled run' : `${n} scheduled runs`} (${times}), each noting ticket ${w.ticket.slice(0, 8)}. The bridge takes its own pin off at its next sync and keeps it off until a run's result needs the person (anything new for this client) or a run has not noted the ticket within 2 hours of its time; then it pins the thread again. "waiting clear" takes it back.`
+  const carrying = w.tag ? ` in a note that carries "${w.tag}"` : ''
+  return `Recorded: this thread waits on ${n === 1 ? 'a scheduled run' : `${n} scheduled runs`} (${times}), each noting ticket ${w.ticket.slice(0, 8)}${carrying}. The bridge takes its own pin off at its next sync and keeps it off until a run's result needs the person (anything new for this client), a run's note says ${failWordsText(w)}, or a run has not noted the ticket within 2 hours of its time; then it pins the thread again. Once every run has reported, the wait is over and the usual pin rules act. "waiting clear" takes it back.`
 }
 
 /** (0.7.70) What `mm waiting scheduled` answers in a thread that is no linked thread here: nothing is stored. */
@@ -1786,17 +1885,22 @@ export const RUN_WAIT_NO_THREAD = 'Not recorded: the bridge could not tell which
 
 /**
  * (0.7.70) What it answers in a thread linked to no project here (an internal thread of the person's own): the bridge has no pin
- * of its own on it to take off, so the thread unpins itself; the bridge pins it again only for a missed run.
+ * of its own on it to take off, so the thread unpins itself; the bridge pins it again only for a missed run, or (0.7.83) a run
+ * whose note says a fail word.
  */
-export function runWaitNotedUnlinked(w: Pick<RunWait, 'runs' | 'ticket'>): string {
+export function runWaitNotedUnlinked(w: Pick<RunWait, 'runs' | 'ticket' | 'tag' | 'fails'>): string {
   const times = w.runs.map(r => dueText(r.at)).join(', ')
   const n = w.runs.length
-  return `Recorded: this thread waits on ${n === 1 ? 'a scheduled run' : `${n} scheduled runs`} (${times}), each noting ticket ${w.ticket.slice(0, 8)}. It is linked to no project here, so unpin it yourself now (mcp__ccd_sidebar__set_pinned with pinned false). The bridge pins it again if a run has not noted the ticket within 2 hours of its time, and takes that pin off once the note lands. "waiting clear" takes it back.`
+  const carrying = w.tag ? ` in a note that carries "${w.tag}"` : ''
+  return `Recorded: this thread waits on ${n === 1 ? 'a scheduled run' : `${n} scheduled runs`} (${times}), each noting ticket ${w.ticket.slice(0, 8)}${carrying}. It is linked to no project here, so unpin it yourself now (mcp__ccd_sidebar__set_pinned with pinned false). The bridge pins it again if a run's note says ${failWordsText(w)} or a run has not noted the ticket within 2 hours of its time, and takes a missed run's pin off once the note lands. "waiting clear" takes it back.`
 }
 
-/** (0.7.70) The end of a thread's name while it waits on a run: ` · waits on a run Wed 4:15 PM`, and once one is missed ` · run missed`. */
+/**
+ * (0.7.70) The end of a thread's name while it waits on a run: ` · waits on a run Wed 4:15 PM`, and once one is missed ` · run missed`.
+ * (0.7.83) A run whose note says a fail word: ` · run reported SHORT`.
+ */
 export const runWaitSuffix = (s: RunState, now: number): string =>
-  s.kind === 'missed' ? 'run missed' : s.kind === 'waiting' ? `waits on a run ${runWhen(s.due, now)}` : 'runs reported'
+  s.kind === 'missed' ? 'run missed' : s.kind === 'failed' ? `run reported ${s.word}` : s.kind === 'waiting' ? `waits on a run ${runWhen(s.due, now)}` : 'runs reported'
 
 /** (0.7.70) When a run is due, short: `4:15 PM` today, `Fri 4:15 PM` within the week, else `Nov 30 4:15 PM`. New York time. */
 export function runWhen(t: number, now: number): string {
@@ -1806,23 +1910,46 @@ export function runWhen(t: number, now: number): string {
   return t - now < 6 * 24 * 60 * 60_000 && t > now ? `${fmt(t, { weekday: 'short' })} ${time}` : `${monthDay(t)} ${time}`
 }
 
-/** (0.7.70) The band's sentence while a wait holds the pin off, once a run is missed, and once every run reported. */
+/** (0.7.70) The band's sentence while a wait holds the pin off, once a run is missed, and once every run reported. (0.7.83) And once a run's note says a fail word. */
 export function runWaitWhy(w: Pick<RunWait, 'what' | 'ticket'>, s: RunState): string {
   if (s.kind === 'missed') return `Pinned for you: a scheduled run (${w.what}) was due ${dueText(s.due)} and has not noted ticket ${w.ticket.slice(0, 8)} since. Check that it ran.`
+  if (s.kind === 'failed') return `Pinned for you: a scheduled run (${w.what}) noted ticket ${w.ticket.slice(0, 8)} ${dueText(s.at)}, and its note says ${s.word}. Read what it found.`
   if (s.kind === 'waiting') return `No pin needed until a scheduled run reports: ${w.what}, due ${dueText(s.due)}. It is pinned again if its result needs you or it has not noted ticket ${w.ticket.slice(0, 8)} by ${dueText(s.due + RUN_GRACE_MS)}.`
   return `No pin needed: the scheduled runs (${w.what}) reported on ticket ${w.ticket.slice(0, 8)} and nothing new for you came of them.`
 }
 
-/** (0.7.70) The name of a thread a missed run pins while its client is on none of the lists. */
-export const runMissedTitle = (client: string): string => `🔴 ${client} · run missed`
+/** (0.7.70) The name of a thread a missed run pins while its client is on none of the lists. (0.7.83) Or a failed run (`what`, the name's end). */
+export const runMissedTitle = (client: string, what = 'run missed'): string => `🔴 ${client} · ${what}`
 
-/** (0.7.70) `mm waiting scheduled ...`: the runs (ms, in order), the ticket and what they check, or RUN_WAIT_REFUSED. */
-export function runWaitArgs(arg: string, now: number): { runs: number[]; ticket: string; what: string } | string {
-  const m = /^scheduled\s+([\s\S]+?)\s+ticket\s+(\S+)\s*--\s*([\s\S]*)$/i.exec(arg.trim())
+/** (0.7.83) The words inside `note "..."` or `fail "..."`, straight or curly quotes. */
+const RUN_OPTION = /\s*(note|fail)\s+["\u201c]([^"\u201c\u201d]*)["\u201d]/gi
+
+/**
+ * (0.7.70) `mm waiting scheduled ...`: the runs (ms, in order), the ticket and what they check, or RUN_WAIT_REFUSED. (0.7.83) And
+ * the words every run's own note carries (`note "..."`, required: 4 to 80 characters), and the fail words besides
+ * RUN_FAIL_WORDS (`fail "..."`, each 2 to 40 characters with a letter or digit, commas between several, at most RUN_FAILS_MAX).
+ */
+export function runWaitArgs(arg: string, now: number): { runs: number[]; ticket: string; what: string; tag: string; fails: string[] } | string {
+  const m = /^scheduled\s+([\s\S]+?)\s+ticket\s+(\S+)((?:\s*(?:note|fail)\s+["\u201c][^"\u201c\u201d]*["\u201d])*)\s*--\s*([\s\S]*)$/i.exec(arg.trim())
   if (!m) return RUN_WAIT_REFUSED
   const ticket = (m[2] as string).toLowerCase()
-  const what = cutAsk(m[3])
+  const what = cutAsk(m[4])
   if (!isUuid(ticket) || !what) return RUN_WAIT_REFUSED
+  let tag: string | undefined
+  const fails: string[] = []
+  for (const o of (m[3] as string).matchAll(RUN_OPTION)) {
+    const words = (o[2] as string).replace(/\s+/g, ' ').trim()
+    if ((o[1] as string).toLowerCase() === 'note') {
+      if (tag !== undefined || words.length < 4 || words.length > 80) return RUN_WAIT_REFUSED
+      tag = words
+      continue
+    }
+    for (const word of words.split(/\s*,\s*/)) {
+      if (word.length < 2 || word.length > 40 || !/[A-Za-z0-9]/.test(word)) return RUN_WAIT_REFUSED
+      if (!fails.includes(word) && !RUN_FAIL_WORDS.includes(word)) fails.push(word)
+    }
+  }
+  if (tag === undefined || fails.length > RUN_FAILS_MAX) return RUN_WAIT_REFUSED
   const runs: number[] = []
   for (const part of (m[1] as string).split(/\s*,\s*/)) {
     const t = runTime(part.trim())
@@ -1830,7 +1957,7 @@ export function runWaitArgs(arg: string, now: number): { runs: number[]; ticket:
     if (!runs.includes(t)) runs.push(t)
   }
   if (!runs.length || runs.length > RUN_WAIT_RUNS_MAX) return RUN_WAIT_REFUSED
-  return { runs: runs.sort((a, b) => a - b), ticket, what }
+  return { runs: runs.sort((a, b) => a - b), ticket, what, tag, fails }
 }
 
 /** (0.7.70) One run time: `2026-11-25 16:15` (New York time, an `ET` after it allowed), or an ISO time with `Z` or an offset. NaN otherwise. */
