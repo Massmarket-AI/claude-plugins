@@ -7,7 +7,7 @@ import {
   peopleRows, routeChoices, routeLabel, routePage, routePageOf, routePrePick, routeSearch, routedText, sourceLink, threadTitle, threadTitleShort, titleFor, withHolder,
   asksMarkdown, assignAsksOf, assignOnly, etaAsksOf, etaOnly, heldInternal, internalQueueThread, matesOf, needsYouNow, newestFirst, olderHeading, olderMarkdown, olderOf, olderTotal, openAsks, queueHome, queueMarkdown, queueTotal, queuedOf, shownText,
   hasDue, clientActivity, isRecent, mayStart,
-  leadDueOf, pinsFor, pinTitle, threadWhy,
+  shownDueOf, pinsFor, pinTitle, threadWhy,
   answerTitle, shortName,
   teamLate, teamLateCount, teamLateSegment, teamLateSplit, teamSplitText, teamLateWho, LATE_WITH_TEAM,
   teamLateOnly,
@@ -3862,8 +3862,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
         client,
         sid,
         ...(said?.dir ? { dir: said.dir } : {}),
-        // (0.7.60) the client's own due time once an internal clock has passed (`leadDueOf`): an away label never reads late for it
-        ...(what && at && Number.isFinite(leadDueOf(at.it, now)) ? { due: leadDueOf(at.it, now), what } : {}),
+        // (0.7.60) the client's own due time once an internal clock has passed (`leadDueOf`): an away label never reads late for it.
+        // ⛔ (0.7.82) a `reply` label's time is the reply's own (`shownDueOf`), never a ticket's sooner one on the same client
+        ...(what && at && Number.isFinite(shownDueOf(at.it, now)) ? { due: shownDueOf(at.it, now), what } : {}),
         listed: at ? at.listed : 'none',
         ...(transcript ? { transcript } : {}),
         ...(title ? { title } : {}),
