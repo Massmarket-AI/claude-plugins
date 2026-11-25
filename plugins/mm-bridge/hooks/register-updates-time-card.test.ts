@@ -27,8 +27,7 @@ import {
   HEAD, TODAY_LINE, PAT_ROW, NUMBERS, LEVERAGE, NOTE_LINE, TRACKED, openTrack, trackHead, trackPart, onlyReads, skill,
   person, tree, L_COPY, L_ROUTER, L_SITE, L_BANK, QUOTE_LINES, PROPOSAL, ON_LINE, NEW_SCOPE, UNMATCHED, PROPOSED,
   linesBody, linesOk, linedWorld, started, notes, ASK_NOTE, bandLines, lineButtons, proof, lastStatus, settledOk,
-  proposalOk, RUN_SPANISH, WHY, PROFILES_ROOT, PROFILE_A, PROFILE_B, profileRec, minutesOn, awayLine, DAYS,
-} from './register-world.test-helper'
+  proposalOk, RUN_SPANISH, WHY, PROFILES_ROOT, PROFILE_A, PROFILE_B, profileRec, minutesOn, awayLine, DAYS, rowsAsBefore } from './register-world.test-helper'
 
 // ======================================================================== 0.5.11
 
@@ -94,8 +93,8 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(records(w).map(r => [r.pid, r.sid, r.ok, r.by, r.client])).toEqual([[ACME, 'local_a', true, SELF, 'Acme Roofing']])
     expect((w.stored['mm.sent'] as Record<string, { sid: string }>)[ACME]?.sid).toBe('local_a')
     expect(w.stored['mm.updating']).toEqual({})
-    // (0.7.73) the band no longer says so: an update that went is work the bridge does by itself; only a failed one is shown
-    expect((await bandLines($)).join(' ')).not.toContain('Updated Acme Roofing')
+    // (0.7.77, Rob 2026-11-25: "The way it was before was good for that") the band says so again, as until 0.7.72
+    expect((await bandLines($)).join(' ')).toContain('Updated Acme Roofing\'s thread.')
     expect(notices(w)).toMatch(new RegExp(`updated Acme Roofing \\(${ACME}\\) sig [0-9a-f]{8} in local_a: something new for the client: drafts ready`))
     // nothing opened, nothing typed, nothing said in the pane
     expect([w.ran, w.opened, w.toasts, w.prompts]).toEqual([[], [], [], []])
@@ -103,7 +102,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(closeouts(w) - read).toBe(3)
     // the list was brought up to date: the row reads that the thread has it
     const ui = await pane($)
-    expect(await buttonsOf(ui, ACME)).toEqual(['Open thread', 'Drafts'])
+    expect(await buttonsOf(ui, ACME)).toEqual([])
     await ui.unmount()
     // never twice: half an hour of syncs
     await after(w, 30)
@@ -348,7 +347,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
       expect(notices(w).match(/its package is the thread's own work/g)?.length).toBe(1)
       // the row says the thread has it
       const ui = await pane($)
-      expect(await buttonsOf(ui, BOLT)).toEqual(['Open thread', 'Drafts'])
+      expect(await buttonsOf(ui, BOLT)).toEqual([])
       await ui.unmount()
     })
   }
@@ -371,6 +370,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     ['prepared', {}],
   ] as const) {
     test(`⛔ (0.7.9) Update pressed on mail with no drafts asks the thread to build them; the package it builds, ${name}, is its own work, never sent to it as new`, LONG, async ($, on) => {
+      rowsAsBefore(on)
       const mail = boltMail(0.5)
       const w = world(on, { feed: feed({ drafts: [], tickets: {}, mail: [mail] }), threads: [thread('local_b', 'Staffing plan', 20)], store: { 'mm.links': { [BOLT]: 'local_b' } } })
       await tickOnce($, w)
@@ -397,6 +397,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
   }
 
   test('(0.7.9) a press that does not ask for the package records no such thing: a client message after it still goes to the thread', LONG, async ($, on) => {
+    rowsAsBefore(on)
     const w = linkedWorld(on)
     await tickOnce($, w)
     const ui = await pane($)
@@ -427,14 +428,14 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     const ui = await pane($)
     expect(BOLT_BY).toBe(SOON)
     expect(await underBolt(ui)).toBe(BOLT_BY)
-    expect(await buttonsOf(ui, BOLT)).toEqual(['Update thread', 'Drafts'])
+    expect(await buttonsOf(ui, BOLT)).toEqual([])
     await ui.unmount()
     // the update goes at its time, saying the drafts follow, and the row says the thread has it
     await after(w, 11)
     await w.clock.advance(3_000)
     expect(sends(w).map(c => c.args.session_id)).toEqual(['local_b'])
     const told = await pane($)
-    expect(await buttonsOf(told, BOLT)).toEqual(['Open thread', 'Drafts'])
+    expect(await buttonsOf(told, BOLT)).toEqual([])
     expect((await lines(told)).join('\n')).not.toContain('updates itself')
     await told.unmount()
     // the drafts are ready: they go ten minutes after they were first seen, and the row says about when
@@ -548,6 +549,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
   })
 
   test('⛔ (review of PR #15, F2) [P3, pressed] Update pressed, and the thread made another client\'s while the press reads the feed: nothing is sent, and the list is drawn again', async ($, on) => {
+    rowsAsBefore(on)
     const w = linkedWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autostart': { on: false } }, fetchTakesMs: n => (n >= 2 ? 1_500 : 0) })
     await mm($, '')
     const ui = await pane($)
@@ -565,6 +567,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
   })
 
   test('⛔ (review of PR #15, F2) [P3, pressed] the client linked to another thread while the press reads the feed: nothing is sent into the old one', async ($, on) => {
+    rowsAsBefore(on)
     const w = linkedWorld(on, {
       threads: [thread('local_a', 'Roof quote', 30), thread('local_new', 'Acme follow-up', 1)],
       store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autostart': { on: false } },
@@ -585,6 +588,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
   })
 
   test('a press with nothing moved meanwhile still sends, after the slow feed read (the final check refuses only a move)', async ($, on) => {
+    rowsAsBefore(on)
     const w = linkedWorld(on, { store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.autostart': { on: false } }, fetchTakesMs: n => (n >= 2 ? 1_500 : 0) })
     await mm($, '')
     const ui = await pane($)
@@ -861,6 +865,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     ['missing', 'the time-tracking hook on this computer could not be read'],
   ] as const) {
     test(`⛔ (review of PR #15, F4) a time-tracking hook that ${hook === 'old' ? 'counts every turn as the person\'s (0.11.4 and before)' : 'cannot be read'}: nothing is sent by itself, logged once; read again at most every 10 minutes`, LONG, async ($, on) => {
+      rowsAsBefore(on)
       const w = linkedWorld(on, { hook })
       await tickOnce($, w)
       await after(w, 40)
@@ -2327,7 +2332,7 @@ describe('0.7.6 (Rob, 10-27: "always pin the most recent thread from that client
       expect(count(notices(w), `brought back Road Dog Industrial (${ROAD}): unarchived ${ROAD_SID}, its own thread, to link, pin and name it`)).toBe(1)
       // its row is its thread's Update, and no client needs a thread started
       const ui = await pane($)
-      expect(await buttonsOf(ui, ROAD)).toEqual(['Update thread', 'Drafts'])
+      expect(await buttonsOf(ui, ROAD)).toEqual([])
       await ui.unmount()
       expect(await kickoffsOf($)).toEqual([])
       // the update by itself, under its own wait: into that thread, the marker first
@@ -2363,7 +2368,7 @@ describe('0.7.6 (Rob, 10-27: "always pin the most recent thread from that client
       // (0.7.10, Rob 10-28; until 0.7.10 its row was a Start, and Start missing threads gave it) its own thread is still
       // its own: the row offers Restore thread, and no new thread is handed out for it
       const ui = await pane($)
-      expect(await buttonsOf(ui, ROAD)).toEqual(['Restore thread', 'Drafts'])
+      expect(await buttonsOf(ui, ROAD)).toEqual(['Restore thread'])
       await ui.unmount()
       expect(await kickoffsOf($)).toEqual([])
       // ⛔ not asked again on every sync
@@ -2395,7 +2400,7 @@ describe('0.7.6 (Rob, 10-27: "always pin the most recent thread from that client
     expect(w.stored['mm.links']).toEqual({})
     // meanwhile (0.7.10; until 0.7.10 a Start) its row offers Restore thread
     const ui = await pane($)
-    expect(await buttonsOf(ui, ROAD)).toEqual(['Restore thread', 'Drafts'])
+    expect(await buttonsOf(ui, ROAD)).toEqual(['Restore thread'])
     await ui.unmount()
     // something newer for Road Dog: brought back, once
     w.setFeed(roadFeed(ago(1)))
@@ -2467,13 +2472,14 @@ describe('0.7.6 (Rob, 10-27: "always pin the most recent thread from that client
     await mm($, '')
     expect(w.stored['mm.links']).toEqual({ [LT]: LT_SID })
     const ui = await pane($)
-    expect(await buttonsOf(ui, LT)).toEqual(['Update thread', 'Drafts'])
+    expect(await buttonsOf(ui, LT)).toEqual([])
     await ui.unmount()
     expect(await kickoffsOf($)).toEqual([])
     expect(starts(w)).toEqual([])
   })
 
   test('a pressed Update puts the client\'s marker on record for its thread too; never over another client\'s marker', async ($, on) => {
+    rowsAsBefore(on)
     const w = world(on, { threads: [thread('local_a', 'Roof quote', 30), thread('local_b', 'Staffing plan', 20)], store: { 'mm.links': { [ACME]: 'local_a', [BOLT]: 'local_b' }, 'mm.marked': { local_b: CEDAR } } })
     await mm($, '')
     const ui = await pane($)
@@ -2488,7 +2494,7 @@ describe('0.7.6 (Rob, 10-27: "always pin the most recent thread from that client
     const w = world(on, { tools: 'start', feed: roadFeed(), threads: [thread('local_other', 'Unrelated notes', 100), thread(ROAD_SID, 'Road Dog intake', 42 * 24)], store: { 'mm.links': { [ROAD]: ROAD_SID } } })
     await tickOnce($, w)
     const ui = await pane($)
-    expect(await buttonsOf(ui, ROAD)).toEqual(['Update thread', 'Drafts'])
+    expect(await buttonsOf(ui, ROAD)).toEqual([])
     await ui.unmount()
     expect(await kickoffsOf($)).toEqual([])
     await after(w, 11)
@@ -2528,7 +2534,7 @@ describe('0.7.6 (Rob, 10-27: "always pin the most recent thread from that client
     // on record for good (`mm.shared`)
     expect(Object.keys((w.stored['mm.shared'] ?? {}) as Record<string, number>).sort()).toEqual(['local_shared', 'local_shared2'])
     const ui = await pane($)
-    expect(await buttonsOf(ui, FNI)).toEqual(['Start thread', 'Drafts'])
+    expect(await buttonsOf(ui, FNI)).toEqual(['Start thread'])
     await ui.unmount()
     expect((await kickoffsOf($)).map(k => k.client)).toContain('F&I Solutions')
     // the feed lists the last 14 days only: once it no longer lists those sessions, the shared threads stay nobody's
@@ -2662,7 +2668,7 @@ describe('0.7.10 (Rob, 10-28): kickoffs never hand a client out twice, start in 
     expect(w.stored['mm.links']).toEqual({})
     expect((w.stored['mm.last'] as { recs: Record<string, { archived?: string; reason: string }> }).recs[ROAD]).toMatchObject({ state: 'start', reason: 'its thread is archived', archived: ROAD_SID })
     const ui = await pane($)
-    expect(await buttonsOf(ui, ROAD)).toEqual(['Restore thread', 'Drafts'])
+    expect(await buttonsOf(ui, ROAD)).toEqual(['Restore thread'])
     await ui.unmount()
     expect(await tool($, 'kickoffs')).toBe('No client needs a new thread now.')
     const one = await tool($, 'kickoffs road dog')
@@ -2670,8 +2676,7 @@ describe('0.7.10 (Rob, 10-28): kickoffs never hand a client out twice, start in 
     expect(one).toBe('Own thread archived: Road Dog Industrial. Never start a new thread for it: bring it back with mm "restore Road Dog Industrial" (the app may ask the person first).')
     // ⛔ not in the band's Start missing threads, and not on its no-thread list
     const band = await bandOf($)
-    // (0.7.73) no Start missing threads at all (and no All threads started): no client here needs a thread and lacks a card
-    expect((await buttons(band)).filter(b => b[0] === 'mm-start-missing')).toEqual([])
+    expect((await buttons(band)).filter(b => b[0] === 'mm-start-missing')).toEqual([['mm-start-missing', 'All threads started']])
     await band.unmount()
     expect(w.minted()).toEqual([])
     expect(starts(w)).toEqual([])
@@ -2717,7 +2722,7 @@ describe('0.7.10 (Rob, 10-28): kickoffs never hand a client out twice, start in 
     const w = world(on, { tools: 'start' })
     await mm($, '')
     const ui = await pane($)
-    expect(await buttonsOf(ui, CEDAR)).toEqual(['Start thread', 'Drafts'])
+    expect(await buttonsOf(ui, CEDAR)).toEqual(['Start thread'])
     await ui.unmount()
     expect(await mm($, 'restore cedar')).toBe('Cedar Dental has no archived thread of its own to bring back.')
     expect(unarchives(w)).toEqual([])
@@ -2764,7 +2769,7 @@ describe('0.7.11 (Rob, 10-30: "switching profiles all the time. It needs to be a
       // each profile keeps its own link: A's is the one the way back takes
       expect(w.stored['mm.profileLinks']).toEqual({ [PROFILE_B]: { [ACME]: 'local_b1' }, [PROFILE_A]: { [ACME]: 'local_a1' } })
       const ui = await pane($)
-      expect(await buttonsOf(ui, ACME)).toEqual(['Update thread', 'Drafts'])
+      expect(await buttonsOf(ui, ACME)).toEqual([])
       expect(await awayLine(ui)).toBeUndefined()
       await ui.unmount()
       expect(await kickoffsOf($)).toEqual([])
@@ -2962,7 +2967,7 @@ describe('0.7.11 (Rob, 10-30: "I don\'t think we need to be creating threads for
     await mm($, '')
     expect(recOf(w, BOLT)?.dormant).toBeUndefined()
     const again = await pane($)
-    expect(await buttonsOf(again, BOLT)).toEqual(['Start thread', 'Drafts'])
+    expect(await buttonsOf(again, BOLT)).toEqual(['Start thread'])
     await again.unmount()
     expect((await kickoffsOf($)).map(k => k.client)).toEqual(['Bolt Staffing'])
     expect(starts(w)).toEqual([])
@@ -4234,6 +4239,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
   /** (0.7.36) The turn under way ends, as the engine raises it: for the main conversation, unless a subagent's is named. */
   const endTurn = ($: Engine, over: Record<string, unknown> = {}) => $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer', ...over } as never)
   test('Drafts on another client\'s row: the card is drawn from the renderer on both surfaces, to read, with no signature box and the page a press away', async ($, on) => {
+    rowsAsBefore(on)
     const w = world(on, { feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.threads': PAIRS }, renderer: 'tree', pickup: PICKUP })
     await mm($, '')
     const ui = await pane($)
@@ -4271,7 +4277,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } }, renderer: 'tree', pickup: PICKUP })
       await mm($, '')
       const u = await mount($, surface)
-      await u.press({ key: `drafts:${ACME}` })
+      await mm($, 'view')
       // (0.7.36) until the thread answers for this version the card stands without the box
       expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn')), surface).toBe(false)
       expect(await tool($, `card ${PKG}`), surface).toContain(`card ready: Package ${LABEL}.`)
@@ -4315,7 +4321,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
     const shown = async ($: Engine, surface: (typeof SURFACES)[number] = 'desktop') => {
       await mm($, '')
       const u = await mount($, surface)
-      await u.press({ key: `drafts:${ACME}` })
+      await mm($, 'view')
       return u
     }
 
@@ -4334,11 +4340,15 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
     })
 
     test('not ready, each in plain words: no id, another package, another client\'s part', async ($, on) => {
+      // another client's part in this pane: Drafts on a row drawn as the rows under the list are (0.7.77: a You row draws none)
+      rowsAsBefore(on)
       const w = world(on, { ...own, feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.threads': PAIRS } })
       expect(await tool($, 'card')).toBe(WHOLE_ID)
       expect(await tool($, 'card not-a-uuid')).toBe(WHOLE_ID)
       expect(await tool($, `card ${PKG}`)).toBe(notReady('the side pane is not showing this package'))
-      const u = await shown($)
+      await mm($, '')
+      const u = await mount($, 'desktop')
+      await u.press({ key: `drafts:${ACME}` })
       expect(await tool($, 'card 99999999-9999-4999-8999-999999999999')).toBe(notReady('the side pane is not showing this package'))
       expect(await tool($, `card ${PKG}`)).toBe(notReady("this is not the client's own thread"))
       expect(w.fills).toEqual([])
@@ -4492,6 +4502,8 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
 
     test('(0.7.75) the pane showing another client: `mm card` puts this thread\'s client back in it first, as `mm view` does, and answers ready', async ($, on) => {
       // Spotlight Dentistry thread, 2026-11-19 at 1:02 PM ET: answered not ready because nothing had put the client in the pane yet
+      // (0.7.77) another client in the pane: Drafts on a row drawn as the rows under the list are (a You row draws none)
+      rowsAsBefore(on)
       const w = world(on, own)
       const u = await shown($)
       await u.press({ key: `drafts:${BOLT}` })
@@ -4541,7 +4553,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       const w = world(on, own)
       await mm($, '')
       const u = await mount($, 'desktop')
-      await u.press({ key: `drafts:${ACME}` })
+      await mm($, 'view')
       // a pass drawing the client part again as the thread asks: the state reads `rendering` for the whole of this dispatch
       const passing = mm($, '')
       expect(await tool($, `card ${PKG}`)).toBe(READY)
@@ -4595,7 +4607,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       const w = world(on, own)
       await mm($, '')
       const u = await mount($, 'desktop')
-      await u.press({ key: `drafts:${ACME}` })
+      await mm($, 'view')
       await u.unmount()
       w.setPlaced(false)
       const opened = w.opened.length
@@ -5016,7 +5028,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
         // a revision: a new hash on OW's page, and the renderer draws it
         w.setPickup({ markdown: NEXT_PAGE, package_sha256: NEXT_SHA })
         w.setTree(JSON.parse(NEXT_TREE))
-        await u.press({ key: `drafts:${ACME}` })
+        await mm($, 'view')
         for (let i = 0; i < 200 && !(await lines(u)).join('\n').includes(NOT_CHECKED); i++) await new Promise(r => setTimeout(r, 2))
         expect((await lines(u)).join('\n')).toContain(NOT_CHECKED)
         expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn'))).toBe(false)
@@ -5027,7 +5039,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
         // the package comes back to the first version: what stood for it was cleared, so the box waits for the thread again
         w.setPickup(PICKUP)
         w.setTree(SMS_TREE)
-        await u.press({ key: `drafts:${ACME}` })
+        await mm($, 'view')
         for (let i = 0; i < 200 && !(await buttons(u)).some(([k]) => k === `mm-card-check:${LABEL}`); i++) await new Promise(r => setTimeout(r, 2))
         expect((await buttons(u)).find(([k]) => k === `mm-card-check:${LABEL}`)?.[1]).toBe('Check this package')
         expect(await hasBox(u)).toBe(false)
@@ -5142,7 +5154,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
         expect(approved.tree.package_sha256).toBe(pair.tree.package_sha256)
         w.setPickup(pick(approved))
         w.setTree(approved.tree)
-        await u.press({ key: `drafts:${ACME}` })
+        await mm($, 'view')
         for (let i = 0; i < 200 && !(await lines(u)).join('\n').includes('Cc support@letaidothehardwork.com'); i++) await new Promise(r => setTimeout(r, 2))
         expect((await lines(u)).join('\n')).toContain('Cc support@letaidothehardwork.com')
         expect(await box()).toBe(true)
@@ -5193,7 +5205,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
     const shown = async ($: Engine) => {
       await mm($, '')
       const u = await mount($, 'desktop')
-      await u.press({ key: `drafts:${ACME}` })
+      await mm($, 'view')
       return u
     }
     /** The live call as the tool hook notes it: the last value written to `cardAsked`, as the engine's state takes the write. */
@@ -5227,7 +5239,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       const live = String(asked()?.toolUseId)
       w.setPickup({ markdown: NEXT_PAGE, package_sha256: NEXT_SHA })
       w.setTree(JSON.parse(NEXT_TREE))
-      await u.press({ key: `drafts:${ACME}` })
+      await mm($, 'view')
       for (let i = 0; i < 200 && !(await buttons(u)).some(([k]) => k === `mm-card-check:${NEXT_LABEL}`); i++) await new Promise(r => setTimeout(r, 2))
       const r = await row($, live, said)
       expect(await lines(r)).toEqual([`Package ${LABEL} was replaced by Package ${NEXT_LABEL}. The newer card is in the side pane, and your thread draws it here once it checks it.`])
@@ -5370,7 +5382,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       await endTurn($)
       w.setPickup({ markdown: NEXT_PAGE, package_sha256: NEXT_SHA })
       w.setTree(JSON.parse(NEXT_TREE))
-      await u.press({ key: `drafts:${ACME}` })
+      await mm($, 'view')
       for (let i = 0; i < 200 && !(await buttons(u)).some(([k]) => k === `mm-card-check:${NEXT_LABEL}`); i++) await new Promise(res => setTimeout(res, 2))
       const second = await tool($, `card ${PKG}`)
       expect(CARD_READY.exec(second)?.[1]).toBe(NEXT_LABEL)
@@ -5430,7 +5442,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       const asked = watchAsked(on)
       await mm($, '')
       const u = await mount($, 'desktop')
-      await u.press({ key: `drafts:${ACME}` })
+      await mm($, 'view')
       expect(await tool($, `card ${PKG}`)).toContain('card not ready:')
       expect(await mm($, `card ${PKG}`)).toContain('card not ready:')
       expect(asked()).toBeUndefined()
@@ -5655,7 +5667,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       world(on, own)
       await mm($, '')
       const t = await $.ui.mount({ plugin: 'mm-bridge', surface: 'terminal', component: 'Pane', requestId: 'mm-queue', props: PANE })
-      await t.press({ key: `drafts:${ACME}` })
+      await mm($, 'view')
       await tool($, `card ${PKG}`)
       await endTurn($)
       const said = (await lines(t)).join('\n')
@@ -5881,10 +5893,8 @@ describe('0.7.34: Team now, Needs you now that folds, the pin marks and the no-t
       const ui = await pane($)
       expect(await label(ui, TOGGLE)).toBe('Team now · 1 working  ▾')
       expect((await lines(ui)).some(l => l.startsWith('Asif'))).toBe(true)
-      // (0.7.73) the You section never folds: an older `needs: false` leaves its rows drawn, with no fold button
-      expect(await label(ui, 'mm-needs-toggle')).toBeUndefined()
-      expect(await lines(ui)).toContain('Needs you (3)')
-      expect((await lines(ui)).some(l => /^\d+\. Cedar Dental: /.test(l))).toBe(true)
+      // (0.7.77, Rob 2026-11-25: "Need you: still needs to be collapsible") folded as the person left it, as until 0.7.72
+      expect(await label(ui, 'mm-needs-toggle')).toBe('Needs you (3)  ▸')
       await ui.unmount()
     })
 
@@ -5951,12 +5961,16 @@ describe('0.7.34: Team now, Needs you now that folds, the pin marks and the no-t
   })
 
   describe('Needs you now', () => {
-    test('it folds, and the rows go with it; the groups under it stay (0.7.73: the You section replaces it and never folds; its rows are always drawn)', async ($, on) => {
+    test('it folds, and the rows go with it; the groups under it stay ((0.7.77) the You section folds as it did)', async ($, on) => {
       const w = world(on, { feed: feed(), threads: [] })
       await tickOnce($, w)
       const ui = await pane($)
-      expect(await label(ui, 'mm-needs-toggle')).toBeUndefined()
-      expect(await lines(ui)).toContain('Needs you (3)')
+      expect(await label(ui, 'mm-needs-toggle')).toBe('Needs you (3)  ▾')
+      expect((await lines(ui)).some(l => /^\d+\. Cedar Dental: /.test(l))).toBe(true)
+      await ui.press({ key: 'mm-needs-toggle' })
+      expect(await label(ui, 'mm-needs-toggle')).toBe('Needs you (3)  ▸')
+      expect((await lines(ui)).some(l => /^\d+\. Cedar Dental: /.test(l))).toBe(false)
+      await ui.press({ key: 'mm-needs-toggle' })
       expect((await lines(ui)).some(l => /^\d+\. Cedar Dental: /.test(l))).toBe(true)
       await ui.unmount()
     })
@@ -6168,8 +6182,7 @@ describe('0.7.38 (Rob 2026-11-07: "Any Reply package should appear above the tea
     expect((await lines(ui)).slice(0, 3)).toEqual(['This thread: Acme Roofing', CARD_NOT_DRAWN, 'Needs you (3)'])
     const keys = await keysOf(ui)
     expect(keys.indexOf('mm-teamnow-toggle')).toBeGreaterThan(keys.indexOf(`drafts:${BOLT}`))
-    // (0.7.73) the You section has no fold button: its last row's buttons come before Team now (above)
-    expect(keys).not.toContain('mm-needs-toggle')
+    expect(keys.indexOf('mm-teamnow-toggle')).toBeGreaterThan(keys.indexOf('mm-needs-toggle'))
     await ui.unmount()
   })
 
@@ -6234,8 +6247,7 @@ describe('(0.7.41) a sent package leaves the side pane, and the chat says while 
     await w.clock.advance(60_000)
     const band = await bandTexts($)
     expect(band.texts[0]).toBe(WAITING)
-    // (0.7.73) then the next client to act on; no Start missing threads while both clients with no thread have their cards
-    expect(band.buttons).toEqual([['mm-open-waiting', 'Open the side pane'], ['mm-next', 'Cedar Dental, deliver "Send the intake form", due 4 PM']])
+    expect(band.buttons).toEqual([['mm-open-waiting', 'Open the side pane'], ['mm-start-missing', 'Start missing threads (2)']])
     const b = await bandOf($)
     const opened = w.opened.length
     await b.press({ key: 'mm-open-waiting' })
@@ -6858,7 +6870,7 @@ describe('0.7.53: Working manually in browser', () => {
   const browserReads = (w: { fetched: string[] }) => w.fetched.filter(u => u.endsWith('/api/ext/browser-now')).length
   const ROW_LINE = 'Working manually in browser · app.gohighlevel.com · Workflows · no thread'
 
-  test('a line goes under its client\'s row; a client with no row is in one short block above Team now (0.7.73: the You section never folds, so a row\'s line stays under it)', async ($, on) => {
+  test('a line goes under its client\'s row; a client with no row is in one short block above Team now ((0.7.73) the browser question sits under the You section)', async ($, on) => {
     const w = world(on, { feed: feed(), browserNow: () => read({ lines: [line(), line({ project_id: DUNE, client: 'Dune Dental', site: 'dune.example', title: 'Booking', no_thread: false })] }) })
     await tickOnce($, w)
     const ui = await pane($)
@@ -6874,9 +6886,11 @@ describe('0.7.53: Working manually in browser', () => {
     const keys = (await buttons(ui)).map(b => b[0])
     expect(keys).toContain('mm-teamnow-toggle')
     expect(keys.some(k => k.startsWith('mm-browser:'))).toBe(false)
-    // (0.7.73) no fold to press: Acme's row is always drawn, so its line never goes to the block
-    expect(keys).not.toContain('mm-needs-toggle')
-    expect(drawn).not.toContain('Acme Roofing · app.gohighlevel.com · Workflows · no thread')
+    // Needs you folded: Acme's row is not drawn, so its line goes to the block
+    await ui.press({ key: 'mm-needs-toggle' })
+    const folded = await lines(ui)
+    expect(folded).toContain('Acme Roofing · app.gohighlevel.com · Workflows · no thread')
+    expect(folded).not.toContain(ROW_LINE)
     await ui.unmount()
   })
 

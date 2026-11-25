@@ -36,8 +36,8 @@ describe('0.7.73: Replies ready, Sessions', () => {
     expect(repliesDot(['Acme Roofing'])).toMatchObject({ level: 'amber', short: '1', says: '1 reply package is ready for your go: Acme Roofing.' })
   })
   test('sessions: the running count; amber while any waits on the person', () => {
-    expect(sessionsDot(4, [])).toMatchObject({ level: 'green', short: '4', says: '4 threads run on this computer; none waits on you.' })
-    expect(sessionsDot(1, ['Acme Roofing', 'Bolt Staffing'])).toMatchObject({ level: 'amber', short: '1·2', says: '1 thread runs on this computer; 2 wait on you: Acme Roofing, Bolt Staffing.' })
+    expect(sessionsDot(4, [])).toMatchObject({ level: 'green', short: '4', says: '4 threads are open on this computer; none waits on you.' })
+    expect(sessionsDot(1, ['Acme Roofing', 'Bolt Staffing'])).toMatchObject({ level: 'amber', short: '1 · 2 waiting', says: '1 thread is open on this computer; 2 wait on you: Acme Roofing, Bolt Staffing.' })
   })
 })
 

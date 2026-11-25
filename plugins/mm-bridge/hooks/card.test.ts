@@ -1127,7 +1127,8 @@ describe('0.7.26 in the bridge: the pane draws the card above the page as the cl
       member: ME, role: 'builder', tickets: {}, threads: [], mail: [],
       drafts: [{ package_id: PKG, project_id: pid(1), project_name: 'Example Dental', status: 'prepared', covers_through: new Date(Date.parse('2026-10-13T11:00:00Z')).toISOString(), drafts_ready: 1, project_owner_email: ME }],
     }
-    const w = fakeApp(feed, [{ sessionId: 'local_hub', title: 'Morning hub' }])
+    // (0.7.77) Drafts on a row drawn as the rows under the list are: a You row draws none (Rob 2026-11-25)
+    const w = fakeApp(feed, [{ sessionId: 'local_hub', title: 'Morning hub' }], [], { rowsAsBefore: true })
     const hub = w.session('local_hub') as unknown as { process: { run: (argv: string[]) => Promise<unknown> }; http: { fetch: (url: string) => Promise<unknown> } }
     const ran: string[][] = []
     hub.process.run = async (argv: string[]) => {
