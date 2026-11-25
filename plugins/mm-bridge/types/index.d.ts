@@ -230,6 +230,8 @@ export type MmFolds = {
    * a group that is gone, and that must not open this one.
    */
   queueOlder?: boolean
+  /** (0.7.75) The person's own stats line under the You section's dots, opened to what it counts. */
+  stats?: boolean
 }
 
 /**
@@ -269,6 +271,13 @@ export type MmTeamPerson = { name: string; me: boolean; reportedAt: number | nul
 export type MmTeamRead = { at: number; partial: string[]; people: MmTeamPerson[] }
 /** (0.7.34) The pane's `Team now`: OW's last read; `missing` while OW has no such route. */
 export type MmTeamNow = { team?: MmTeamRead; got?: number; missing?: boolean }
+
+/** (0.7.75) One person's numbers for today, as OW's `GET /api/ext/day-stats` answers them (checked): the 9 AM team image's figures. */
+export type MmStatsPerson = { name: string; me: boolean; hours: number; workHours: number; parallel: number | null; tokens: number | null; sessions: number | null }
+/** (0.7.75) Today's numbers: the person's own, and the team's (one a person, then the team) for the founder and the PMs alone. */
+export type MmDayStats = { at: number; day: string; me: MmStatsPerson | null; team: MmStatsPerson[] | null; total: MmStatsPerson | null }
+/** (0.7.75) The pane's stats, from the store (`drawStats`): OW's last read and when it was read. */
+export type MmStats = { stats?: MmDayStats; got?: number }
 
 /** What the last button press did, shown above the list. */
 export type MmNotice = { text: string; at: number }
@@ -565,6 +574,8 @@ declare module 'claude-code' {
       seenPackages: string[]
       /** (0.7.71) The band's Ship row, as this thread's folder stood when last looked at. */
       you: MmYou
+      /** (0.7.75) Today's numbers: the person's line under the You section's dots, and the team's at the top of Team now. */
+      stats: MmStats
     }
   }
 }
