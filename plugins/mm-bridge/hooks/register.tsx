@@ -245,7 +245,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.83'
+export const VERSION = '0.7.84'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -3069,9 +3069,9 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // watchdog's or a run's "short" ticket does, a client message, a package): the wait ENDS, and the usual rules act from this pass;
   // (2) a run with no note on its ticket RUN_GRACE_MS after its time (`missed`, a run that failed or never ran: unproven is
   // pinned): pinned as a declaration is (`asking`, `Pin.waiting`), named ` · run missed`, until its note lands (then it is held
-  // off again) or the thread clears or renews the wait; (3, 0.7.83) a run whose note says a fail word (`failed`: SHORT, or one the
+  // off again) or the thread clears or renews the wait; (3, 0.7.84) a run whose note says a fail word (`failed`: SHORT, or one the
   // wait names), pinned as a missed run is, named ` · run reported SHORT`, until the thread clears or renews the wait. A run that
-  // reports and brings nothing new leaves the thread unpinned while a later run is due. ⛔ (0.7.83) Once every run has reported,
+  // reports and brings nothing new leaves the thread unpinned while a later run is due. ⛔ (0.7.84) Once every run has reported,
   // the wait is over: the usual rules act on the thread from that pass (0.7.70 held it up to 21 days, so a dated ticket still
   // open could go late unpinned). ⛔ The person's own unpin of a missed or failed run's pin stands, as for a declaration. Any
   // linked thread here (a client's or an internal project's), never another profile's or one this pass cannot see.
@@ -3079,7 +3079,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   const runHeld = new Set<string>()
   /** (0.7.81) And what each one's thread's name says of its wait, for the pane's Coming up line. */
   const runHeldWords = new Map<string, string>()
-  /** (0.7.70) The threads a missed run (0.7.83: or a failed one) pins again: thread → its project, the wait and where it stands. */
+  /** (0.7.70) The threads a missed run (0.7.84: or a failed one) pins again: thread → its project, the wait and where it stands. */
   const runMissed = new Map<string, { pid: string; w: RunWait; st: Extract<RunState, { kind: 'missed' | 'failed' }> }>()
   for (const [sid, w] of Object.entries(runWaits)) {
     if (w.project === undefined) continue
@@ -3096,7 +3096,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       await logAuto($, `thread ${sid}: something new for its client since it began waiting on a scheduled run; the wait is over and the usual pin rules act`)
       continue
     } else if (w.base.asks === undefined) {
-      // (0.7.83) a wait on record from before 0.7.83: the asks open now were all asked before it began (newSince), so they are its baseline
+      // (0.7.84) a wait on record from before 0.7.84: the asks open now were all asked before it began (newSince), so they are its baseline
       runWaits[sid] = { ...w, base: { ...w.base, asks: baselineOf(it).asks ?? [] } }
     }
     const st = runState(w, now)
@@ -3104,7 +3104,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       runMissed.set(sid, { pid, w, st })
       continue
     }
-    // ⛔ (0.7.83) every run reported and none failed: the wait is over, and the usual rules act from this pass
+    // ⛔ (0.7.84) every run reported and none failed: the wait is over, and the usual rules act from this pass
     if (st.kind === 'done') {
       delete runWaits[sid]
       await logAuto($, `thread ${sid}: every scheduled run it waited on reported on ticket ${w.ticket.slice(0, 8)}; the wait is over and the usual pin rules act`)
@@ -3135,7 +3135,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // (`Unpinned.at` later than `Declared.at`) keeps the pin off, and is kept on record while it stands; a newer declaration pins
   // the thread again. ⛔ The same on every computer: the thread is in that person's profile, so its question is theirs.
   /** (0.7.68) The threads a declaration pins this pass: thread → its client, the declaration and the name it gets. */
-  const asking = new Map<string, { pid: string; d?: Declared; title: string; name: string; /** (0.7.71) a missed run's (0.7.83: or a failed one's) alert key: once per miss or failed note */ runSig?: string }>()
+  const asking = new Map<string, { pid: string; d?: Declared; title: string; name: string; /** (0.7.71) a missed run's (0.7.84: or a failed one's) alert key: once per miss or failed note */ runSig?: string }>()
   /** (0.7.68) The threads whose declaration the person's unpin holds off: named as before, never pinned for it. */
   const askHeld = new Set<string>()
   /** (0.7.68) The name of each client a declaration pins or would pin, for the pin report. */
@@ -3476,14 +3476,14 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       s.pinned = true
       writes++
       // (0.7.71) a declaration's pin says its question; a missed run's (no declaration) is a pin like the feed's, once per miss
-      // (0.7.83) and a failed run's, once per failed note
+      // (0.7.84) and a failed run's, once per failed note
       newPins.push({ pid: a.pid, sid, client: a.name, sig: a.d ? waitingSig(a.d.type, a.d.at) : (a.runSig ?? `run-missed:${now}`), text: a.d ? waitingAlertText(a.title, a.d.ask) : pinAlertText(a.title) })
     }
   }
 
   // ⛔ (0.7.70) A thread linked to no project that waits on a scheduled run (an internal thread of the person's own): it unpinned
   // itself when it declared the wait, and the bridge has no pin record on it. A missed run pins it once (`repinned`); the run's
-  // note landing later takes that pin off again, and the wait goes once every run has reported. (0.7.83) A run whose note says a
+  // note landing later takes that pin off again, and the wait goes once every run has reported. (0.7.84) A run whose note says a
   // fail word pins it once too, and that pin stays until the thread clears or renews the wait. The person's unpin of that pin
   // stands: it is never pinned twice for one wait. Never a scheduled task's run, never one this pass cannot see.
   for (const [sid, w] of Object.entries(runWaits)) {
@@ -3820,11 +3820,11 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // (0.7.68) the declarations this pass let go (archived, gone, unlinked): only those, over a fresh copy
   await patchStore<Record<string, Declared>>($, 'mm.waiting', {}, fresh => applyChanges(fresh, declaredWas, declared))
   // (0.7.70) and the scheduled waits: the reports this pass found, and the waits it ended or let go
-  // ⛔ (0.7.83) each wait as `runWaitsOf` reads it back, its keys in one order: the store takes a change only where its copy is the
+  // ⛔ (0.7.84) each wait as `runWaitsOf` reads it back, its keys in one order: the store takes a change only where its copy is the
   // same text as the one the pass read (`applyChanges`), and a wait written in another order (`{ ...w, repinned }`) never was,
   // so the pass that found a run's report could take the pin off and leave the wait standing
   await patchStore<Record<string, RunWait>>($, 'mm.runwait', {}, fresh => {
-    // (and the store's own copy read the same way, for a wait a bridge before 0.7.83 wrote in another order)
+    // (and the store's own copy read the same way, for a wait a bridge before 0.7.84 wrote in another order)
     for (const [sid, w] of Object.entries(runWaitsOf(fresh))) fresh[sid] = w
     return applyChanges(fresh, runWaitsWas, runWaitsOf(runWaits))
   })
@@ -11509,7 +11509,7 @@ async function runWaitCommand($: EngineInterface, arg: string): Promise<string> 
     tag: asked.tag, ...(asked.fails.length ? { fails: asked.fails } : {}),
   }
   await patchStore<Record<string, RunWait>>($, 'mm.runwait', {}, fresh => {
-    // (0.7.83) stored as the pass reads it back (`runWaitsOf`), its keys in that order
+    // (0.7.84) stored as the pass reads it back (`runWaitsOf`), its keys in that order
     fresh[me] = runWaitsOf({ [me]: wait })[me] ?? wait
     capped(fresh)
   })
@@ -11536,7 +11536,7 @@ const RUN_READS_MAX = 6
 /**
  * (0.7.70) Each wait's runs that are due and not reported yet: the first note on the wait's ticket at or after the run's time
  * (`runReport`, OW's read-only `GET /api/ext/ticket-status?ticket_id=`), one read per ticket per pass, at most RUN_READS_MAX.
- * ⛔ (0.7.83) Only a note with the wait's words is a run's report (`RunWait.tag`; a wait from before 0.7.83 has none, and its first
+ * ⛔ (0.7.84) Only a note with the wait's words is a run's report (`RunWait.tag`; a wait from before 0.7.84 has none, and its first
  * note counts, as it did), and a report that says a fail word (`failWordsOf`) marks the run failed (`WaitRun.fail`).
  * ⛔ A read that fails finds nothing: a run past its grace whose report the bridge cannot read pins its thread again, since
  * unproven is pinned (Rob 2026-11-18: "I want things pinned that aren't running properly until we know they are"). Never throws.
@@ -11550,7 +11550,7 @@ async function readRunReports($: EngineInterface, waits: Record<string, RunWait>
         if (notes.size >= RUN_READS_MAX) return
         notes.set(w.ticket, await ticketNotes($, w.ticket))
       }
-      // (0.7.83) the note with the wait's words, and whether it (or another of the run's) says a fail word
+      // (0.7.84) the note with the wait's words, and whether it (or another of the run's) says a fail word
       const found = runReport(notes.get(w.ticket), w, r, w.runs[i + 1]?.at)
       if (found.seen !== undefined) r.seen = found.seen
       if (found.fail) r.fail = found.fail
