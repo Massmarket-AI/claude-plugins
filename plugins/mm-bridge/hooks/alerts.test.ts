@@ -299,7 +299,7 @@ describe('0.7.71: a new pin for the person raises one notification and the sound
     const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: {}, projects: [{ project_id: ACME, name: 'Acme Roofing — Pat' }] } as Partial<Feed>), store: { 'mm.links': { [ACME]: SELF } }, ticketStatus: () => 'network' })
     const { notes, plays } = heard(on)
     await tickOnce($, w)
-    await tool($, 'waiting scheduled 2026-10-12 09:10 ticket c3710000-0000-4000-8000-000000000001 -- the day-one launch check')
+    await tool($, 'waiting scheduled 2026-10-12 09:10 ticket c3710000-0000-4000-8000-000000000001 note "check:" -- the day-one launch check')
     await w.clock.advance(2_000)
     expect(pinned(w, SELF)).toBe(false)
     await minutesOn(w, 12)
