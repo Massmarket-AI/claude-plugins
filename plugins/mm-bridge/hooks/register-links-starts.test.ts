@@ -5226,9 +5226,11 @@ describe('R17: a client with nothing due', () => {
     await mm($, '')
     // (0.7.5) its one line ends ` · no thread`, never red and with no clock: nothing is due; (0.7.12) and it says so
     // (until 0.7.12: '1. 🟡 Cedar Dental · reply · no thread')
-    // (0.7.73) its head, and its line of pace: no due date, and no pin needed yet
-    expect(await lines(ui)).toContain('1. Cedar Dental: answer Client about "Question"')
-    expect(await meta(ui, 'Cedar Dental: answer Client about "Question"')).toBe('🟢 on pace · no due date · no pin needed yet · the client wrote')
+    // (0.7.73) its head, and its line of pace: no due date, and no pin needed yet. ⛔ (0.7.81, Rob 2026-11-25) Needs you lists only
+    // what should be pinned, so it is on the Coming up line instead, with no due date
+    expect(await lines(ui)).not.toContain('1. Cedar Dental: answer Client about "Question"')
+    expect(await lines(ui)).toContain('Nothing needs you right now.')
+    expect(await lines(ui)).toContain('Coming up, not pinned yet: Cedar Dental · no due date')
     await ui.unmount()
     expect(w.acted()).toEqual([])
   })
