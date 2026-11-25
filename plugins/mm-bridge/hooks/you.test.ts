@@ -344,8 +344,8 @@ describe('0.7.73: the band says what needs you and what is next', () => {
   })
 })
 
-describe('0.7.73: this thread\'s own client\'s pace, for the theme\'s glow', () => {
-  test('a thread linked to a late client: `you.here` says red and late; the theme mod reads it to colour its glow', LONG, async ($, on) => {
+describe('0.7.73 (Rob 2026-11-25: "i dont think i want to make the gradient in the chat pane change color based on dueness of task"): no colour for the theme\'s glow', () => {
+  test('a thread linked to a late client: `you` carries no `here`, so massmarket-theme keeps its plain mesh; the row and the thread\'s name say late', LONG, async ($, on) => {
     const w = youWorld(on, {
       ...acmeLinked({ feed: feed({ drafts: [], mail: [{ message_id_key: 'a1', received_at: ago(90), reply_due_at: ago(74), sender: 'pat@acme.example', subject: 'Roof', snippet: '', project_id: ACME, project_name: 'Acme Roofing', reply_status: 'unanswered', project_owner_email: ME }] }) }),
       self: thread('local_a', 'Roof quote', 1),
@@ -360,7 +360,10 @@ describe('0.7.73: this thread\'s own client\'s pace, for the theme\'s glow', () 
     await mm($, '')
     const ui = await pane($)
     await w.clock.advance(1_000)
-    expect(youSet.at(-1)?.here).toEqual({ projectId: ACME, client: 'Acme Roofing', level: 'red', words: '1d late' })
+    expect(youSet.length).toBeGreaterThan(0)
+    expect(youSet.every(v => !('here' in (v as object)))).toBe(true)
+    // the indicator stays where it was: the row's own dot
+    expect((await lines(ui)).some(l => l.startsWith('🔴 1d late · '))).toBe(true)
     await ui.unmount()
   })
 })

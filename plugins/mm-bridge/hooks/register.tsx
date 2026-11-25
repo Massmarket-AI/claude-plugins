@@ -5488,14 +5488,8 @@ async function youPass($: EngineInterface): Promise<void> {
     const pace = items.filter(needsYouNow).map(it => ({ client: cleanName(it.client) || 'a client', ...youPace(it, now) }))
     // 6. the plan's usage, from the status line's own figures
     const usage = await $.session.usage()
-    // and this thread's own client's pace, for the theme's glow: its colour the project's status, its strength the thread's fill
-    const own = await ownIn($, items)
-    const linked = own ? undefined : me ? ownerOf(me, await storeGet<Record<string, string>>($, 'mm.links', {})) : undefined
-    const here: MmYou['here'] = own
-      ? { projectId: own.projectId, client: cleanName(own.client) || 'this client', ...youPace(own, now) }
-      : linked && isUuid(linked)
-        ? { projectId: linked, client: cleanName(pins[me as string]?.client ?? '') || 'this client', level: 'green', words: 'nothing due' }
-        : undefined
+    // ⛔ no `here` for the theme's glow (Rob 2026-11-25: "color coding the thread red is stressfull and annoying if inaccurate"):
+    // the dot beside the pin on the thread's name is the one indicator of where it stands
     const dots = youDots({
       needing,
       overdue,
@@ -5508,7 +5502,7 @@ async function youPass($: EngineInterface): Promise<void> {
       rc: await rcPinOn($),
     })
     const { value: had } = await $.state.get(YOU)
-    const next: MmYou = { dots, line: compactLine(dots), at: now, ...(had?.open && dots.some(d => d.key === had.open) ? { open: had.open } : {}), ...(waits.length ? { waits } : {}), ...(here ? { here } : {}) }
+    const next: MmYou = { dots, line: compactLine(dots), at: now, ...(had?.open && dots.some(d => d.key === had.open) ? { open: had.open } : {}), ...(waits.length ? { waits } : {}) }
     if (!had || !sameValue({ ...had, at: 0 }, { ...next, at: 0 })) await $.state.set(YOU, next)
   } catch {
     // the strip stays as it was

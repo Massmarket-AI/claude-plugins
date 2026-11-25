@@ -499,12 +499,12 @@ export type MmYouDot = { key: 'pins' | 'late' | 'replies' | 'sessions' | 'pace' 
  */
 export type MmYouWait = { sid: string; projectId?: string; client: string; question: string; type: string }
 /**
- * (0.7.73) The strip as this thread last worked it out, the band's one line, the dot whose line is open in the pane, the threads that wait
- * on the person (`mm waiting`), and `here`: this thread's own client's pace (green on pace or ahead, amber behind, red late), absent in a
- * thread with no client. ⛔ Read by the massmarket-theme mod (Rob 2026-11-24: "lightly the color indicating the status of the project, and
- * then the more intense the gradient appears, that's the context"): keep its shape, or change both mods together.
+ * (0.7.73) The strip as this thread last worked it out, the band's one line, the dot whose line is open in the pane, and the threads that
+ * wait on the person (`mm waiting`). ⛔ No `here` (this thread's client's pace for the theme's glow): Rob 2026-11-25, "i dont think i want
+ * to make the gradient in the chat pane change color based on dueness of task, i think indicator beside pin on thread like we have now is
+ * all we need for that". massmarket-theme 0.6.2 tints only when `here` is present, so its mesh stays plain.
  */
-export type MmYou = { dots: MmYouDot[]; line: string; at: number; open?: MmYouDot['key']; waits?: MmYouWait[]; here?: { projectId: string; client: string; level: 'green' | 'amber' | 'red'; words: string } }
+export type MmYou = { dots: MmYouDot[]; line: string; at: number; open?: MmYouDot['key']; waits?: MmYouWait[] }
 /** (0.7.73) Where a You row's "what's needed" came from (hooks/you.ts). */
 export type MmYouSource = 'open' | 'noreply' | 'draft' | 'ok' | 'package' | 'mail' | 'ask' | 'eta' | 'owner' | 'go' | 'task' | 'pace' | 'queue' | 'none' | 'waiting'
 /**
