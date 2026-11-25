@@ -87,6 +87,16 @@
  * secret is never uploaded; and the hourly scan resumes where a slow run stopped.
  * See SKILL PROPOSALS.
  *
+ * Stale team copies (0.15.1, 2026-11-25): the bundle serves each skill's earlier
+ * team versions as fingerprints (`old`, migration 365). After a skill is written,
+ * a leftover file the incoming version no longer has and an old team version
+ * holds is removed; a folder of nothing but team versions is no longer read as
+ * the teammate's edit (no kept copy, no review hold, no proposal); uploads leave
+ * leftovers out; a kept copy of nothing but team versions is deleted; and once,
+ * the up-to-date skills with a kept copy or a folder that differs from its marker
+ * are fetched and cleaned the same way. A file no team version ever held always
+ * stays. See STALE TEAM COPIES.
+ *
  * Turn origin (0.11.5, 2026-10-12): every worklog POST also says who started the
  * work it belongs to, `person` or `auto`, read from the stamp Claude Code writes
  * on the turn's opening entry in the session's transcript. A turn the system
@@ -216,7 +226,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.15.0";
+const HOOK_VERSION = "0.15.1";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -8117,7 +8127,8 @@ function undeclaredReminderFor(payload, state, turnOrigin, env, platform) {
 // its timestamp file under `~/.claude/mm-hooks/state/` and the copies it keeps
 // of a local edit under `~/.claude/mm-hooks/state/skill-edits/` (0.12.3), and
 // (0.15.0, SKILL PROPOSALS) `state/skill-proposals.json` and
-// `state/skill-touched.json`. Nothing else, anywhere. That is the #342
+// `state/skill-touched.json`, and (0.15.1, STALE TEAM COPIES)
+// `state/skill-file-history.json`. Nothing else, anywhere. That is the #342
 // invariant, widened deliberately and only for this — see
 // tests/unit/worklog-hook-state-home.unit.test.ts.
 //
@@ -8127,7 +8138,11 @@ function undeclaredReminderFor(payload, state, turnOrigin, env, platform) {
 // ours when it carries our `.mm-skill.json` marker, and a real folder without
 // one is adopted only when its SKILL.md frontmatter `name` equals the key; any
 // other folder is not ours and is skipped; the only files removed are ones our
-// marker listed and the registry dropped; a folder is never deleted.
+// marker listed and the registry dropped, and (0.15.1, STALE TEAM COPIES) ones
+// the registry's own history shows are an earlier team version of a path the
+// incoming version no longer has, with the directories that left empty below
+// the skill folder; the skill folder itself is never deleted. The only kept
+// copies removed are ones that hold nothing but team versions.
 //
 // ⛔ WHEN: on Stop only, never SessionStart; at most once an hour per machine;
 // inside Stop's 6 s hard exit with its own 4 s budget. Every failure is silent
@@ -8587,13 +8602,457 @@ function keptSkillEditsForReport(deadlineAt) {
     .map((f) => f.entry);
 }
 
+// ── STALE TEAM COPIES (0.15.1) ─────────────────────────────────────────────
+// Rob, 2026-11-25: "can we remove stale copies when we install new ones for
+// team members?" A skill folder can hold files that are only earlier TEAM
+// versions. Measured 2026-11-25 on a Windows machine: agent-orchestration held
+// scripts/load-ops-env.sh, scripts/codex-wrap.sh and scripts/settings.proposal.json,
+// deleted from the repo on 2026-09-19 (control tower 4fb2df6ce), CRLF, older than
+// our marker. The sync removes only files its marker listed, so they never went;
+// the folder never matched its marker's sha, so every change on main read as the
+// teammate's edit: a new kept copy each time, and from 0.15.0 a new proposal.
+//
+// The bundle now serves, per skill, `old` (migration 365, file_history.paths):
+// {<path>: [<fp>, ...]}, every version of every path in the last 200 commits that
+// touched the skill, the current version and deleted paths included, where
+//   fp(t) = the first 16 hex of sha256 (UTF-8) of eolKey(t),
+//   eolKey(t) = t.replace(/\r\n/g, "\n").replace(/\n*$/, "\n").
+// A local file is EXPLAINED when the incoming version has its path with the same
+// eolKey text, or its fp is one of old[path]. Which local files count: exactly
+// skillFolderRead's walk (the sha's own: regular servable text files, no link, no
+// dotfile, so never the marker; no .git or node_modules; the same depth and size
+// limits). A path the incoming version has and the folder lacks loses nothing.
+//   A. writeRegistrySkill, after the incoming files AND the final marker are
+//      written, removes from an "ours" or "adoptable" folder each file the walk
+//      reaches whose path the incoming version does not have and whose fp is in
+//      old[path]; then the directories that left empty, below the skill folder
+//      only, never the folder itself (removeTeamLeftovers).
+//   B. With `old` served and every local file explained, the folder holds nothing
+//      of the teammate's: no kept copy, no review gate, no kept-copy memory, no
+//      proposal. The incoming version is written, then A. Otherwise 0.15.0 runs
+//      unchanged (gate, hold, keep), and A after the write removes only explained
+//      leftovers.
+//   C. The proposal scan and the uploads read the `old` last served, kept in
+//      state/skill-file-history.json (`now` is the fp of each file of the version
+//      served with it). A sync edit or kept copy is uploaded without its
+//      leftovers (a path `now` lacks whose fp is in old); a folder or copy with
+//      nothing unexplained is not proposed; and a kept copy that is fully
+//      explained, and holds no file the walk does not read, is deleted: it holds
+//      no teammate work. A proposal already uploaded is left alone (OW sets it
+//      aside).
+//   D. Once (STALE CLEANUP, below): the up-to-date team skills that the sync
+//      never fetches, whose folder differs from its marker or that have a kept
+//      copy, are fetched and given A and C.
+// ⛔ A file no team version ever held is the teammate's own and always stays.
+// ⛔ No `old` for a skill: nothing is removed and nothing changes (0.15.0 exactly).
+// ⛔ FAIL-SAFE: any error here is 0.15.0's behaviour for that skill, never a crash
+//   and never a removal on doubt. Every removal re-reads the file right before it,
+//   through real directories only; a removal that fails leaves the file in place
+//   and never fails the write.
+const SKILL_HISTORY_STATE_NAME = "skill-file-history.json";
+/** The bundle route's caps, applied again here. */
+const SKILL_HISTORY_MAX_PATHS = 500;
+const SKILL_HISTORY_MAX_PER_PATH = 50;
+const SKILL_HISTORY_FP_RE = /^[0-9a-f]{16}$/;
+/** skill-file-history.json: at most this many skills, at most this many bytes, the newest kept. */
+const SKILL_HISTORY_KEYS_MAX = 2000;
+const SKILL_HISTORY_STATE_MAX_BYTES = 8 * 1024 * 1024;
+
+/** An own property of a plain object (a file path may be any name, "__proto__" included). */
+function ownKey(obj, key) {
+  return Boolean(obj) && Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+/** eolKey: CRLF as LF, and exactly one trailing LF (the registry's file_history rule). */
+function skillEolKey(text) {
+  return String(text).replace(/\r\n/g, "\n").replace(/\n*$/, "\n");
+}
+
+/** fp: the first 16 hex of sha256 (UTF-8) of eolKey(text). */
+function skillFileFp(text) {
+  return sha256Hex(Buffer.from(skillEolKey(text), "utf8")).slice(0, 16);
+}
+
+/**
+ * A served or stored `old` map, validated: at most 500 paths (in sorted order),
+ * each a safe skill path with forward slashes, with at most 50 distinct 16-hex
+ * fingerprints; anything else is dropped. Null when `raw` is not an object: no
+ * history for that skill. Never throws.
+ */
+function cleanSkillHistoryMap(raw) {
+  try {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const out = Object.create(null);
+    const rels = Object.keys(raw).sort();
+    let kept = 0;
+    for (let i = 0; i < rels.length && kept < SKILL_HISTORY_MAX_PATHS; i++) {
+      const rel = rels[i];
+      if (!safeSkillPathParts(rel)) continue;
+      const list = raw[rel];
+      if (!Array.isArray(list)) continue;
+      const fps = [];
+      for (let j = 0; j < list.length && fps.length < SKILL_HISTORY_MAX_PER_PATH; j++) {
+        const fp = list[j];
+        if (typeof fp === "string" && SKILL_HISTORY_FP_RE.test(fp) && fps.indexOf(fp) === -1) fps.push(fp);
+      }
+      if (fps.length === 0) continue;
+      out[rel] = fps;
+      kept += 1;
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** {<path>: fp} of a version's files (the `now` of a stored history). Never throws. */
+function skillFileFps(files) {
+  const out = Object.create(null);
+  try {
+    if (!files || typeof files !== "object" || Array.isArray(files)) return out;
+    const rels = Object.keys(files).sort();
+    for (let i = 0; i < rels.length && i < SKILL_HISTORY_MAX_PATHS; i++) {
+      const rel = rels[i];
+      if (typeof files[rel] === "string" && safeSkillPathParts(rel)) out[rel] = skillFileFp(files[rel]);
+    }
+  } catch {
+    /* what was read so far */
+  }
+  return out;
+}
+
+/**
+ * Is the local file `rel` (its `text`) explained: the incoming version has the
+ * path with the same eolKey text, or its fp is the stored current version's
+ * (`nowFps`) or one of old[rel]? `incoming` and `nowFps` may be null. Throws only
+ * on a bug; callers decide in a try.
+ */
+function skillFileExplained(rel, text, incoming, nowFps, old) {
+  if (typeof text !== "string") return false;
+  if (ownKey(incoming, rel) && typeof incoming[rel] === "string" && skillEolKey(text) === skillEolKey(incoming[rel])) {
+    return true;
+  }
+  const fp = skillFileFp(text);
+  if (ownKey(nowFps, rel) && nowFps[rel] === fp) return true;
+  return ownKey(old, rel) && Array.isArray(old[rel]) && old[rel].indexOf(fp) !== -1;
+}
+
+/** Every file of `files` ({path: text}, the walk's) explained. False on any doubt. Never throws. */
+function skillFilesExplained(files, incoming, nowFps, old) {
+  try {
+    if (!files || !old) return false;
+    const rels = Object.keys(files);
+    for (let i = 0; i < rels.length; i++) {
+      if (!skillFileExplained(rels[i], files[rels[i]], incoming, nowFps, old)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * C: `files` without the leftovers a stored history `hist` explains: a path the
+ * version served with it (`hist.now`) does not have, whose fp is in old[path].
+ * SKILL.md always stays. A copy, never `files` itself. Never throws.
+ */
+function withoutTeamLeftovers(files, hist) {
+  const out = {};
+  Object.keys(files || {}).forEach((rel) => {
+    try {
+      if (
+        rel !== "SKILL.md" &&
+        hist &&
+        !ownKey(hist.now, rel) &&
+        ownKey(hist.old, rel) &&
+        hist.old[rel].indexOf(skillFileFp(files[rel])) !== -1
+      ) {
+        return;
+      }
+    } catch {
+      /* kept: never left out on doubt */
+    }
+    out[rel] = files[rel];
+  });
+  return out;
+}
+
+/**
+ * A: after a write, remove from `dir` each file the walk reaches whose path
+ * `incomingRels` (a Set) does not have and whose fp is in old[path]; then the
+ * directories that left empty, below `dir` only, never `dir`. Each file is read
+ * again right before it goes, through real directories only, and must still be a
+ * regular file holding a team version. Best-effort: a removal that fails leaves
+ * that file in place. Returns how many files went. Never throws.
+ */
+function removeTeamLeftovers(dir, incomingRels, old) {
+  let removed = 0;
+  try {
+    if (!old || !incomingRels) return 0;
+    const read = skillFolderRead(dir);
+    if (!read || !read.files) return 0;
+    const emptied = new Set();
+    Object.keys(read.files).forEach((rel) => {
+      try {
+        if (incomingRels.has(rel) || !ownKey(old, rel)) return;
+        const fps = old[rel];
+        if (fps.indexOf(skillFileFp(read.files[rel])) === -1) return;
+        const parts = safeSkillPathParts(rel);
+        if (!parts || !realDirsAlong(dir, parts)) return;
+        const target = path.join(dir, ...parts);
+        const st = fs.lstatSync(target);
+        if (!st.isFile() || st.size > REG_MAX_FILE_BYTES) return;
+        if (fps.indexOf(skillFileFp(fs.readFileSync(target).toString("utf8"))) === -1) return;
+        fs.unlinkSync(target);
+        removed += 1;
+        for (let up = path.dirname(target); up.length > dir.length && up !== dir; up = path.dirname(up)) emptied.add(up);
+      } catch (err) {
+        debugLog(`stale team file not removed: ${err && err.code}`);
+      }
+    });
+    // Deepest first, so a parent is looked at after its children.
+    Array.from(emptied)
+      .sort((a, b) => b.length - a.length)
+      .forEach((d) => {
+        try {
+          if (pathKind(d) === "dir" && fs.readdirSync(d).length === 0) fs.rmdirSync(d);
+        } catch {
+          /* it stays */
+        }
+      });
+  } catch {
+    /* what went stays gone; the rest stays */
+  }
+  return removed;
+}
+
+/** `<home>/.claude/mm-hooks/state/skill-file-history.json`, or null. */
+function skillHistoryStateFile() {
+  const root = stateRootDir();
+  return root ? path.join(root, SKILL_HISTORY_STATE_NAME) : null;
+}
+
+/** One stored entry {sha, at, now, old}, validated, or null. */
+function cleanSkillHistoryEntry(e) {
+  if (!e || typeof e !== "object" || Array.isArray(e)) return null;
+  const old = cleanSkillHistoryMap(e.old);
+  if (!old) return null;
+  const now = Object.create(null);
+  if (e.now && typeof e.now === "object" && !Array.isArray(e.now)) {
+    const rels = Object.keys(e.now).sort();
+    for (let i = 0; i < rels.length && i < SKILL_HISTORY_MAX_PATHS; i++) {
+      const fp = e.now[rels[i]];
+      if (safeSkillPathParts(rels[i]) && typeof fp === "string" && SKILL_HISTORY_FP_RE.test(fp)) now[rels[i]] = fp;
+    }
+  }
+  return {
+    sha: typeof e.sha === "string" && e.sha.length <= 200 ? e.sha : null,
+    at: typeof e.at === "string" && e.at.length <= 40 && Number.isFinite(Date.parse(e.at)) ? e.at : null,
+    now,
+    old,
+  };
+}
+
+/** The stored histories, `{<key>: {sha, at, now, old}}`; a missing or broken file reads as none. Never throws. */
+function readSkillHistories() {
+  const out = Object.create(null);
+  try {
+    const file = skillHistoryStateFile();
+    if (!file || pathKind(file) !== "file") return out;
+    const raw = JSON.parse(readTextBounded(file, SKILL_HISTORY_STATE_MAX_BYTES));
+    const byKey = raw && raw.by_key;
+    if (!byKey || typeof byKey !== "object" || Array.isArray(byKey)) return out;
+    Object.keys(byKey).forEach((key) => {
+      if (!SKILL_KEY_RE.test(key)) return;
+      const e = cleanSkillHistoryEntry(byKey[key]);
+      if (e) out[key] = e;
+    });
+  } catch {
+    /* none */
+  }
+  return out;
+}
+
+/**
+ * Store the histories served this run (`fresh`, {key: entry}) over the stored
+ * ones, keep only keys still installed under `root` (ours or adoptable), the
+ * newest first within the caps, and write the file atomically. Written only when
+ * something was served. Never throws.
+ */
+function storeSkillHistories(root, fresh) {
+  try {
+    const keys = Object.keys(fresh || {});
+    if (keys.length === 0) return false;
+    const all = readSkillHistories();
+    keys.forEach((k) => {
+      all[k] = fresh[k];
+    });
+    const installed = Object.keys(all)
+      .filter((k) => {
+        const kind = inspectSkillFolder(root, k).kind;
+        return kind === "ours" || kind === "adoptable";
+      })
+      .sort((a, b) => String(all[b].at || "").localeCompare(String(all[a].at || "")) || (a < b ? -1 : 1));
+    const byKey = {};
+    let bytes = 64;
+    for (let i = 0; i < installed.length && i < SKILL_HISTORY_KEYS_MAX; i++) {
+      const size = JSON.stringify(all[installed[i]]).length + installed[i].length + 8;
+      if (bytes + size > SKILL_HISTORY_STATE_MAX_BYTES) continue;
+      byKey[installed[i]] = all[installed[i]];
+      bytes += size;
+    }
+    const file = skillHistoryStateFile();
+    if (!file) return false;
+    const dir = path.dirname(file);
+    fs.mkdirSync(dir, { recursive: true });
+    if (pathKind(dir) !== "dir") return false;
+    return writeFileAtomic(file, `${JSON.stringify({ v: 1, by_key: byKey })}\n`, dir);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Does the kept copy `copyDir` hold only files skillFolderRead's walk reads (and
+ * its own record)? A link, an unexpected dotfile, `.git`, `node_modules`, a file
+ * the walk leaves out (binary, too large, past the caps) or anything too deep is
+ * a doubt: false. Never throws.
+ */
+function keptCopyHoldsOnlyWalked(copyDir, files) {
+  try {
+    const walk = (d, rel, depth) => {
+      if (depth > 12) return false;
+      const entries = fs.readdirSync(d, { withFileTypes: true });
+      for (let i = 0; i < entries.length; i++) {
+        const e = entries[i];
+        const relPath = rel ? `${rel}/${e.name}` : e.name;
+        const abs = path.join(d, e.name);
+        if (!rel && e.name === SKILL_EDIT_RECORD) continue;
+        const st = fs.lstatSync(abs);
+        if (st.isSymbolicLink() || e.name.startsWith(".") || e.name === "node_modules") return false;
+        if (st.isDirectory()) {
+          if (!walk(abs, relPath, depth + 1)) return false;
+          continue;
+        }
+        if (!st.isFile() || !ownKey(files, relPath)) return false;
+      }
+      return true;
+    };
+    return walk(copyDir, "", 0);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * C, for one kept copy `copyDir` and a history `hist` ({now, old}): "team_only"
+ * (every file explained and nothing else in it: it may be deleted), "explained"
+ * (every file the walk reads explained, but the copy holds something more: never
+ * sent, never deleted), or null (it holds the teammate's work, or cannot be read:
+ * 0.15.0). Never throws.
+ */
+function keptCopyVerdict(copyDir, hist) {
+  try {
+    if (!hist || !hist.old || pathKind(copyDir) !== "dir") return null;
+    if (pathKind(path.join(copyDir, "SKILL.md")) !== "file" || !readSkillEditRecord(copyDir)) return null;
+    const read = skillFolderRead(copyDir);
+    if (!read || !read.files || !skillFilesExplained(read.files, null, hist.now, hist.old)) return null;
+    return keptCopyHoldsOnlyWalked(copyDir, read.files) ? "team_only" : "explained";
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Delete the kept copy `copyDir`: renamed away first, so it stops being a
+ * finished copy in one step (a removal cut short leaves a `.tmp` that
+ * removeStaleKeepTemps clears), then removed. False when it is still there.
+ * Never throws.
+ */
+function deleteKeptCopy(copyDir) {
+  try {
+    const parent = path.dirname(copyDir);
+    if (pathKind(parent) !== "dir" || pathKind(copyDir) !== "dir") return false;
+    const gone = `${copyDir}.tmp`;
+    if (pathKind(gone) !== "missing") return false;
+    fs.renameSync(copyDir, gone);
+    try {
+      fs.rmSync(gone, { recursive: true, force: true });
+    } catch {
+      /* no longer a finished copy; cleared later */
+    }
+    return true;
+  } catch (err) {
+    debugLog(`kept copy not removed: ${err && err.code}`);
+    return false;
+  }
+}
+
+/**
+ * C, in the sync: delete each kept copy of `key` that `hist` fully explains and
+ * that holds nothing else, within `deadlineAt`; then the key's folder when that
+ * left it empty. Returns how many went. Never throws.
+ */
+function pruneTeamOnlyKeptCopies(key, hist, deadlineAt) {
+  let n = 0;
+  try {
+    if (!hist || !SKILL_KEY_RE.test(key)) return 0;
+    const root = skillEditsRoot();
+    if (!root || pathKind(root) !== "dir") return 0;
+    const keyDir = path.join(root, key);
+    if (pathKind(keyDir) !== "dir") return 0;
+    const stamps = fs.readdirSync(keyDir).sort();
+    for (let i = 0; i < stamps.length && !deadlinePassed(deadlineAt); i++) {
+      if (!SKILL_EDIT_STAMP_RE.test(stamps[i])) continue;
+      const copyDir = path.join(keyDir, stamps[i]);
+      if (keptCopyVerdict(copyDir, hist) === "team_only" && deleteKeptCopy(copyDir)) n += 1;
+    }
+    if (n > 0) {
+      try {
+        if (fs.readdirSync(keyDir).length === 0) fs.rmdirSync(keyDir);
+      } catch {
+        /* it stays */
+      }
+    }
+  } catch {
+    /* what went stays gone */
+  }
+  return n;
+}
+
+/** The keys under state/skill-edits that hold at least one kept copy. Never throws. */
+function keysWithKeptCopies() {
+  const out = new Set();
+  try {
+    const root = skillEditsRoot();
+    if (!root || pathKind(root) !== "dir") return out;
+    fs.readdirSync(root).forEach((key) => {
+      if (!SKILL_KEY_RE.test(key)) return;
+      const keyDir = path.join(root, key);
+      if (pathKind(keyDir) !== "dir") return;
+      const has = fs.readdirSync(keyDir).some((n) => SKILL_EDIT_STAMP_RE.test(n) && pathKind(path.join(keyDir, n)) === "dir");
+      if (has) out.add(key);
+    });
+  } catch {
+    /* what was read so far */
+  }
+  return out;
+}
+
 /**
  * Write one registry skill under `<root>/<key>/` by the §5.3 rules. Returns
  * "installed" | "updated", or why it did not: "invalid", "too_large", "linked",
  * "foreign", "conflict", "error", or "kept_for_review" (0.15.0: a local edit
  * waiting on review, which is not a failure). Never throws out of the caller's try.
+ *
+ * `opts` (0.15.1, STALE TEAM COPIES): `old`, the validated history served for the
+ * skill (B and A), or absent for none; `cleanOnly` (D) writes only a folder that
+ * every file of is explained, and answers "edited" for any other, before
+ * anything is written.
  */
-function writeRegistrySkill(root, key, sha, files, nowIso) {
+function writeRegistrySkill(root, key, sha, files, nowIso, opts) {
+  const old = opts && opts.old ? opts.old : null;
+  const cleanOnly = Boolean(opts && opts.cleanOnly);
   if (!files || typeof files !== "object" || Array.isArray(files)) return "invalid";
   const names = Object.keys(files);
   if (names.length === 0 || names.length > 500) return "invalid";
@@ -8627,6 +9086,8 @@ function writeRegistrySkill(root, key, sha, files, nowIso) {
   // be stale by now.
   const info = inspectSkillFolder(root, key);
   if (info.kind !== "missing" && info.kind !== "ours" && info.kind !== "adoptable") return info.kind;
+  // D writes only an up-to-date folder of ours that the gate below would never see.
+  if (cleanOnly && (info.kind !== "ours" || info.marker.updating_to)) return "edited";
   const dir = info.dir;
   if (info.kind === "missing") {
     try {
@@ -8663,8 +9124,15 @@ function writeRegistrySkill(root, key, sha, files, nowIso) {
   // already matching the incoming version have nothing to keep. A copy that cannot
   // be made stops the write: "error" is transient, so the sync asks again later.
   if (info.kind === "adoptable" || (info.kind === "ours" && !info.marker.updating_to)) {
-    const local = skillFolderShas(dir);
-    if (local && local.sha !== sha && local.md_sha !== sha) {
+    const read = skillFolderRead(dir);
+    const local = read ? { sha: read.sha, md_sha: read.md_sha } : null;
+    // ⛔ STALE TEAM COPIES (0.15.1, B): with a history served and every file the
+    // walk reads explained (the incoming text modulo eolKey, or an old team
+    // version), the folder holds nothing of the teammate's: nothing is kept,
+    // nothing is held, nothing is proposed. Any doubt is false: 0.15.0 below.
+    const explained = Boolean(old && read && read.files) && skillFilesExplained(read.files, files, null, old);
+    if (cleanOnly && !explained) return "edited";
+    if (!explained && local && local.sha !== sha && local.md_sha !== sha) {
       const base = info.kind === "ours" ? info.marker.sha : null;
       let reason = null;
       if (info.kind === "adoptable") reason = "no_record";
@@ -8748,6 +9216,10 @@ function writeRegistrySkill(root, key, sha, files, nowIso) {
   // The marker LAST, so an interrupted update keeps the old sha and is retried.
   const written = entries.map((e) => e.rel).sort();
   if (!writeFileAtomic(markerPath, markerFor(sha, written), dir)) return "error";
+  // ⛔ STALE TEAM COPIES (0.15.1, A): only now, with the incoming files and the
+  // final marker in place. Only a file the incoming version lacks and an old
+  // team version holds; best-effort, never a failure of this write.
+  if (old && info.kind !== "missing") removeTeamLeftovers(dir, new Set(written), old);
   return info.kind === "missing" ? "installed" : "updated";
 }
 
@@ -8792,7 +9264,8 @@ function rememberedSkillFailures(record) {
  * the hour (or the timestamp cannot be written). The slot is taken BEFORE any
  * request, so a failing or slow registry is asked at most once an hour too.
  * The re-read nonce keeps two Stops that raced for the slot from both running.
- * The remembered failures (L1) are carried over into the new record.
+ * The remembered failures (L1) and the STALE CLEANUP record (0.15.1) are
+ * carried over into the new record.
  */
 function claimSkillSyncSlot(nowMs) {
   const file = skillsSyncStateFile();
@@ -8819,6 +9292,10 @@ function claimSkillSyncSlot(nowMs) {
     nonce: require("crypto").randomBytes(8).toString("hex"),
     permanent_failures: rememberedSkillFailures(prev),
   };
+  // STALE CLEANUP (0.15.1): carried over like the failures; absent until a
+  // bundle first served a history.
+  const cleanup = rememberedStaleCleanup(prev);
+  if (cleanup) record.stale_cleanup = cleanup;
   if (!writeFileAtomic(file, `${JSON.stringify(record)}\n`, dir)) return null;
   try {
     const back = JSON.parse(readTextBounded(file, 64 * 1024));
@@ -8860,9 +9337,10 @@ async function skillsApiRequest(url, init, deadlineAt) {
 /**
  * The list → compare → bundle → write pass. Fills `result`, and keeps `failures`
  * — the remembered permanent failures (L1), `{key: {sha, outcome, at}}` — up to
- * date. Never throws.
+ * date. `cleanup` ({value}) holds the STALE CLEANUP record (0.15.1), which this
+ * pass creates once a bundle serves a history and moves on. Never throws.
  */
-async function runSkillSync(root, deadlineAt, result, failures) {
+async function runSkillSync(root, deadlineAt, result, failures, cleanup) {
   if (pathKind(root) === "symlink") {
     result.reason = "skills_dir_linked";
     return;
@@ -8880,6 +9358,8 @@ async function runSkillSync(root, deadlineAt, result, failures) {
   const heldForReview = skillKeysHeldForReview(Date.now());
   const later = [];
   const seen = new Set();
+  // STALE CLEANUP (0.15.1): the up-to-date folders of ours, which this pass never fetches.
+  const upToDate = new Map();
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i] && typeof rows[i] === "object" ? rows[i] : {};
     const key = typeof row.skill_key === "string" ? row.skill_key : typeof row.key === "string" ? row.key : "";
@@ -8900,6 +9380,7 @@ async function runSkillSync(root, deadlineAt, result, failures) {
     if (info.kind === "ours" && info.marker.sha === sha && !info.marker.updating_to) {
       result.current += 1;
       delete failures[key];
+      upToDate.set(key, { sha, dir: info.dir });
     } else if (info.kind === "missing" || info.kind === "ours" || info.kind === "adoptable") {
       // L1: never asked for again at the sha it failed at for good. It takes
       // no slot, so the skills after it get their turn.
@@ -8921,8 +9402,51 @@ async function runSkillSync(root, deadlineAt, result, failures) {
   // ⛔ SKILL PROPOSALS (0.15.0): which keys the team has, so a skill only this
   // computer has can be told apart from a registry one (B2.3, B5).
   rememberRegistryKeys(Array.from(seen));
-  if (wanted.length === 0) return;
+  // ⛔ STALE TEAM COPIES (0.15.1): the histories served this run, stored once at
+  // the end for the proposal scan (C).
+  const fresh = Object.create(null);
+  try {
+    if (wanted.length > 0 && !(await fetchAndWriteWanted(root, wanted, deadlineAt, result, failures, cleanup, fresh))) return;
+    await runStaleCleanup(root, Array.from(seen).sort(), upToDate, deadlineAt, result, cleanup, fresh);
+  } finally {
+    storeSkillHistories(root, fresh);
+  }
+}
 
+/**
+ * Record that a bundle served a history (STALE CLEANUP's start). Never throws.
+ */
+function noteHistoryServed(cleanup, nowIso) {
+  try {
+    if (!cleanup.value) cleanup.value = { history_seen_at: null, done_at: null, cursor: null };
+    if (!cleanup.value.history_seen_at) cleanup.value.history_seen_at = nowIso;
+  } catch {
+    /* D waits */
+  }
+}
+
+/**
+ * A skill's served history, validated, and its stored form ({sha, at, now, old})
+ * in `fresh`. Null when the bundle served none for it. Never throws.
+ */
+function servedSkillHistory(s, key, sha, nowIso, fresh, cleanup) {
+  try {
+    const old = cleanSkillHistoryMap(s.old);
+    if (!old) return null;
+    fresh[key] = { sha, at: nowIso, now: skillFileFps(s.files), old };
+    noteHistoryServed(cleanup, nowIso);
+    return old;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The bundle → write half of runSkillSync for the skills it wanted. False when
+ * the bundle could not be had (the pass ends there, as before). Never throws.
+ */
+async function fetchAndWriteWanted(root, wanted, deadlineAt, result, failures, cleanup, fresh) {
+  const auth = { Authorization: `Bearer ${TOKEN}` };
   const bundle = await skillsApiRequest(
     SKILLS_BUNDLE_URL,
     {
@@ -8935,7 +9459,7 @@ async function runSkillSync(root, deadlineAt, result, failures) {
   if (!bundle.ok) {
     result.reason = `bundle_${bundle.reason}`;
     result.failed += wanted.length;
-    return;
+    return false;
   }
   const pending = new Map(wanted.map((w) => [w.key, w]));
   const skills = Array.isArray(bundle.body.skills) ? bundle.body.skills : [];
@@ -8952,7 +9476,8 @@ async function runSkillSync(root, deadlineAt, result, failures) {
     if (!want) continue; // only what was asked for, once each
     pending.delete(key);
     const sha = typeof s.sha === "string" && s.sha && s.sha.length <= 200 ? s.sha : want.sha;
-    const outcome = writeRegistrySkill(root, key, sha, s.files, nowIso);
+    const old = servedSkillHistory(s, key, sha, nowIso, fresh, cleanup);
+    const outcome = writeRegistrySkill(root, key, sha, s.files, nowIso, old ? { old } : null);
     if (outcome === "installed") result.installed += 1;
     else if (outcome === "updated") result.updated += 1;
     else if (outcome === "linked" || outcome === "foreign") result.left_alone += 1;
@@ -8964,6 +9489,187 @@ async function runSkillSync(root, deadlineAt, result, failures) {
     else if (SKILL_PERMANENT_OUTCOMES.indexOf(outcome) !== -1) {
       failures[key] = { sha, outcome, at: nowIso };
     }
+    // ⛔ STALE TEAM COPIES (0.15.1, C): the kept copies this history shows hold
+    // nothing but team versions go.
+    if (old) result.kept_copies_removed += pruneTeamOnlyKeptCopies(key, fresh[key], deadlineAt);
+  }
+  return true;
+}
+
+// ── STALE CLEANUP (0.15.1, D) ──────────────────────────────────────────────
+// The sync never fetches a skill whose marker already names the registry's sha,
+// so leftovers in an up-to-date folder, and kept copies of it that hold only
+// team versions, would stay until main next changed that skill. Once per
+// machine, the sync fetches those skills and gives them A and C:
+//   - which: every listed key whose folder is ours and up to date (marker sha =
+//     registry sha, no `updating_to`) and that has a kept copy under
+//     state/skill-edits or a folder sha that differs from its marker's;
+//   - when: from the first sync after a bundle served a history (a bundle with
+//     none has nothing to apply, and a machine would fetch for nothing until
+//     migration 365 is applied and the registry sync has filled it); then on
+//     each hourly sync until a full pass is done. The record lives in
+//     skills-sync.json as `stale_cleanup` {history_seen_at, done_at, cursor};
+//   - how much: in key order, resuming after `cursor` (the last key whose
+//     candidates were all handled), at most SKILL_CLEANUP_MAX_PER_RUN skills in
+//     one bundle request of the route's 40, only with SKILL_CLEANUP_MIN_LEFT_MS
+//     of the sync's budget left, the folders hashed until
+//     SKILL_CLEANUP_REQUEST_RESERVE_MS before its end (always at least one);
+//   - what: a folder every file of which is explained is rewritten with the
+//     incoming version (writeRegistrySkill, cleanOnly) and A removes its
+//     leftovers; a folder with anything unexplained is left exactly as it is (the
+//     proposal scan and the review take it); then the skill's team-only kept
+//     copies go (C);
+//   - handled: a skill served (with or without its own history), or one the
+//     answer left out and did not defer. A deferred one, one not reached in time
+//     or a failed request is asked for again on the next sync. An answer that
+//     served skills but no history at all means the registry stopped serving it:
+//     D waits for the next history (history_seen_at cleared), its cursor kept.
+const SKILL_CLEANUP_MAX_PER_RUN = 10;
+const SKILL_CLEANUP_MIN_LEFT_MS = 1500;
+const SKILL_CLEANUP_REQUEST_RESERVE_MS = 1000;
+
+/** The STALE CLEANUP record of a skills-sync.json record, malformed parts dropped; null for none. */
+function rememberedStaleCleanup(record) {
+  const raw = record && record.stale_cleanup;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const iso = (v) => (typeof v === "string" && v.length <= 40 && Number.isFinite(Date.parse(v)) ? v : null);
+  return {
+    history_seen_at: iso(raw.history_seen_at),
+    done_at: iso(raw.done_at),
+    cursor: typeof raw.cursor === "string" && SKILL_KEY_RE.test(raw.cursor) ? raw.cursor : null,
+  };
+}
+
+/**
+ * D for one sync: the scan, one bundle request and the cleaning, and the record
+ * moved on. `listed` is every listed key in sorted order, `upToDate` the
+ * up-to-date folders of ours ({key → {sha, dir}}). Never throws.
+ */
+async function runStaleCleanup(root, listed, upToDate, deadlineAt, result, cleanup, fresh) {
+  try {
+    const state = cleanup.value;
+    if (!state || !state.history_seen_at || state.done_at) return;
+    if (deadlineAt - Date.now() < SKILL_CLEANUP_MIN_LEFT_MS) return;
+    const scanUntil = deadlineAt - SKILL_CLEANUP_REQUEST_RESERVE_MS;
+    const kept = keysWithKeptCopies();
+    const examined = [];
+    const candidates = [];
+    let reachedEnd = true;
+    for (let i = 0; i < listed.length; i++) {
+      const key = listed[i];
+      if (state.cursor && key <= state.cursor) continue;
+      if (examined.length > 0 && (candidates.length >= SKILL_CLEANUP_MAX_PER_RUN || deadlinePassed(scanUntil))) {
+        reachedEnd = false;
+        break;
+      }
+      examined.push(key);
+      const current = upToDate.get(key);
+      if (!current) continue;
+      let wanted = kept.has(key);
+      if (!wanted) {
+        const local = skillFolderShas(current.dir);
+        wanted = Boolean(local) && local.sha !== current.sha && local.md_sha !== current.sha;
+      }
+      if (wanted) candidates.push({ key, sha: current.sha });
+    }
+
+    const handled = new Set();
+    let historyGone = false;
+    if (candidates.length > 0) {
+      const bundle = await skillsApiRequest(
+        SKILLS_BUNDLE_URL,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+          body: JSON.stringify({ keys: candidates.map((c) => c.key) }),
+        },
+        deadlineAt,
+      );
+      if (bundle.ok) {
+        const skills = Array.isArray(bundle.body.skills) ? bundle.body.skills : [];
+        const deferred = new Set(Array.isArray(bundle.body.deferred) ? bundle.body.deferred : []);
+        const asked = new Map(candidates.map((c) => [c.key, c]));
+        const nowIso = new Date().toISOString();
+        let served = 0;
+        let withHistory = 0;
+        const later = [];
+        for (let i = 0; i < skills.length; i++) {
+          const s = skills[i] && typeof skills[i] === "object" ? skills[i] : {};
+          const key = typeof s.key === "string" ? s.key : typeof s.skill_key === "string" ? s.skill_key : "";
+          const want = asked.get(key);
+          if (!want || handled.has(key)) continue;
+          served += 1;
+          const sha = typeof s.sha === "string" && s.sha && s.sha.length <= 200 ? s.sha : want.sha;
+          const old = servedSkillHistory(s, key, sha, nowIso, fresh, cleanup);
+          if (old) withHistory += 1;
+          later.push({ key, sha, files: s.files, old });
+          handled.add(key);
+        }
+        if (served > 0 && withHistory === 0) {
+          historyGone = true;
+          handled.clear();
+        } else {
+          for (let i = 0; i < later.length; i++) {
+            const c = later[i];
+            if (deadlinePassed(deadlineAt)) {
+              handled.delete(c.key);
+              for (let j = i + 1; j < later.length; j++) handled.delete(later[j].key);
+              break;
+            }
+            if (!c.old) continue;
+            if (cleanStaleSkill(root, c.key, c.sha, c.files, nowIso, c.old) === "updated") result.cleaned += 1;
+            result.kept_copies_removed += pruneTeamOnlyKeptCopies(c.key, fresh[c.key], deadlineAt);
+          }
+          // Left out and not deferred: nothing the bundle serves, so nothing to clean.
+          candidates.forEach((c) => {
+            if (!deferred.has(c.key) && !skills.some((s) => s && (s.key === c.key || s.skill_key === c.key))) handled.add(c.key);
+          });
+        }
+      }
+    }
+
+    // The cursor moves to the last key before the first candidate not handled.
+    let cursor = state.cursor;
+    let blocked = false;
+    const isCandidate = new Set(candidates.map((c) => c.key));
+    for (let i = 0; i < examined.length; i++) {
+      if (isCandidate.has(examined[i]) && !handled.has(examined[i])) {
+        blocked = true;
+        break;
+      }
+      cursor = examined[i];
+    }
+    if (historyGone) {
+      state.history_seen_at = null;
+      return;
+    }
+    if (!blocked && reachedEnd) {
+      state.done_at = new Date().toISOString();
+      state.cursor = null;
+    } else {
+      state.cursor = cursor;
+    }
+  } catch (err) {
+    debugLog(`stale cleanup failed: ${err && err.message}`);
+  }
+}
+
+/**
+ * D for one skill: rewrite an up-to-date folder of ours only when every file is
+ * explained (A then removes its leftovers). "updated", "current" (it already is
+ * the served version), or why not ("edited" for a folder holding something of
+ * the teammate's, and writeRegistrySkill's other answers). Never throws.
+ */
+function cleanStaleSkill(root, key, sha, files, nowIso, old) {
+  try {
+    const info = inspectSkillFolder(root, key);
+    if (info.kind !== "ours" || info.marker.updating_to || info.marker.sha !== sha) return "moved";
+    const local = skillFolderShas(info.dir);
+    if (!local) return "unreadable";
+    if (local.sha === sha || local.md_sha === sha) return "current";
+    return writeRegistrySkill(root, key, sha, files, nowIso, { old, cleanOnly: true });
+  } catch {
+    return "error";
   }
 }
 
@@ -9043,26 +9749,36 @@ async function syncRegistrySkills(budgetMs) {
       failed: 0,
       skipped_failed: 0,
       kept_for_review: 0,
+      // STALE TEAM COPIES (0.15.1): skills D rewrote, and kept copies C removed.
+      cleaned: 0,
+      kept_copies_removed: 0,
       reason: null,
     };
     const failures = claim.record.permanent_failures;
+    const cleanup = { value: claim.record.stale_cleanup || null };
     try {
       const root = path.join(claude, "skills");
       if (skillsComeFromControlTower(root)) {
         // The control-tower rule: nothing at all, and the skip on record.
         result.reason = "control_tower_checkout";
       } else {
-        await runSkillSync(root, deadlineAt, result, failures);
+        await runSkillSync(root, deadlineAt, result, failures, cleanup);
       }
     } finally {
       result.finished_at = new Date().toISOString();
+      const staleCleanup = rememberedStaleCleanup({ stale_cleanup: cleanup.value });
       writeFileAtomic(
         claim.file,
         `${JSON.stringify(
-          Object.assign({}, claim.record, {
-            permanent_failures: rememberedSkillFailures({ permanent_failures: failures }),
-            last_result: result,
-          }),
+          Object.assign(
+            {},
+            claim.record,
+            {
+              permanent_failures: rememberedSkillFailures({ permanent_failures: failures }),
+              last_result: result,
+            },
+            staleCleanup ? { stale_cleanup: staleCleanup } : {},
+          ),
         )}\n`,
         claim.dir,
       );
@@ -10384,6 +11100,9 @@ function findSkillProposals(s, nowMs, deadlineAt, probe) {
   const settled = (ms) => typeof ms === "number" && ms > 0 && nowMs - ms >= SKILL_PROPOSE_SETTLE_MS;
   /** Was this entry queued after the folder last changed? Then it is this version. */
   const queuedSince = (e, newest) => Boolean(e) && Date.parse(e.queued_at || "") >= newest;
+  // ⛔ STALE TEAM COPIES (0.15.1, C): the histories the sync last stored. The
+  // child's scan only: Stop's probe hashes nothing.
+  const histories = probe ? Object.create(null) : readSkillHistories();
 
   // Out of time before B2.2 (child only): B2.2 still checks one folder.
   let early = false;
@@ -10417,6 +11136,16 @@ function findSkillProposals(s, nowMs, deadlineAt, probe) {
         }
         const stamp = stamps[j];
         const id = `${key}/${stamp}`;
+        // C: a copy the stored history fully explains holds no teammate work.
+        // Deleted when it holds nothing else; otherwise remembered, never sent.
+        if (histories[key] && SKILL_EDIT_STAMP_RE.test(stamp)) {
+          const verdict = keptCopyVerdict(path.join(keyDir, stamp), histories[key]);
+          if (verdict === "team_only" && deleteKeptCopy(path.join(keyDir, stamp))) continue;
+          if (verdict) {
+            if (!Object.prototype.hasOwnProperty.call(s.kept_uploaded, id)) found.keptKnown[id] = null;
+            continue;
+          }
+        }
         if (!SKILL_EDIT_STAMP_RE.test(stamp) || Object.prototype.hasOwnProperty.call(s.kept_uploaded, id)) continue;
         const record = readSkillEditRecord(path.join(keyDir, stamp));
         if (!record || record.key !== key || record.seen_at) continue;
@@ -10512,6 +11241,9 @@ function findSkillProposals(s, nowMs, deadlineAt, probe) {
     if (probe) return true;
     const read = skillFolderRead(info.dir);
     if (!read || read.sha === info.marker.sha || read.md_sha === info.marker.sha) continue;
+    // C: leftovers aside, nothing unexplained is left: nothing to propose.
+    const hist = histories[name];
+    if (hist && read.files && skillFilesExplained(read.files, null, hist.now, hist.old)) continue;
     const local = read.sha || read.md_sha;
     if (!local || (e && e.local_sha === local)) continue;
     found.queue.push({ key: name, local_sha: local, origin: "sync_edit" });
@@ -10733,7 +11465,18 @@ async function uploadLiveProposal(key, entry, deadlineAt) {
     });
     if (!moved.written) return false;
   }
-  const files = proposalUploadFiles(read.files, info.kind === "ours" ? info.marker.files : []);
+  // ⛔ STALE TEAM COPIES (0.15.1, C): a sync edit goes without its leftovers, and
+  // one with nothing unexplained left is not sent at all.
+  let mine = read.files;
+  if (info.kind === "ours" && entry.origin === "sync_edit") {
+    const hist = readSkillHistories()[key];
+    if (hist && skillFilesExplained(read.files, null, hist.now, hist.old)) {
+      drop();
+      return false;
+    }
+    if (hist) mine = withoutTeamLeftovers(read.files, hist);
+  }
+  const files = proposalUploadFiles(mine, info.kind === "ours" ? info.marker.files : []);
   const answer = await postSkillProposal(
     { skill_key: key, kind, origin: entry.origin, base_sha: base, files, note: null, machine_id: setupMachineId() },
     deadlineAt,
@@ -10771,7 +11514,19 @@ async function uploadKeptProposal(k, deadlineAt) {
     remember(null);
     return false;
   }
-  const files = proposalUploadFiles(read.files, liveMarkerFiles(k.key));
+  // ⛔ STALE TEAM COPIES (0.15.1, C): as for a sync edit; a copy of nothing but
+  // team versions is deleted (or, holding anything else, remembered unsent).
+  let mine = read.files;
+  const hist = readSkillHistories()[k.key];
+  if (hist) {
+    const verdict = keptCopyVerdict(k.dir, hist);
+    if (verdict) {
+      if (!(verdict === "team_only" && deleteKeptCopy(k.dir))) remember(null);
+      return false;
+    }
+    mine = withoutTeamLeftovers(read.files, hist);
+  }
+  const files = proposalUploadFiles(mine, liveMarkerFiles(k.key));
   const answer = await postSkillProposal(
     { skill_key: k.key, kind: "edit", origin: "kept_copy", base_sha: k.base, files, note: null, machine_id: setupMachineId() },
     deadlineAt,
