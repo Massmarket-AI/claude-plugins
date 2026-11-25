@@ -5171,7 +5171,7 @@ async function bandLine($: EngineInterface): Promise<MmBand> {
   const newerText = newer ? `A newer Claude mod (${newer}) is installed: quit and reopen Claude to load it.` : ''
   const headText = head ? youBandText({ ...first, head }) : ''
   const rest = [...problems, ...(!headText && newerText ? [newerText] : [])].join(' ')
-  const text = [headText ? (newerText ? `${headText} · ${newerText}` : headText) : '', rest].filter(Boolean).join(' ')
+  const text = [headText ? (newerText ? `${headText.replace(/\.$/, '')} · ${newerText}` : headText) : '', rest].filter(Boolean).join(' ')
   if (!text) return { text: '', at: last.at }
   // (0.5.14) Start missing threads: counted as Start all counts them (`needingThreads`), and (0.7.11) the clients off the list whose
   // thread is in another Claude profile; (0.7.73) drawn only while a client that needs a thread has no Start card
@@ -11812,6 +11812,7 @@ export const register: Register = on => {
      * (0.7.73) A You row: what is needed (a press on it opens the client's thread), by when, its pin and why; then, for a client of the
      * list, its row's note, browser lines, open items and buttons, as before. A thread that waits on the person has its press alone.
      */
+    const youMeta = (r: MmYouRow) => [r.pace ? `${LEVEL_GLYPH[r.pace]} ${r.paceWords}` : '', r.when, youPinText(r), r.why].filter(Boolean).join(' · ')
     const drawYou = (r: MmYouRow, n: number) => {
       const row = hasList && queue ? queue.rows.find(x => x.projectId === r.projectId) : undefined
       const head = `${n}. ${r.client}: ${r.ask}`
@@ -11821,13 +11822,14 @@ export const register: Register = on => {
             {r.pin !== 'later' ? <Text color={r.pin === 'pinned' ? 'success' : 'warning'}>{r.pin === 'pinned' ? '●' : '○'}</Text> : null}
             {r.target ? <Button key={`mm-you-open:${r.projectId}`} plain label={head} onPress={() => void openTracked($, r.target as string)} /> : <Text>{head}</Text>}
           </Box>
-          <Box flexDirection="row" flexWrap="wrap" gap={1}>
-            {/* (0.7.73) on pace to finish on time: its colour and its words first */}
-            {r.pace ? <Text color={r.pace === 'red' ? 'error' : r.pace === 'amber' ? 'warning' : 'success'}>{`${LEVEL_GLYPH[r.pace]} ${r.paceWords}`}</Text> : null}
-            {r.clock === 'late' ? <Text color="error">{`· ${r.when}`}</Text> : <Text dimColor>{`· ${r.when}`}</Text>}
-            {r.pin === 'needs_pin' ? <Text color="warning">{`· ${youPinText(r)}`}</Text> : <Text dimColor>{`· ${youPinText(r)}`}</Text>}
-            {r.why ? <Text dimColor>{`· ${r.why}`}</Text> : null}
-          </Box>
+          {/* (0.7.73) one line: on pace to finish on time (its dot carries the colour), by when, the pin, and why; red where it is late */}
+          {r.clock === 'late' ? <Text color="error">{youMeta(r)}</Text> : <Text dimColor>{youMeta(r)}</Text>}
+          {/* (0.7.73, Rob 2026-11-25: "an overview of each clients status ... with more specific client task details") */}
+          {Array.isArray(r.details) && r.details.length ? (
+            <Box key={`mm-you-details:${r.projectId}`} flexDirection="column">
+              {r.details.map(d => <Text dimColor>{`  ${d}`}</Text>)}
+            </Box>
+          ) : null}
           {/* the row's own second line where it has one: drafts not sent, why Update goes to a look-alike thread, when it updates itself */}
           {row && rowDetail(row) ? <Text dimColor>{rowDetail(row)}</Text> : null}
           {row ? rowTail(row) : null}

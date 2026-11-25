@@ -193,6 +193,80 @@ export function youPin(pin: RowPin | undefined): Pick<YouRow, 'pin' | 'pinWhy'> 
 /** The row's pin as the pane says it: `pinned`, `needs a pin: you unpinned it`, `no pin needed yet`. */
 export const youPinText = (r: Pick<YouRow, 'pin' | 'pinWhy'>): string => (r.pin === 'pinned' ? 'pinned' : r.pin === 'needs_pin' ? `needs a pin: ${r.pinWhy || 'not pinned'}` : 'no pin needed yet')
 
+/** How fresh something is, in real time: `just now`, `25m ago`, `3h ago`, `2d ago`. Not a client clock: never business time. */
+export function agoWords(at: number, now: number): string {
+  const m = Math.max(0, Math.round((now - at) / 60_000))
+  if (m < 2) return 'just now'
+  if (m < 60) return `${m}m ago`
+  const h = Math.round(m / 60)
+  return h < 48 ? `${h}h ago` : `${Math.round(h / 24)}d ago`
+}
+
+/**
+ * At most `max` characters of a client's or teammate's words, with an ellipsis where it was cut: cleaned as `cleanText` cleans, but
+ * keeping `?`, `!`, `:` and `;`, which the pane draws as plain text (they never go into a kickoff, a title or a tool argument from here).
+ */
+function clip(text: unknown, max: number): string {
+  const kept = (typeof text === 'string' ? text : '').normalize('NFC').replace(/[^\p{L}\p{N} .,&'()/?!:;-]/gu, ' ')
+  const all = kept.replace(/ +/g, ' ').trim()
+  return [...all].length > max ? `${[...all].slice(0, max - 1).join('').trimEnd()}…` : all
+}
+
+const hrs = (n: number): string => String(Math.round(n * 10) / 10)
+const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`
+
+/** The most detail lines a row draws, so the section stays an overview (Rob 2026-11-25: "i dont want to get overcluttered"). */
+export const YOU_DETAIL_MAX = 3
+
+/**
+ * (0.7.73, Rob 2026-11-25: "more info than what we see in the thread names ... an overview of each clients status that needs them with
+ * more specific client task details") The specifics under a You row, each from the item itself and none repeating its head: the
+ * client's newest message (who, how long ago, its first words), the reply package (who holds it, drafts not sent, what came after
+ * it), a teammate's ask, the tickets beyond the one the head names, and the hours (needed against paid a day, logged today, the
+ * date). In that order, at most YOU_DETAIL_MAX.
+ */
+export function youDetails(it: QueueItem, now: number, from: YouSource): string[] {
+  const out: string[] = []
+  const m = newestMail(it)
+  if (m && it.messages > 0) {
+    const who = senderName(m.sender) || cleanName(it.client) || 'The client'
+    const at = Date.parse(m.at)
+    const words = clip(m.snippet, 90) || subjectOf(m.subject)
+    const many = it.messages > 1 ? ` (${plural(it.messages, 'message')})` : ''
+    out.push(`${who} wrote${Number.isFinite(at) ? ` ${agoWords(at, now)}` : ''}${words ? `: "${words}"` : ''}${many}`)
+  }
+  const o = it.open ?? null
+  if (o && o.noReply !== true) {
+    const parts = [
+      o.state === 'held_by_other' && o.by ? `${cleanText(o.by, 40)} holds it` : o.state === 'held_by_me' ? 'you hold it' : o.state === 'stale' ? 'out of date' : '',
+      o.unsent > 0 ? `${plural(o.unsent, 'draft')} ${o.state === 'held_by_me' || o.state === 'held_by_other' ? 'not sent' : 'ready'}` : '',
+      o.newer > 0 ? `${plural(o.newer, 'message')} came after it` : '',
+    ].filter(Boolean)
+    if (parts.length) out.push(`Reply package: ${parts.join(' · ')}`)
+  } else if (packageReady(it) && it.coversThrough) {
+    const at = Date.parse(it.coversThrough)
+    if (Number.isFinite(at)) out.push(`Reply package: ready, covers mail through ${clockText(at, now)}`)
+  }
+  const asks = openAsks(it).slice(from === 'ask' ? 1 : 0)
+  if (asks.length) {
+    const a = asks[0]
+    const what = clip(a?.snippet, 80)
+    out.push(`${cleanText(a?.asker, 40) || 'A teammate'} asks${what ? `: "${what}"` : ''}${asks.length > 1 ? ` (+${asks.length - 1} more)` : ''}`)
+  }
+  const titles = (Array.isArray(it.taskTitles) ? it.taskTitles : []).filter(x => typeof x === 'string' && x.trim()).slice(from === 'task' ? 1 : 0)
+  if (titles.length) out.push(`${titles.length === 1 ? 'Ticket' : 'Tickets'}: ${titles.slice(0, 2).map(x => `"${clip(x, 50)}"`).join(', ')}${titles.length > 2 ? ` (+${titles.length - 2} more)` : ''}`)
+  const p = paceOf(it)
+  if (p) {
+    const by = Number.isFinite(p.date) ? clockText(shownDue(p.date), now) : ''
+    out.push(
+      p.state === 'late'
+        ? `Hours: ${hrs(p.short)} h of quoted work past ${by}`
+        : `Hours: needs ${hrs(p.need)} h a day, ${hrs(p.paid)} paid${p.logged !== null ? ` · ${hrs(p.logged)} h logged today` : ''}${by ? ` · due ${by}` : ''}`,
+    )
+  }
+  return out.slice(0, YOU_DETAIL_MAX)
+}
+
 /** One item as its You row. */
 export function youRow(it: QueueItem, now: number, o: { pin?: RowPin | undefined; stillOpen?: readonly string[]; waiting?: string; target?: string } = {}): YouRow {
   const { ask, from } = youAsk(it, now, o.stillOpen)
@@ -210,6 +284,7 @@ export function youRow(it: QueueItem, now: number, o: { pin?: RowPin | undefined
     why: youWhy(it, now, c.clock, from, o.waiting),
     pace: pace.level,
     paceWords: pace.words,
+    details: youDetails(it, now, from),
     ...youPin(o.pin),
     ...(o.target ? { target: o.target } : {}),
   }
@@ -255,7 +330,8 @@ export function withWaits(rows: readonly YouRow[], waits: readonly MmYouWait[] |
   const out = rows.map(r => ({ ...r }))
   for (const w of Array.isArray(waits) ? waits : []) {
     if (!w || typeof w.sid !== 'string' || typeof w.question !== 'string' || !w.question) continue
-    const question = cleanText(w.question, 120)
+    // cleaned as any text the pane shows, keeping the question mark that ends it
+    const question = `${cleanText(w.question, 120)}${/\?\s*$/.test(w.question) ? '?' : ''}`
     const mine = w.projectId ? out.find(r => r.projectId === w.projectId) : undefined
     if (mine) {
       if (!mine.why.includes('waiting on you')) mine.why = [mine.why, `waiting on you: ${question}`].filter(Boolean).join(' · ')
@@ -292,6 +368,8 @@ export function shortAsk(ask: string): string {
 
 /** What the band says when nothing needs the person. */
 export const NOTHING_NEEDS_YOU = 'Nothing needs you right now.'
+/** And when something does, but none of it has a date. */
+export const NOTHING_DUE = 'nothing due'
 
 /**
  * The band's first line: `Needs you: 7 · 2 late` and the next row's words, `Crucial Hire, approve the reply, due 3:45 PM`, which the
@@ -302,7 +380,11 @@ export function youBand(rows: readonly YouRow[]): { head: string; next?: { words
   const late = rows.filter(r => r.clock === 'late').length
   const behind = rows.filter(r => r.clock === 'behind').length
   const head = [`Needs you: ${rows.length}`, ...(late ? [`${late} late`] : []), ...(behind ? [`${behind} behind`] : [])].join(' · ')
-  const n = rows[0] as YouRow
+  // late first, then by deadline (`youSort`): the rows with no date come last, so with none dated, nothing is due. A thread's
+  // open question is next all the same (it waits on the person now); otherwise the band says so (Rob 2026-11-24: "with nothing
+  // due it says so in a few words")
+  const n = rows.find(r => r.at !== null) ?? rows.find(r => r.from === 'waiting')
+  if (!n) return { head: `${head} · ${NOTHING_DUE}` }
   return { head, next: { words: `${n.client}, ${shortAsk(n.ask)}, ${n.short}`, projectId: n.projectId, ...(n.target ? { target: n.target } : {}) } }
 }
 

@@ -3,7 +3,7 @@
 
 import { describe, expect, test } from 'claude-code/testing'
 import type { QueueItem } from './queue'
-import { NOTHING_NEEDS_YOU, shortAsk, subjectOf, youAsk, youBand, youBandText, youClock, youPin, youRow, youRows } from './you'
+import { NOTHING_DUE, NOTHING_NEEDS_YOU, YOU_DETAIL_MAX, agoWords, shortAsk, withWaits, subjectOf, youAsk, youBand, youBandText, youClock, youDetails, youPin, youRow, youRows } from './you'
 
 // Tuesday 2026-11-24, 10 AM in New York
 const NOW = Date.parse('2026-11-24T15:00:00Z')
@@ -167,9 +167,80 @@ describe('0.7.73: the order, and the band\'s next', () => {
     expect(youBandText(youBand([]))).toBe('Nothing needs you right now.')
   })
 
+  test('something needs the person but none of it has a date: the band says nothing is due, with no next; a waiting question is next all the same', () => {
+    const undated = rows.filter(r => r.at === null)
+    expect(undated.map(r => r.client)).toEqual(['Undated Co'])
+    expect(youBand(undated)).toEqual({ head: `Needs you: 1 · ${NOTHING_DUE}` })
+    expect(youBandText(youBand(undated))).toBe('Needs you: 1 · nothing due')
+    const asked = withWaits(undated, [{ sid: 'local_q', client: 'Quiet Co', type: 'only-you', question: 'Which plan?' }])
+    expect(youBand(asked).next).toEqual({ words: 'Quiet Co, answer: Which plan?, waiting on you', projectId: 'local_q', target: 'local_q' })
+  })
+
   test('the band keeps an ask short: its first clause, at most 48 characters', () => {
     expect(shortAsk('approve the reply to Zach about "Invite failures"')).toBe('approve the reply to Zach')
     expect(shortAsk('answer Asif\'s ask: "Can we move the call?"')).toBe("answer Asif's ask")
     expect([...shortAsk(`deliver "${'y'.repeat(80)}"`)].length).toBeLessThanOrEqual(48)
+  })
+})
+
+describe('0.7.73 (Rob 2026-11-25: "more specific client task details" than the thread name): the lines under a row', () => {
+  const zach = { at: '2026-11-24T14:00:00Z', sender: 'Zach Hill <zach@crucial.example>', subject: 'Re: Invite failures', snippet: 'The invites bounce when a second user is added.' }
+
+  test('the newest message (who, how long ago, its first words, how many) and the ready package (what mail it covers)', () => {
+    const it = item({ client: 'Crucial Hire', kind: 'ready', packageId: 'pkg', coversThrough: '2026-11-24T14:30:00Z', messages: 2, mail: [zach, mail('amy@crucial.example', 'Older', '2026-11-23T14:00:00Z')] })
+    expect(youDetails(it, NOW, 'package')).toEqual(['Zach Hill wrote 1h ago: "The invites bounce when a second user is added." (2 messages)', 'Reply package: ready, covers mail through 9:30 AM'])
+    // and on the row itself
+    expect(youRow(it, NOW).details).toEqual(youDetails(it, NOW, 'package'))
+  })
+
+  test('a message with no words in the feed: its subject; a long one is cut with an ellipsis', () => {
+    expect(youDetails(item({ client: 'Acme Roofing', kind: 'reply', messages: 1, mail: [mail('jo.smith@acme.example', 'Fwd: Quote for the roof')] }), NOW, 'mail')).toEqual(['Jo Smith wrote 2h ago: "Quote for the roof"'])
+    const long = { ...zach, snippet: 'word '.repeat(40) }
+    const [line] = youDetails(item({ client: 'Crucial Hire', kind: 'reply', messages: 1, mail: [long] }), NOW, 'mail')
+    expect(line).toEndWith('…"')
+    expect([...(line ?? '')].length).toBeLessThan(130)
+  })
+
+  test('a package someone holds: who, the drafts not sent, and what came after it', () => {
+    const it = item({ client: 'Bolt Staffing', kind: 'reply', open: { id: 'o', state: 'held_by_other', by: 'Asif', at: null, unsent: 2, newer: 1 } })
+    expect(youDetails(it, NOW, 'none')).toEqual(['Reply package: Asif holds it · 2 drafts not sent · 1 message came after it'])
+  })
+
+  test('the tickets the head does not name, two at most, and how many more', () => {
+    const it = item({ client: 'Cedar Dental', taskTitles: ['Send the intake form', 'Fix the router', 'Book the call', 'Order the scanner'] })
+    expect(youDetails(it, NOW, 'task')).toEqual(['Tickets: "Fix the router", "Book the call" (+1 more)'])
+    expect(youDetails(item({ client: 'Cedar Dental', taskTitles: ['Send the intake form'] }), NOW, 'task')).toEqual([])
+    expect(youDetails(item({ client: 'Cedar Dental', taskTitles: ['Send the intake form'] }), NOW, 'mail')).toEqual(['Ticket: "Send the intake form"'])
+  })
+
+  test("a teammate's ask the head does not carry", () => {
+    const ask = (id: string, snippet: string) => ({ id, asker: 'Asif', askedAt: NOW - H, dueAt: NOW + H, snippet, hasDraft: false, link: '', draftSha: null })
+    const it = item({ client: 'Delta Law', kind: 'ask', asks: [ask('a', 'Can we move the call?'), ask('b', 'Is the quote signed?')] })
+    // the head names the first ask: the next one here, with its question mark
+    expect(youDetails(it, NOW, 'ask')).toEqual(['Asif asks: "Is the quote signed?"'])
+    expect(youDetails(it, NOW, 'mail')).toEqual(['Asif asks: "Can we move the call?" (+1 more)'])
+  })
+
+  test('the hours: needed against paid a day, logged today, the date; or how far past it', () => {
+    const date = Date.parse('2026-11-25T22:00:00Z')
+    expect(youDetails(item({ client: 'Echo Labs', pace: { state: 'behind', need: 2.5, paid: 2, logged: 1.25, short: 0, date } }), NOW, 'pace')).toEqual(['Hours: needs 2.5 h a day, 2 paid · 1.3 h logged today · due Wed 5 PM'])
+    expect(youDetails(item({ client: 'Echo Labs', pace: { state: 'behind', need: 2.5, paid: 2, logged: null, short: 0, date } }), NOW, 'pace')).toEqual(['Hours: needs 2.5 h a day, 2 paid · due Wed 5 PM'])
+    expect(youDetails(item({ client: 'Echo Labs', pace: { state: 'late', need: 0, paid: 2, logged: null, short: 3, date: Date.parse('2026-11-23T22:00:00Z') } }), NOW, 'pace')[0]).toStartWith('Hours: 3 h of quoted work past ')
+  })
+
+  test(`at most ${YOU_DETAIL_MAX} lines, in order: message, package, ask, tickets, hours`, () => {
+    const it = item({
+      client: 'Crucial Hire', kind: 'reply', messages: 1, mail: [zach], taskTitles: ['Fix the router'],
+      open: { id: 'o', state: 'held_by_me', by: '', at: null, unsent: 1, newer: 0 },
+      asks: [{ id: 'a', asker: 'Asif', askedAt: NOW - H, dueAt: NOW + H, snippet: 'Ping me', hasDraft: false, link: '', draftSha: null }],
+      pace: { state: 'behind', need: 2.5, paid: 2, logged: 1, short: 0, date: NOW + 24 * H },
+    })
+    const lines = youDetails(it, NOW, 'draft')
+    expect(lines).toHaveLength(YOU_DETAIL_MAX)
+    expect(lines.map(l => l.split(/[: ]/)[0])).toEqual(['Zach', 'Reply', 'Asif'])
+  })
+
+  test('how fresh, in real time', () => {
+    expect([agoWords(NOW - 30_000, NOW), agoWords(NOW - 25 * 60_000, NOW), agoWords(NOW - 3 * H, NOW), agoWords(NOW - 72 * H, NOW)]).toEqual(['just now', '25m ago', '3h ago', '3d ago'])
   })
 })

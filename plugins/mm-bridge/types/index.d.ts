@@ -526,6 +526,8 @@ export type MmYouRow = {
   /** (0.7.73) On pace to finish on time: green on pace or ahead, amber behind, red late (you.ts `youPace`), and its words. */
   pace: 'green' | 'amber' | 'red'
   paceWords: string
+  /** (0.7.73) The specifics under the row (you.ts `youDetails`): the client's newest message, the package, an ask, tickets, hours. Absent on a row an older build stored. */
+  details?: string[]
   pin: 'pinned' | 'needs_pin' | 'later'
   pinWhy?: string
   target?: string

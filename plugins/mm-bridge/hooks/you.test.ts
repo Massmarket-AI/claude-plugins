@@ -6,7 +6,7 @@ import type { On } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 import type { Feed } from './queue'
 import type { WorldOptions } from './register-world.test-helper'
-import { NOW, LONG, ACME, BOLT, CEDAR, ME, SELF_CLI, PANE, BAND_PROPS, ago, feed, thread, world, mm, pane, bandOf, buttons, lines, tickOnce } from './register-world.test-helper'
+import { NOW, LONG, ACME, BOLT, CEDAR, ME, SELF_CLI, PANE, BAND_PROPS, ago, feed, thread, world, mm, pane, bandOf, buttons, details, lines, tickOnce } from './register-world.test-helper'
 
 const DECLARED = `/home/someone/.claude/mm-hooks/state/declarations/${SELF_CLI}.json`
 const clear = (): Feed => feed({ drafts: [], mail: [], tickets: {} })
@@ -83,8 +83,8 @@ describe('0.7.73: the "You" strip at the top of the side pane', () => {
     await ui.press({ key: 'mm-you:pace' })
     expect(await lines(ui)).toContain('1 late (Acme Roofing). The rest are on pace.')
     // and the row says it in its own colour and words
-    expect((await lines(ui)).some(l => l.startsWith('🔴 ') && l.endsWith('late'))).toBe(true)
-    expect(await lines(ui)).toContain('🟢 on pace')
+    expect((await lines(ui)).some(l => /^🔴 \dd late · /.test(l))).toBe(true)
+    expect((await lines(ui)).some(l => l.startsWith('🟢 on pace · '))).toBe(true)
     await ui.unmount()
   })
 
@@ -202,16 +202,11 @@ describe('0.7.73: the You section replaces Needs you now', () => {
     expect(all[0]).toBe('You')
     expect(all).toContain('Needs you (3)')
     expect(await heads(ui)).toEqual([`1. ${CEDAR_ROW_HEAD}`, `2. ${ACME_ROW_HEAD}`, `3. ${BOLT_ROW_HEAD}`])
-    // by when, in business time: today's clock, then tomorrow's
-    expect(all).toContain('· due 4 PM')
-    expect(all).toContain('· due Tue 8 AM')
-    expect(all).toContain('· due Tue 9 AM')
-    // on pace to finish on time: its colour and words first on the row's second line
-    expect(all.filter(l => l === '🟢 on pace')).toHaveLength(3)
-    // why, and the pin
-    expect(all.some(l => l.startsWith('· ') && l.includes('reply ready for your go'))).toBe(true)
-    expect(all.some(l => l.startsWith('· ') && l.includes('the client wrote'))).toBe(true)
-    expect(all.filter(l => l === '· needs a pin: no thread')).toHaveLength(3)
+    // the row's second line, one line: on pace (its dot's colour and words first), by when in business time (today's clock,
+    // then tomorrow's), its pin, and why
+    expect(all).toContain('🟢 on pace · due 4 PM · needs a pin: no thread · due within 24 business hours · your ticket')
+    expect(all).toContain('🟢 on pace · due Tue 8 AM · needs a pin: no thread · due within 24 business hours · reply ready for your go')
+    expect(all).toContain('🟢 on pace · due Tue 9 AM · needs a pin: no thread · due within 24 business hours · the client wrote')
     // no dropdown, and no Needs you now heading: the rows are always open; Team now stays closed below
     const keys = (await buttons(ui)).map(([k]) => k)
     expect(keys).not.toContain('mm-needs-toggle')
@@ -231,6 +226,24 @@ describe('0.7.73: the You section replaces Needs you now', () => {
     expect(await heads(ui)).toEqual([`1. ${CEDAR_ROW_HEAD}`, `2. ${ACME_ROW_HEAD}`, `3. ${BOLT_ROW_HEAD}`])
     expect(await lines(ui)).toContain('Needs you (3)')
     await ui.unmount()
+  })
+
+  test('(Rob 2026-11-25: "more specific client task details" than the thread name) under each row, desktop and mobile: what the item itself says beyond the head', LONG, async ($, on) => {
+    const w = youWorld(on, { feed: feed() })
+    usage(on, { tokens: 10_000 })
+    await mm($, '')
+    for (const surface of ['desktop', 'mobile'] as const) {
+      const ui = await $.ui.mount({ plugin: 'mm-bridge', surface, component: 'Pane', requestId: 'mm-queue', props: PANE })
+      await w.clock.advance(1_000)
+      expect(await details(ui, ACME)).toEqual(['  Reply package: ready, covers mail through 8 AM'])
+      expect(await details(ui, BOLT)).toEqual(['  Client wrote 3h ago: "hello" (2 messages)'])
+      // Cedar's one ticket is its head already: nothing more to say
+      expect(await details(ui, CEDAR)).toEqual([])
+      await ui.unmount()
+    }
+    // read-only: drawing them asked for nothing
+    expect(w.acted()).toEqual([])
+    expect(w.prompts).toEqual([])
   })
 
   test('a client with its own thread: a press on its row opens that thread, and nothing is sent, pinned or filled', LONG, async ($, on) => {
@@ -262,9 +275,8 @@ describe('0.7.73: the You section replaces Needs you now', () => {
     await w.clock.advance(1_000)
     expect(await heads(ui)).toEqual(['1. Bolt Staffing: answer Kim Park about "Bolt Staffing (Sam) follow-up"', '2. Acme Roofing: answer Kim Park about "Acme Roofing follow-up"', `3. ${CEDAR_ROW_HEAD}`])
     const all = await lines(ui)
-    expect(all).toContain('· 2d late, due Thu 9 AM')
-    expect(all).toContain('· 1d late, due Fri 9 AM')
-    expect(all.filter(l => l === '🔴 2d late' || l === '🔴 1d late')).toHaveLength(2)
+    expect(all.some(l => l.startsWith('🔴 2d late · 2d late, due Thu 9 AM · '))).toBe(true)
+    expect(all.some(l => l.startsWith('🔴 1d late · 1d late, due Fri 9 AM · '))).toBe(true)
     await ui.unmount()
   })
 
