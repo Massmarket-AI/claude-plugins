@@ -2102,6 +2102,152 @@ export function openCommand(thread: { sessionId: string; link?: unknown } | unde
   return [...OPENERS[platform], link]
 }
 
+/**
+ * (0.7.80, Shezan in #mmai-it-support 2026-11-25, Discord 1575178267260887081: every Open thread press on his Ubuntu
+ * computer said `Open "<title>" under Pinned.`, and nobody could tell why) Why the system's opener did not take the person
+ * to the thread:
+ *   no_link      the app gave no link for the thread, or one that is not exactly its own (`threadLink`): nothing started
+ *   no_platform  the bridge could not tell which system this computer runs (`platformOf`): nothing started
+ *   no_opener    the opener is not on this computer (the start failed with ENOENT)
+ *   exit         the opener ran and exited with an error: `code`
+ *   timeout      the opener did not answer within the wait
+ *   failed       the opener could not be started for another reason: `detail`
+ * `handler` (Linux, after `exit` or `timeout` alone): which app the system hands `claude://` links to, as
+ * `xdg-mime query default x-scheme-handler/claude` answers (HANDLER_QUERY): '' none, null the question went unanswered,
+ * absent not asked. `detail`: the first line the opener wrote to its error output, or why it could not start, cleaned
+ * (`detailLine`). Never the link, a path, or a title.
+ */
+export type OpenReason = 'no_link' | 'no_platform' | 'no_opener' | 'exit' | 'timeout' | 'failed'
+export type OpenWhy = {
+  reason: OpenReason
+  platform: Platform | null
+  /** The opener's program (`open`, `rundll32`, `xdg-open`); null where none was started. */
+  program: string | null
+  code: number | null
+  handler?: string | null
+  detail: string | null
+}
+
+/**
+ * (0.7.80) The one question asked of a Linux system after its opener failed or did not answer: which app takes `claude://`
+ * links. Read-only, fixed, and never with the link in it. Claude Desktop on a Mac registers the `claude` scheme
+ * (CFBundleURLSchemes, checked 2026-11-25 in /Applications/Claude.app); on Linux `xdg-open` can hand the link on only when
+ * an installed `.desktop` file lists `MimeType=x-scheme-handler/claude` and the system's default for that type names it.
+ * Whether Claude Desktop's Linux package does that could not be checked from a Mac, so the bridge asks the computer it runs
+ * on, and says what it found (`openWhyWords`).
+ */
+export const HANDLER_QUERY = ['xdg-mime', 'query', 'default', 'x-scheme-handler/claude'] as const
+/** (0.7.80) How long the handler question may take. */
+export const HANDLER_WAIT_MS = 3_000
+
+/**
+ * (0.7.80) What `xdg-mime query default` answered, as the bridge keeps it: a desktop file's name (`claude-desktop.desktop`),
+ * '' when the system names none, null when the answer is not a desktop file's name. Never a path.
+ */
+export function handlerOf(stdout: unknown): string | null {
+  if (typeof stdout !== 'string') return null
+  const first = stdout.split('\n').map(l => l.trim()).find(Boolean) ?? ''
+  if (!first) return ''
+  return /^[A-Za-z0-9][A-Za-z0-9._+-]{0,78}\.desktop$/.test(first) ? first : null
+}
+
+/** (0.7.80) The most characters of an opener's own words the bridge keeps (`detailLine`). */
+export const OPEN_DETAIL_MAX = 120
+
+/**
+ * (0.7.80) The first non-empty line of what an opener wrote, or of an error, kept for the log and OW: the link and any
+ * `claude://` address are taken out, a home folder becomes `~`, control characters become spaces, and it is cut at
+ * OPEN_DETAIL_MAX. null when nothing is left.
+ */
+export function detailLine(text: unknown): string | null {
+  if (typeof text !== 'string') return null
+  const line = text.split('\n').map(l => l.trim()).find(Boolean)
+  if (!line) return null
+  const clean = line
+    .replace(/claude:\/\/[^\s'"<>]*/g, '<link>')
+    .replace(/\/(?:home|Users)\/[^\s/'"]+/g, '~')
+    .replace(/[A-Za-z]:\\Users\\[^\s\\'"]+/g, '~')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
+    .trim()
+  return clean ? [...clean].slice(0, OPEN_DETAIL_MAX).join('') : null
+}
+
+/**
+ * (0.7.80) Why `$.process.run` rejected the opener: it is not on this computer (ENOENT), it was still running when its time
+ * ran out (the engine's words say so, or the wait had passed), or anything else. `elapsedMs`: how long the call took.
+ */
+export function openRejection(err: unknown, elapsedMs: number, waitMs: number): { reason: 'no_opener' | 'timeout' | 'failed'; detail: string | null } {
+  const raw = err instanceof Error ? err.message : typeof err === 'string' ? err : String((err as { message?: unknown } | null)?.message ?? err ?? '')
+  // the engine's own prefix (`mm-bridge: $.process.run: spawn xdg-open EACCES`): the opener's words are what follows it
+  const message = raw.replace(/^[^\n]*?\$\.process\.run:\s*/, '')
+  if (/\bENOENT\b|command not found|no such file or directory|not found in PATH/i.test(message)) return { reason: 'no_opener', detail: detailLine(message) }
+  if (/timed?[\s_-]*out|timeout|ETIMEDOUT|still running/i.test(message) || elapsedMs >= waitMs) return { reason: 'timeout', detail: detailLine(message) }
+  return { reason: 'failed', detail: detailLine(message) }
+}
+
+/**
+ * (0.7.80) Why a thread did not open, in plain words for the person: the toast, the line above the list, and the log. Each
+ * names the program and, on Linux after an error or no answer, what the system does with `claude://` links.
+ */
+export function openWhyWords(why: OpenWhy, waitMs: number): string {
+  const program = why.program ?? 'the link opener'
+  const links =
+    why.handler === ''
+      ? 'no app on this computer is set to open claude:// links'
+      : typeof why.handler === 'string'
+        ? `claude:// links go to ${why.handler}`
+        : ''
+  switch (why.reason) {
+    case 'no_link':
+      return 'the Claude app gave no link for this thread'
+    case 'no_platform':
+      return 'the bridge could not tell which system this computer runs'
+    case 'no_opener':
+      return `${program} is not installed on this computer`
+    case 'exit':
+      return links ? `${links} (${program} stopped with error code ${why.code})` : `${program} stopped with error code ${why.code}`
+    case 'timeout':
+      return `${program} did not answer within ${Math.round(waitMs / 1000)} seconds${links ? `; ${links}` : ''}`
+    default:
+      return why.detail ? `${program} could not start: ${why.detail}` : `${program} could not start`
+  }
+}
+
+/** (0.7.80) The last failed open, as OW's pin report carries it (`open_failure`). No client, no thread, no link, no path. */
+export type OpenFailureReport = {
+  at: string
+  reason: OpenReason
+  platform: Platform | null
+  program: string | null
+  code: number | null
+  /** '' none set, null not readable, absent not asked (`OpenWhy.handler`). */
+  handler?: string | null
+  detail: string | null
+}
+
+/** (0.7.80) How long the last failed open stays in the pin report: a day, as OW keeps only reports from the last day. */
+export const OPEN_FAILURE_KEEP_MS = 24 * 3_600_000
+
+/**
+ * (0.7.80) The failed open the pin report carries: the one kept (`mm.openFailed`) when it is well formed and less than
+ * OPEN_FAILURE_KEEP_MS old; else undefined. ⛔ Pure, and only the fields OW is meant to see.
+ */
+export function openFailureFor(kept: unknown, now: number): OpenFailureReport | undefined {
+  if (!kept || typeof kept !== 'object' || Array.isArray(kept)) return undefined
+  const k = kept as Record<string, unknown>
+  const at = typeof k.at === 'string' ? Date.parse(k.at) : NaN
+  if (!Number.isFinite(at) || now - at >= OPEN_FAILURE_KEEP_MS || at - now > 60_000) return undefined
+  const reasons: readonly OpenReason[] = ['no_link', 'no_platform', 'no_opener', 'exit', 'timeout', 'failed']
+  if (!reasons.includes(k.reason as OpenReason)) return undefined
+  const platform = typeof k.platform === 'string' && Object.hasOwn(OPENERS, k.platform) ? (k.platform as Platform) : null
+  const program = typeof k.program === 'string' && Object.values(OPENERS).some(o => o[0] === k.program) ? k.program : null
+  const code = typeof k.code === 'number' && Number.isInteger(k.code) ? k.code : null
+  const handler = k.handler === null ? null : typeof k.handler === 'string' ? (k.handler === '' ? '' : handlerOf(k.handler)) : undefined
+  const detail = detailLine(k.detail)
+  return { at: new Date(at).toISOString(), reason: k.reason as OpenReason, platform, program, code, ...(handler !== undefined ? { handler } : {}), detail }
+}
+
 // ---------------------------------------------------------------- the pane
 
 export const LABEL = { update: 'Update thread', start: 'Start thread', open: 'Open thread', drafts: 'Drafts', claim: 'Claim in this thread', restore: 'Restore thread' } as const
@@ -2563,8 +2709,13 @@ export type PinReportItem = {
 /** (0.7.23) A client thread that is pinned though its client is not in the report's items: who pinned it. */
 export type PinReportExtra = { project_id: string | null; client: string | null; by: 'bridge' | 'person' }
 
-/** (0.7.23) The pin report, exactly as OW's `POST /api/ext/bridge-pins` takes it. */
-export type PinReport = { at: string; items: PinReportItem[]; extra: PinReportExtra[] }
+/**
+ * (0.7.23) The pin report, exactly as OW's `POST /api/ext/bridge-pins` takes it. (0.7.80) `open_failure`: the last time the
+ * system's opener failed to take the person to a thread on this computer, within a day (`openFailureFor`). OW's parser
+ * (src/lib/ext/bridge-pins.ts, checked 2026-11-25) ignores a top-level key it does not list, so an OW from before it takes the
+ * report as before and keeps nothing of it; `extra` could not carry it, as OW keeps only `{project_id, client, by}` there.
+ */
+export type PinReport = { at: string; items: PinReportItem[]; extra: PinReportExtra[]; open_failure?: OpenFailureReport }
 
 /** (0.7.23) The most items and extra rows a report carries: past that it is trimmed, never refused. */
 export const PIN_REPORT_ITEMS_MAX = 200

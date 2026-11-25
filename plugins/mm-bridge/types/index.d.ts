@@ -272,8 +272,14 @@ export type MmTeamRead = { at: number; partial: string[]; people: MmTeamPerson[]
 /** (0.7.34) The pane's `Team now`: OW's last read; `missing` while OW has no such route. */
 export type MmTeamNow = { team?: MmTeamRead; got?: number; missing?: boolean }
 
-/** What the last button press did, shown above the list. */
-export type MmNotice = { text: string; at: number }
+/**
+ * (0.7.80) The one press a failed Open thread offers under its line: Update for that client's row, into the thread the row
+ * showed, sent even though the thread already had it. Drawn only while that row still reads Open thread for `target`.
+ */
+export type NoticeOffer = { projectId: string; target: string; client: string }
+
+/** What the last button press did, shown above the list. (0.7.80) `offer`: see NoticeOffer. */
+export type MmNotice = { text: string; at: number; offer?: NoticeOffer }
 
 /**
  * The one line above the prompt: how many clients need the person, and this thread's client. An empty
