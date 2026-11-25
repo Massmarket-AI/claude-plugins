@@ -48,6 +48,12 @@ const BRAND = {
     // Night flips day: the same cream and grays as a light mesh on black.
     scene: { base: '#0a0a0a', blooms: ['#d9d4c7', '#bebab0', '#000000', '#f2efe8', '#9e998f'], grid: '#f2efe8', gridOpacity: 0.12, meshOpacity: [0.2, 0.28, 0.36, 0.46] },
   },
+  // The hue of the thread's client status (mm-bridge's `you.here.level`): green on pace or ahead, amber behind, red
+  // late. By day the deep hues mix into the grays; at night lighter ones mix into the creams, so they read on black.
+  status: {
+    light: { green: '#2e7d4f', amber: '#b7791f', red: '#c2203a' },
+    dark: { green: '#6fbf8a', amber: '#e3a944', red: '#e86a7c' },
+  },
 } as const
 
 // ============================================================================
@@ -90,32 +96,63 @@ const colors: ThemeColors = {
 // looks finished with motion turned off.
 //
 // The thread's fill sets the level, 0 to 3: as the thread nears the point
-// where it compacts, the same mesh grows and deepens, in its own colors and
-// nothing new (Rob, 2026-11-24: flip the colors "instead of adding new colors
-// like white or red"). Level 3 breathes slowly (9 s), well under any flashing.
+// where it compacts, the same mesh grows and deepens (Rob, 2026-11-24: flip
+// the colors "instead of adding new colors like white or red"). Level 3
+// breathes slowly (9 s), well under any flashing.
+//
+// The thread's client status tints it (Rob, later on 2026-11-24, in the bridge
+// thread: "A color that represents if you're on pace to complete it on time.
+// Or when they're ahead of schedule"; "Maybe it's lightly the color indicating
+// the status of the project, and then the more intense the gradient appears,
+// that's the context"). The status picks the hue and the level how much of it:
+// a light tint while the thread is short, near full strength as it nears
+// compacting. Every bloom takes it but the highlight (by day the near-white,
+// at night the black). With no status (no client, or no mm-bridge 0.7.73 to
+// say), the mesh is its own colors, exactly as before.
 const L = BRAND.light.scene
 const D = BRAND.dark.scene
 const DEPTH = [1, 1.4, 1.8, 2.2] as const
+// How much of the hue each bloom takes, by level. The night mesh is faint (20% at level 0), so it takes more hue to
+// show its status at a glance.
+const TINT = { light: [0.25, 0.4, 0.55, 0.7], dark: [0.5, 0.6, 0.7, 0.8] } as const
+const HIGHLIGHT = 2
 
 export type Level = 0 | 1 | 2 | 3
+export type Status = 'green' | 'amber' | 'red'
+const STATUSES: readonly Status[] = ['green', 'amber', 'red']
 
 function op(base: number, level: Level): string {
   return Math.min(1, base * DEPTH[level]).toFixed(3)
 }
 
-function sceneFor(level: Level): string {
+/** `a` mixed toward `b` by `t` (0 to 1), both `#rrggbb`. */
+function mix(a: string, b: string, t: number): string {
+  const channel = (hex: string, i: number): number => parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16)
+  const out = [0, 1, 2].map(i => Math.round(channel(a, i) * (1 - t) + channel(b, i) * t))
+
+  return `#${out.map(n => n.toString(16).padStart(2, '0')).join('')}`
+}
+
+/** One mode's bloom colors at a level, tinted by the status when there is one. */
+function bloomsFor(blooms: readonly string[], hue: string | undefined, amount: number): readonly string[] {
+  return hue === undefined ? blooms : blooms.map((c, i) => (i === HIGHLIGHT ? c : mix(c, hue, amount)))
+}
+
+export function sceneFor(level: Level, status?: Status): string {
   const grow = 1 + level * 0.1
   const r = (n: number): string => (n * grow).toFixed(0)
   const breathe = level === 3 ? ' br' : ''
+  const lb = bloomsFor(L.blooms, status && BRAND.status.light[status], TINT.light[level])
+  const db = bloomsFor(D.blooms, status && BRAND.status.dark[status], TINT.dark[level])
 
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid slice">
 <style>
 .base { fill: ${L.base} }
-.s1 { stop-color: ${L.blooms[0]} }
-.s2 { stop-color: ${L.blooms[1]} }
-.s3 { stop-color: ${L.blooms[2]} }
-.s4 { stop-color: ${L.blooms[3]} }
-.s5 { stop-color: ${L.blooms[4]} }
+.s1 { stop-color: ${lb[0]} }
+.s2 { stop-color: ${lb[1]} }
+.s3 { stop-color: ${lb[2]} }
+.s4 { stop-color: ${lb[3]} }
+.s5 { stop-color: ${lb[4]} }
 .grid { stroke: ${L.grid}; stroke-opacity: ${L.gridOpacity} }
 .mesh { opacity: ${L.meshOpacity[level]} }
 .m1 { animation: d1 45s ease-in-out infinite }
@@ -130,11 +167,11 @@ function sceneFor(level: Level): string {
 @keyframes breathe { 0%, 100% { opacity: 0.8 } 50% { opacity: 1 } }
 @media (prefers-color-scheme: dark) {
   .base { fill: ${D.base} }
-  .s1 { stop-color: ${D.blooms[0]} }
-  .s2 { stop-color: ${D.blooms[1]} }
-  .s3 { stop-color: ${D.blooms[2]} }
-  .s4 { stop-color: ${D.blooms[3]} }
-  .s5 { stop-color: ${D.blooms[4]} }
+  .s1 { stop-color: ${db[0]} }
+  .s2 { stop-color: ${db[1]} }
+  .s3 { stop-color: ${db[2]} }
+  .s4 { stop-color: ${db[3]} }
+  .s5 { stop-color: ${db[4]} }
   .grid { stroke: ${D.grid}; stroke-opacity: ${D.gridOpacity} }
   .mesh { opacity: ${D.meshOpacity[level]} }
 }
@@ -195,11 +232,55 @@ function styleFor(_scheme: 'light' | 'dark' | undefined): ThemeSetArgs['style'] 
 // The app frosts its own panels (the side panel, the thread list) over the
 // scene with no blur (any blur wipes out the grid's 1px lines) and a veil of
 // 40%, so the grid and mesh read through while their words stay legible.
-function lookFor(scheme: 'light' | 'dark' | undefined, level: Level): ThemeSetArgs {
-  const look: ThemeSetArgs = { colors, backdrop: { scene: `${BRAND.sceneId}-${level}`, glass: { blur: 0, opacity: 0.4 } }, style: styleFor(scheme) }
+function lookFor(scheme: 'light' | 'dark' | undefined, level: Level, status?: Status): ThemeSetArgs {
+  const scene = `${BRAND.sceneId}-${level}${status ? `-${status}` : ''}`
+  const look: ThemeSetArgs = { colors, backdrop: { scene, glass: { blur: 0, opacity: 0.4 } }, style: styleFor(scheme) }
 
   return scheme ? { ...look, overrideColorScheme: scheme } : look
 }
+
+// ------------------------------------------------- the thread's client status
+
+/**
+ * mm-bridge's session value for this thread (0.7.73 and later, desktop, interactive sessions): its `here` is this
+ * thread's client's pace. Read only, with no dependency on mm-bridge: a computer without it, an older bridge or a
+ * thread with no client reads nothing, and the mesh keeps its own colors.
+ */
+const BRIDGE_YOU = { plugin: 'mm-bridge', key: 'you' } as const
+
+export type Here = { status: Status; client: string; words: string }
+
+/** The client status in mm-bridge's `you` value, or undefined when it holds none we can use. */
+export function hereFrom(value: unknown): Here | undefined {
+  const here = value && typeof value === 'object' ? (value as { here?: unknown }).here : undefined
+
+  if (!here || typeof here !== 'object') {
+    return undefined
+  }
+  const { level, client, words } = here as { level?: unknown; client?: unknown; words?: unknown }
+
+  if (!STATUSES.includes(level as Status)) {
+    return undefined
+  }
+
+  return { status: level as Status, client: typeof client === 'string' ? client : '', words: typeof words === 'string' ? words : '' }
+}
+
+async function hereNow($: EngineInterface): Promise<Here | undefined> {
+  try {
+    // mm-bridge's contract types this key, and the theme deliberately does not list mm-bridge under "dependencies":
+    // a dependency installs and turns on mm-bridge with the theme, measured 2026-11-24. So the ref is untyped here,
+    // and hereFrom checks the value's shape instead.
+    // @ts-ignore
+    const { value } = await $.state.get(BRIDGE_YOU)
+
+    return hereFrom(value)
+  } catch {
+    return undefined
+  }
+}
+
+const STATUS_WORDS: Record<Status, string> = { green: 'green, on pace or ahead', amber: 'amber, behind', red: 'red, late' }
 
 // ---------------------------------------------------------------- the switch
 
@@ -411,11 +492,11 @@ async function fillNow($: EngineInterface): Promise<number | undefined> {
   }
 }
 
-/** The last look this copy drew (mode and level): a tick that finds the same sets nothing. */
+/** The last look this copy drew (mode, level and status): a tick that finds the same sets nothing. */
 let drawn: string | undefined
 
-async function draw($: EngineInterface, scheme: 'light' | 'dark' | undefined, level: Level): Promise<void> {
-  const look = lookFor(scheme, level)
+async function draw($: EngineInterface, scheme: 'light' | 'dark' | undefined, level: Level, status?: Status): Promise<void> {
+  const look = lookFor(scheme, level, status)
 
   try {
     const set = await $.theme.set(look)
@@ -431,16 +512,20 @@ async function draw($: EngineInterface, scheme: 'light' | 'dark' | undefined, le
   }
 }
 
-/** Draws the mode this hour and the level this thread call for, if they differ from what is drawn (or always, when forced). */
+/**
+ * Draws the mode this hour, the level this thread and the tint its client's status call for, if they differ from
+ * what is drawn (or always, when forced). Glow off is the plain mesh: no growth and no tint.
+ */
 async function apply($: EngineInterface, force = false): Promise<void> {
   const prefs = await readPrefs($)
   const scheme = schemeNow(new Date(await $.clock.now()), prefs)
   const level = prefs.glow ? levelFor(await fillNow($)) : 0
-  const key = `${scheme ?? 'app'}:${level}`
+  const status = prefs.glow ? (await hereNow($))?.status : undefined
+  const key = `${scheme ?? 'app'}:${level}:${status ?? 'none'}`
 
   if (force || key !== drawn) {
     drawn = key
-    await draw($, scheme, level)
+    await draw($, scheme, level, status)
   }
 }
 
@@ -467,11 +552,15 @@ async function describe($: EngineInterface): Promise<string> {
         ? `${BRAND.name} look: following the app's own light or dark setting.`
         : `${BRAND.name} look: always ${prefs.mode}.`
   const fill = await fillNow($)
+  const here = await hereNow($)
+  const tint = here
+    ? ` Its tint: ${STATUS_WORDS[here.status]}${here.client ? `, for ${here.client}` : ''}${here.words ? ` (${here.words})` : ''}.`
+    : ' No tint: mm-bridge has no client status for this thread.'
   const glow = !prefs.glow
-    ? 'Thread glow: off.'
+    ? 'Thread glow: off, and with it the client status tint.'
     : fill === undefined
-      ? 'Thread glow: on. It starts at half the way to compacting; this thread has no reading yet.'
-      : `Thread glow: on. This thread is ${Math.round(fill * 100)}% of the way to compacting (glow level ${levelFor(fill)} of 3; it starts at 50%).`
+      ? `Thread glow: on. It starts at half the way to compacting; this thread has no reading yet.${tint}`
+      : `Thread glow: on. This thread is ${Math.round(fill * 100)}% of the way to compacting (glow level ${levelFor(fill)} of 3; it starts at 50%).${tint}`
 
   return `${where}\n${glow}\nChange it with /look auto (sunrise to sunset), /look hours 7 19 (fixed hours light and dark start, 0 to 23), /look light, /look dark, /look app, or /look glow on|off.`
 }
@@ -546,10 +635,12 @@ export const register: Register = on => {
       return next(e)
     }
 
-    const n = Number(e.props.scene.slice(prefix.length))
-    const level: Level = n === 1 || n === 2 || n === 3 ? n : 0
+    // `hero-mesh-<level>`, or `hero-mesh-<level>-<status>` when the thread's client status tints it.
+    const [n, s] = e.props.scene.slice(prefix.length).split('-')
+    const level: Level = n === '1' ? 1 : n === '2' ? 2 : n === '3' ? 3 : 0
+    const status = STATUSES.find(x => x === s)
     const { Svg } = $.ui.resolve(e)
 
-    return <Svg source={sceneFor(level)} alt={BRAND.sceneAlt} />
+    return <Svg source={sceneFor(level, status)} alt={BRAND.sceneAlt} />
   })
 }
