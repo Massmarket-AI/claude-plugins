@@ -8,23 +8,20 @@ massmarket.ai homepage hero.
 - By day: a slow cream and gray mesh over the hero's faint grid, black user boxes and cream replies.
 - At night: the same in reverse, a cream mesh on black, cream user boxes and black replies.
 - Plain square message boxes.
-- As a thread nears compacting, the mesh grows and deepens (from half the way there).
-- In a client's thread the mesh takes the client's status as its color: green on pace or ahead, amber
-  behind, red late. It is a light tint while the thread is short and deepens as the thread nears
-  compacting. The status comes from mm-bridge (0.7.73 and later, in the desktop app); a thread with no
-  client, or a computer without that bridge, keeps the plain mesh.
+- As a thread nears compacting, the mesh grows and deepens (from half the way there). No extra color
+  is added.
 
 ## /look
 
 | Command | What it does |
 | --- | --- |
-| `/look` | Says what the look is doing now, how full this thread is and its client status tint. |
+| `/look` | Says what the look is doing now and how full this thread is. |
 | `/look auto` | Light from sunrise to sunset, dark at night (the default). |
 | `/look hours 7 19` | Fixed hours instead: light from 7, dark from 19 (any two hours from 0 to 23). |
 | `/look light` | Always light. |
 | `/look dark` | Always dark. |
 | `/look app` | Follows the app's own light or dark setting. |
-| `/look glow on` or `/look glow off` | Turns the mesh growing near compacting, and its status tint, on or off. |
+| `/look glow on` or `/look glow off` | Turns the mesh growing near compacting on or off. |
 
 The choice is kept on this computer, across threads.
 
