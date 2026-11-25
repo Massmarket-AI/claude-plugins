@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { FRESH_SAVING, FRESH_TOKENS, freshSaving } from './threads'
 
-// (0.7.77, Rob 2026-11-25: "I also think that's what should trigger the chip to restart the thread once we hit a certain
+// (0.7.78, Rob 2026-11-25: "I also think that's what should trigger the chip to restart the thread once we hit a certain
 // threshold") The bridge's card for a fresh thread follows the same rule as massmarket-theme's glow (0.6.5): `freshSaving`
 // is the theme's `savingFor`, and the card shows from the glow's level 2. A test may not import another plugin's files,
 // so the theme's `levelFor` is copied here as it is there, and the cases below are the theme's own glow test
@@ -23,7 +23,7 @@ function levelFor(saving: number | undefined): 0 | 1 | 2 | 3 {
   return 3
 }
 
-describe('(0.7.77) the card for a fresh thread and massmarket-theme\'s glow agree', () => {
+describe('(0.7.78) the card for a fresh thread and massmarket-theme\'s glow agree', () => {
   test('the theme\'s glow cases, on the bridge\'s saving', () => {
     expect(FRESH_TOKENS).toBe(150_000)
     expect(freshSaving(150_000, false)).toBe(0)

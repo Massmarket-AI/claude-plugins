@@ -244,7 +244,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.77'
+export const VERSION = '0.7.78'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -6969,7 +6969,7 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
 /**
  * (0.7.14, Rob 2026-10-30: "if a new thread is recommended, the chip should show up in the old thread, and it should be
  * pinned") What an update sent by itself into a client's thread carries last when a fresh thread would save on it.
- * (0.7.77, Rob 2026-11-25: the chip follows the thread's cost to keep going, never so as to abandon a hard task) That is
+ * (0.7.78, Rob 2026-11-25: the chip follows the thread's cost to keep going, never so as to abandon a hard task) That is
  * when a fresh thread would save FRESH_SAVING or more of the next calls (`freshReading`, from the note the thread keeps of
  * itself, `mm.cost`, found by the Claude Code session this computer paired with it, `mm.threads`): one that has sat past
  * its cache's hour from 250K tokens, one being worked on in practice never. No transcript is read or even stat'ed any more.
@@ -6993,7 +6993,7 @@ async function freshNote($: EngineInterface, sid: string, found: AppThread, it: 
 }
 
 /**
- * (0.7.77) This thread's note of its own model activity, for another thread's card for a fresh one (`freshNote`): at the
+ * (0.7.78) This thread's note of its own model activity, for another thread's card for a fresh one (`freshNote`): at the
  * start of each of its turns (the turn's calls keep its cache warm) and at the end (the context its last call re-read,
  * and the cache life its writes named). Kept for the newest COST_KEEP threads.
  */
@@ -11787,7 +11787,7 @@ export const register: Register = on => {
     // the main conversation's turns only: a subagent's turn says nothing of this thread's work
     if ((e as { agentId?: unknown }).agentId) return done
     noteTurnEnded()
-    // (0.7.77) what this thread now re-reads, for the card for a fresh one (`noteCost`)
+    // (0.7.78) what this thread now re-reads, for the card for a fresh one (`noteCost`)
     void noteCost($, (e as { usage?: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number } }).usage).catch(() => {})
     // (0.7.36) the thread has stopped, unless a background sub-agent is at work: what this turn got `card ready` for, or printed the page of, is checked now, and the signature box opens
     await turnEnded($, e.reason === 'answer').catch(() => {})
@@ -11863,7 +11863,7 @@ export const register: Register = on => {
       if (!(e as { agentId?: unknown }).agentId) {
         await turnBegan($)
         await noteTurnBegan($)
-        // (0.7.77) the thread is working: its cache is warm from now (`noteCost`)
+        // (0.7.78) the thread is working: its cache is warm from now (`noteCost`)
         void noteCost($).catch(() => {})
       }
       const id = await instanceId($)

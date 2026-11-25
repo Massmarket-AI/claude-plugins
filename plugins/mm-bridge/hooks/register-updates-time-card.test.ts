@@ -202,7 +202,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
 
   // ⛔ (0.7.14, Rob 2026-10-30: "if a new thread is recommended, the chip should show up in the old thread, and it should
   // be pinned") a thread a fresh one would save on is updated as any other, and asked to put up a card for a fresh one,
-  // there. (0.7.77, Rob 2026-11-25) Saving on it is the thread's cost to keep going, from its own note (`mm.cost`): never
+  // there. (0.7.78, Rob 2026-11-25) Saving on it is the thread's cost to keep going, from its own note (`mm.cost`): never
   // its transcript, and never a thread being worked on.
   const ACME_CLI = '0e7a1c2d-3b4f-4a5e-8c6d-7e8f9a0b1c2d'
   const transcriptOf = (cwd: string) => `/home/someone/.claude/projects/${cwd.replace(/[^A-Za-z0-9]/g, '-')}/${ACME_CLI}.jsonl`
@@ -217,7 +217,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
       ...(over.transcriptBytes ? { files: { [transcriptOf('/home/someone/Clients')]: { text: '', mtimeMs: NOW - HOUR, size: over.transcriptBytes } } } : {}),
     })
 
-  test('(0.7.77) a thread that has sat 30 hours at 320K tokens: its update by itself ends with the paragraph that asks it to put up a card for a fresh thread', async ($, on) => {
+  test('(0.7.78) a thread that has sat 30 hours at 320K tokens: its update by itself ends with the paragraph that asks it to put up a card for a fresh thread', async ($, on) => {
     const w = costWorld(on, { at: NOW - 30 * HOUR, life: '1h', tokens: 320_000 })
     await tickOnce($, w)
     await seenTen(w)
@@ -233,7 +233,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
   })
 
   // the update goes once the bridge has seen the item 10 minutes (`seenTen`): the thread has sat 21 minutes by then
-  test('(0.7.77) a 320K thread last worked 10 minutes before the update was due, on a five-minute cache: lapsed, so it gets the card, which says five minutes (on an hour\'s cache it would not: below)', async ($, on) => {
+  test('(0.7.78) a 320K thread last worked 10 minutes before the update was due, on a five-minute cache: lapsed, so it gets the card, which says five minutes (on an hour\'s cache it would not: below)', async ($, on) => {
     const w = costWorld(on, { at: NOW - 10 * 60_000, life: '5m', tokens: 320_000 }, { hoursAgo: 1 / 6 })
     await tickOnce($, w)
     await seenTen(w)
@@ -241,7 +241,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(String(sends(w)[0]?.args.message)).toMatch(/\n\nThis thread re-reads 320K tokens on every step and has sat 2\d minutes since it last worked, longer than its cache keeps \(five minutes\), so a fresh thread would save about 53% of what comes next\. Unless this thread/)
   })
 
-  test('(0.7.77) each main-loop turn notes the thread\'s own cost in `mm.cost`: when, the cache life its writes named, the context its last call re-read; a sub-agent\'s turn notes nothing', async ($, on) => {
+  test('(0.7.78) each main-loop turn notes the thread\'s own cost in `mm.cost`: when, the cache life its writes named, the context its last call re-read; a sub-agent\'s turn notes nothing', async ($, on) => {
     const w = world(on, {})
     let tokens = 320_000
     on('session.usage', () => ({ value: { startedAt: 0, rateLimits: [], context: { tokens, window: 1_000_000, percent: 32 } } }) as never)
@@ -269,7 +269,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(cost()).toEqual({ at: t0 + 120_200, life: '1h', tokens: 360_000 })
   })
 
-  test('(0.7.77) a compacted thread whose transcript is 20 MB but whose context is 140K: no card, and its transcript is never stat\'ed or read', async ($, on) => {
+  test('(0.7.78) a compacted thread whose transcript is 20 MB but whose context is 140K: no card, and its transcript is never stat\'ed or read', async ($, on) => {
     const w = costWorld(on, { at: NOW - 30 * HOUR, life: '1h', tokens: 140_000 }, { transcriptBytes: 20 * 1_048_576 })
     await tickOnce($, w)
     await seenTen(w)
@@ -280,12 +280,12 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
 
   for (const [name, cost, hoursAgo] of [
     ['a thread that has sat 30 hours at 240K tokens (a fresh one would save under 40%)', { at: NOW - 30 * HOUR, life: '1h', tokens: 240_000 }, 30],
-    ['a thread with no note of its cost yet (no turn since 0.7.77)', undefined, 30],
+    ['a thread with no note of its cost yet (no turn since 0.7.78)', undefined, 30],
     ['a large thread worked on 10 minutes ago (its warm cache is the point)', { at: NOW - 10 * 60_000, life: '1h', tokens: 320_000 }, 30],
     ['a 480K thread worked on 10 minutes ago (warm on an hour\'s cache: the card waits for 488K)', { at: NOW - 10 * 60_000, life: '1h', tokens: 480_000 }, 30],
     ['a thread whose note is 30 hours old but which the app saw working 6 minutes ago (the newer word keeps it warm)', { at: NOW - 30 * HOUR, life: '1h', tokens: 320_000 }, 0.1],
   ] as const) {
-    test(`(0.7.77) ${name}: the update by itself carries no such paragraph`, async ($, on) => {
+    test(`(0.7.78) ${name}: the update by itself carries no such paragraph`, async ($, on) => {
       const w = costWorld(on, cost, { hoursAgo })
       await tickOnce($, w)
       await seenTen(w)

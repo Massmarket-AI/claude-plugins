@@ -401,7 +401,7 @@ export function world(on: On, opts: WorldOptions = {}) {
   // A pretend disk: the tracker token, and whatever record files a test puts under the app's data folder.
   const files = opts.files ?? {}
   const reads: string[] = []
-  /** (0.7.77) Every path the bridge stat'ed. */
+  /** (0.7.78) Every path the bridge stat'ed. */
   const stats: string[] = []
   const hookReads: string[] = []
   const lists: string[] = []
