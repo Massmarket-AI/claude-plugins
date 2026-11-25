@@ -791,7 +791,7 @@ export function selfUpdateText(at: number, now: number): string {
 }
 
 /**
- * (0.7.74, Rob 2026-11-25, of a thread's cost to keep going: "I also think that's what should trigger the chip to restart
+ * (0.7.77, Rob 2026-11-25, of a thread's cost to keep going: "I also think that's what should trigger the chip to restart
  * the thread once we hit a certain threshold"; "I just want to make sure we don't prevent ourselves from completing hard
  * tasks to the best of our abilities, accidentally, by abandoning expensive threads") A client's thread is asked to put up
  * a card for a fresh one (`freshParagraph`) when a fresh thread would save FRESH_SAVING or more of the input cost of the
@@ -814,7 +814,11 @@ export const CACHE_LIFE_MS: Record<CacheLife, number> = { '1h': 3_600_000, '5m':
 const CACHE_READ = 0.1
 const CACHE_WRITE: Record<CacheLife, number> = { '1h': 2, '5m': 1.25 }
 
-/** (0.7.74) The share of the next FRESH_HORIZON calls' input cost a fresh thread would save, 0 to 1. */
+/**
+ * (0.7.77) The share of the next FRESH_HORIZON calls' input cost a fresh thread would save, 0 to 1: massmarket-theme's
+ * `savingFor`, copied as it is there (fresh-theme-parity.test.ts holds the two equal). Cold, that is 1 - FRESH_TOKENS /
+ * tokens on either cache life; warm, 1 - FRESH_TOKENS x (write + 1.9) / (tokens x 2).
+ */
 export function freshSaving(tokens: number, isCold: boolean, life: CacheLife = '1h'): number {
   const rest = (FRESH_HORIZON - 1) * CACHE_READ
   const here = tokens * ((isCold ? CACHE_WRITE[life] : CACHE_READ) + rest)
@@ -823,17 +827,17 @@ export function freshSaving(tokens: number, isCold: boolean, life: CacheLife = '
 }
 
 /**
- * (0.7.74) Each thread's last model activity on this computer, by its Claude Code session id (`mm.cost`): when, its
+ * (0.7.77) Each thread's last model activity on this computer, by its Claude Code session id (`mm.cost`): when, its
  * cache's life (from what its turns wrote), and the context its last call re-read. Every thread notes its own at the
  * start and the end of each of its turns (`noteCost`).
  */
 export type CostSeen = Record<string, { at: number; life: CacheLife; tokens?: number }>
 
-/** (0.7.74) What the card says of a thread: its context, how long it has sat, whether past its cache's life, the saving. */
+/** (0.7.77) What the card says of a thread: its context, how long it has sat, whether past its cache's life, the saving. */
 export type FreshReading = { tokens: number; idleMs: number; isCold: boolean; life: CacheLife; saving: number }
 
 /**
- * (0.7.74) A thread's reading from its note, or undefined with none (a thread that has run no turn since 0.7.74 gets no
+ * (0.7.77) A thread's reading from its note, or undefined with none (a thread that has run no turn since 0.7.77 gets no
  * card until it has). The app's own word on its last activity counts too: anything newer than the note keeps it warm.
  */
 export function freshReading(seen: CostSeen[string] | undefined, lastActivityAt: string | undefined, now: number): FreshReading | undefined {
@@ -852,7 +856,7 @@ function sat(ms: number): string {
 }
 
 /**
- * (0.7.14; 0.7.74 says why) What an update sent by itself into a thread a fresh one would save on (`FRESH_SAVING`)
+ * (0.7.14; 0.7.77 says why) What an update sent by itself into a thread a fresh one would save on (`FRESH_SAVING`)
  * carries last: put up a card for a fresh thread for the client, in this thread, through the mm tool's kickoffs (whose
  * kickoff carries this thread's hand-over and, once started, takes the client's link and its pin), unless one is up
  * already. The card starts nothing: the person clicks it or not. `name`: the client's full name, as kickoffs finds it.
