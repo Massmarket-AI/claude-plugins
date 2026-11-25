@@ -1,6 +1,6 @@
 import type { Elements, EngineInterface, Register, RenderElement } from 'claude-code'
 
-import type { MmBand, MmBrowser, MmBrowserAsk, MmBrowserChoice, MmCard, MmCardAsked, MmFolds, MmTeamNow, MmLineAsk, MmLineChoice, MmNotice, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTeam, MmTrack, MmTrackLine, MmView } from '../types'
+import type { MmBand, MmBrowser, MmBrowserAsk, MmBrowserChoice, MmCard, MmCardAsked, MmFolds, MmTeamNow, MmLineAsk, MmLineChoice, MmNotice, NoticeOffer, MmPeople, MmPerson, MmProject, MmQueue, MmSession, MmSuggestion, MmTeam, MmTrack, MmTrackLine, MmView } from '../types'
 
 import {
   INTERNAL_OPS, INTERNAL_PROJECTS, buildLists, byDue, isNewerVersion, isVersion, checkingTitle, internalProjects, ownerPrivateProjects, cleanName, cleanTitle, clearedTitle, clientInTitle, clientMarkdown, clockText, feedClients, fastState, holdBanner, isClosingRoute, isUuid, mailLookbackHours, needsLine, noteText, pastCutClients,
@@ -17,7 +17,8 @@ import {
 import type { Feed, FeedThread, KnownClient, QueueItem } from './queue'
 import {
   LABEL, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
-  newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, secondThreadSentence, startKickoff, threadLink, titleLooksLike, titleSuggestion,
+  newerThreadFor, openCommand, ownerOf, platformOf, recommend,
+  HANDLER_QUERY, HANDLER_WAIT_MS, OPENERS, handlerOf, detailLine, openFailureFor, openRejection, openWhyWords, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, secondThreadSentence, startKickoff, threadLink, titleLooksLike, titleSuggestion,
   REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, bandText, chipTitle, ownPackage, readyPackage, seenNow, selfUpdateAt, selfUpdateText, updatePace, waitingText,
   FRESH_SAVING, draftsComing, freshParagraph, freshReading, prepDue, replacedBy,
   buildHeading, buildMore, buildOf, buildShown,
@@ -31,7 +32,7 @@ import {
   RUN_DONE_KEEP_MS, RUN_WAIT_NO_THREAD, RUN_WAIT_TOOL_TEXT, runWaitNotedUnlinked, baselineOf, newSince, reportedAt, runMissedTitle, runState, runWaitArgs, runWaitNoted, runWaitSuffix, runWaitWhy, runWaitsOf,
 } from './threads'
 import type { CacheLife, CostSeen, RunState, RunWait } from './threads'
-import type { RowPin, AppThread, AwayClient, Declared, Fold, Kickoff, LookupSeen, Pairs, PinReport, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
+import type { OpenWhy, RowPin, AppThread, AwayClient, Declared, Fold, Kickoff, LookupSeen, Pairs, PinReport, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
 import {
   INTERNAL_NAME, INTERNAL_NOTE, NUDGE_AFTER, NUDGE_INTERNAL, NUDGE_NONE, NUDGE_TEXT, SKILL_KEY, afterPersonClose, clientName, displayName, kindOf, mergeCurrent, mergeTime, opensBySelf,
   parseClientTime, parseSkillMap, pressNote, secondLine, skillName, taskFrom, thisThread, titleForClaude, trackLabel, trackLines, trackStatus, weekIsDue,
@@ -244,7 +245,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.78'
+export const VERSION = '0.7.80'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -8439,22 +8440,92 @@ async function replaced($: EngineInterface, it: QueueItem, pass: Pass): Promise<
  * ⛔ ONLY FROM THE PERSON: reached from `showThread` (the Open thread button) and from `updateThread`
  *    after its message went (the Update thread button, a typed /mm update). Never from a timer, a sync,
  *    the band, or Claude's tool.
- * ⛔ ONE COMMAND, and nothing else is ever started here: the platform's own opener (`open`, `rundll32
- *    url.dll,FileProtocolHandler`, `xdg-open`) with the link as its last argument, as an argument array.
+ * ⛔ ONE COMMAND opens, and nothing else is ever started here but the one question below: the platform's own opener (`open`,
+ *    `rundll32 url.dll,FileProtocolHandler`, `xdg-open`) with the link as its last argument, as an argument array.
  *    No shell, and nothing joined into an argument (`openCommand`).
  * ⛔ ONE LINK: the app's own link for that thread, of exactly the shape `claude://claude.ai/epitaxy/<its
  *    id>`, for a thread the app listed and the row showed (`threadLink`). Never a URL from the feed, a
  *    title or a message.
  * A platform that cannot be told, an opener that is not there, one that does not answer in OPEN_WAIT_MS,
- * or one that exits with an error: false.
+ * or one that exits with an error: not opened, and (0.7.80) why (`OpenWhy`).
+ *
+ * (0.7.80, Shezan, 2026-11-25: on his Ubuntu 24.04 computer, GNOME on X11, every Open thread press said only `Open "<title>"
+ * under Pinned.`, and nobody could tell which of these it was) Each failure is told: one line in bridge-notices.log
+ * (`noteOpenFailed`), the reason in plain words where the press answers (`openWhyWords`), and the last one in the pin report
+ * to OW for a day (`open_failure`, `openFailureFor`). An open that works takes that record back.
+ * ⛔ AND ONE QUESTION, on Linux alone, after the opener exited with an error or did not answer: `xdg-mime query default
+ *    x-scheme-handler/claude` (HANDLER_QUERY, fixed, read-only, never with the link), which app the system hands
+ *    `claude://` links to. Whether Claude Desktop's Linux package registers that scheme could not be checked from a Mac (the
+ *    Mac app does: CFBundleURLSchemes `claude`); this asks the computer where it failed. An empty answer means no app is set
+ *    to open those links, and the person's one-time step is in the PR that added this (claude-plugins, mm-bridge 0.7.80).
  */
-async function openThread($: EngineInterface, thread: AppThread | undefined): Promise<boolean> {
-  const argv = openCommand(thread, platformOf({ OS: await $.env.get('OS'), HOME: await $.env.get('HOME') }))
-  if (!argv) return false
+async function openThread($: EngineInterface, thread: AppThread | undefined, what = 'a thread'): Promise<{ ok: true } | { ok: false; why: OpenWhy }> {
+  const platform = platformOf({ OS: await $.env.get('OS'), HOME: await $.env.get('HOME') }) ?? null
+  const program = platform ? OPENERS[platform][0] : null
+  const fail = async (why: OpenWhy): Promise<{ ok: false; why: OpenWhy }> => {
+    await noteOpenFailed($, why, what)
+    return { ok: false, why }
+  }
+  if (!threadLink(thread)) return fail({ reason: 'no_link', platform, program: null, code: null, detail: null })
+  const argv = openCommand(thread, platform ?? undefined)
+  if (!argv || !platform) return fail({ reason: 'no_platform', platform: null, program: null, code: null, detail: null })
+  const started = await $.clock.now()
+  let ran: Awaited<ReturnType<EngineInterface['process']['run']>>
   try {
-    return (await $.process.run(argv, { timeoutMs: OPEN_WAIT_MS })).exitCode === 0
+    ran = await $.process.run(argv, { timeoutMs: OPEN_WAIT_MS })
+  } catch (err) {
+    const { reason, detail } = openRejection(err, (await $.clock.now()) - started, OPEN_WAIT_MS)
+    const why: OpenWhy = { reason, platform, program, code: null, detail }
+    if (reason === 'timeout' && platform === 'linux') why.handler = await schemeHandler($)
+    return fail(why)
+  }
+  if (ran.exitCode === 0) {
+    await forgetOpenFailed($)
+    return { ok: true }
+  }
+  const why: OpenWhy = { reason: 'exit', platform, program, code: ran.exitCode, detail: detailLine(ran.stderr) ?? detailLine(ran.stdout) }
+  if (platform === 'linux') why.handler = await schemeHandler($)
+  return fail(why)
+}
+
+/** (0.7.80) Which app a Linux system hands `claude://` links to (HANDLER_QUERY): its desktop file, '' none, null unanswered. */
+async function schemeHandler($: EngineInterface): Promise<string | null> {
+  try {
+    const r = await $.process.run(HANDLER_QUERY, { timeoutMs: HANDLER_WAIT_MS })
+    return r.exitCode === 0 ? handlerOf(r.stdout) : null
   } catch {
-    return false
+    return null
+  }
+}
+
+/**
+ * (0.7.80) A failed open, told: one line in bridge-notices.log with what was pressed and why, and the record the pin report
+ * carries to OW (`mm.openFailed`: when, why, and the opener's own first line; no client, no thread, no link). Never throws.
+ */
+async function noteOpenFailed($: EngineInterface, why: OpenWhy, what: string): Promise<void> {
+  const now = await $.clock.now()
+  const facts = [
+    `reason=${why.reason}`,
+    `platform=${why.platform ?? 'unknown'}`,
+    ...(why.program ? [`program=${why.program}`] : []),
+    ...(why.code !== null ? [`code=${why.code}`] : []),
+    ...(why.handler !== undefined ? [`claude-handler=${why.handler === null ? 'unanswered' : why.handler || 'none'}`] : []),
+    ...(why.detail ? [`said=${JSON.stringify(why.detail)}`] : []),
+  ].join(' ')
+  await logAuto($, `open thread failed: ${what}: ${openWhyWords(why, OPEN_WAIT_MS)} (${facts})`)
+  try {
+    await $.store.set('mm.openFailed', { at: new Date(now).toISOString(), ...why })
+  } catch (err) {
+    await noteFailure($, 'open thread: the record for OW', err)
+  }
+}
+
+/** (0.7.80) An open that worked takes back the record of the last one that failed: the next pin report says nothing of it. */
+async function forgetOpenFailed($: EngineInterface): Promise<void> {
+  try {
+    if (await $.store.get('mm.openFailed')) await $.store.set('mm.openFailed', null)
+  } catch {
+    // the record ages out of the report in a day
   }
 }
 
@@ -8550,7 +8621,7 @@ async function stillTheClients(
  * command (or a press the stored state could not vouch for) brought the list up to date with; null for a
  * `stored` pass.
  */
-async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem, pass: Pass, how: { typed: true } | { typed: false; shown: string | undefined }): Promise<Answer> {
+async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem, pass: Pass, how: { typed: true } | { typed: false; shown: string | undefined; again?: true }): Promise<Answer> {
   // With no thread list there is nothing to act on: a thread remembered from an earlier sync may be gone.
   if (!pass.listed) return { said: NO_THREAD_LIST }
   const target = pass.last.recs[it.projectId]?.target
@@ -8616,7 +8687,10 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
   const signature = signatureOf(cur)
   const sent = (await storeGet<Record<string, Sent>>($, 'mm.sent', {}))[cur.projectId]
   const has = (sent && sent.sid === target.sid && hasWaiting(sent.sig, cur)) || sentHere.get(`${cur.projectId}\n${target.sid}`) === signature
-  if ((!pass.stored && pass.last.recs[it.projectId]?.state === 'current') || has) {
+  // (0.7.80) except from a failed Open thread's offer (`pressAgain`): the person asked for it again, after the thread could not be
+  // opened for them. Every other guard above and below still holds.
+  const again = !how.typed && how.again === true
+  if (!again && ((!pass.stored && pass.last.recs[it.projectId]?.state === 'current') || has)) {
     return { said: `${it.client}'s thread already has this. Open "${cleanTitle(pass.live.get(target.sid)?.title ?? target.title)}" under Pinned.` }
   }
   const here = target.sid === (await selfId($))
@@ -8725,7 +8799,7 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
     // S2: the answer now; the pass after it. Where the thread could not be opened, the toast says it went at
     // once, and the line the pane keeps says where the thread is once that pass has named it.
     if (here) return { said: `Picking up ${it.client} in this thread.`, after: settle }
-    if (await openThread($, thread)) return { said: went, after: settle }
+    if ((await openThread($, thread, `${it.client}, after Update`)).ok) return { said: went, after: settle }
     return {
       said: went,
       after: async () => {
@@ -8736,7 +8810,7 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
   }
   await settle()
   if (here) return { said: `Picking up ${it.client} in this thread.` }
-  if (await openThread($, thread)) return { said: went }
+  if ((await openThread($, thread, `${it.client}, after Update`)).ok) return { said: went }
   return { said: { text: where(), toast: went } }
 }
 
@@ -8744,7 +8818,7 @@ async function updateThread($: EngineInterface, feed: Feed | null, it: QueueItem
  * Open thread: the client's thread already has what is waiting. Sends nothing, links nothing. It opens the
  * thread the row showed when the app can be told to; otherwise it says where the thread is.
  */
-async function showThread($: EngineInterface, it: QueueItem, pass: Pass, shown: string | undefined): Promise<string> {
+async function showThread($: EngineInterface, it: QueueItem, pass: Pass, shown: string | undefined): Promise<Said> {
   if (!pass.listed) return NO_THREAD_LIST
   const linked = (await storeGet<Record<string, string>>($, 'mm.links', {}))[it.projectId]
   if ((linked && pass.unseen.has(linked)) || (shown && pass.unseen.has(shown))) return NO_THREAD_LIST
@@ -8754,9 +8828,18 @@ async function showThread($: EngineInterface, it: QueueItem, pass: Pass, shown: 
   // (S2) with no pass before it: the client's link, read now, is no other thread
   if (pass.stored && linked !== undefined && linked !== shown) return THREAD_GONE
   const thread = pass.live.get(shown)
-  if (await openThread($, thread)) return ''
-  return `Open "${cleanTitle(thread?.title ?? target.title)}" under Pinned.`
+  const opened = await openThread($, thread, `${it.client}, Open thread`)
+  if (opened.ok) return ''
+  // (0.7.80) why, in plain words, and one press that gets the thread going with the client's context while the person finds it
+  // under Pinned (`OPEN_FAILED_OFFER`): the pane's Update for this row, sent even though the thread already had it
+  const line = OPEN_FAILED(cleanTitle(thread?.title ?? target.title), openWhyWords(opened.why, OPEN_WAIT_MS))
+  return { text: line, toast: line, offer: { projectId: it.projectId, target: shown, client: it.client } }
 }
+
+/** (0.7.80) What a failed Open thread says, above the list and in the toast: which thread, why, and where it is. */
+export const OPEN_FAILED = (title: string, why: string): string => `Couldn't open "${title}": ${why}. Open it under Pinned.`
+/** (0.7.80) The line beside the one press a failed Open thread offers (`NoticeOffer`). */
+export const OPEN_FAILED_OFFER = (client: string): string => `Sends what is waiting for ${client} into that thread now, so it is picked up when you open it.`
 
 /**
  * The one send of Update and Claim: into this thread as the person's own prompt, or into another with the app's
@@ -8877,7 +8960,7 @@ async function claimThread($: EngineInterface, feed: Feed | null, it: QueueItem,
   }
   const went = `Sent to ${it.client}'s thread.`
   if (here) return { said: `Picking up ${it.client} in this thread.`, after: settle }
-  if (await openThread($, thread)) return { said: went, after: settle }
+  if ((await openThread($, thread, `${it.client}, after Claim`)).ok) return { said: went, after: settle }
   return {
     said: went,
     after: async () => {
@@ -8901,8 +8984,11 @@ async function showDrafts($: EngineInterface, it: QueueItem): Promise<Answer> {
   return { said: '', after: finish }
 }
 
-/** What a button or a command answers: one sentence, or the line the pane keeps with a shorter toast. */
-type Said = string | { text: string; toast: string }
+/**
+ * What a button or a command answers: one sentence, or the line the pane keeps with a shorter toast. (0.7.80) `offer`: a
+ * failed Open thread's one press, drawn under that line while the row still reads Open thread for that same thread.
+ */
+type Said = string | { text: string; toast: string; offer?: NoticeOffer }
 
 /**
  * What a press answers at once, and what it does after that answer is drawn (S2): the list brought up to date,
@@ -8943,8 +9029,11 @@ async function storedPass($: EngineInterface, verb: Exclude<Verb, 'drafts'>, row
   return { it, pass }
 }
 
-/** A button on a row. `row` is the row as it was drawn: Update and Open act on the thread that row showed. */
-async function act($: EngineInterface, verb: Verb, row: Row): Promise<Answer> {
+/**
+ * A button on a row. `row` is the row as it was drawn: Update and Open act on the thread that row showed. (0.7.80) `again`:
+ * Update pressed from a failed Open thread's offer (`pressAgain`), which goes even though the thread already had it.
+ */
+async function act($: EngineInterface, verb: Verb, row: Row, again = false): Promise<Answer> {
   if (verb === 'drafts') {
     const last = (await storeGet<Last | null>($, 'mm.last', null)) ?? (await sync($))
     const it = listedIn(last).find(i => i.projectId === row.projectId)
@@ -8965,7 +9054,7 @@ async function act($: EngineInterface, verb: Verb, row: Row): Promise<Answer> {
     }
     // (an Update that sent nothing is answered too, and the list brought up to date after it, unless it says
     // there is nothing to bring it up to date with)
-    const answer = await updateThread($, null, it, pass, { typed: false, shown: row.target })
+    const answer = await updateThread($, null, it, pass, { typed: false, shown: row.target, ...(again ? { again } : {}) })
     return 'after' in answer ? answer : { ...answer, after }
   }
   // What is stored cannot vouch for the row: the list is brought up to date first, as in 0.5.0, and the
@@ -8985,13 +9074,13 @@ async function act($: EngineInterface, verb: Verb, row: Row): Promise<Answer> {
   if (verb === 'restore') return { said: await restoreThread($, it, pass.last, row.archived), after }
   if (verb === 'open') return { said: await showThread($, it, pass, row.target) }
   if (verb === 'claim') return claimThread($, feed, it, pass, row.target)
-  return updateThread($, feed, it, pass, { typed: false, shown: row.target })
+  return updateThread($, feed, it, pass, { typed: false, shown: row.target, ...(again ? { again } : {}) })
 }
 
 /** Puts what a press or a command said above the list, and in a toast (`toast` false: the line alone, for what the work after a press says). */
 async function say($: EngineInterface, said: Said, toast = true): Promise<void> {
   const text = typeof said === 'string' ? said : said.text
-  const notice: MmNotice = { text, at: await $.clock.now() }
+  const notice: MmNotice = { text, at: await $.clock.now(), ...(typeof said === 'object' && said.offer ? { offer: said.offer } : {}) }
   await $.state.set(NOTICE, notice)
   const brief = typeof said === 'string' ? said : said.toast
   if (toast && brief) $.ui.toast(brief)
@@ -9006,7 +9095,7 @@ async function say($: EngineInterface, said: Said, toast = true): Promise<void> 
  * brought up to date, a pickup view read) runs once the answer is drawn and the hold is released. Its
  * failure is noted where the bridge's errors go; the next sync is the fallback.
  */
-async function press($: EngineInterface, verb: Verb, row: Row): Promise<void> {
+async function press($: EngineInterface, verb: Verb, row: Row, again = false): Promise<void> {
   const held = verb !== 'drafts'
   if (held && pressing.has(row.projectId)) return
   const mine = ++pressCount
@@ -9022,7 +9111,7 @@ async function press($: EngineInterface, verb: Verb, row: Row): Promise<void> {
     // R10: a press that makes a chip says so before it asks the app for anything (where the app gives start_session,
     // 0.5.25, Start makes none: it fills the prompt box)
     if (verb === 'start' && !(await sessionTools($)).start) await say($, MAKING_CHIP(row.client), false).catch(() => {})
-    answer = await act($, verb, row)
+    answer = await act($, verb, row, again)
   } catch (err) {
     answer = { said: errorText(err) }
   } finally {
@@ -9047,6 +9136,26 @@ async function press($: EngineInterface, verb: Verb, row: Row): Promise<void> {
   } catch {
     // as above
   }
+}
+
+/**
+ * (0.7.80, coordinator 2026-11-25, on Shezan's report that he "has to ask Claude by hand to load context" after Open thread
+ * failed) The one press a failed Open thread offers: Update for that row, into the thread the row showed, sent even though
+ * the thread already has what is waiting (`updateThread`'s `again`), so the thread is picking the client up by the time the
+ * person finds it under Pinned. The offer is taken off the line first, so it is one press: another needs another failed Open.
+ * ⛔ ONLY FROM THE PERSON: drawn under the line a failed Open thread press left (`NoticeOffer`), pressed by the person. Never
+ *    from a timer, a sync, the band or Claude's tool, and never kept past the line: a sync that clears the line clears it.
+ */
+async function pressAgain($: EngineInterface, row: Row): Promise<void> {
+  // another press for this client still in flight: this one does nothing (`press`), and the offer stays for after it
+  if (pressing.has(row.projectId)) return
+  try {
+    const { value: notice } = await $.state.get(NOTICE)
+    if (notice?.offer) await $.state.set(NOTICE, { text: notice.text, at: notice.at })
+  } catch {
+    // the press goes on: the line is written again when it answers
+  }
+  await press($, 'update', row, true)
 }
 
 // ---------------------------------------------------------------- New people (OW ticket 549944b0, spec Part B)
@@ -10097,12 +10206,15 @@ type PinReportSent = { hash?: string; at?: number; missingUntil?: number }
  * PIN_REPORT_MISSING_MS; any other failure, or no answer within APP_WAIT_MS, is tried again at the next sync. ⛔ Never throws
  * into the sync, and the report is never logged or noted anywhere: it goes to OW alone.
  */
-async function sendPinReport($: EngineInterface, report: PinReport, now: number): Promise<void> {
+async function sendPinReport($: EngineInterface, given: PinReport, now: number): Promise<void> {
   try {
     const kept = await storeGet<unknown>($, 'mm.pinReport', {})
     const was: PinReportSent = kept && typeof kept === 'object' && !Array.isArray(kept) ? (kept as PinReportSent) : {}
     if (Number(was.missingUntil) > now) return
-    const hash = sigHash(JSON.stringify({ items: report.items, extra: report.extra }))
+    // (0.7.80) and the last failed open on this computer, within a day (`openFailureFor`): a new one, or its end, is a new report
+    const openFailure = openFailureFor(await storeGet<unknown>($, 'mm.openFailed', null), now)
+    const report: PinReport = openFailure ? { ...given, open_failure: openFailure } : given
+    const hash = sigHash(JSON.stringify({ items: report.items, extra: report.extra, ...(openFailure ? { open_failure: openFailure } : {}) }))
     if (was.hash === hash && now - (Number(was.at) || 0) < PIN_REPORT_EVERY_MS) return
     const post = async (r: PinReport) => within($, $.http.fetch(`${EXT}/bridge-pins`, { method: 'POST', headers: { ...(await authHeaders($)), 'Content-Type': 'application/json' }, body: JSON.stringify(r) }))
     const asked = await post(report)
@@ -11650,7 +11762,10 @@ async function paneOpened($: EngineInterface): Promise<void> {
 async function openTracked($: EngineInterface, sid: string): Promise<void> {
   if (!THREAD_ID.test(sid)) return
   const found = await lookup($, sid)
-  if (typeof found === 'object') await openThread($, found)
+  if (typeof found !== 'object') return
+  // (0.7.80) a press that did nothing said nothing until now: the toast says why
+  const opened = await openThread($, found, 'a row of Threads today')
+  if (!opened.ok) $.ui.toast(OPEN_FAILED(cleanTitle(found.title), openWhyWords(opened.why, OPEN_WAIT_MS)))
 }
 
 /** (0.6.0) /mm unlink: this thread has no current project any more. */
@@ -12046,6 +12161,12 @@ export const register: Register = on => {
     const Input = Select ? ($.ui.resolve(e) as Partial<Pick<Elements['desktop'], 'Input'>>).Input : undefined
     const { value: queue } = await $.state.get(QUEUE)
     const { value: notice } = await $.state.get(NOTICE)
+    // (0.7.80) the row a failed Open thread offered its one press for: only while it still reads Open thread for that thread
+    const openOffer = notice?.text ? notice.offer : undefined
+    const offerRow =
+      openOffer && queue && Array.isArray(queue.rows)
+        ? queue.rows.find(r => r.projectId === openOffer.projectId && r.target === openOffer.target && rowButtons(r).includes('open'))
+        : undefined
     const { value: folds } = await $.state.get(FOLDS)
     // (0.7.34) the two parts that fold: each thread's own press, else this computer's last one
     const panel = await storeGet<Panel>($, 'mm.panel', {})
@@ -12352,6 +12473,13 @@ export const register: Register = on => {
           <Text dimColor>{CHECKING}</Text>
         )}
         {notice?.text ? <Text>{notice.text}</Text> : null}
+        {/* (0.7.80) a failed Open thread's one press, while that row still reads Open thread for that same thread (`pressAgain`) */}
+        {offerRow ? (
+          <Box key="mm-open-failed" flexDirection="row" flexWrap="wrap" gap={1}>
+            <Button key={`again:${offerRow.projectId}`} label={LABEL.update} variant="primary" onPress={() => void pressAgain($, offerRow)} />
+            <Text dimColor>{OPEN_FAILED_OFFER(offerRow.client)}</Text>
+          </Box>
+        ) : null}
         {hasList && queue?.warning ? <Text>{queue.warning}</Text> : null}
         {/* ⛔ (0.7.59, Rob 2026-11-16: "Yes, build it") the pins the app refused, and what the person can do about it */}
         {hasList && queue && refusedPinCount(queue.rows) > 0 ? <Text color="warning">{refusedPinsText(refusedPinCount(queue.rows))}</Text> : null}

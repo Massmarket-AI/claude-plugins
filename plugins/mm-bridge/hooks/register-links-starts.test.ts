@@ -662,10 +662,11 @@ describe('the app\'s own thread records: a thread links itself without being ope
     await mm($, '')
     expect(scans()).toBe(1)
     expect(w.reads).toEqual([at('local_a.json')])
-    // Update runs two passes over the feed (before and after linking) and scans once
+    // Update runs two passes over the feed (before and after linking) and scans once. (0.7.80) The thread has no link of the
+    // app's here, so its open fails and is noted in the bridge's own log, which is read to add the line: not the app's folder.
     await mm($, 'update Acme Roofing')
     expect(scans()).toBe(2)
-    expect(w.reads).toEqual([at('local_a.json')])
+    expect(w.reads.filter(p => !p.endsWith('/.claude/mm-hooks/bridge-notices.log'))).toEqual([at('local_a.json')])
     // nothing is ever written under the app's folder
     expect(w.written.filter(f => f.path.includes('claude-code-sessions'))).toEqual([])
   })
@@ -1996,7 +1997,8 @@ describe('a row says Start, Update or Open: one action, chosen by what the threa
     const before = { acted: w.acted().length, opened: w.opened.length }
     w.toasts.length = 0
     await ui.press({ key: `open:${ACME}` })
-    const said = `Open "${ACME_SHOWN}" under Pinned.`
+    // (0.7.80) and why
+    const said = `Couldn't open "${ACME_SHOWN}": the Claude app gave no link for this thread. Open it under Pinned.`
     expect(w.toasts).toEqual([said])
     expect(await lines(ui)).toContain(said)
     expect(w.ran).toEqual([])
@@ -2034,7 +2036,6 @@ describe('starts a program: the system\'s opener takes the person to the thread'
     acmeWorld(on, { threads: [{ ...thread('local_a', 'Roof quote', 30), link } as never, thread('local_x', 'Unrelated notes', 5)], ...over })
   const SENT_LINE = `Sent to Acme Roofing's thread: open "${ACME_SHOWN}" under Pinned.`
   const SHORT = 'Sent to Acme Roofing\'s thread.'
-  const WHERE = `Open "${ACME_SHOWN}" under Pinned.`
 
   for (const platform of PLATFORMS) {
     test(`${platform}: Update thread sends, then opens the thread; Open thread opens it and says nothing`, async ($, on) => {
@@ -2069,12 +2070,14 @@ describe('starts a program: the system\'s opener takes the person to the thread'
     expect(w.argvs().length).toBe(1)
   })
 
-  const FALLBACKS: Array<[string, WorldOptions, number]> = [
-    ['the opener exits with an error', { env: ENV.mac }, 1],
-    ['the opener is not on this computer', { env: ENV.linux, opener: 'missing' }, 1],
-    ['the platform cannot be told', { env: { ...DESKTOP, HOME: '/srv/someone' }, opener: 'works' }, 0],
+  /** (0.7.80) What a failed Open thread says: which thread, why, and where it is. */
+  const WHERE_BECAUSE = (why: string) => `Couldn't open "${ACME_SHOWN}": ${why}. Open it under Pinned.`
+  const FALLBACKS: Array<[string, WorldOptions, number, string]> = [
+    ['the opener exits with an error', { env: ENV.mac }, 1, 'open stopped with error code 1'],
+    ['the opener is not on this computer', { env: ENV.linux, opener: 'missing' }, 1, 'xdg-open is not installed on this computer'],
+    ['the platform cannot be told', { env: { ...DESKTOP, HOME: '/srv/someone' }, opener: 'works' }, 0, 'the bridge could not tell which system this computer runs'],
   ]
-  for (const [name, over, tries] of FALLBACKS) {
+  for (const [name, over, tries, why] of FALLBACKS) {
     test(`${name}: the sentences that say where the thread is, and nothing else is tried`, async ($, on) => {
       rowsAsBefore(on)
       const w = acmeLinked(on, over)
@@ -2086,9 +2089,10 @@ describe('starts a program: the system\'s opener takes the person to the thread'
       // the message went all the same, and the thread has it
       expect(await buttonsOf(ui, ACME)).toEqual(['Open thread', 'Drafts'])
       await ui.press({ key: `open:${ACME}` })
-      expect(w.toasts).toEqual([SHORT, WHERE])
-      expect(await lines(ui)).toContain(WHERE)
-      // one try per press at most, each the platform's opener with the link, and no second program after it
+      expect(w.toasts).toEqual([SHORT, WHERE_BECAUSE(why)])
+      expect(await lines(ui)).toContain(WHERE_BECAUSE(why))
+      // one try per press at most, each the platform's opener with the link, and no second program after it (the Linux
+      // question of 0.7.80 follows only an opener that ran and failed, or did not answer)
       expect(w.argvs().length).toBe(tries * 2)
       for (const argv of w.argvs()) {
         expect(PROGRAMS).toContain(argv[0])
@@ -2116,7 +2120,7 @@ describe('starts a program: the system\'s opener takes the person to the thread'
       await ui.press({ key: `update:${ACME}` })
       expect(await lines(ui)).toContain(SENT_LINE)
       await ui.press({ key: `open:${ACME}` })
-      expect(await lines(ui)).toContain(WHERE)
+      expect(await lines(ui)).toContain(WHERE_BECAUSE('the Claude app gave no link for this thread'))
       expect(w.ran).toEqual([])
       await ui.unmount()
     })
