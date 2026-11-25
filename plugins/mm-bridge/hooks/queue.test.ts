@@ -1380,7 +1380,7 @@ describe('(u) a client whose reply drafts a teammate holds is not the viewer\'s 
     expect(ids(l.queue)).toEqual([P1])
     const it = l.queue[0] as QueueItem
     expect(withTeammate(it)).toBe(false)
-    // (0.7.81) the reply's own clock, then my task's: until 0.7.81 '🔴 1h left · Acme Roofing · reply · with J Smith' gave the reply the task's 1h
+    // (0.7.82) the reply's own clock, then my task's: until 0.7.82 '🔴 1h left · Acme Roofing · reply · with J Smith' gave the reply the task's 1h
     expect(titleFor(it, MON)).toBe('🔴 18h left · Acme Roofing · reply · with J Smith · task 1h left')
     expect(waitingText(it)).toBe('1 message waiting, 1 task due, drafts with J Smith')
     expect(holdSentence(it)).toContain('Ask J Smith before writing a second reply.')
@@ -4047,10 +4047,10 @@ describe('0.7.24 beside 0.7.23: the founder\'s own go on a client whose package 
   })
 })
 
-// ⛔ (0.7.81, Rob 2026-11-25: "Yes, fix it here", to "Fix the bridge so a reply row shows the reply's own due date?") A row's words
+// ⛔ (0.7.82, Rob 2026-11-25: "Yes, fix it here", to "Fix the bridge so a reply row shows the reply's own due date?") A row's words
 // and its date come from the same item. The four rows of that morning (Remver, Mugen, ReGen, Homestretch) read `reply ready ·
 // 15d late` from an old ticket date on the same client; the reply's own clock was a day or less.
-describe('0.7.81: a reply row shows the reply\'s own due date, and what is due before it keeps its own', () => {
+describe('0.7.82: a reply row shows the reply\'s own due date, and what is due before it keeps its own', () => {
   const WED = Date.parse('2026-11-25T17:30:00Z') // Wed Nov 25, 12:30 PM ET
   const ME = 'builder-a@example.com'
   const REMVER = '9e594776-0000-4000-8000-0000000000a1'
@@ -4084,7 +4084,7 @@ describe('0.7.81: a reply row shows the reply\'s own due date, and what is due b
     expect(replyDueOf(it)).toBe(Date.parse('2026-11-26T02:29:00Z'))
     expect(shownDueOf(it, WED)).toBe(Date.parse('2026-11-26T02:29:00Z'))
     expect(soonerPartOf(it)).toEqual({ kind: 'task', what: 'task', due: Date.parse('2026-11-09T22:00:00Z'), internal: false })
-    // until 0.7.81: '🔴 11d late, due Nov 9 · Remver Consulting · reply ready'
+    // until 0.7.82: '🔴 11d late, due Nov 9 · Remver Consulting · reply ready'
     expect(titleFor(it, WED)).toBe('🔴 9h left · Remver Consulting · reply ready · task 11d late, due Nov 9')
     expect(rowLine(it, WED)).toBe('🔴 Remver Consulting · reply ready · 9h left · task 11d late, due Nov 9')
     expect(dueLine(it, WED)).toBe('reply ready due 9:29 PM · task overdue 11d, due Nov 9')

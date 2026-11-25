@@ -1166,7 +1166,7 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
   const who = `${it.projectName} (OW project ${id})`
   // (R17) nothing due: the kickoff says no due time (the clause is left out, never "due Invalid Date")
   const due = hasDue(it) ? dueText(it.dueAt) : ''
-  // ⛔ (0.7.81, Rob 2026-11-25) the reply's own due time, never a ticket's sooner one on the same client (`replyDueOf`)
+  // ⛔ (0.7.82, Rob 2026-11-25) the reply's own due time, never a ticket's sooner one on the same client (`replyDueOf`)
   const ownReply = replyDueOf(it)
   const replyDue = Number.isFinite(ownReply) ? `, reply due ${dueText(ownReply)}` : due ? `, reply due ${due}` : ''
   const tasksDue = due ? ` due ${due}` : ''
@@ -2797,10 +2797,10 @@ export function pinReport(o: {
     // thread, when one does: its kind, its colour and its date
     const status = c ? (c.pace ? paceStatus(c.pace, o.now) : null) : statusOf(it, o.now)
     const notStarted = c !== null && c.pace === undefined && c.notStarted && checkDot(c, o.now) === '🟡'
-    // ⛔ (0.7.81, Rob 2026-11-25: "Yes, fix it here") a reply row that something else dates sooner (`soonerPartOf`): two items for
+    // ⛔ (0.7.82, Rob 2026-11-25: "Yes, fix it here") a reply row that something else dates sooner (`soonerPartOf`): two items for
     // the one thread, each with its own words and date. The reply's, at its own due time, and the sooner part's (`task`, `ask`,
     // `go`; `behind` for one of our own clocks past its time), so a late ticket stays on Team now and the 9 AM image. Until
-    // 0.7.81 one item said `ready` at the ticket's date (Remver: `reply ready · 15d late`). Both carry the thread's one pin.
+    // 0.7.82 one item said `ready` at the ticket's date (Remver: `reply ready · 15d late`). Both carry the thread's one pin.
     const part = c === null && !status ? soonerPartOf(it) : null
     const reply = part ? replyDueOf(it) : NaN
     if (part && Number.isFinite(reply)) {

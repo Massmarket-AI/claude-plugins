@@ -245,7 +245,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.81'
+export const VERSION = '0.7.82'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -617,6 +617,8 @@ type Last = {
   holder?: string
   /** (0.7.34) What the pin report said of each client that should be pinned, for the pane's marks. */
   rowPins?: Record<string, RowPin>
+  /** (0.7.81) The clients a scheduled run holds off this sync, with the words their thread's name ends with (`waits on a run 4:15 PM`): for the Coming up line. */
+  held?: Record<string, string>
   /** The clients that need the person now: what pins, and what the header and the band count. */
   items: QueueItem[]
   /** (0.7.71) What this computer has alerted for, or recorded quietly (alerts.ts `Alerted`): kept on the sync record, read as data. */
@@ -3073,6 +3075,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // internal project's), never another profile's or one this pass cannot see.
   /** (0.7.70) The projects whose thread a wait holds unpinned this pass: never "should be pinned" in the pin report. */
   const runHeld = new Set<string>()
+  /** (0.7.81) And what each one's thread's name says of its wait, for the pane's Coming up line. */
+  const runHeldWords = new Map<string, string>()
   /** (0.7.70) The threads a missed run pins again: thread → its project, the wait and where it stands. */
   const runMissed = new Map<string, { pid: string; w: RunWait; st: Extract<RunState, { kind: 'missed' }> }>()
   for (const [sid, w] of Object.entries(runWaits)) {
@@ -3105,6 +3109,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
     const prev = named.get(sid)
     named.set(sid, { it, unpin: prev?.unpin === 'any' ? 'any' : prev?.unpin === false ? false : 'ours', title: `${prev?.title ?? threadTitle(it, now)} · ${runWaitSuffix(st, now)}` })
     runHeld.add(pid)
+    runHeldWords.set(pid, runWaitSuffix(st, now))
   }
 
   // ⛔ (0.7.68, Rob 2026-11-23, of two client threads that ended their turn waiting on him and were not pinned: "why are they
@@ -3682,7 +3687,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // (0.7.11, 10-30: the status said 3 pinned while the sidebar showed 8) the client threads this profile's app shows
   // pinned once the pass is done: what the sidebar shows, never a pin record, and never a thread of another profile
   const pinnedHere = new Set(Object.values(links).filter(sid => live.get(sid)?.pinned === true && !gone.has(sid))).size
-  const last: Last = { at: now, member, items, ...also, ...founderMark, pinned: pinnedHere, recs, projects, ...newPeople, ...(refused.length ? { pinRefused: refused.slice(0, PIN_REFUSED_MAX) } : {}), ...(nameRefused.length ? { nameRefused: nameRefused.slice(0, PIN_REFUSED_MAX) } : {}) }
+  const last: Last = { at: now, member, items, ...also, ...founderMark, pinned: pinnedHere, recs, projects, ...newPeople, ...(refused.length ? { pinRefused: refused.slice(0, PIN_REFUSED_MAX) } : {}), ...(nameRefused.length ? { nameRefused: nameRefused.slice(0, PIN_REFUSED_MAX) } : {}), ...(runHeldWords.size ? { held: Object.fromEntries(runHeldWords) } : {}) }
   // (0.7.23, Rob 2026-11-05: "it should be everything that should be pinned, and there should be another indicator, like a
   // green light beside it, to show if it is or not.") What should be pinned and whether it is, once the pass is done: sent to
   // OW for the team's daily "Pins by person" image after everything else of this pass (`sendPinReport`). ⛔ Built from what
@@ -3839,7 +3844,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
         sid,
         ...(said?.dir ? { dir: said.dir } : {}),
         // (0.7.60) the client's own due time once an internal clock has passed (`leadDueOf`): an away label never reads late for it.
-        // ⛔ (0.7.81) a `reply` label's time is the reply's own (`shownDueOf`), never a ticket's sooner one on the same client
+        // ⛔ (0.7.82) a `reply` label's time is the reply's own (`shownDueOf`), never a ticket's sooner one on the same client
         ...(what && at && Number.isFinite(shownDueOf(at.it, now)) ? { due: shownDueOf(at.it, now), what } : {}),
         listed: at ? at.listed : 'none',
         ...(transcript ? { transcript } : {}),
@@ -3975,7 +3980,7 @@ async function showQueue(
   now: number,
   folds: { teammate: Row[]; checking?: Row[]; team?: MmTeam[] },
   syncedAt = now,
-  found: Pick<Last, 'people' | 'routeTo' | 'founder' | 'teammate' | 'rowPins'> = {},
+  found: Pick<Last, 'people' | 'routeTo' | 'founder' | 'teammate' | 'rowPins' | 'held'> = {},
 ): Promise<void> {
   const teammateRows = found.founder === true ? [] : folds.teammate
   const teamRows = found.founder === true ? [] : (folds.team ?? [])
@@ -3999,6 +4004,12 @@ async function showQueue(
     const it = byPid.get(r.projectId)
     return !it || needsYouNow(it) || (it.kind === 'queue' && !build)
   })
+  // ⛔ (0.7.81, Rob 2026-11-25: "Need You should be pinned, even if it's on pace. These two areas are supposed to be based on the
+  // same rules.") Needs you is what should be pinned: the pin report's clients (`needsYouSet`), the rows the team view shows under
+  // the person's name. The rest of the dated list is one Coming up line under it, and counts nowhere.
+  const pinSet = needsYouSet(items, found.rowPins, now)
+  const needing = listed.filter(r => pinSet.has(r.projectId))
+  const comingUp = comingUpText(items, pinSet, found.held, now)
   const queue: MmQueue = {
     // (R1: no cap on pins any more; the header counts the list)
     header: listed.length ? `Needs you now (${listed.length})` : 'Nothing needs you right now.',
@@ -4011,7 +4022,8 @@ async function showQueue(
     ...(undated.length ? { undated } : {}),
     ...(build ? { build: { total: build.total, top: [...build.top], row: build.row } } : {}),
     // (0.7.73) the You section's rows: what each listed client needs from the person, by when, why and its pin (you.ts)
-    you: youOfListed(listed, byPid, found.rowPins, now),
+    you: youOfListed(needing, byPid, found.rowPins, now),
+    ...(comingUp ? { comingUp } : {}),
     ...(teamRows.length ? { team: teamRows } : {}),
     ...(people.length ? { people, ...(routeTo.length ? { routeTo } : {}) } : {}),
   }
@@ -4021,7 +4033,7 @@ async function showQueue(
   if (notice?.text && now - notice.at > SYNC_MS) await $.state.set(NOTICE, { text: '', at: now })
   // (0.7.21) and, for the founder, how many of his teammates' tickets are late (`· 5 late with the team`): none, no segment
   const late = teamLateSegment(teamLateSplit(teamRows))
-  await putStatus($, 'base', listed.length ? `MM: ${listed.length} need you · ${pinned} pinned${late}` : `MM: clear${late}`)
+  await putStatus($, 'base', needing.length ? `MM: ${needing.length} need you · ${pinned} pinned${late}` : `MM: clear${late}`)
 }
 
 async function sync($: EngineInterface): Promise<Last> {
@@ -4183,7 +4195,7 @@ import { LEVEL_GLYPH, YOU_EVERY_MS, YOU_HEADING, compactLine, dotLabel, tierOf, 
 import type { Overdue } from './health'
 import { clientDueOf, internalBehindAt } from './queue'
 import type { MmYou, MmYouRow, MmYouWait } from '../types'
-import { NOTHING_NEEDS_YOU, withWaits, youPace, youPinText, youRows } from './you'
+import { NOTHING_NEEDS_YOU, comingUpText, needsYouSet, withWaits, youPace, youPinText, youRows } from './you'
 
 /**
  * The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that
@@ -5094,9 +5106,9 @@ async function showList($: EngineInterface, press: boolean): Promise<string> {
   return listSaid(last)
 }
 
-/** (0.7.5) The list in a sentence, counted as the pane's header counts them: not the internal queue, not the clients with no due date. */
+/** (0.7.5) The list in a sentence, counted as the pane's header counts them: (0.7.81) the clients that should be pinned (`needsYouSet`). */
 function listSaid(last: Last): string {
-  const n = last.items.filter(needsYouNow).length
+  const n = needsYouSet(last.items, last.rowPins, Number.isFinite(last.at) ? last.at : Date.now()).size
   return n ? `${n} client${n === 1 ? '' : 's'} need you; ${last.pinned} thread${last.pinned === 1 ? '' : 's'} pinned. The list is in the side pane.` : 'Nothing needs you right now.'
 }
 
@@ -9632,7 +9644,7 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
     const split = teamLateSplit(team)
     return [
       `member: ${memberText(last?.member) || '?'}`,
-      `last sync: ${last ? new Date(last.at).toISOString() : 'never'} · ${last?.items.length ?? 0} need you · ${last?.pinned ?? 0} pinned`,
+      `last sync: ${last ? new Date(last.at).toISOString() : 'never'} · ${last ? needsYouSet(last.items, last.rowPins, last.at).size : 0} need you · ${last?.pinned ?? 0} pinned`,
       ...(late > 0 ? [`${split.behind > 0 ? teamSplitText(split) : `${LATE_WITH_TEAM}: ${late}`} (${teamLateWho(team)})`] : []),
       `linked threads: ${Object.keys(links).length} · this thread: ${await selfId($)}`,
       // (0.6.0) every thread with a current project, and the second threads among them
@@ -12545,6 +12557,8 @@ export const register: Register = on => {
         {/* ⛔ (0.7.59, Rob 2026-11-16: "Yes, build it") the pins the app refused, and what the person can do about it */}
         {hasList && queue && refusedPinCount(queue.rows) > 0 ? <Text color="warning">{refusedPinsText(refusedPinCount(queue.rows))}</Text> : null}
         {youList ? (needsOpen ? youList.map((r, i) => drawYou(r, i + 1)) : null) : hasList && queue && needsOpen ? rowGroups(queue.rows).flatMap(group => group.rows.map(({ row, n, mark }) => drawRow(row, `${mark}${n}.`))) : null}
+        {/* (0.7.81) the dated clients that do not pin yet, on one line under the list: shown with the list, or alone when nothing pins */}
+        {hasList && queue?.comingUp && (needsOpen || !youList?.length) ? <Text key="mm-coming-up" dimColor>{queue.comingUp}</Text> : null}
       </Box>
     )
     // ⛔ (0.7.38) a reply package drawn here comes before everything (`revealNewPackages` scrolls the pane to it); the rest of the

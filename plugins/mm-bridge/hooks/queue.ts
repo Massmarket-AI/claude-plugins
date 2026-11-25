@@ -637,12 +637,12 @@ export type QueueItem = {
   clientDue?: number | null
   clientOwn?: number | null
   /**
-   * ⛔ (0.7.81, Rob 2026-11-25: "Yes, fix it here", to "Fix the bridge so a reply row shows the reply's own due date?") Set only
+   * ⛔ (0.7.82, Rob 2026-11-25: "Yes, fix it here", to "Fix the bridge so a reply row shows the reply's own due date?") Set only
    * on a reply row (kind `ready` or `reply`) whose client has something else due before the reply: a dated ticket of the
    * viewer's, an internal ask, follow-up steps that wait for a go. The reply's OWN due time: its package's, or the client's
    * oldest unanswered message's when that is earlier, since that is the reply's clock too. A row's words and its date come
    * from the same item, so the row's clock is this, and the sooner part follows it with its own clock (`soonerPartOf`).
-   * `dueAt`, `actBy`, `own`, what pins and how a client ranks are unchanged. Until 0.7.81 a reply that arrived yesterday read
+   * `dueAt`, `actBy`, `own`, what pins and how a client ranks are unchanged. Until 0.7.82 a reply that arrived yesterday read
    * `reply ready · 15d late` when an old ticket date sat on the same client (Remver, Mugen, ReGen, Homestretch, 2026-11-25).
    * Absent on every other item, and on an item an older version stored: read `replyDueOf(it)`.
    */
@@ -890,7 +890,7 @@ export function leadDueOf(it: Pick<QueueItem, 'dueAt' | 'clientDue' | 'internalD
 }
 
 /**
- * ⛔ (0.7.81, Rob 2026-11-25: "Yes, fix it here", to "Fix the bridge so a reply row shows the reply's own due date?") The reply's
+ * ⛔ (0.7.82, Rob 2026-11-25: "Yes, fix it here", to "Fix the bridge so a reply row shows the reply's own due date?") The reply's
  * own due time on a reply row that something else dates sooner (`QueueItem.replyDue`), else NaN.
  */
 export function replyDueOf(it: Pick<QueueItem, 'kind' | 'replyDue'>): number {
@@ -898,7 +898,7 @@ export function replyDueOf(it: Pick<QueueItem, 'kind' | 'replyDue'>): number {
 }
 
 /**
- * ⛔ (0.7.81) The due time a row's clock shows: a row's words and its date come from the same item. On a reply row, the reply's
+ * ⛔ (0.7.82) The due time a row's clock shows: a row's words and its date come from the same item. On a reply row, the reply's
  * own (`replyDueOf`), never a ticket's; on every other row, `leadDueOf`, as before. What pins, what is red and how a client
  * ranks still read the client's soonest (`ownActBy`, `isRed`, `leadDueOf`).
  */
@@ -908,14 +908,14 @@ export function shownDueOf(it: Pick<QueueItem, 'kind' | 'replyDue' | 'dueAt' | '
 }
 
 /**
- * (0.7.81) What of a reply row's client is due before its reply: `task` (a dated ticket of the viewer's), `ask` (an internal ask),
+ * (0.7.82) What of a reply row's client is due before its reply: `task` (a dated ticket of the viewer's), `ask` (an internal ask),
  * `go` (follow-up steps that wait for a go). `what` is how a row names it, `internal` whether its clock is one of ours
  * (INTERNAL_CLOCK_BASES, or an owed ETA), which never reads late.
  */
 export type SoonerPart = { kind: 'task' | 'ask' | 'go'; what: string; due: number; internal: boolean }
 
 /**
- * ⛔ (0.7.81) The part of a reply row's client due before its reply, which the row names after the reply's clock so it never
+ * ⛔ (0.7.82) The part of a reply row's client due before its reply, which the row names after the reply's clock so it never
  * disappears (Rob's late ticket on Remver, 2026-11-25): the soonest CLIENT clock first, since that is what turns the row red
  * (`isRed`), else one of our own clocks. Null on every other row, and on one a teammate has (`withTeammate`: no clock is shown).
  */
@@ -935,14 +935,14 @@ export function soonerPartOf(it: QueueItem): SoonerPart | null {
 }
 
 /**
- * (0.7.81) The sooner part with its own clock, as a thread's name and a pane row say it after the reply's: `task 15d late, due
+ * (0.7.82) The sooner part with its own clock, as a thread's name and a pane row say it after the reply's: `task 15d late, due
  * Nov 9`, `task 3h left`. One of our own clocks past its time reads `behind`, never late (0.7.60): `task behind, due Mon 3 PM`.
  */
 export function partClock(p: SoonerPart, now: number): string {
   return p.internal && p.due < now ? `${p.what} behind, due ${dueWhen(p.due, now)}` : `${p.what} ${clockAndDue(p.due, now)}`
 }
 
-/** (0.7.81) The same as a chip says it (`whenText`): `task overdue 15d, due Nov 9`, `task due 3 PM`. */
+/** (0.7.82) The same as a chip says it (`whenText`): `task overdue 15d, due Nov 9`, `task due 3 PM`. */
 export function partWhen(p: SoonerPart, now: number): string {
   return p.internal && p.due < now ? `${p.what} behind, due ${dueWhen(p.due, now)}` : `${p.what} ${whenText(p.due, now)}`
 }
@@ -1647,7 +1647,7 @@ function ownReason(it: QueueItem): string {
   return whatOf(it)
 }
 
-/** (0.7.81) What of a reply row's client is due before its reply (`soonerPartOf`), in plain words: what a pinned thread's reason names. */
+/** (0.7.82) What of a reply row's client is due before its reply (`soonerPartOf`), in plain words: what a pinned thread's reason names. */
 function partReason(it: QueueItem, p: SoonerPart): string {
   if (p.kind === 'ask') {
     const asks = openAsks(it)
@@ -1664,7 +1664,7 @@ function partReason(it: QueueItem, p: SoonerPart): string {
   return 'a task of yours'
 }
 
-/** (0.7.81) A reply row's own clock as a sentence closes on it: `The reply to Remver is due Wed 9 PM.`, once late `is 2h late, due 3 PM.` */
+/** (0.7.82) A reply row's own clock as a sentence closes on it: `The reply to Remver is due Wed 9 PM.`, once late `is 2h late, due 3 PM.` */
 const replyClause = (it: QueueItem, reply: number, now: number): string =>
   ` The reply to ${it.client} is ${reply < now ? clockAndDue(reply, now) : `due ${clockText(shownDue(reply), now)}`}.`
 
@@ -1691,7 +1691,7 @@ export function pinReason(it: QueueItem, now: number): string {
   if (ownPins(it, now)) {
     if (status?.why) return status.why
     let own = ownActBy(it)
-    // ⛔ (0.7.81, Rob 2026-11-25) on a reply row, what pins before the reply is the part due before it (`soonerPartOf`): the
+    // ⛔ (0.7.82, Rob 2026-11-25) on a reply row, what pins before the reply is the part due before it (`soonerPartOf`): the
     // sentence names that part with its clock, and closes on the reply's own (`replyClause`), never the reply with a ticket's date
     const reply = replyDueOf(it)
     const part = soonerPartOf(it)
@@ -2614,7 +2614,7 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
   const ownAct = new Map<string, number>()
   const mailAct = new Map<string, number>()
   const okAct = new Map<string, number>()
-  // ⛔ (0.7.81) the reply's own due time on each client: its package's and its unanswered messages', soonest (`replyDue`)
+  // ⛔ (0.7.82) the reply's own due time on each client: its package's and its unanswered messages', soonest (`replyDue`)
   const replyAct = new Map<string, number>()
   const soonest = (into: Map<string, number>, it: QueueItem, at: number): void => {
     if (Number.isFinite(at)) into.set(it.projectId, Math.min(into.get(it.projectId) ?? Infinity, at))
@@ -3177,7 +3177,7 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
       it.clientDue = it.dueAt
       it.dueAt = Math.min(it.dueAt, inner)
     }
-    // ⛔ (0.7.81, Rob 2026-11-25: "Yes, fix it here") a reply row that something else dates sooner keeps the reply's own due
+    // ⛔ (0.7.82, Rob 2026-11-25: "Yes, fix it here") a reply row that something else dates sooner keeps the reply's own due
     // time for its clock (`replyDue`). Not a row named for follow-up steps that cover the message (`goWithMail`), and not a
     // reply with no due time of its own (R17): those read as before.
     const reply = replyAct.get(pid) ?? Infinity
@@ -3340,7 +3340,7 @@ function taskWhat(it: QueueItem): string {
 
 /** What is due for a client and when, in words: `reply ready due tomorrow 8 AM`. */
 export function dueLine(it: QueueItem, now: number): string {
-  // (0.7.60) an internal clock past its time: `behind`, never `overdue`. ⛔ (0.7.81) a reply row: the reply's own due time, and
+  // (0.7.60) an internal clock past its time: `behind`, never `overdue`. ⛔ (0.7.82) a reply row: the reply's own due time, and
   // what is due before it after it (`reply ready due tomorrow 9 PM · task overdue 15d, due Nov 9`)
   const due = shownDueOf(it, now)
   const part = soonerPartOf(it)
@@ -3412,7 +3412,7 @@ export function titleFor(it: QueueItem, now: number): string {
   // founder, the teammate it is with when it is theirs to see through: 0.5.1)
   // (R17) nothing due: `🟡 <client> · <what>`, no clock and never red; (0.7.12) and `no due date` after it
   // (0.7.60) the clock from the client's own due time once an internal one has passed (`leadDueOf`): never `late` for it
-  // ⛔ (0.7.81, Rob 2026-11-25) a reply row's clock is the reply's own (`shownDueOf`), and what is due before it follows with its
+  // ⛔ (0.7.82, Rob 2026-11-25) a reply row's clock is the reply's own (`shownDueOf`), and what is due before it follows with its
   // own clock: `🔴 1d left · Remver · reply ready · task 15d late, due Nov 9`. The dot is still the client's (`isRed`).
   const leadDue = shownDueOf(it, now)
   const lead = theirs ? `🟡 with ${it.theirs ?? it.open?.by ?? ''}` : Number.isFinite(leadDue) ? `${isRed(it, now) ? '🔴' : '🟡'} ${clockAndDue(leadDue, now)}` : ''
@@ -3423,7 +3423,7 @@ export function titleFor(it: QueueItem, now: number): string {
   const rest: string[] = []
   if (it.open?.state === 'held_by_other' && !theirs) rest.push(`with ${it.open.by}`)
   if (it.flagged) rest.push('flagged')
-  // (0.7.81) what is due before the reply goes last, after what the reply's own words say, and is never dropped for length
+  // (0.7.82) what is due before the reply goes last, after what the reply's own words say, and is never dropped for length
   const part = !status && lead && !theirs ? soonerPartOf(it) : null
   if (part) rest.push(partClock(part, now))
   const full = [...parts, ...(count ? [count] : []), ...rest].join(' · ')
@@ -3441,7 +3441,7 @@ export function titleFor(it: QueueItem, now: number): string {
  */
 export function rowLine(it: QueueItem, now: number, opts: { fresh?: boolean; pins?: boolean } = {}): string {
   const theirs = withTeammate(it)
-  // (0.7.60) the clock from the client's own due time once an internal one has passed (`leadDueOf`). ⛔ (0.7.81) a reply row's
+  // (0.7.60) the clock from the client's own due time once an internal one has passed (`leadDueOf`). ⛔ (0.7.82) a reply row's
   // clock is the reply's own (`shownDueOf`), and what is due before it follows with its own clock (`partClock`)
   const leadDue = shownDueOf(it, now)
   const due = !theirs && Number.isFinite(leadDue)
@@ -3466,7 +3466,7 @@ export function rowLine(it: QueueItem, now: number, opts: { fresh?: boolean; pin
   else if (check) parts.push(`with ${cleanText(check.by, 40) || 'a teammate'}`)
   else if (it.open?.state === 'held_by_other') parts.push(`with ${it.open.by}`)
   if (it.flagged) parts.push('flagged')
-  // (0.7.81) what is due before the reply, with its own clock, after what the reply's own words say
+  // (0.7.82) what is due before the reply, with its own clock, after what the reply's own words say
   const part = !named && due ? soonerPartOf(it) : null
   if (part) parts.push(partClock(part, now))
   if (opts.fresh) parts.push('no thread')

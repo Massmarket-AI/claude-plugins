@@ -120,6 +120,11 @@ export type MmQueue = {
    * first and then by deadline (hooks/you.ts). It replaces the Needs you now dropdown. Absent on a list an older version stored.
    */
   you?: MmYouRow[]
+  /**
+   * (0.7.81) One line under Needs you: the person's dated clients that do not pin yet (due later, or waiting on a scheduled run),
+   * soonest first (hooks/you.ts `comingUpText`). Absent when there are none.
+   */
+  comingUp?: string
     /**
    * (0.7.21, for the founder) Team · late: his teammates' late internal tickets, by person, then client, each ticket one
    * line. A closed group `Team · late (n)` at the end of the line of groups under the list, drawn below the others once
