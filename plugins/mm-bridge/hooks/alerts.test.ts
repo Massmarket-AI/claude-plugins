@@ -10,7 +10,8 @@ import { ALERTS_DUE, ALERT_CHARS, ALERT_GAP_MS, ALERT_MAX, ALERT_TITLE, DUE_MAX_
 import type { Feed } from './queue'
 import { ALERTS_OFF_SAID, ALERTS_ON_SAID } from './register'
 import type { WorldOptions } from './register-world.test-helper'
-import { NOW, HOUR, LONG, ACME, BOLT, PAIRS, SELF, thread, feed, world, mm, tool, tickOnce } from './register-world.test-helper'
+import { NOW, HOUR, LONG, ACME, BOLT, PAIRS, SELF, thread, feed, world, mm, tool, tickOnce, minutesOn } from './register-world.test-helper'
+import { runMissedTitle } from './threads'
 
 const pin = (pid: string, sig: string, text = `Pinned for you: ${pid}`): NewPin => ({ pid, sid: `local_${pid}`, client: pid, sig, text })
 const record = (over: Partial<Alerted> = {}): Alerted => ({ pins: {}, packages: [], at: NOW - 60_000, ...over })
@@ -292,6 +293,23 @@ describe('0.7.71: a new pin for the person raises one notification and the sound
     expect(pinned(w, SELF)).toBe(true)
     expect(notes).toEqual([{ text: `Pinned for you: 🟡 Acme Roofing · waiting on you: "${ASK}"`, title: ALERT_TITLE, key: `pin:${ACME}` }])
     expect(plays).toHaveLength(1)
+  })
+
+  test('a scheduled run that was missed pins its thread: one notification with the thread\'s name, and the sync goes on', LONG, async ($, on) => {
+    const w = world(on, { feed: feed({ drafts: [], mail: [], tickets: {}, projects: [{ project_id: ACME, name: 'Acme Roofing — Pat' }] } as Partial<Feed>), store: { 'mm.links': { [ACME]: SELF } }, ticketStatus: () => 'network' })
+    const { notes, plays } = heard(on)
+    await tickOnce($, w)
+    await tool($, 'waiting scheduled 2026-10-12 09:10 ticket c3710000-0000-4000-8000-000000000001 -- the day-one launch check')
+    await w.clock.advance(2_000)
+    expect(pinned(w, SELF)).toBe(false)
+    await minutesOn(w, 12)
+    expect(pinned(w, SELF)).toBe(true)
+    expect(notes).toEqual([{ text: `Pinned for you: ${runMissedTitle('Acme Roofing')}`, title: ALERT_TITLE, key: `pin:${ACME}` }])
+    expect(plays).toHaveLength(1)
+    expect(await mm($, 'status')).not.toMatch(/TypeError|undefined/)
+    // missed and still pinned, sync after sync: nothing more
+    await minutesOn(w, 10)
+    expect(notes).toHaveLength(1)
   })
 
   test('an unattended run (MM_UNATTENDED=1) never alerts', async ($, on) => {

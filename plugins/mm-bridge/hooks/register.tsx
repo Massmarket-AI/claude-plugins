@@ -3092,7 +3092,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
   // (`Unpinned.at` later than `Declared.at`) keeps the pin off, and is kept on record while it stands; a newer declaration pins
   // the thread again. ⛔ The same on every computer: the thread is in that person's profile, so its question is theirs.
   /** (0.7.68) The threads a declaration pins this pass: thread → its client, the declaration and the name it gets. */
-  const asking = new Map<string, { pid: string; d?: Declared; title: string; name: string }>()
+  const asking = new Map<string, { pid: string; d?: Declared; title: string; name: string; /** (0.7.71) a missed run's: since when it is missed, for its alert */ missed?: number }>()
   /** (0.7.68) The threads whose declaration the person's unpin holds off: named as before, never pinned for it. */
   const askHeld = new Set<string>()
   /** (0.7.68) The name of each client a declaration pins or would pin, for the pin report. */
@@ -3145,7 +3145,7 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       continue
     }
     const listedIt = listedNow.get(m.pid)
-    asking.set(sid, { pid: m.pid, title: listedIt ? `${titleFor(listedIt, now)} · ${runWaitSuffix(m.st, now)}` : runMissedTitle(name), name })
+    asking.set(sid, { pid: m.pid, title: listedIt ? `${titleFor(listedIt, now)} · ${runWaitSuffix(m.st, now)}` : runMissedTitle(name), name, missed: m.st.since })
     named.delete(sid)
     stayedOff.delete(sid)
     delete unpinned[sid]
@@ -3431,7 +3431,8 @@ async function reconcile($: EngineInterface, feed: Feed, known?: Pairs, opts: { 
       }
       s.pinned = true
       writes++
-      newPins.push({ pid: a.pid, sid, client: a.name, sig: waitingSig(a.d.type, a.d.at), text: waitingAlertText(a.title, a.d.ask) })
+      // (0.7.71) a declaration's pin says its question; a missed run's (no declaration) is a pin like the feed's, once per miss
+      newPins.push({ pid: a.pid, sid, client: a.name, sig: a.d ? waitingSig(a.d.type, a.d.at) : `run-missed:${a.missed ?? now}`, text: a.d ? waitingAlertText(a.title, a.d.ask) : pinAlertText(a.title) })
     }
   }
 
