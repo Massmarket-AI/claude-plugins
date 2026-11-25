@@ -578,6 +578,12 @@ export type QueueItem = {
   /** (0.7.4) The titles of the tasks nobody dated (R17 and `tickets.undated`): the pane lists them apart from `taskTitles`, the committed ones. */
   undatedTitles?: string[]
   /**
+   * (0.7.70) The ids of the viewer's own tickets the item counts (`tasks`), lower case: what a scheduled wait's baseline
+   * (`baselineOf`) remembers, so a ticket that opens or reopens for the viewer after the wait began ends it. Every read is
+   * `it.taskIds ?? []`: an item an older version stored has none.
+   */
+  taskIds?: string[]
+  /**
    * (0.7.18, Rob 2026-11-03: "The pinned is for when action is needed from you") The soonest time something of the client's
    * that needs the VIEWER must be acted on: `actBy` without the parts a teammate is to see through (a reply whose drafts a
    * teammate holds, a package flagged for the founder's OK that a teammate decides on, a teammate's ticket). What R1 pins
@@ -2766,6 +2772,8 @@ function build(feed: Feed, now: number, cut: number = listCutoff(now)): QueueIte
       if (typeof tk.ticket_id === 'string') counting.add(tk.ticket_id)
       const it = item(tk.project_id, tk.project_name)
       it.tasks += 1
+      // (0.7.70) its id, for a scheduled wait's baseline
+      if (isUuid(tk.ticket_id)) it.taskIds = [...(it.taskIds ?? []), tk.ticket_id.toLowerCase()]
       // ⛔ (0.7.60, Rob approved 2026-11-19 ('Yes, all five'): "Only a client date turns a thread red") a ticket on an
       // internal clock (an owed ETA, or INTERNAL_CLOCK_BASES): listed and pinned exactly as before, but its time is kept
       // apart from the client's (`clientDue`, `clientOwn`), so it is never red and past it reads `behind`, never `late`
