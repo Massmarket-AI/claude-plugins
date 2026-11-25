@@ -4449,6 +4449,8 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
 
     test('(0.7.75) the pane showing another client: `mm card` puts this thread\'s client back in it first, as `mm view` does, and answers ready', async ($, on) => {
       // Spotlight Dentistry thread, 2026-11-19 at 1:02 PM ET: answered not ready because nothing had put the client in the pane yet
+      // (0.7.77) another client in the pane: Drafts on a row drawn as the rows under the list are (a You row draws none)
+      rowsAsBefore(on)
       const w = world(on, own)
       const u = await shown($)
       await u.press({ key: `drafts:${BOLT}` })
