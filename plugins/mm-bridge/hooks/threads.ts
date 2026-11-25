@@ -738,22 +738,79 @@ export function selfUpdateText(at: number, now: number): string {
 }
 
 /**
- * (0.7.14, Rob 2026-10-30: "if a new thread is recommended, the chip should show up in the old thread") A client's
- * thread whose transcript on this computer is this large or larger is long: an update sent into it by itself asks it to
- * put up a card for a fresh thread (`freshParagraph`). 12 MiB: of 100 of Rob's transcripts sampled on 10-30, the median
- * was 4.3 MB with no compaction, 12.4 MB with two.
+ * (0.7.74, Rob 2026-11-25, of a thread's cost to keep going: "I also think that's what should trigger the chip to restart
+ * the thread once we hit a certain threshold"; "I just want to make sure we don't prevent ourselves from completing hard
+ * tasks to the best of our abilities, accidentally, by abandoning expensive threads") A client's thread is asked to put up
+ * a card for a fresh one (`freshParagraph`) when a fresh thread would save FRESH_SAVING or more of the input cost of the
+ * next FRESH_HORIZON model calls. The same rule as massmarket-theme's glow (`savingFor` there; keep the two equal).
+ *
+ * Every call re-reads the whole thread: a tenth of the full price while its prompt cache is warm, a full write again once
+ * the thread has sat longer than the cache keeps (an hour; five minutes on some plans). A fresh thread writes its own
+ * start once and then re-reads less on every call. So a large thread being worked on never gets the card (its warm cache
+ * is the point: 488K tokens before it would, past Rob's 500K compaction), and one that has sat over an hour gets it from
+ * 250K. It replaces 0.7.14's 12 MiB transcript (`FRESH_THREAD_BYTES`), which kept counting what compaction had cleared.
+ *
+ * FRESH_TOKENS: the context a fresh thread carries once it is going. On Rob's Mac (1,569 threads, the 14 days to
+ * 2026-11-25) the median thread answered its first message over 111K tokens, its 10th call over 146K, its 30th over 190K.
  */
-export const FRESH_THREAD_BYTES = 12 * 1_048_576
+export const FRESH_TOKENS = 150_000
+export const FRESH_HORIZON = 20
+export const FRESH_SAVING = 0.4
+export type CacheLife = '1h' | '5m'
+export const CACHE_LIFE_MS: Record<CacheLife, number> = { '1h': 3_600_000, '5m': 300_000 }
+const CACHE_READ = 0.1
+const CACHE_WRITE: Record<CacheLife, number> = { '1h': 2, '5m': 1.25 }
+
+/** (0.7.74) The share of the next FRESH_HORIZON calls' input cost a fresh thread would save, 0 to 1. */
+export function freshSaving(tokens: number, isCold: boolean, life: CacheLife = '1h'): number {
+  const rest = (FRESH_HORIZON - 1) * CACHE_READ
+  const here = tokens * ((isCold ? CACHE_WRITE[life] : CACHE_READ) + rest)
+  const fresh = FRESH_TOKENS * (CACHE_WRITE[life] + rest)
+  return here > 0 ? Math.max(0, 1 - fresh / here) : 0
+}
 
 /**
- * (0.7.14) What an update sent by itself into a long thread (`FRESH_THREAD_BYTES`) carries last: put up a card for a fresh
- * thread for the client, in this thread, through the mm tool's kickoffs (whose kickoff carries this thread's hand-over
- * and, once started, takes the client's link and its pin), unless one is up already. The card starts nothing: the person
- * clicks it or not. `name`: the client's full name, as kickoffs finds it.
+ * (0.7.74) Each thread's last model activity on this computer, by its Claude Code session id (`mm.cost`): when, its
+ * cache's life (from what its turns wrote), and the context its last call re-read. Every thread notes its own at the
+ * start and the end of each of its turns (`noteCost`).
  */
-export function freshParagraph(name: string, bytes: number): string {
-  const mb = Math.round(bytes / 1_048_576)
-  return `This thread is long (its transcript is ${mb} MB), so a fresh thread would cost less from here on. Unless this thread already shows a card for one, call mm with "kickoffs ${name}" and propose that thread with start_session using exactly the title, prompt, background and cwd it gives, but with initiation "own_initiative", so the card waits here for my click. If kickoffs says it is pending, a card is up already: propose nothing. Started, the new thread gets this thread's hand-over and takes over the client's link and pin. Then carry on with the update above.`
+export type CostSeen = Record<string, { at: number; life: CacheLife; tokens?: number }>
+
+/** (0.7.74) What the card says of a thread: its context, how long it has sat, whether past its cache's life, the saving. */
+export type FreshReading = { tokens: number; idleMs: number; isCold: boolean; life: CacheLife; saving: number }
+
+/**
+ * (0.7.74) A thread's reading from its note, or undefined with none (a thread that has run no turn since 0.7.74 gets no
+ * card until it has). The app's own word on its last activity counts too: anything newer than the note keeps it warm.
+ */
+export function freshReading(seen: CostSeen[string] | undefined, lastActivityAt: string | undefined, now: number): FreshReading | undefined {
+  if (!seen || !(typeof seen.tokens === 'number' && seen.tokens > 0) || typeof seen.at !== 'number') return undefined
+  const life: CacheLife = seen.life === '5m' ? '5m' : '1h'
+  const idleMs = Math.max(0, now - Math.max(seen.at, Date.parse(lastActivityAt ?? '') || 0))
+  const isCold = idleMs > CACHE_LIFE_MS[life]
+  return { tokens: seen.tokens, idleMs, isCold, life, saving: freshSaving(seen.tokens, isCold, life) }
+}
+
+function sat(ms: number): string {
+  const min = Math.round(ms / 60_000)
+  if (min < 90) return `${min} minutes`
+  const h = Math.round(min / 60)
+  return h < 48 ? `${h} hours` : `${Math.round(h / 24)} days`
+}
+
+/**
+ * (0.7.14; 0.7.74 says why) What an update sent by itself into a thread a fresh one would save on (`FRESH_SAVING`)
+ * carries last: put up a card for a fresh thread for the client, in this thread, through the mm tool's kickoffs (whose
+ * kickoff carries this thread's hand-over and, once started, takes the client's link and its pin), unless one is up
+ * already. The card starts nothing: the person clicks it or not. `name`: the client's full name, as kickoffs finds it.
+ */
+export function freshParagraph(name: string, r: FreshReading): string {
+  const k = `${Math.round(r.tokens / 1000)}K`
+  const pct = Math.round(r.saving * 100)
+  const why = r.isCold
+    ? `This thread re-reads ${k} tokens on every step and has sat ${sat(r.idleMs)} since it last worked, longer than its cache keeps (${r.life === '1h' ? 'an hour' : 'five minutes'}), so a fresh thread would save about ${pct}% of what comes next.`
+    : `This thread re-reads ${k} tokens on every step, so a fresh thread would save about ${pct}% of what comes next.`
+  return `${why} Unless this thread already shows a card for one, call mm with "kickoffs ${name}" and propose that thread with start_session using exactly the title, prompt, background and cwd it gives, but with initiation "own_initiative", so the card waits here for my click. If kickoffs says it is pending, a card is up already: propose nothing. Started, the new thread gets this thread's hand-over and takes over the client's link and pin. Then carry on with the update above.`
 }
 
 /**

@@ -13,7 +13,7 @@ import { buildLists, cleanTitle, clockText } from './queue'
 import { NEXT_LABEL, NEXT_PAGE, NEXT_SHA, NEXT_TREE, SMS_PAGE, SMS_TREE } from './card-fixture.test-helper'
 import { CARD_PAIRS } from './card-pairs.test-helper'
 import { VERSION } from './register'
-import { DETACH_SELF_NOTE, TOP_LEVEL_STEP, carryKickoff, freshParagraph, lookupOrder, packageArrived, pinReport, readyPackages, signatureOf } from './threads'
+import { DETACH_SELF_NOTE, TOP_LEVEL_STEP, carryKickoff, freshParagraph, freshSaving, lookupOrder, packageArrived, pinReport, readyPackages, signatureOf } from './threads'
 import type { PinReport } from './threads'
 import { localClock } from './track'
 import type { Thread, Call, WorldOptions, Drawing, Kick } from './register-world.test-helper'
@@ -201,39 +201,42 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
   })
 
   // ⛔ (0.7.14, Rob 2026-10-30: "if a new thread is recommended, the chip should show up in the old thread, and it should
-  // be pinned") a long thread is updated as any other, and asked to put up a card for a fresh one, there
+  // be pinned") a thread a fresh one would save on is updated as any other, and asked to put up a card for a fresh one,
+  // there. (0.7.74, Rob 2026-11-25) Saving on it is the thread's cost to keep going, from its own note (`mm.cost`): never
+  // its transcript, and never a thread being worked on.
   const ACME_CLI = '0e7a1c2d-3b4f-4a5e-8c6d-7e8f9a0b1c2d'
-  const transcriptOf = (cwd: string) => `/home/someone/.claude/projects/${cwd.replace(/[^A-Za-z0-9]/g, '-')}/${ACME_CLI}.jsonl`
-  const longWorld = (on: On, bytes: number) =>
+  const costWorld = (on: On, cost: Record<string, unknown> | undefined) =>
     linkedWorld(on, {
       threads: [thread('local_a', 'Roof quote', 30, { cwd: '/home/someone/Clients' })],
-      store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.threads': { [ACME_CLI]: { app: 'local_a', at: NOW - HOUR } } },
-      files: { [transcriptOf('/home/someone/Clients')]: { text: '', mtimeMs: NOW - HOUR, size: bytes } },
+      store: {
+        'mm.links': { [ACME]: 'local_a' },
+        'mm.threads': { [ACME_CLI]: { app: 'local_a', at: NOW - HOUR } },
+        ...(cost ? { 'mm.cost': { [ACME_CLI]: cost } } : {}),
+      },
     })
 
-  test('(0.7.14) a thread whose transcript is 12 MB or more: its update by itself ends with the paragraph that asks it to put up a card for a fresh thread', async ($, on) => {
-    const w = longWorld(on, 20 * 1_048_576)
+  test('(0.7.74) a thread that has sat 30 hours at 320K tokens: its update by itself ends with the paragraph that asks it to put up a card for a fresh thread', async ($, on) => {
+    const w = costWorld(on, { at: NOW - 30 * HOUR, life: '1h', tokens: 320_000 })
     await tickOnce($, w)
     await seenTen(w)
     expect(sends(w).map(c => c.args.session_id)).toEqual(['local_a'])
-    expect(String(sends(w)[0]?.args.message)).toBe(`${ACME_UPDATE}\n\n${freshParagraph('Acme Roofing Pat', 20 * 1_048_576)}`)
+    const reading = { tokens: 320_000, idleMs: 30 * HOUR, isCold: true, life: '1h' as const, saving: freshSaving(320_000, true) }
+    expect(String(sends(w)[0]?.args.message)).toBe(`${ACME_UPDATE}\n\n${freshParagraph('Acme Roofing Pat', reading)}`)
+    expect(String(sends(w)[0]?.args.message)).toContain('This thread re-reads 320K tokens on every step and has sat 30 hours since it last worked')
     expect(String(sends(w)[0]?.args.message)).toContain('call mm with "kickoffs Acme Roofing Pat" and propose that thread with start_session using exactly the title, prompt, background and cwd it gives, but with initiation "own_initiative"')
-    // the transcript was stat'ed, never read
+    // no transcript was read
     expect(w.reads.filter(r => r.endsWith('.jsonl'))).toEqual([])
     // ⛔ nothing started, minted or proposed by the bridge
     expect(w.acted().filter(c => c.tool !== 'send_message')).toEqual([])
   })
 
-  for (const [name, bytes, cwd] of [
-    ['a shorter transcript', 12 * 1_048_576 - 1, '/home/someone/Clients'],
-    ['no transcript where the thread runs', 20 * 1_048_576, '/home/someone/Elsewhere'],
+  for (const [name, cost] of [
+    ['a thread that has sat 30 hours at 240K tokens (a fresh one would save under 40%)', { at: NOW - 30 * HOUR, life: '1h', tokens: 240_000 }],
+    ['a thread with no note of its cost yet (no turn since 0.7.74)', undefined],
+    ['a large thread worked on 10 minutes ago (its warm cache is the point)', { at: NOW - 10 * 60_000, life: '1h', tokens: 320_000 }],
   ] as const) {
-    test(`(0.7.14) ${name}: the update by itself carries no such paragraph`, async ($, on) => {
-      const w = linkedWorld(on, {
-        threads: [thread('local_a', 'Roof quote', 30, { cwd })],
-        store: { 'mm.links': { [ACME]: 'local_a' }, 'mm.threads': { [ACME_CLI]: { app: 'local_a', at: NOW - HOUR } } },
-        files: { [transcriptOf('/home/someone/Clients')]: { text: '', mtimeMs: NOW - HOUR, size: bytes } },
-      })
+    test(`(0.7.74) ${name}: the update by itself carries no such paragraph`, async ($, on) => {
+      const w = costWorld(on, cost)
       await tickOnce($, w)
       await seenTen(w)
       expect(sends(w).map(c => [c.args.session_id, c.args.message])).toEqual([['local_a', ACME_UPDATE]])

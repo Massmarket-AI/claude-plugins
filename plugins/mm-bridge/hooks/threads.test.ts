@@ -5,7 +5,7 @@ import type { AskRef, Feed, FeedAsk, FeedQueueTicket, FeedThread, QueueItem } fr
 import {
   AUTO_NO_DRAFTS_MS, AUTO_QUIET_MS, LABEL, NEW_MARK, OPENERS, THREAD_ID,
   asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, draftsComing, ownPackage, prepDue, seenNow, selfUpdateAt, selfUpdateText,
-  FRESH_THREAD_BYTES, freshParagraph,
+  FRESH_SAVING, freshParagraph, freshReading, freshSaving,
   autoLinkFate, autoLinkFor, bandWords, clientThreads, declaredOther, dueText, foldGroups, handoverText, hasWaiting, isNewRow, kickoffText, onlyClients, openCommand, ownerOf, paneText, platformOf, recommend, rowButtons, rowDetail,
   rowFor, rowGroups, sharedThreads, signatureOf, soleClient, threadLink, titleLooksLike, titleSuggestion, waitingText,
   newerThreadFor, threadStart, markedThreads, ownThreads, replacedBy, AWAY_REASON,
@@ -25,6 +25,7 @@ const et = (s: string) => Date.parse(`${s.replace(' ', 'T')}:00-04:00`)
 const at = (s: string) => new Date(et(s)).toISOString()
 /** Monday 11 AM. */
 const NOW = et('2026-10-12 11:00')
+const HOUR_MS = 3_600_000
 
 const ACME = '11111111-1111-1111-1111-111111111111'
 const BOLT = '22222222-2222-2222-2222-222222222222'
@@ -826,10 +827,38 @@ describe('(0.5.23, Rob 10-21: "change auto-starts to update the older thread") w
     expect(autoUpdateTarget({ state: 'start', reason: 'no thread yet', fresh: true }, 'local_a', true)).toBeUndefined()
   })
 
-  test('(0.7.14) a long thread\'s paragraph: the transcript\'s size, kickoffs by the client\'s name, a card that waits (own_initiative), never a second one', async () => {
-    expect(FRESH_THREAD_BYTES).toBe(12 * 1_048_576)
-    const text = freshParagraph('Acme Roofing Pat', 20 * 1_048_576)
-    expect(text).toBe('This thread is long (its transcript is 20 MB), so a fresh thread would cost less from here on. Unless this thread already shows a card for one, call mm with "kickoffs Acme Roofing Pat" and propose that thread with start_session using exactly the title, prompt, background and cwd it gives, but with initiation "own_initiative", so the card waits here for my click. If kickoffs says it is pending, a card is up already: propose nothing. Started, the new thread gets this thread\'s hand-over and takes over the client\'s link and pin. Then carry on with the update above.')
+  test('(0.7.74) what a fresh thread would save: little for a large thread being worked on, a lot for one that has sat past its cache\'s hour', async () => {
+    expect(FRESH_SAVING).toBe(0.4)
+    // warm: switching forfeits the cache, so the card waits until 488K (past a 500K compaction)
+    expect(freshSaving(300_000, false)).toBeLessThan(FRESH_SAVING)
+    expect(freshSaving(480_000, false)).toBeLessThan(FRESH_SAVING)
+    expect(freshSaving(490_000, false)).toBeGreaterThanOrEqual(FRESH_SAVING)
+    // cold: 1 - 150K / tokens, so from 250K
+    expect(Math.round(freshSaving(320_000, true) * 1000)).toBe(531)
+    expect(freshSaving(240_000, true)).toBeLessThan(FRESH_SAVING)
+    expect(freshSaving(250_000, true)).toBeGreaterThanOrEqual(FRESH_SAVING)
+    expect(Math.round(freshSaving(320_000, true, '5m') * 1000)).toBe(531)
+  })
+
+  test('(0.7.74) a thread\'s reading: none without a note of its context; the app\'s newer activity keeps it warm', async () => {
+    expect(freshReading(undefined, undefined, NOW)).toBeUndefined()
+    expect(freshReading({ at: NOW - 3 * HOUR_MS, life: '1h' }, undefined, NOW)).toBeUndefined()
+    const cold = freshReading({ at: NOW - 3 * HOUR_MS, life: '1h', tokens: 320_000 }, new Date(NOW - 3 * HOUR_MS).toISOString(), NOW)
+    expect(cold?.isCold).toBe(true)
+    expect(cold?.idleMs).toBe(3 * HOUR_MS)
+    // the app says it worked 20 minutes ago: warm, whatever the note says
+    const warm = freshReading({ at: NOW - 3 * HOUR_MS, life: '1h', tokens: 320_000 }, new Date(NOW - 20 * 60_000).toISOString(), NOW)
+    expect(warm?.isCold).toBe(false)
+    expect(warm!.saving).toBeLessThan(FRESH_SAVING)
+    // a five-minute cache lapses after five minutes
+    expect(freshReading({ at: NOW - 6 * 60_000, life: '5m', tokens: 320_000 }, undefined, NOW)?.isCold).toBe(true)
+  })
+
+  test('(0.7.14; 0.7.74 says why) the paragraph: the context and how long it sat, kickoffs by the client\'s name, a card that waits (own_initiative), never a second one', async () => {
+    const r = freshReading({ at: NOW - 3 * HOUR_MS, life: '1h', tokens: 320_000 }, undefined, NOW)!
+    expect(freshParagraph('Acme Roofing Pat', r)).toBe('This thread re-reads 320K tokens on every step and has sat 3 hours since it last worked, longer than its cache keeps (an hour), so a fresh thread would save about 53% of what comes next. Unless this thread already shows a card for one, call mm with "kickoffs Acme Roofing Pat" and propose that thread with start_session using exactly the title, prompt, background and cwd it gives, but with initiation "own_initiative", so the card waits here for my click. If kickoffs says it is pending, a card is up already: propose nothing. Started, the new thread gets this thread\'s hand-over and takes over the client\'s link and pin. Then carry on with the update above.')
+    const warm = { tokens: 500_000, idleMs: 0, isCold: false, life: '1h' as const, saving: freshSaving(500_000, false) }
+    expect(freshParagraph('Acme Roofing Pat', warm).startsWith('This thread re-reads 500K tokens on every step, so a fresh thread would save about 42% of what comes next. Unless')).toBe(true)
   })
 
   test('no thread yet: none ((0.7.6) and nothing is started by itself: the row waits for the person\'s Start)', async () => {
