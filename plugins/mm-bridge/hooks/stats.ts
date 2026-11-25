@@ -7,15 +7,16 @@
 // Hours are the time recorded to clients, parallel threads counted in full; Work hours are the wall clock of any work, overlaps once;
 // Parallel is Hours ÷ Work hours; tokens are the person's Claude Code tokens of the New York day, the runners' left out. OW reads them
 // at most once every 10 minutes for everyone, and the bridge asks every 10 minutes.
-// ⛔ WHO SEES WHAT. Everyone gets their own line, under the You section's dots. The founder and the PMs also get one line per person
-// at the top of Team now: OW answers `team` to them alone (the gate of `GET /api/ext/leverage`), and the bridge draws what OW sends.
+// ⛔ WHO SEES WHAT. Everyone gets their own line, under the You section's dots, and one line per person at the top of Team now
+// (Rob, 2026-11-25: "no need to hide team view from anyone, its important for people to be a ble to see that a team member has
+// starting working on something they handed over"). The bridge draws the team rows OW sends; an OW that sends none draws none.
 // ⛔ Read-only: nothing here sends, pins, sounds or writes anywhere but the bridge's own store.
 
 import type { MmDayStats, MmStatsPerson } from '../types'
 
 /** One person's numbers, as OW answers them (checked). `me`: the person this bridge belongs to. */
 export type StatsPerson = MmStatsPerson
-/** Today's numbers: the person's own, and the team's for the founder and the PMs. `at`: when OW worked them out. `day`: New York. */
+/** Today's numbers: the person's own, and the team's. `at`: when OW worked them out. `day`: New York. */
 export type DayStats = MmDayStats
 
 /** One line of the drawing. */
@@ -114,7 +115,7 @@ export function myStatsSays(s: DayStats, now: number): string {
   )
 }
 
-/** The block at the top of Team now, for the founder and the PMs: a heading, one line a person in OW's order, then the team. */
+/** The block at the top of Team now: a heading, one line a person in OW's order, then the team. None when OW sent no team rows. */
 export function teamStatsLines(s: DayStats | null | undefined, now: number): StatsLine[] {
   if (!s || !s.team || !s.team.length || !isToday(s, now)) return []
   const out: StatsLine[] = [{ text: `Today · as of ${nyClock(s.at)}`, bold: true }]

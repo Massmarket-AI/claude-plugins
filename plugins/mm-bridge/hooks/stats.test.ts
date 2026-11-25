@@ -1,5 +1,5 @@
 // (0.7.75) Today's numbers in the side pane (stats.ts): the person's own line under the You section's dots, and the team's at the top
-// of Team now for the founder and the PMs, from OW's `GET /api/ext/day-stats`. Pure words first, then the bridge against a pretend
+// of Team now for everyone, from OW's `GET /api/ext/day-stats`. Pure words first, then the bridge against a pretend
 // desktop app and OW (register-world.test-helper.ts), on the desktop and on the phone. Read-only: nothing here sends, pins or sounds.
 // Every person and client is made up.
 
@@ -24,14 +24,14 @@ const person = (name: string, hours: number, work: number, tokens: number | null
   ...over,
 })
 const ME_ROW = person('Pat Builder', 4.2, 1.4, 1_840_000, { me: true, sessions: 6 })
-/** What OW answers a teammate: their own numbers, no team. */
+/** An answer with the person's own numbers and no team rows (an OW from before the team rows went to everyone). */
 const member = (over: Record<string, unknown> = {}) => ({ ok: true, at: iso(NOW - 2 * MIN), day: TODAY, role: 'member', me: ME_ROW, partial: [], ...over })
-/** What OW answers the founder or a PM: their own, then the team in its order and the totals. */
-const founder = (over: Record<string, unknown> = {}) => ({
+/** What OW answers anyone on the team: their own, then the team in its order and the totals. */
+const everyone = (over: Record<string, unknown> = {}) => ({
   ok: true,
   at: iso(NOW - 2 * MIN),
   day: TODAY,
-  role: 'founder',
+  role: 'member',
   me: ME_ROW,
   team: [person('Rob Example', 6.1, 1.8, 12_300_000), ME_ROW, person('Asif Example', 2.8, 1.75, null), person('Nayan Example', 0, 0, null)],
   totals: { hours: 13.1, work_hours: 4.95, parallel: 2.64, tokens: 14_140_000, members: 4 },
@@ -54,7 +54,7 @@ describe('0.7.75: the words (stats.ts)', () => {
     expect([950, 9_540, 12_000, 1_840_000, 12_340_000, 123_400_000, 1_230_000_000].map(tokenWords)).toEqual(['950', '9.5K', '12K', '1.8M', '12.3M', '123M', '1.2B'])
   })
 
-  test("OW's answer is checked: another shape is null, a person of another shape is dropped, a teammate's has no team", () => {
+  test("OW's answer is checked: another shape is null, a person of another shape is dropped, an answer with no team rows has none", () => {
     expect(statsFrom(null)).toBeNull()
     expect(statsFrom({ ok: false })).toBeNull()
     expect(statsFrom({ ...member(), day: 'today' })).toBeNull()
@@ -62,7 +62,7 @@ describe('0.7.75: the words (stats.ts)', () => {
     expect(mine?.me).toEqual({ name: 'Pat Builder', me: true, hours: 4.2, workHours: 1.4, parallel: 3, tokens: 1_840_000, sessions: 6 })
     expect(mine?.team).toBeNull()
     expect(mine?.total).toBeNull()
-    const all = statsFrom(founder({ team: [...founder().team, { name: 'Broken', hours: 'lots' }] }))
+    const all = statsFrom(everyone({ team: [...everyone().team, { name: 'Broken', hours: 'lots' }] }))
     expect(all?.team?.map(p => p.name)).toEqual(['Rob Example', 'Pat Builder', 'Asif Example', 'Nayan Example'])
     expect(all?.total).toMatchObject({ name: 'Team', hours: 13.1, workHours: 4.95, tokens: 14_140_000 })
   })
@@ -88,7 +88,7 @@ describe('0.7.75: the words (stats.ts)', () => {
   })
 
   test("the team block: a heading, one line a person in OW's order, an empty one dim, then the team; none without a team", () => {
-    const s = statsFrom(founder())
+    const s = statsFrom(everyone())
     const block = teamStatsLines(s, NOW)
     expect(block.map(l => l.text)).toEqual(TEAM_BLOCK)
     expect(block[0]?.bold).toBe(true)
@@ -100,7 +100,7 @@ describe('0.7.75: the words (stats.ts)', () => {
 })
 
 describe('0.7.75: today\'s numbers in the pane', () => {
-  test('desktop, a teammate: one dim line under the dots; a press says what it counts; Team now has no team block', LONG, async ($, on) => {
+  test('desktop: one dim line under the dots; a press says what it counts; an answer with no team rows draws no team block', LONG, async ($, on) => {
     const w = world(on, { feed: feed(), dayStats: () => ok(member()) })
     await tickOnce($, w)
     const ui = await pane($)
@@ -122,8 +122,8 @@ describe('0.7.75: today\'s numbers in the pane', () => {
     await ui.unmount()
   })
 
-  test('desktop, the founder: Team now opens on today\'s numbers, one line a person, above each person\'s block', LONG, async ($, on) => {
-    const w = world(on, { feed: feed(), dayStats: () => ok(founder()), store: { 'mm.panel': { teamNow: true } } })
+  test('desktop, a teammate (any role): Team now opens on today\'s numbers, one line a person, above each person\'s block', LONG, async ($, on) => {
+    const w = world(on, { feed: feed(), dayStats: () => ok(everyone()), store: { 'mm.panel': { teamNow: true } } })
     await tickOnce($, w)
     const ui = await pane($)
     expect(await label(ui, 'mm-stats')).toBe(MY_LINE)
@@ -138,7 +138,7 @@ describe('0.7.75: today\'s numbers in the pane', () => {
   })
 
   test('mobile: the same line and the same team block', LONG, async ($, on) => {
-    const w = world(on, { feed: feed(), dayStats: () => ok(founder()), store: { 'mm.panel': { teamNow: true } } })
+    const w = world(on, { feed: feed(), dayStats: () => ok(everyone()), store: { 'mm.panel': { teamNow: true } } })
     await tickOnce($, w)
     const ui = await $.ui.mount({ plugin: 'mm-bridge', surface: 'mobile', component: 'Pane', requestId: 'mm-queue', props: PANE })
     expect(await label(ui, 'mm-stats')).toBe(MY_LINE)
@@ -180,8 +180,8 @@ describe('0.7.75: today\'s numbers in the pane', () => {
     await ui.unmount()
   })
 
-  test('/mm team: the block above Team now for the founder, nothing more for a teammate; it sends nothing', LONG, async ($, on) => {
-    let answer = ok(founder())
+  test('/mm team: the block above Team now, nothing more when OW sends no team rows; it sends nothing', LONG, async ($, on) => {
+    let answer = ok(everyone())
     const w = world(on, { feed: feed(), dayStats: () => answer })
     await tickOnce($, w)
     expect((await mm($, 'team')).split('\n').slice(0, TEAM_BLOCK.length)).toEqual(TEAM_BLOCK)
