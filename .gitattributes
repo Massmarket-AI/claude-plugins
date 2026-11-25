@@ -14,5 +14,5 @@
 plugins/mm-hooks/extension/** -text
 plugins/mm-hooks/extension.json -text
 
-# (0.7.70) The bridge's own sound: a binary file, never converted.
+# (0.7.71) The bridge's own sound: a binary file, never converted.
 plugins/mm-bridge/sounds/** binary

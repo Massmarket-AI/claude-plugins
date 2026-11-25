@@ -5644,9 +5644,9 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       for (const m of [r, u]) await m.unmount()
     })
 
-    // (0.7.70, Rob 2026-11-24: approve reply packages from the phone) The mobile app draws a tree that keeps a tool row as one quiet line, and
+    // (0.7.71, Rob 2026-11-24: approve reply packages from the phone) The mobile app draws a tree that keeps a tool row as one quiet line, and
     // as a card under the row only when the Box holding the row and the rest has a border or a background.
-    describe('0.7.70 on the phone: the same card, under the row, in a bordered Box, with the same one-press go', () => {
+    describe('0.7.71 on the phone: the same card, under the row, in a bordered Box, with the same one-press go', () => {
       /** A few milliseconds of real time, for the press's record and note (they are written off the clock). */
       const pause = (ms: number) => new Promise<void>(res => void (globalThis as unknown as { setTimeout: (f: () => void, ms: number) => unknown }).setTimeout(res, ms))
       /** The engine's own row, beneath the plugins: what `next(e)` draws. */

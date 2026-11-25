@@ -1,4 +1,4 @@
-// (0.7.70) The right-click rows in the desktop app's transcript, and the band's Ship row. The bridge against a pretend desktop app, feed
+// (0.7.71) The right-click rows in the desktop app's transcript, and the band's Ship row. The bridge against a pretend desktop app, feed
 // and store (register-world.test-helper.ts), with `git` and `gh` answered by the test; every client and folder is made up.
 
 import { describe, expect, test } from 'claude-code/testing'
@@ -17,7 +17,7 @@ const menu = ($: Engine, props: Record<string, unknown> = {}, surface: 'desktop'
 const acmeHere: WorldOptions = { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } } }
 const ours = async (ui: Parameters<typeof buttons>[0]) => (await buttons(ui)).filter(([k]) => k.startsWith('mm-menu'))
 
-describe('0.7.70: the right-click rows in the desktop app', () => {
+describe('0.7.71: the right-click rows in the desktop app', () => {
   test('in a client\'s own thread: Update this thread and Open in pane, each with the line under it', async ($, on) => {
     world(on, acmeHere)
     await mm($, '')
@@ -146,7 +146,7 @@ const shipLine = async ($: Engine) => (await bandLines($)).lines.find(l => l.sta
 const shipButton = async ($: Engine) => (await bandLines($)).buttons.find(([k]) => k === 'mm-ship-btn')
 const ghAsked = (w: { gitRuns: Array<{ argv: string[] }> }) => w.gitRuns.filter(r => r.argv[0] === 'gh').length
 
-describe('0.7.70: the band\'s Ship row', () => {
+describe('0.7.71: the band\'s Ship row', () => {
   test('a feature branch with commits not pushed: the row says so, and its Ship button', async ($, on) => {
     const w = world(on, { git: repo() })
     await started($, w)

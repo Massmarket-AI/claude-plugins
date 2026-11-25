@@ -1,5 +1,5 @@
 /**
- * (0.7.70) Alerts: one phone notification when a thread is pinned for the person, and one quiet sound when a pin needs them or a reply
+ * (0.7.71) Alerts: one phone notification when a thread is pinned for the person, and one quiet sound when a pin needs them or a reply
  * package of theirs lands. Rob, 2026-11-24, in the approved Phase 2 plan: alert only when someone has to act. A pin means the person has
  * to act, so a new pin is the one thing that notifies. Nothing on a re-pin, an unpin, or a thread that was already pinned when the
  * bridge started.
@@ -8,7 +8,7 @@
  *   thread that says it waits on the person (`mm waiting`). A thread a profile switch carried, already pinned, or pinned again over the
  *   person's own unpin (`again`) is not listed.
  * - A re-pin is a pin of the same client for the same thing: the same kind and act-by time, or the same declaration (`sig`). It is on
- *   record per computer (`mm.alerted`), so a pin taken off and put back, a profile switch that clears and re-pins, or two threads that
+ *   record per computer, on the sync record every thread here reads (`mm.last`, `alerted`), so a pin taken off and put back, a profile switch that clears and re-pins, or two threads that
  *   sync one after the other never alert twice.
  * - A quiet pass alerts nothing and only records: the first pass on a computer with no record yet, and any pass after a gap of more than
  *   ALERT_GAP_MS since the last sync on record (the computer was asleep or the app closed). What it pins then was waiting when the
@@ -30,8 +30,6 @@
 
 /** The per-computer switch: `{ on: false }` turns alerts off. Absent, on. */
 export const ALERTS_SWITCH = 'mm.alerts'
-/** What this computer has alerted for, or recorded quietly. */
-export const ALERTED = 'mm.alerted'
 /** A pass after a gap this long since the last sync on record is quiet: it records and alerts nothing. */
 export const ALERT_GAP_MS = 20 * 60_000
 /** The most notifications one pass raises; past them, one line says how many more. */
@@ -63,7 +61,7 @@ export type NewPin = {
   text: string
 }
 
-/** The record (`mm.alerted`). */
+/** The record, kept on the sync record as `alerted` (`mm.last`). */
 export type Alerted = {
   /** Each client's last pin alerted for (or recorded quietly), and when. */
   pins: Record<string, { sig: string; at: number }>

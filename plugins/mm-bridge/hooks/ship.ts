@@ -1,5 +1,5 @@
 /**
- * (0.7.70) The band's Ship row (Rob, 2026-11-24, his "yes" to Phase 2b): when this thread's folder is a git checkout on a branch other
+ * (0.7.71) The band's Ship row (Rob, 2026-11-24, his "yes" to Phase 2b): when this thread's folder is a git checkout on a branch other
  * than its default branch, with work past the default branch that is not pushed yet, or no pull request for it yet, the band shows one
  * row with a Ship button. A press puts exactly `/ship` in the person's prompt box, with no Enter, as the card puts `Send package <12>`
  * there when it cannot send it: the person presses Enter. ⛔ The bridge never runs `/ship` itself, through `$.command.run`, a submit or

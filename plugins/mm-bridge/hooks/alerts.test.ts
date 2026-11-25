@@ -1,4 +1,4 @@
-// (0.7.70) Alerts: one notification when a thread is pinned for the person, one quiet sound when a pin needs them or a reply package of
+// (0.7.71) Alerts: one notification when a thread is pinned for the person, one quiet sound when a pin needs them or a reply package of
 // theirs lands, and nothing else (Rob, 2026-11-24, the approved Phase 2 plan: alert only when someone has to act). The bridge against a
 // pretend desktop app, feed and store (register-world.test-helper.ts); every client is made up.
 
@@ -16,7 +16,7 @@ const pin = (pid: string, sig: string, text = `Pinned for you: ${pid}`): NewPin 
 const record = (over: Partial<Alerted> = {}): Alerted => ({ pins: {}, packages: [], at: NOW - 60_000, ...over })
 const loud = { now: NOW, quiet: false, on: true }
 
-describe('0.7.70: what one pass alerts for (planAlerts)', () => {
+describe('0.7.71: what one pass alerts for (planAlerts)', () => {
   test('a computer\'s first pass alerts nothing and only records', () => {
     const plan = planAlerts(null, { ...loud, pins: [pin(BOLT, 'reply:1')], ready: ['p1'] })
     expect(plan.notify).toEqual([])
@@ -90,7 +90,7 @@ describe('0.7.70: what one pass alerts for (planAlerts)', () => {
   })
 })
 
-describe('0.7.70: each notification is raised from its pinned thread (claimDue)', () => {
+describe('0.7.71: each notification is raised from its pinned thread (claimDue)', () => {
   const due = (at: number, text = 'Pinned for you: x'): AlertDue => ({ text, key: 'pin:x', at })
   test('a thread takes its own at once and leaves the others for theirs', () => {
     const { mine, keep } = claimDue({ local_a: due(NOW, 'a'), local_b: due(NOW, 'b') }, 'local_a', NOW + 1_000)
@@ -136,12 +136,12 @@ const boltWorld = (on: On, over: WorldOptions = {}) =>
 const minute = async (w: { clock: { advance: (ms: number) => Promise<void> } }) => w.clock.advance(60_000)
 const pinned = (w: ReturnType<typeof world>, sid = SELF) => w.threads.get(sid)?.pinned === true
 
-describe('0.7.70: a new pin for the person raises one notification and the sound, and nothing else does', () => {
+describe('0.7.71: a new pin for the person raises one notification and the sound, and nothing else does', () => {
   test('the first sync alerts nothing; a pin after it: one notification naming the client and what is due, keyed by client, and one sound', async ($, on) => {
     const w = boltWorld(on)
     const { notes, plays } = heard(on)
     await mm($, '')
-    expect(w.stored['mm.alerted']).toEqual({ pins: {}, packages: [], at: NOW })
+    expect((w.stored['mm.last'] as { alerted?: unknown }).alerted).toEqual({ pins: {}, packages: [], at: NOW })
     w.setFeed(boltDue())
     await minute(w)
     await mm($, '')
@@ -216,7 +216,7 @@ describe('0.7.70: a new pin for the person raises one notification and the sound
     expect(pinned(w)).toBe(true)
     expect(notes).toEqual([])
     expect(plays).toEqual([])
-    expect((w.stored['mm.alerted'] as Alerted).pins[BOLT]?.sig).toMatch(/^reply:\d+$/)
+    expect(((w.stored['mm.last'] as { alerted: Alerted }).alerted).pins[BOLT]?.sig).toMatch(/^reply:\d+$/)
   })
 
   test('/mm alerts says the switch and sets it, per computer: off, a pin raises nothing; on again, what was pinned meanwhile stays quiet', async ($, on) => {
@@ -319,6 +319,6 @@ describe('0.7.70: a new pin for the person raises one notification and the sound
     await minute(w)
     await mm($, '')
     expect(pinned(w)).toBe(true)
-    expect((w.stored['mm.alerted'] as Alerted).pins[BOLT]).toBeDefined()
+    expect(((w.stored['mm.last'] as { alerted: Alerted }).alerted).pins[BOLT]).toBeDefined()
   })
 })

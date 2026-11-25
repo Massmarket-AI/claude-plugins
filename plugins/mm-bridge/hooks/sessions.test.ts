@@ -2833,11 +2833,11 @@ describe('0.7.19: the newest bridge on this machine holds the sync, against the 
   })
 })
 
-// (0.7.70, Rob 2026-11-24, the approved Phase 2 plan: alert only when someone has to act) A new pin raises one notification, from the
+// (0.7.71, Rob 2026-11-24, the approved Phase 2 plan: alert only when someone has to act) A new pin raises one notification, from the
 // pinned thread's own session (the phone hears a thread over its own Remote Control), and the sound from the thread whose sync made it.
 // The record of what was alerted, and the switch, are the computer's (the store every thread here shares), so a second thread pinning
 // the same thing again never alerts, and /mm alerts off typed in one thread holds in all of them.
-describe('0.7.70: the alert record and the alerts switch are the computer\'s, whichever thread syncs', () => {
+describe('0.7.71: the alert record and the alerts switch are the computer\'s, whichever thread syncs', () => {
   const ONE = pid(1)
   const app = (opts: { every?: boolean } = {}) => {
     const f: Feed = { member: ME, role: 'builder', tickets: {}, threads: [], drafts: [], mail: [] }

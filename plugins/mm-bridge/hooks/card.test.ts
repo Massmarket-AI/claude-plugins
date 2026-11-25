@@ -2162,14 +2162,14 @@ describe('0.7.40 the row of the thread\'s own `mm card` call: everything but a r
     await passes(t, row({}, { isInterrupted: true }))
   })
 
-  test('every surface but the desktop and (0.7.70) the phone: the engine\'s row', async () => {
+  test('every surface but the desktop and (0.7.71) the phone: the engine\'s row', async () => {
     const t = drawing()
     t.state.set('card', cardOf())
     await noteAsked(t.$, { packageId: PKG, label: LABEL, toolUseId: 'toolu_1' })
     for (const surface of ['terminal', 'vscode']) await passes(t, row({ surface }))
     // and the desktop draws its own
     expect(await rowHook?.(t.$, row(), engine)).not.toBe(ENGINE_ROW)
-    // (0.7.70) the phone too: a bordered card that keeps the engine's row first (register-updates-time-card.test.ts has the whole of it)
+    // (0.7.71) the phone too: a bordered card that keeps the engine's row first (register-updates-time-card.test.ts has the whole of it)
     const phone = (await rowHook?.(t.$, row({ surface: 'mobile' }), engine)) as { props: Record<string, unknown>; children: unknown[] }
     expect(phone.props.borderStyle).toBe('round')
     expect(phone.children[0]).toBe(ENGINE_ROW)

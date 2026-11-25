@@ -479,7 +479,7 @@ export type MmCardAsked = { packageId: string; label: string; toolUseId: string;
 export type MmCardFeedback = { label: string; said: 'sent' | 'busy' | 'go' | 'changed' | 'filled' | 'draft' | 'none' }
 
 /**
- * (0.7.70) The Ship row of the band: this thread's folder is a git checkout on a branch other than its default, with commits past the default
+ * (0.7.71) The Ship row of the band: this thread's folder is a git checkout on a branch other than its default, with commits past the default
  * branch, and some of them not pushed (`unpushed`, every one of them when the branch has no upstream) or no pull request for the branch yet
  * (`pr: 'none'`). `pr` is what `gh pr view` said for the branch at `head` (`unknown`: gh is not here, or did not answer). Hidden (`show`
  * false) on the default branch, in a folder that is not a git checkout, and in the control tower, whose edits go to main with no PR.
@@ -516,7 +516,7 @@ declare module 'claude-code' {
       cardFeedback: MmCardFeedback | null
       /** (0.7.38) The ready reply packages this thread's pane listed last: a new one scrolls the pane to its top. */
       seenPackages: string[]
-      /** (0.7.70) The band's Ship row, as this thread's folder stood when last looked at. */
+      /** (0.7.71) The band's Ship row, as this thread's folder stood when last looked at. */
       ship: MmShip
     }
   }

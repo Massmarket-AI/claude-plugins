@@ -167,6 +167,8 @@ export type WorldOptions = {
   browserNow?: () => { status: number; body?: unknown } | 'network'
   /** (0.7.53) How OW answers `POST /browser-answer`. Left out, 404. */
   browserAnswer?: (body: Record<string, unknown>) => { status: number; body?: unknown } | 'network'
+  /** (0.7.70) How OW answers `GET /ticket-status?ticket_id=<id>` (a scheduled wait's report): a status and a body, or no answer at all. Left out, 404. */
+  ticketStatus?: (url: string) => { status: number; body?: unknown } | 'network'
   /** (0.7.23) How OW answers the sync's pin report (`POST /bridge-pins`): a status, or no answer at all. Left out, 404: an OW without the route yet. */
   bridgePins?: (body: PinReport) => { status: number; body?: unknown } | 'network'
   /** (0.7.59) Threads the app refuses to pin or unpin, with its words (as outside Bypass permissions mode). Read at each call. */
@@ -182,7 +184,7 @@ export type WorldOptions = {
   /** (0.7.26) What the reply-package pickup read answers, when not the plain page. */
   pickup?: Record<string, unknown>
   /**
-   * (0.7.70) How `git` and `gh` answer in this thread's folder (the band's Ship row): an exit code and what they print, or `throws` (not
+   * (0.7.71) How `git` and `gh` answer in this thread's folder (the band's Ship row): an exit code and what they print, or `throws` (not
    * on this computer). Left out, or undefined for a command: exit 128, `not a git repository`. Kept apart from `ran`.
    */
   git?: (argv: string[], cwd: string | undefined) => { exitCode: number; stdout?: string; stderr?: string } | 'throws' | undefined
@@ -367,6 +369,12 @@ export function world(on: On, opts: WorldOptions = {}) {
       if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
       return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: typeof answer.body === 'string' ? answer.body : JSON.stringify(answer.body ?? {}) } }
     }
+    // (0.7.70) one ticket's state, as OW's ticket-status GET answers it
+    if (e.url.includes('/api/ext/ticket-status?')) {
+      const answer = opts.ticketStatus ? opts.ticketStatus(e.url) : { status: 404, body: { error: 'Ticket not found.' } }
+      if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
+      return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: JSON.stringify(answer.body ?? {}) } }
+    }
     if (e.url.includes('/closeout') && opts.fetchTakesMs) {
       const ms = opts.fetchTakesMs(++feedReads)
       if (ms > 0) await clock.sleep(ms)
@@ -429,7 +437,7 @@ export function world(on: On, opts: WorldOptions = {}) {
   })
   /** Every program the bridge started. */
   const ran: string[] = []
-  /** (0.7.70) Every git and gh command the bridge ran, and in which folder. */
+  /** (0.7.71) Every git and gh command the bridge ran, and in which folder. */
   const gitRuns: Array<{ argv: string[]; cwd: string | undefined }> = []
   /** (0.7.26) Every reply-package card the bridge drew on this computer: the renderer, apart from the programs above. */
   const renders: string[] = []
@@ -450,7 +458,7 @@ export function world(on: On, opts: WorldOptions = {}) {
       // a renderer from before --tree: the pane shows the page alone, as before 0.7.26
       return { value: { exitCode: 2, stdout: '', stderr: 'render_visual.py: error: unrecognized arguments: --tree -', isStdoutTruncated: false, isStderrTruncated: false } }
     }
-    // (0.7.70) git and gh, for the band's Ship row: kept apart from `ran`
+    // (0.7.71) git and gh, for the band's Ship row: kept apart from `ran`
     if (e.argv[0] === 'git' || e.argv[0] === 'gh') {
       gitRuns.push({ argv: e.argv.map(String), cwd: (e as { cwd?: string }).cwd ?? (e as { init?: { cwd?: string } }).init?.cwd })
       const said = opts.git?.(e.argv.map(String), gitRuns.at(-1)?.cwd)
