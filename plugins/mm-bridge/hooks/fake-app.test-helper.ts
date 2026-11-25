@@ -46,7 +46,7 @@ export const next = (e: unknown) => e
  */
 export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessionId: string }>, unlisted: readonly string[] = [], opts: { every?: boolean; tools?: 'spawn' | 'start' | 'both'; now?: number; rowsAsBefore?: boolean } = {}) {
   /**
-   * ⛔ (0.7.74, Rob 2026-11-25: no Update, Open or Drafts in Needs you) `rowsAsBefore`: the list as an older version stored it, with no You
+   * ⛔ (0.7.77, Rob 2026-11-25: no Update, Open or Drafts in Needs you) `rowsAsBefore`: the list as an older version stored it, with no You
    * rows, so the clients' rows are drawn as the rows under the list are, buttons and all: how a test of a press itself presses it (the
    * same `drawRow` and `press` the rows under the list and the right-click menu use). See register-world.test-helper.ts `rowsAsBefore`.
    */

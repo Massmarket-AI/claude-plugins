@@ -163,6 +163,8 @@ export type WorldOptions = {
   scopeProposal?: (body: Record<string, unknown>) => { status: number; body?: unknown } | 'network'
   /** (0.7.34) How OW answers `GET /team-now`. Left out, 404: an OW without the route yet. */
   teamNow?: () => { status: number; body?: unknown } | 'network'
+  /** (0.7.76) How OW answers `GET /drafts-pulse`. Left out, 404: an OW without the route yet. */
+  draftsPulse?: () => { status: number; body?: unknown } | 'network'
   /** (0.7.53) How OW answers `GET /browser-now`. Left out, 404: an OW without the route yet. */
   browserNow?: () => { status: number; body?: unknown } | 'network'
   /** (0.7.53) How OW answers `POST /browser-answer`. Left out, 404. */
@@ -333,6 +335,11 @@ export function world(on: On, opts: WorldOptions = {}) {
       const body = JSON.parse(String(e.init?.body ?? '{}')) as PinReport
       pinPosts.push({ method: String(e.init?.method ?? 'GET'), headers: { ...(e.init?.headers ?? {}) }, body })
       const answer = opts.bridgePins ? opts.bridgePins(body) : { status: 404, body: { error: 'not_found' } }
+      if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
+      return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: JSON.stringify(answer.body ?? {}) } }
+    }
+    if (e.url.endsWith('/api/ext/drafts-pulse')) {
+      const answer = opts.draftsPulse ? opts.draftsPulse() : { status: 404, body: { error: 'not_found' } }
       if (answer === 'network') return { deny: 'fetch failed: socket hang up' }
       return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: JSON.stringify(answer.body ?? {}) } }
     }
@@ -638,7 +645,7 @@ export const lines = async (ui: Drawing): Promise<string[]> => {
     return n === 0
   }
   // (0.7.34) a row's pin mark has tests of its own; the Needs you now heading is a button now, and reads as the heading it is
-  // (0.7.74) a You row's head is a line of text again; its Details toggle (`mm-you-more:`) and the page under it have tests of their own
+  // (0.7.77) a You row's head is a line of text again; its Details toggle (`mm-you-more:`) and the page under it have tests of their own
   return all.flatMap(e => (e.type === 'Text' && !PIN_MARKS.has(e.text) && left(e.text) ? [e.text] : e.key === 'mm-needs-toggle' ? [e.text.replace(/\s+[▾▸]$/, '')] : []))
 }
 /** (0.7.73) The texts of a You row's detail Box, as drawn (indented two spaces). */
@@ -682,7 +689,7 @@ export const ACME_ROW = "Acme Roofing: approve Acme Roofing's reply package"
 export const BOLT_ROW = 'Bolt Staffing: answer Client about "Question" (+1 more)'
 export const CEDAR_ROW = 'Cedar Dental: deliver "Send the intake form"'
 /**
- * (0.7.74) The same clients' rows drawn as the rows under the list are (`rowsAsBefore`): their one line as until 0.7.72, `NO THREAD` rows
+ * (0.7.77) The same clients' rows drawn as the rows under the list are (`rowsAsBefore`): their one line as until 0.7.72, `NO THREAD` rows
  * first and marked, what a test of a press itself reads around the press.
  */
 export const BEFORE = {
@@ -815,7 +822,7 @@ export const personClose = (on: On, pid: string) => {
   return { close: () => { closing = true } }
 }
 /**
- * ⛔ (0.7.74, Rob 2026-11-25: "I don't think we need the Update and Open Thread buttons, or the Draft button ... in the 'Needs You'")
+ * ⛔ (0.7.77, Rob 2026-11-25: "I don't think we need the Update and Open Thread buttons, or the Draft button ... in the 'Needs You'")
  * The You rows draw no Update, Open or Drafts. Those presses still run from every row drawn under the list (Checking your reply, With a
  * teammate, No due date), from the thread's right-click menu, and on a list an older version stored, all through the one row drawing
  * (`drawRow`) and the one `press`. A test of a press itself (what it sends, opens, refuses, holds) presses it on such a row: the list as
@@ -829,7 +836,7 @@ export const rowsAsBefore = (on: On) => {
   })
 }
 /** A client's buttons on the pane, by their labels. */
-/** (0.7.74) Not the You row's Details toggle (`mm-you-more:<project>`), which only opens the client's part under it: the row's actions. */
+/** (0.7.77) Not the You row's Details toggle (`mm-you-more:<project>`), which only opens the client's part under it: the row's actions. */
 export const buttonsOf = async (ui: Drawing, projectId: string): Promise<string[]> => (await buttons(ui)).filter(b => b[0].endsWith(projectId) && !b[0].startsWith('mm-you-more:')).map(b => b[1])
 /**
  * (0.7.5) The text the pane draws right under a row's one line: its second line where it has one, else what comes next.
@@ -1024,8 +1031,9 @@ export const trackPart = (drawn: string[]): string[] => {
 /** Every fetch the bridge made is a read of one of its own GET routes: never a pickup, a hold or a resolve. */
 // (0.7.23) and the sync's pin report (`/bridge-pins`): what is pinned and what should be, never a pickup, a hold or a claim
 // (0.7.53) and Working manually in browser (`/browser-now`): its read records a new stretch's question, never an answer
+// (0.7.76) and the drafts pulse (`/drafts-pulse`): a key, nothing else
 export const onlyReads = (w: { fetched: string[] }) =>
-  w.fetched.every(u => /\/api\/ext\/(?:closeout\?|skill-map$|client-time\?project_ids=|reply-package\?package_id=[0-9a-f-]+&format=pickup$|team-ask\?|bridge-pins$|team-now$|browser-now$)/.test(u))
+  w.fetched.every(u => /\/api\/ext\/(?:closeout\?|skill-map$|client-time\?project_ids=|reply-package\?package_id=[0-9a-f-]+&format=pickup$|team-ask\?|bridge-pins$|team-now$|browser-now$|drafts-pulse$)/.test(u))
 export const skill = async ($: Engine, name: string, over: Record<string, unknown> = {}) => $.tool.call({ tool: 'Skill', skill: name, ...over } as never)
 export const person = async ($: Engine, text: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
 /** Everything a mounted drawing shows, in order: each Text, and each Button as `[label]`. */

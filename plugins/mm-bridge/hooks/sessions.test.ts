@@ -1041,7 +1041,7 @@ describe('L3: a refresh that fails after a press shows in one line, until a sync
         return
       }
       const o = node as { props?: Record<string, unknown>; children?: unknown }
-      // (0.7.34) the Needs you now heading is a button now, and reads as the heading it is; (0.7.74) the You section's, Needs you (n)
+      // (0.7.34) the Needs you now heading is a button now, and reads as the heading it is; (0.7.77) the You section's, Needs you (n)
       if (typeof o.props?.label === 'string' && /^Needs you( now)? \(\d+\)/.test(o.props.label)) out.push(o.props.label.replace(/\s+[▾▸]$/, ''))
       walk(o.props?.children, depth + 1)
       walk(o.children, depth + 1)

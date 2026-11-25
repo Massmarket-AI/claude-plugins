@@ -75,7 +75,7 @@ export function repliesDot(ready: readonly string[]): Dot {
 // ---------------------------------------------------------------- 4. sessions
 
 export function sessionsDot(running: number, waiting: readonly string[]): Dot {
-  // (0.7.74, Rob 2026-11-25: "Why does it say 'sessions 30.1'? What does that mean?") `30·1` read as a decimal: the count waiting is named
+  // (0.7.77, Rob 2026-11-25: "Why does it say 'sessions 30.1'? What does that mean?") `30·1` read as a decimal: the count waiting is named
   const short = waiting.length ? `${running} · ${waiting.length} waiting` : String(running)
   // a thread counts while its bridge ticked in the last 5 minutes: open in the app, working or not
   const runs = `${running} ${running === 1 ? 'thread is' : 'threads are'} open on this computer`

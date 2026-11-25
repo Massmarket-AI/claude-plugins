@@ -1,5 +1,5 @@
 // (0.7.73) The "You" strip in the bridge itself: worked out from the store, this session's usage and the worklog hook's record, drawn
-// first in the side pane (desktop and mobile; (0.7.74) no longer in the band, which is 0.7.72's again). Read-only. The
+// first in the side pane (desktop and mobile; (0.7.77) no longer in the band, which is 0.7.72's again). Read-only. The
 // bridge against a pretend desktop app, feed and store (register-world.test-helper.ts); every client is made up.
 
 import type { On } from 'claude-code'
@@ -134,7 +134,7 @@ describe('0.7.73: the "You" strip at the top of the side pane', () => {
   })
 })
 
-describe('0.7.74 (Rob 2026-11-25: "I also didn\'t want to add the U panel above where I type. I just wanted to remove the ship button. The way it was before was good for that"): the band as before, with no strip and no next', () => {
+describe('0.7.77 (Rob 2026-11-25: "I also didn\'t want to add the U panel above where I type. I just wanted to remove the ship button. The way it was before was good for that"): the band as before, with no strip and no next', () => {
   test('desktop, something not green and clients waiting: the band\'s own words and Start missing threads, as in 0.7.72; no You line, no next button, no Ship', LONG, async ($, on) => {
     const w = youWorld(on, { feed: feed() })
     usage(on, { tokens: 10_000, five: 65 })
@@ -186,9 +186,9 @@ const acmeLinked = (over: WorldOptions = {}): WorldOptions => ({
   ...over,
   store: { 'mm.links': { [ACME]: 'local_a' }, ...(over.store ?? {}) },
 })
-/** The You rows' heads as drawn: (0.7.74) plain text, with or without a thread. */
+/** The You rows' heads as drawn: (0.7.77) plain text, with or without a thread. */
 const heads = async (ui: Parameters<typeof buttons>[0]) => (await ui.findAll({})).flatMap(e => (e.type === 'Text' && /^\d+\. /.test(e.text) ? [e.text] : []))
-/** (0.7.74) A You row's Details page, as drawn under it once opened: the Markdown's text, or undefined while closed. */
+/** (0.7.77) A You row's Details page, as drawn under it once opened: the Markdown's text, or undefined while closed. */
 const page = async (ui: Parameters<typeof buttons>[0], projectId: string): Promise<string | undefined> => {
   const box = (await ui.findAll({ type: 'Box' })).find(e => e.key === `mm-you-page:${projectId}`)
   if (!box) return undefined
@@ -212,20 +212,20 @@ describe('0.7.73: the You section replaces Needs you now', () => {
     expect(all).toContain('🟢 on pace · due 4 PM · needs a pin: no thread · due within 24 business hours · your ticket')
     expect(all).toContain('🟢 on pace · due Tue 8 AM · needs a pin: no thread · due within 24 business hours · reply ready for your go')
     expect(all).toContain('🟢 on pace · due Tue 9 AM · needs a pin: no thread · due within 24 business hours · the client wrote')
-    // (0.7.74, Rob 2026-11-25: "Need you: still needs to be collapsible") the heading is its fold again, open at first; no Needs
+    // (0.7.77, Rob 2026-11-25: "Need you: still needs to be collapsible") the heading is its fold again, open at first; no Needs
     // you now heading; Team now stays closed below
     const keys = (await buttons(ui)).map(([k]) => k)
     expect((await buttons(ui)).find(([k]) => k === 'mm-needs-toggle')?.[1]).toBe('Needs you (3)  ▾')
     expect(all.some(l => l.startsWith('Needs you now'))).toBe(false)
     expect((await buttons(ui)).find(([k]) => k === 'mm-teamnow-toggle')?.[1]).toMatch(/▸$/)
-    // ⛔ (0.7.74, Rob 2026-11-25: "I don't think we need the Update and Open Thread buttons, or the Draft button ... in the 'Needs
+    // ⛔ (0.7.77, Rob 2026-11-25: "I don't think we need the Update and Open Thread buttons, or the Draft button ... in the 'Needs
     // You'") Start for a client with no thread, and each row's Details; no Update, Open or Drafts, and no press on a row's words
     expect(keys).toEqual(expect.arrayContaining([`start:${CEDAR}`, `start:${BOLT}`, `mm-you-more:${ACME}`, `mm-you-more:${BOLT}`, `mm-you-more:${CEDAR}`]))
     expect(keys.filter(k => /^(update|open|drafts|mm-you-open):/.test(k))).toEqual([])
     await ui.unmount()
   })
 
-  test('(0.7.74, Rob 2026-11-25: "Need you: still needs to be collapsible") the fold hides the rows, is remembered on this computer, and opens again', LONG, async ($, on) => {
+  test('(0.7.77, Rob 2026-11-25: "Need you: still needs to be collapsible") the fold hides the rows, is remembered on this computer, and opens again', LONG, async ($, on) => {
     const w = youWorld(on, { feed: feed() })
     usage(on, { tokens: 10_000 })
     await mm($, '')
@@ -278,7 +278,7 @@ describe('0.7.73: the You section replaces Needs you now', () => {
     expect(w.prompts).toEqual([])
   })
 
-  test('(0.7.74, Rob 2026-11-25: "I would just click the thread in the left-hand panel") a client with its own thread: its row\'s words are no press, and no Update, Open or Drafts is drawn for it', LONG, async ($, on) => {
+  test('(0.7.77, Rob 2026-11-25: "I would just click the thread in the left-hand panel") a client with its own thread: its row\'s words are no press, and no Update, Open or Drafts is drawn for it', LONG, async ($, on) => {
     const w = youWorld(on, acmeLinked({ feed: feed() }))
     usage(on, { tokens: 10_000 })
     await mm($, '')
@@ -289,7 +289,7 @@ describe('0.7.73: the You section replaces Needs you now', () => {
     await ui.unmount()
   })
 
-  test('(0.7.74, Rob 2026-11-25: "I think we need some more detail") Details under a row opens the client\'s whole part there, on desktop and mobile, and closes on a second press; read-only', LONG, async ($, on) => {
+  test('(0.7.77, Rob 2026-11-25: "I think we need some more detail") Details under a row opens the client\'s whole part there, on desktop and mobile, and closes on a second press; read-only', LONG, async ($, on) => {
     const w = youWorld(on, acmeLinked({ feed: feed() }))
     usage(on, { tokens: 10_000 })
     await mm($, '')
@@ -314,7 +314,7 @@ describe('0.7.73: the You section replaces Needs you now', () => {
     expect(w.fills).toEqual([])
   })
 
-  test('(0.7.74) an opened Details stays open in another pane on this computer, until closed', LONG, async ($, on) => {
+  test('(0.7.77) an opened Details stays open in another pane on this computer, until closed', LONG, async ($, on) => {
     const w = youWorld(on, { feed: feed() })
     usage(on, { tokens: 10_000 })
     await mm($, '')

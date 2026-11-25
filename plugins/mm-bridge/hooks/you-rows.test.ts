@@ -208,7 +208,7 @@ describe('0.7.73 (Rob 2026-11-25: "more specific client task details" than the t
     expect(lines.map(l => l.split(/[: ]/)[0])).toEqual(['Zach', 'Reply', 'Asif'])
   })
 
-  test('(0.7.74) a row whose head already says to send the draft does not say it again: only what came after the package', () => {
+  test('(0.7.77) a row whose head already says to send the draft does not say it again: only what came after the package', () => {
     const open = (newer: number) => item({ client: 'Bolt Staffing', kind: 'reply', open: { id: 'o', state: 'held_by_me', by: '', at: null, unsent: 2, newer } })
     expect(youDetails(open(0), NOW, 'draft')).toEqual([])
     expect(youDetails(open(1), NOW, 'draft')).toEqual(['Reply package: 1 message came after it'])
@@ -221,7 +221,7 @@ describe('0.7.73 (Rob 2026-11-25: "more specific client task details" than the t
   })
 })
 
-describe('0.7.74 (Rob 2026-11-25: "I think we need some more detail"): Details, the client\'s whole part under its row', () => {
+describe('0.7.77 (Rob 2026-11-25: "I think we need some more detail"): Details, the client\'s whole part under its row', () => {
   test('first when we last wrote to the client (or that nothing we sent is in the feed), the package and the hours, then the client\'s part', () => {
     const it = item({
       client: 'Crucial Hire', kind: 'reply', messages: 1, mail: [{ at: '2026-11-24T14:00:00Z', sender: 'Zach Hill <zach@crucial.example>', subject: 'Re: Invite failures', snippet: 'The invites bounce.' }],

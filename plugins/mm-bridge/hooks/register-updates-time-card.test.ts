@@ -93,7 +93,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(records(w).map(r => [r.pid, r.sid, r.ok, r.by, r.client])).toEqual([[ACME, 'local_a', true, SELF, 'Acme Roofing']])
     expect((w.stored['mm.sent'] as Record<string, { sid: string }>)[ACME]?.sid).toBe('local_a')
     expect(w.stored['mm.updating']).toEqual({})
-    // (0.7.74, Rob 2026-11-25: "The way it was before was good for that") the band says so again, as until 0.7.72
+    // (0.7.77, Rob 2026-11-25: "The way it was before was good for that") the band says so again, as until 0.7.72
     expect((await bandLines($)).join(' ')).toContain('Updated Acme Roofing\'s thread.')
     expect(notices(w)).toMatch(new RegExp(`updated Acme Roofing \\(${ACME}\\) sig [0-9a-f]{8} in local_a: something new for the client: drafts ready`))
     // nothing opened, nothing typed, nothing said in the pane
@@ -4287,7 +4287,7 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
     })
 
     test('not ready, each in plain words: no id, another package, another client\'s part', async ($, on) => {
-      // another client's part in this pane: Drafts on a row drawn as the rows under the list are (0.7.74: a You row draws none)
+      // another client's part in this pane: Drafts on a row drawn as the rows under the list are (0.7.77: a You row draws none)
       rowsAsBefore(on)
       const w = world(on, { ...own, feed: feed({ threads: [declared(ACME, 'cli-acme', 30)] }), threads: [thread('local_a', 'Roof quote', 30)], store: { 'mm.threads': PAIRS } })
       expect(await tool($, 'card')).toBe(WHOLE_ID)
@@ -4444,6 +4444,33 @@ describe('0.7.26 the reply-package card in the bridge\'s own pane, on the deskto
       expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn'))).toBe(false)
       expect(await tool($, `card ${PKG}`)).toBe(notReady('the side pane is not showing this package'))
       expect(w.fills).toEqual([])
+      await u.unmount()
+    })
+
+    test('(0.7.75) the pane showing another client: `mm card` puts this thread\'s client back in it first, as `mm view` does, and answers ready', async ($, on) => {
+      // Spotlight Dentistry thread, 2026-11-19 at 1:02 PM ET: answered not ready because nothing had put the client in the pane yet
+      const w = world(on, own)
+      const u = await shown($)
+      await u.press({ key: `drafts:${BOLT}` })
+      const other = (await lines(u)).join('\n')
+      expect(other).not.toContain('Hi! Is the new booking link live yet?')
+      expect((await buttons(u)).some(([k]) => k.startsWith('mm-card-sign-btn'))).toBe(false)
+      const renders = w.renders.length
+      const calls = w.calls.length
+      // ready, in either of its forms: the pane may not have drawn the card again yet within `mm card`'s wait (before 0.7.75: not ready)
+      expect([READY, OFF_SCREEN]).toContain(await tool($, `card ${PKG}`))
+      // this thread's client is in the pane again: the card is drawn there, read from OW and the renderer as `mm view` reads it
+      expect((await lines(u)).join('\n')).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
+      expect(w.renders.length).toBeGreaterThan(renders)
+      // it sends, starts, fills and notes nothing: the only app call is the one that learns this thread's id
+      expect(w.fills).toEqual([])
+      expect(w.prompts).toEqual([])
+      expect(w.minted()).toEqual([])
+      expect(sends(w)).toEqual([])
+      expect(w.calls.slice(calls).filter(c => c.tool !== 'get_session')).toEqual([])
+      // a package that is not this thread's client's is still not ready, and the pane keeps this thread's client
+      expect(await tool($, 'card 99999999-9999-4999-8999-999999999999')).toBe(notReady('the side pane is not showing this package'))
+      expect((await lines(u)).join('\n')).toContain('Hi! Is the new booking link live yet? Do Saturday slots show?')
       await u.unmount()
     })
 
@@ -5811,7 +5838,7 @@ describe('0.7.34: Team now, Needs you now that folds, the pin marks and the no-t
       const ui = await pane($)
       expect(await label(ui, TOGGLE)).toBe('Team now · 1 working  ▾')
       expect((await lines(ui)).some(l => l.startsWith('Asif'))).toBe(true)
-      // (0.7.74, Rob 2026-11-25: "Need you: still needs to be collapsible") folded as the person left it, as until 0.7.72
+      // (0.7.77, Rob 2026-11-25: "Need you: still needs to be collapsible") folded as the person left it, as until 0.7.72
       expect(await label(ui, 'mm-needs-toggle')).toBe('Needs you (3)  ▸')
       await ui.unmount()
     })
@@ -5879,7 +5906,7 @@ describe('0.7.34: Team now, Needs you now that folds, the pin marks and the no-t
   })
 
   describe('Needs you now', () => {
-    test('it folds, and the rows go with it; the groups under it stay ((0.7.74) the You section folds as it did)', async ($, on) => {
+    test('it folds, and the rows go with it; the groups under it stay ((0.7.77) the You section folds as it did)', async ($, on) => {
       const w = world(on, { feed: feed(), threads: [] })
       await tickOnce($, w)
       const ui = await pane($)

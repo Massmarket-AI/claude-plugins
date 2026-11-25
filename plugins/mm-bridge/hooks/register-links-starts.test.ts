@@ -41,7 +41,7 @@ describe('R1: existing threads link themselves', () => {
     expect(w.prompts).toEqual([])
   })
 
-  test('a title that looks like the client is never linked: it is offered on the row ((0.7.74) named under its row in Needs you, with no press there; Update on a row drawn under the list links it: R3)', async ($, on) => {
+  test('a title that looks like the client is never linked: it is offered on the row ((0.7.77) named under its row in Needs you, with no press there; Update on a row drawn under the list links it: R3)', async ($, on) => {
     const w = world(on, { threads: [thread('local_t', 'Bolt Staffing: invoice question', 400)] })
     await mm($, '')
     expect(w.stored['mm.links']).toEqual({})
@@ -49,7 +49,7 @@ describe('R1: existing threads link themselves', () => {
     const ui = await pane($)
     // (0.7.5) the row's second line is the one reason a button does not carry: the thread only looks like the client
     expect(await lines(ui)).toContain('"Bolt Staffing invoice question" looks like this client')
-    // ⛔ (0.7.74, Rob 2026-11-25: no Update, Open or Drafts in Needs you) nothing to press on Bolt's row: still nothing linked
+    // ⛔ (0.7.77, Rob 2026-11-25: no Update, Open or Drafts in Needs you) nothing to press on Bolt's row: still nothing linked
     expect(await buttonsOf(ui, BOLT)).toEqual([])
     expect(w.stored['mm.links']).toEqual({})
     await ui.unmount()
@@ -211,7 +211,7 @@ describe('R3: the buttons on each row', () => {
       ...over,
     })
 
-  test('each row draws ONE action, chosen by its state, then Drafts, on every surface; the clients with no thread come first, marked (0.7.73: the order is by deadline, a row is its head, a line of pace and its detail; (0.7.74) the fold is back, and a row in Needs you draws Start where there is no thread and Details, never Update, Open or Drafts)', async ($, on) => {
+  test('each row draws ONE action, chosen by its state, then Drafts, on every surface; the clients with no thread come first, marked (0.7.73: the order is by deadline, a row is its head, a line of pace and its detail; (0.7.77) the fold is back, and a row in Needs you draws Start where there is no thread and Details, never Update, Open or Drafts)', async ($, on) => {
     twoThreads(on)
     await mm($, '')
     for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
@@ -229,7 +229,7 @@ describe('R3: the buttons on each row', () => {
         '"Bolt Staffing invoice question" looks like this client',
         UPDATED,
       ])
-      // ⛔ (0.7.74, Rob 2026-11-25: "I would just click the thread in the left-hand panel if I needed to get to it") Start for the
+      // ⛔ (0.7.77, Rob 2026-11-25: "I would just click the thread in the left-hand panel if I needed to get to it") Start for the
       // client with no thread; Acme's and Bolt's rows have a thread in the app's list, so no Update, Open or Drafts; each row its Details
       expect(await buttons(ui)).toEqual([
         ['mm-needs-toggle', 'Needs you (3)  ▾'],
@@ -1355,7 +1355,7 @@ describe('R6: a link is not dropped only because its thread is missing from the 
 })
 
 describe('F5: /mm update typed inside the client\'s own thread', () => {
-  test('[N1] it says to press the button ((0.7.74) the thread\'s right-click menu has it), submits nothing now or later, and writes no stamp', async ($, on) => {
+  test('[N1] it says to press the button ((0.7.77) the thread\'s right-click menu has it), submits nothing now or later, and writes no stamp', async ($, on) => {
     rowsAsBefore(on)
     const w = world(on, { feed: feed({ threads: [declared(ACME, SELF_CLI, 1)] }), store: { 'mm.threads': { [SELF_CLI]: { app: SELF, at: NOW } } } })
     expect(await mm($, 'update acme roofing')).toBe('You are already in Acme Roofing\'s thread. Right-click in it and choose Update this thread to pick it up here.')

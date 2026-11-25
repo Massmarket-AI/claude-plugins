@@ -223,7 +223,7 @@ export type MmFolds = {
   more?: boolean
   /** (0.7.5) The tasks of the time list opened to their threads, by key (`MmTrackLine.toggle`). */
   tasks?: string[]
-  /** (0.7.74) The You rows whose Details are open in this thread, by project: at most 20. */
+  /** (0.7.77) The You rows whose Details are open in this thread, by project: at most 20. */
   you?: string[]
   /** (0.7.53) The end-of-day list of browser stretches with no client yet, closed until opened. */
   confirm?: boolean
@@ -524,7 +524,7 @@ export type MmYouRow = {
   paceWords: string
   /** (0.7.73) The specifics under the row (you.ts `youDetails`): the client's newest message, the package, an ask, tickets, hours. Absent on a row an older build stored. */
   details?: string[]
-  /** (0.7.74) What the row's Details opens, as Markdown (you.ts `youPage`). Absent on a row an older build stored. */
+  /** (0.7.77) What the row's Details opens, as Markdown (you.ts `youPage`). Absent on a row an older build stored. */
   page?: string
   pin: 'pinned' | 'needs_pin' | 'later'
   pinWhy?: string

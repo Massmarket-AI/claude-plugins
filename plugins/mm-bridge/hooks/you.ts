@@ -238,7 +238,7 @@ export function youDetails(it: QueueItem, now: number, from: YouSource, max = YO
   }
   const o = it.open ?? null
   if (o && o.noReply !== true) {
-    // (0.7.74) a head that already says "send your draft" is not said again: only what it does not say
+    // (0.7.77) a head that already says "send your draft" is not said again: only what it does not say
     const said = from === 'draft'
     const parts = [
       said ? '' : o.state === 'held_by_other' && o.by ? `${cleanText(o.by, 40)} holds it` : o.state === 'held_by_me' ? 'you hold it' : o.state === 'stale' ? 'out of date' : '',
@@ -271,7 +271,7 @@ export function youDetails(it: QueueItem, now: number, from: YouSource, max = YO
 }
 
 /**
- * (0.7.74, Rob 2026-11-25: "it doesn't seem to be giving that much more new info under each item ... I think we need some more detail")
+ * (0.7.77, Rob 2026-11-25: "it doesn't seem to be giving that much more new info under each item ... I think we need some more detail")
  * What a row's Details opens: when we last wrote to the client, the reply package, the hours, then the client's whole part as its own
  * thread shows it (`clientSections`: every message waiting with its words, the tasks, the asks, the follow-ups), as Markdown.
  */
