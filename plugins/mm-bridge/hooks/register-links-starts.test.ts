@@ -3505,9 +3505,12 @@ describe('(r) for the founder: a package that waits for his OK', () => {
     // an ask from anyone else is not Builder B asking: still Builder B's
     w.setFeed({ member: FOUNDER, role: 'founder', drafts: [packageFor(ACME, 'Acme Roofing — Pat', { flagged_for_rob: true, project_owner_email: TEAMMATE_B })], mail: [], tickets: {}, asks: [askOf('builder-c@example.com')] })
     const other = await mm($, '')
-    expect(other).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
+    // ⛔ (0.7.81, Rob 2026-11-25) Needs you is what should be pinned: Builder C's ask is due in 47 hours, so it is on the Coming up
+    // line, not under Needs you (until 0.7.81: '1 client need you; 0 threads pinned. ...')
+    expect(other).toBe('Nothing needs you right now.')
     const again = await pane($)
     expect((await lines(again)).some(l => /needs your OK|· your OK ·/.test(l))).toBe(false)
+    expect((await lines(again)).some(l => l.startsWith('Coming up, not pinned yet: Acme Roofing · due '))).toBe(true)
     // (0.7.27) on the 9 AM image, not on his page
     expect((await buttons(again)).some(b => b[0] === 'mm-fold:team')).toBe(false)
     await again.unmount()
@@ -4611,7 +4614,7 @@ describe('B3: a thread is linked by itself only to the one client its sessions d
 // ======================================================================== 0.5.2 (Rob, 2026-10-13 evening)
 
 describe('R1: a pin means "needs you": pinned while something must be acted on within 24 business hours', () => {
-  test('a reply due in 30 business hours is on the list, its thread named and not pinned, though the client wrote today; it pins itself once within 24', async ($, on) => {
+  test('a reply due in 30 business hours is on the Coming up line, its thread named and not pinned, though the client wrote today; it pins itself once within 24', async ($, on) => {
     const due = new Date(NOW + 30 * HOUR).toISOString() // Tuesday 5 PM: 13 business hours today, 17 tomorrow
     const w = world(on, {
       feed: feed({ drafts: [], tickets: {}, mail: [mailFor(BOLT, 'Bolt Staffing (Sam)', 1, { reply_due_at: due })], threads: [declared(BOLT, 'cli-bolt', 20)] }),
@@ -4620,7 +4623,11 @@ describe('R1: a pin means "needs you": pinned while something must be acted on w
     })
     // (0.7.12, Rob 10-30: "It usually says 'due in XYZ hours'") a pin needs a clock: R1's 24 business hours decide for every
     // client again. 0.7.11 pinned an ACTIVE client's thread at once, whatever its time; this is 0.7.10's test again.
-    expect(await mm($, '')).toBe('1 client need you; 0 threads pinned. The list is in the side pane.')
+    // ⛔ (0.7.81, Rob 2026-11-25) and Needs you counts only what should be pinned (until 0.7.81: '1 client need you; 0 threads pinned. ...')
+    expect(await mm($, '')).toBe('Nothing needs you right now.')
+    const ui = await pane($)
+    expect((await lines(ui)).some(l => l.startsWith('Coming up, not pinned yet: Bolt Staffing · due '))).toBe(true)
+    await ui.unmount()
     expect(w.threads.get('local_b')).toMatchObject({ title: '🟡 1d left · Bolt Staffing · reply', pinned: false })
     // six hours on, it is 24 business hours away: pinned
     await w.clock.advance(6 * HOUR)
@@ -4655,9 +4662,11 @@ describe('R4, R3 and (0.5.4) C1-C3: a chip minted by itself, ONE per client, in 
     await mm($, '')
     expect(w.acted()).toEqual([])
     const ui = await pane($)
-    // (0.7.73) both are rows, Cedar first by its deadline; the head names the ticket, and `needs a pin: no thread` is on the line of pace
+    // (0.7.73) the head names the ticket, and `needs a pin: no thread` is on the line of pace. ⛔ (0.7.81, Rob 2026-11-25) Needs you
+    // is what should be pinned: Cedar alone; Dune, further out than the pin's window, is on the Coming up line (until 0.7.81 a row)
     const rows = await lines(ui)
-    expect(rows.filter(l => /^\d+\. /.test(l))).toEqual(['1. Cedar Dental: deliver "Do it"', '2. Dune Freight: deliver "Do it"'])
+    expect(rows.filter(l => /^\d+\. /.test(l))).toEqual(['1. Cedar Dental: deliver "Do it"'])
+    expect(rows.some(l => l.startsWith('Coming up, not pinned yet: Dune Freight · due '))).toBe(true)
     expect(await meta(ui, 'Cedar Dental: deliver "Do it"')).toBe('🟢 on pace · due 4 PM · needs a pin: no thread · due within 24 business hours · your ticket')
     await ui.unmount()
     // the timer does, for Cedar alone (Dune is further out than the pin's window)
@@ -5226,9 +5235,11 @@ describe('R17: a client with nothing due', () => {
     await mm($, '')
     // (0.7.5) its one line ends ` · no thread`, never red and with no clock: nothing is due; (0.7.12) and it says so
     // (until 0.7.12: '1. 🟡 Cedar Dental · reply · no thread')
-    // (0.7.73) its head, and its line of pace: no due date, and no pin needed yet
-    expect(await lines(ui)).toContain('1. Cedar Dental: answer Client about "Question"')
-    expect(await meta(ui, 'Cedar Dental: answer Client about "Question"')).toBe('🟢 on pace · no due date · no pin needed yet · the client wrote')
+    // (0.7.73) its head, and its line of pace: no due date, and no pin needed yet. ⛔ (0.7.81, Rob 2026-11-25) Needs you lists only
+    // what should be pinned, so it is on the Coming up line instead, with no due date
+    expect(await lines(ui)).not.toContain('1. Cedar Dental: answer Client about "Question"')
+    expect(await lines(ui)).toContain('Nothing needs you right now.')
+    expect(await lines(ui)).toContain('Coming up, not pinned yet: Cedar Dental · no due date')
     await ui.unmount()
     expect(w.acted()).toEqual([])
   })
