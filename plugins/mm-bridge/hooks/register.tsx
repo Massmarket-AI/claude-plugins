@@ -243,7 +243,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.73'
+export const VERSION = '0.7.74'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -1470,13 +1470,23 @@ function applyListChanges(fresh: string[], before: readonly string[], after: rea
 
 /** 1 to 3 seconds, spread by the thread's own id: a dozen threads that start together do not check again together. */
 function settleMs(id: string): number {
-  // FNV-1a, then mixed, so ids that differ in one character land far apart
+  return 1_000 + (idHash(id) % 2_001)
+}
+
+/** An id as 32 bits: FNV-1a, then mixed, so ids that differ in one character land far apart. */
+function idHash(id: string): number {
   let h = 0x811c9dc5
   for (const c of id) h = Math.imul(h ^ c.charCodeAt(0), 0x01000193) >>> 0
   h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0
-  h = (h ^ (h >>> 16)) >>> 0
-  return 1_000 + (h % 2_001)
+  return (h ^ (h >>> 16)) >>> 0
 }
+
+/**
+ * (0.7.74) A thread's own fraction of a millisecond, 1 to 4095 parts of 4096 by its id, added to a time it writes as a claim
+ * (`capNotice`): read back, the time says whose claim it is, with the store's value still a time. Exact for any time before
+ * 2039 (below 2^41 ms a double holds 2^-12 ms). Two threads that share a fraction both act, as before 0.7.74.
+ */
+const claimMark = (id: string): number => (1 + (idHash(id) % 4_095)) / 4_096
 
 /**
  * Once, 1 to 3 seconds after a write the person's own act made (a marker's link, a session's own pair), it is
@@ -6197,15 +6207,25 @@ const hookLogged = new Set<string>()
  */
 async function capNotice($: EngineInterface, pid: string, line: string): Promise<void> {
   const now = await $.clock.now()
+  const me = (await knownSelf($)) || (await instanceId($))
+  const stamp = now + claimMark(me)
   let mine = false
   await patchStore<Record<string, number>>($, 'mm.capLogged', {}, fresh => {
     const at = Number(fresh[pid])
     if (Number.isFinite(at) && now - at < CAP_LOG_EVERY_MS) return false
     for (const [k, v] of Object.entries(fresh)) if (!(now - Number(v) < CAP_LOG_EVERY_MS)) delete fresh[k]
-    fresh[pid] = now
+    fresh[pid] = stamp
     mine = true
   }).catch(() => {})
-  if (mine) await logAuto($, line)
+  // ⛔ (0.7.74) the claim, checked after the write. Threads that sync together each read no line in the hour and each write
+  // their own time (the store has no compare-and-set), and each then wrote the line: three lines for one client in the
+  // fifteen-thread test once 0.7.74's `settleSeen` moved its schedule. 1 to 3 seconds on, once that moment's writes have
+  // landed, the one thread whose time is on record writes it. A claim another thread's stale write took away writes no line
+  // this time: the next capped sync claims again.
+  if (!mine) return
+  settleLater($, `${me}#cap#${pid}`, async () => {
+    if ((await storeGet<Record<string, number>>($, 'mm.capLogged', {}))[pid] === stamp) await logAuto($, line)
+  })
 }
 
 /** (0.5.11) The updates on record (every session's). */
@@ -7951,10 +7971,37 @@ async function noteSeen($: EngineInterface, human: boolean): Promise<void> {
   // (the tick's word is needed only every couple of minutes: ALIVE_MS is five)
   if (!human && mine && now - mine.tick < ALIVE_MS / 2) return
   const home = await mayHoldCard($)
+  const written: { entry?: Seen[string] } = {}
   await patchStore<Seen>($, 'mm.seen', {}, seen => {
     const was = seen[me]
-    seen[me] = { tick: now, ...(human ? { human: now } : was?.human ? { human: was.human } : {}), ...(home ? {} : { home: false as const }) }
+    seen[me] = written.entry = { tick: now, ...(human ? { human: now } : was?.human ? { human: was.human } : {}), ...(home ? {} : { home: false as const }) }
     for (const [sid, s] of Object.entries(seen)) if (!s || !(now - Number(s.tick) <= DAY_MS)) delete seen[sid]
+  })
+  if (written.entry) settleSeen($, me, { ...written.entry })
+}
+
+/**
+ * (0.7.74, the Start-card race) This thread's own entry in `mm.seen`, looked at again 1 to 3 seconds after it wrote it, and
+ * written again when another thread's write took it away or put an older one back; five rounds at most, while it had to.
+ * Every thread writes the one map at its tick (`patchStore`: the store has no compare-and-set), and threads that started
+ * together tick together, so the entry of the thread that holds the no-thread cards could be lost twice running and read as
+ * stopped once its last tick on record was ALIVE_MS old (`noThreadHolder`). The next thread up then put up a card for each
+ * client past the holder's AUTO_CHIPS_MAX, with no claim in its way (0.7.72 claims a client only once a thread puts its card
+ * up). A write is lost only to another write that met it within milliseconds, so this look sees what it came to. Its own entry
+ * only, as `noteSeen` writes it; a newer one (a later tick, a later prompt of the person's) is left as it is.
+ */
+function settleSeen($: EngineInterface, me: string, wrote: Seen[string], round = 0): void {
+  settleLater($, round ? `${me}#seen#${round}` : `${me}#seen`, async () => {
+    const now = await $.clock.now()
+    let again = false
+    await patchStore<Seen>($, 'mm.seen', {}, seen => {
+      const has = seen[me]
+      if (has && Number(has.tick) >= wrote.tick && Number(has.human ?? 0) >= Number(wrote.human ?? 0)) return false
+      seen[me] = { ...wrote, ...(has && Number(has.tick) > wrote.tick ? { tick: Number(has.tick) } : {}), ...(has && Number(has.human ?? 0) > Number(wrote.human ?? 0) ? { human: Number(has.human) } : {}) }
+      for (const [sid, s] of Object.entries(seen)) if (!s || !(now - Number(s.tick) <= DAY_MS)) delete seen[sid]
+      again = true
+    })
+    if (again && round < 4) settleSeen($, me, wrote, round + 1)
   })
 }
 

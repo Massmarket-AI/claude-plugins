@@ -334,6 +334,15 @@ describe('B1: a dozen threads started at once against one store, with a sync run
   })
 })
 
+/**
+ * (0.7.74) The seeds both chip tests run over. The first twelve are the ones they ran by 0.7.72; the rest are seeds at which a
+ * sweep of 1 to 100 failed at 0.7.70 or 0.7.72 (a withdrawn card's record put back by another thread's write, two threads that
+ * each missed the other's `mm.seen` entry both putting a card up, a holder read as stopped). The module is one for the whole
+ * file, so a seed's schedule here also depends on the tests before it: a wider net, not those exact runs. Every seed from 1 to
+ * 300 passes both tests at 0.7.74 (and the eight-round test below, 1 to 100). Add more freely.
+ */
+const CHIP_SEEDS = [1, 7, 42, 99, 2026, 1013, 5, 11, 6, 29, 31, 35, 12, 14, 20, 28, 34, 46, 57, 63, 66, 67, 73, 78, 88, 89, 93]
+
 // Fix round 1, F4 (review of e832775b): a dozen threads that tick at once write the one `mm.chips` record over each
 // other. (0.5.4, C3: Rob, 10-14, "yes chips") A client with no thread has ONE chip, in one thread: threads that
 // start together and each mint one come down to the copies of the one thread that holds them, on the next tick,
@@ -344,7 +353,7 @@ describe('F4: chip records when a dozen threads tick at once', () => {
     await w.advance(4_000)
     await w.advance(3_100)
   }
-  for (const seed of [1, 7, 42, 99, 2026, 1013, 5, 11]) {
+  for (const seed of CHIP_SEEDS) {
     test(`twelve threads tick at once: the clients with no thread end with one chip each, five in all, in one thread; the next tick mints none (seed ${seed})`, async () => {
       // (thread ids of this test's own: the bridge's module is one for the whole file, as each app thread's is one per thread)
       const ids = Array.from({ length: N }, (_, i) => `local_f4_${seed}_${i + 1}`)
@@ -387,7 +396,7 @@ describe('0.5.7: a dozen threads that tick at once never start one client\'s thr
   // (0.7.72) 6, 29, 31 and 35 each ended with two cards for one client in 0.7.69: two threads that read different copies of
   // `mm.seen` each put one up, and a withdrawn card's record that another thread's write brought back read as a live card. Every
   // seed from 1 to 100 passes since the claim (`claimCards`).
-  for (const seed of [1, 7, 42, 99, 2026, 1013, 5, 11, 6, 29, 31, 35]) {
+  for (const seed of CHIP_SEEDS) {
     test(`twelve threads, no poller they know of: no thread is started, and each client ends with one card (seed ${seed})`, async () => {
       const ids = Array.from({ length: N }, (_, i) => `local_as_${seed}_${i + 1}`)
       const w = world({ seed, extra: ids, startOnly: true })
@@ -403,6 +412,12 @@ describe('0.5.7: a dozen threads that tick at once never start one client\'s thr
       const live = ((w.stored('mm.chips') ?? []) as Array<{ taskId: string; threadId: string; projectId: string; superseded?: boolean }>).filter(r => ids.includes(r.threadId) && !r.superseded)
       expect(live.length).toBeGreaterThan(0)
       expect(new Set(live.map(r => r.projectId)).size).toBe(live.length)
+      // (0.7.74) one card a client in the app too (put up by the twelve and not withdrawn), and the record says exactly those
+      const shown = w.cards
+        .map((prompt, i) => ({ taskId: `task_${String(i + 1).padStart(8, '0')}`, threadId: w.spawned[i] ?? '', projectId: /\[mm-link ([0-9a-f-]{36})\]/.exec(prompt)?.[1] ?? '' }))
+        .filter(c => ids.includes(c.threadId) && !w.dismissed.includes(c.taskId))
+      expect(new Set(shown.map(c => c.projectId)).size).toBe(shown.length)
+      expect(live.map(r => r.taskId).sort()).toEqual(shown.map(c => c.taskId).sort())
       // and the tick after puts up nothing
       const cards = w.cards.length
       await tickAll(w, threads)
@@ -416,8 +431,12 @@ describe('0.5.7: a dozen threads that tick at once never start one client\'s thr
   // round settles. In 0.7.69 every thread that ticked first put one up for the same clients, and eight rounds still ended with
   // two (28, 34). Seeds 1 to 100 pass this.
   const LONG = { timeoutMs: 30_000 }
-  for (const seed of [6, 28, 29, 31, 34, 35]) {
-    test(`(0.7.72) eight rounds of twelve threads: never two cards up for one client, and the record says the same (seed ${seed})`, LONG, async () => {
+  // (0.7.74) and the tick after the eighth round puts up nothing: by then the thread that holds the cards has ticked past ALIVE_MS
+  // since the first round, and at 0.7.72 its `mm.seen` entry could be lost twice running to the others' writes, so the next thread
+  // up read it as stopped and put up a card for each client past the holder's AUTO_CHIPS_MAX (`settleSeen`). In this file 0.7.72
+  // fails that at 17, 44 and 94; 63, 66 and 93 failed it in sweeps of their own.
+  for (const seed of [6, 28, 29, 31, 34, 35, 17, 44, 63, 66, 93, 94]) {
+    test(`(0.7.72) eight rounds of twelve threads: never two cards up for one client, and the record says the same; (0.7.74) the tick after puts up nothing (seed ${seed})`, LONG, async () => {
       const ids = Array.from({ length: N }, (_, i) => `local_cl_${seed}_${i + 1}`)
       const w = world({ seed, extra: ids, startOnly: true })
       await before(w)
@@ -434,6 +453,10 @@ describe('0.5.7: a dozen threads that tick at once never start one client\'s thr
         expect({ round, records: live.map(r => r.taskId).sort() }).toEqual({ round, records: up().map(c => c.taskId).sort() })
       }
       expect(w.startedNow).toEqual([])
+      const cards = w.cards.length
+      await tickAll(w, threads)
+      await w.advance(60_000)
+      expect(w.cards.length).toBe(cards)
     })
   }
 })
