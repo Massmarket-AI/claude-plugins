@@ -401,6 +401,8 @@ export function world(on: On, opts: WorldOptions = {}) {
   // A pretend disk: the tracker token, and whatever record files a test puts under the app's data folder.
   const files = opts.files ?? {}
   const reads: string[] = []
+  /** (0.7.78) Every path the bridge stat'ed. */
+  const stats: string[] = []
   const hookReads: string[] = []
   const lists: string[] = []
   const written: Array<{ path: string; text: string }> = []
@@ -439,6 +441,7 @@ export function world(on: On, opts: WorldOptions = {}) {
   // (0.7.14) a stat of the pretend disk: a file's own size when the test gives one, else its text's length
   on('fs.stat', (_$, e) => {
     const path = asGiven(e.path)
+    stats.push(path)
     const file = files[path]
     return file ? { value: { kind: 'file' as const, size: file.size ?? file.text.length, mtimeMs: file.mtimeMs, isLink: false } } : { deny: `ENOENT: no such file or directory, stat '${path}'` }
   })
@@ -566,7 +569,7 @@ export function world(on: On, opts: WorldOptions = {}) {
   /** The chips this session asked the app for. */
   const minted = () => calls.filter(c => c.tool === 'spawn_task')
   return {
-    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, hookReads, lists, written, appended, notices, ran, renders, shell, box, fills, resolves, statuses, closes, scopePosts, pinPosts, browserPosts, gitRuns,
+    clock, stored, threads, calls, prompts, opened, toasts, fetched, registered, acted, minted, reads, stats, hookReads, lists, written, appended, notices, ran, renders, shell, box, fills, resolves, statuses, closes, scopePosts, pinPosts, browserPosts, gitRuns,
     /** The app calls that change a thread: a rename, a pin, a message, a chip. (Reading this session's own usage, and withdrawing a chip, change none.) */
     writes: () => calls.filter(c => !['get_session', 'list_sessions', 'get_usage', 'dismiss_task'].includes(c.tool)).map(c => [c.tool, c.args.session_id ?? '', c.args.title ?? c.args.pinned ?? ''].join(' | ')),
     /** The chips this session asked the app to withdraw, by their ids. */

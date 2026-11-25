@@ -19,7 +19,7 @@ import {
   LABEL, THREAD_ID, autoLinkFate, autoLinkFor, bandWords, buttonLabel, claimText, clientThreads, declaredOther, foldGroups, hasWaiting, isStillOpenRow, kickoffText, onlyClients,
   newerThreadFor, openCommand, ownerOf, platformOf, recommend, rowButtons, rowDetail, rowFor, rowGroups, sharedThreads, signatureOf, secondThreadSentence, startKickoff, threadLink, titleLooksLike, titleSuggestion,
   REFRESH_FAILED, asksForPrep, autoUpdatable, autoUpdateDue, autoUpdateTarget, bandText, chipTitle, ownPackage, readyPackage, seenNow, selfUpdateAt, selfUpdateText, updatePace, waitingText,
-  FRESH_THREAD_BYTES, draftsComing, freshParagraph, prepDue, replacedBy,
+  FRESH_SAVING, draftsComing, freshParagraph, freshReading, prepDue, replacedBy,
   buildHeading, buildMore, buildOf, buildShown,
   teamCount, teamHeading, teamOf, teamPane, teamPerson,
   START_ALL_MAX, startAllKickoff, START_MISSING, notStartedText, packageReady, awaitingPackage, readyPackages, packageArrived, rowPinWords, rowPinsOf, startMissingLabel, AWAY_REASON, ownThreads, START_ALL_WORDS, startWords, startFillSaid, kickoffsAnswer,
@@ -30,7 +30,7 @@ import {
   ANSWER_CLEARED, ANSWER_CLIENTS_ONLY, ANSWER_TOOL_TEXT, answerArgs, answerNoted, declaredOf,
   RUN_DONE_KEEP_MS, RUN_WAIT_NO_THREAD, RUN_WAIT_TOOL_TEXT, runWaitNotedUnlinked, baselineOf, newSince, reportedAt, runMissedTitle, runState, runWaitArgs, runWaitNoted, runWaitSuffix, runWaitWhy, runWaitsOf,
 } from './threads'
-import type { RunState, RunWait } from './threads'
+import type { CacheLife, CostSeen, RunState, RunWait } from './threads'
 import type { RowPin, AppThread, AwayClient, Declared, Fold, Kickoff, LookupSeen, Pairs, PinReport, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
 import {
   INTERNAL_NAME, INTERNAL_NOTE, NUDGE_AFTER, NUDGE_INTERNAL, NUDGE_NONE, NUDGE_TEXT, SKILL_KEY, afterPersonClose, clientName, displayName, kindOf, mergeCurrent, mergeTime, opensBySelf,
@@ -244,7 +244,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.77'
+export const VERSION = '0.7.78'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -6928,12 +6928,14 @@ async function autoUpdate($: EngineInterface, it: QueueItem, sid: string, signat
 
 /**
  * (0.7.14, Rob 2026-10-30: "if a new thread is recommended, the chip should show up in the old thread, and it should be
- * pinned") What an update sent by itself into a client's thread carries last when that thread is long: its transcript
- * on this computer (`transcriptPath`, from the folder the app says it runs in and the Claude Code session this computer
- * paired with it, `mm.threads`) is FRESH_THREAD_BYTES or more, by `$.fs.stat`: never read. The paragraph asks the thread
- * to put up a card for a fresh one (`freshParagraph`); the card waits in the old thread for the person's click, and the
- * thread it starts takes the client's link, and so its pin. '' for a shorter thread, or one whose transcript is not found.
- * ⛔ Nothing is started here or by the bridge: the person clicks the card or not (R5).
+ * pinned") What an update sent by itself into a client's thread carries last when a fresh thread would save on it.
+ * (0.7.78, Rob 2026-11-25: the chip follows the thread's cost to keep going, never so as to abandon a hard task) That is
+ * when a fresh thread would save FRESH_SAVING or more of the next calls (`freshReading`, from the note the thread keeps of
+ * itself, `mm.cost`, found by the Claude Code session this computer paired with it, `mm.threads`): one that has sat past
+ * its cache's hour from 250K tokens, one being worked on in practice never. No transcript is read or even stat'ed any more.
+ * The paragraph asks the thread to put up a card for a fresh one (`freshParagraph`); the card waits in the old thread for
+ * the person's click, and the thread it starts takes the client's link, and so its pin. '' below the line, or for a
+ * thread with no note yet. ⛔ Nothing is started here or by the bridge: the person clicks the card or not (R5).
  */
 async function freshNote($: EngineInterface, sid: string, found: AppThread, it: QueueItem): Promise<string> {
   try {
@@ -6941,14 +6943,39 @@ async function freshNote($: EngineInterface, sid: string, found: AppThread, it: 
     const cli = Object.entries(pairs)
       .filter(([, p]) => p && p.app === sid)
       .sort((a, b) => Number(b[1].at) - Number(a[1].at))[0]?.[0]
-    const path = transcriptPath(await home($), found.cwd, cli)
-    if (!path) return ''
-    const { size } = await $.fs.stat(path)
-    return size >= FRESH_THREAD_BYTES ? freshParagraph(cleanName(it.projectName) || cleanName(it.client), size) : ''
+    if (!cli) return ''
+    const reading = freshReading((await storeGet<CostSeen>($, 'mm.cost', {}))[cli], found.lastActivityAt, await $.clock.now())
+    return reading && reading.saving >= FRESH_SAVING ? freshParagraph(cleanName(it.projectName) || cleanName(it.client), reading) : ''
   } catch {
-    // no transcript where it should be: the update goes without it
+    // no note to read: the update goes without it
     return ''
   }
+}
+
+/**
+ * (0.7.78) This thread's note of its own model activity, for another thread's card for a fresh one (`freshNote`): at the
+ * start of each of its turns (the turn's calls keep its cache warm) and at the end (the context its last call re-read,
+ * and the cache life its writes named). Kept for the newest COST_KEEP threads.
+ */
+const COST_KEEP = 300
+async function noteCost($: EngineInterface, usage?: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number }): Promise<void> {
+  const cli = await instanceId($)
+  if (!cli) return
+  const now = await $.clock.now()
+  let tokens: number | undefined
+  try {
+    tokens = (await $.session.usage()).context.tokens
+  } catch {
+    tokens = undefined
+  }
+  await patchStore<CostSeen>($, 'mm.cost', {}, all => {
+    const was = all[cli]
+    const life: CacheLife = usage?.ephemeral_1h_input_tokens ? '1h' : usage?.ephemeral_5m_input_tokens ? '5m' : was?.life === '5m' ? '5m' : '1h'
+    const t = tokens ?? (typeof was?.tokens === 'number' ? was.tokens : undefined)
+    delete all[cli]
+    all[cli] = t ? { at: now, life, tokens: t } : { at: now, life }
+    capped(all, COST_KEEP)
+  })
 }
 
 // ---------------------------------------------------------------- (0.7.44) client threads are top-level threads
@@ -11735,6 +11762,8 @@ export const register: Register = on => {
     // the main conversation's turns only: a subagent's turn says nothing of this thread's work
     if ((e as { agentId?: unknown }).agentId) return done
     noteTurnEnded()
+    // (0.7.78) what this thread now re-reads, for the card for a fresh one (`noteCost`)
+    void noteCost($, (e as { usage?: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number } }).usage).catch(() => {})
     // (0.7.36) the thread has stopped, unless a background sub-agent is at work: what this turn got `card ready` for, or printed the page of, is checked now, and the signature box opens
     await turnEnded($, e.reason === 'answer').catch(() => {})
     // (0.7.48) a card this turn got `card ready` for is owed to the screen: under the thread's line, or the thread prints the page (`owe`)
@@ -11809,6 +11838,8 @@ export const register: Register = on => {
       if (!(e as { agentId?: unknown }).agentId) {
         await turnBegan($)
         await noteTurnBegan($)
+        // (0.7.78) the thread is working: its cache is warm from now (`noteCost`)
+        void noteCost($).catch(() => {})
       }
       const id = await instanceId($)
       const paused = mintPause.get(id)
