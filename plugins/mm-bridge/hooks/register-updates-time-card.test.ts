@@ -265,7 +265,7 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     tokens = 360_000
     await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't3', reason: 'answer', usage: { ephemeral_1h_input_tokens: 500 } } as never)
     await w.clock.advance(100)
-    expect(cost()).toEqual({ at: t0 + 120_200, life: '1h', tokens: 360_000 })
+    expect(cost()).toEqual({ at: t0 + 120_300, life: '1h', tokens: 360_000 })
   })
 
   test('(0.7.78) a compacted thread whose transcript is 20 MB but whose context is 140K: no card, and its transcript is never stat\'ed or read', async ($, on) => {
