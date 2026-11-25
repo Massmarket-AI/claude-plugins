@@ -627,9 +627,23 @@ export const mm = async ($: Engine, args: string): Promise<string> => String((aw
 export const pane = ($: Engine) => $.ui.mount({ plugin: 'mm-bridge', surface: 'desktop', component: 'Pane', requestId: 'mm-queue', props: PANE })
 export type Drawing = { findAll: (query: { type?: string; key?: string }) => Promise<FoundElement[]> }
 /** Every text the pane draws, top to bottom. */
-export const lines = async (ui: Drawing): Promise<string[]> =>
+export const lines = async (ui: Drawing): Promise<string[]> => {
+  const all = await ui.findAll({})
+  // (0.7.73) a You row's detail lines have tests of their own (`details`): each drawn in the row's `mm-you-details:` Box is left out once
+  const skip = new Map<string, number>()
+  for (const e of all) if (e.type === 'Box' && String(e.key ?? '').startsWith('mm-you-details:')) for (const d of detailTexts(e)) skip.set(d, (skip.get(d) ?? 0) + 1)
+  const left = (text: string) => {
+    const n = skip.get(text) ?? 0
+    if (n > 0) skip.set(text, n - 1)
+    return n === 0
+  }
   // (0.7.34) a row's pin mark has tests of its own; the Needs you now heading is a button now, and reads as the heading it is
-  (await ui.findAll({})).flatMap(e => (e.type === 'Text' && !PIN_MARKS.has(e.text) ? [e.text] : e.key === 'mm-needs-toggle' ? [e.text.replace(/\s+[▾▸]$/, '')] : []))
+  // (0.7.73) a You row's head is the press that opens its thread when it has one, and reads as the line it is
+  return all.flatMap(e => (e.type === 'Text' && !PIN_MARKS.has(e.text) && left(e.text) ? [e.text] : e.key === 'mm-needs-toggle' ? [e.text.replace(/\s+[▾▸]$/, '')] : e.type === 'Button' && String(e.key).startsWith('mm-you-open:') ? [String(e.props.label)] : []))
+}
+/** (0.7.73) The texts of a You row's detail Box, as drawn (indented two spaces). */
+const detailTexts = (box: FoundElement): string[] =>
+  box.children.flatMap(c => (c && typeof c === 'object' && (c as { type?: string }).type === 'Text' ? [((c as { children?: unknown[] }).children ?? []).filter((s): s is string => typeof s === 'string').join('')] : []))
 export const PIN_MARKS = new Set(['●', '○'])
 export const buttons = async (ui: Drawing): Promise<Array<[string, string]>> => (await ui.findAll({ type: 'Button' })).map(b => [String(b.key), String(b.props.label)])
 
@@ -655,16 +669,21 @@ export const CEDAR_KICKOFF = `[mm-link ${CEDAR}] Cedar Dental (OW project ${CEDA
  * (0.5.2, R4) A client on the list with no thread at all, due within the pin's window: its row's name. (0.7.5, the panel
  * redesign) Its one line, ending ` · no thread`, and red while it pins now.
  */
-export const CEDAR_FRESH = '🔴 Cedar Dental · task · 5h left · no thread'
-export const BOLT_FRESH = '🔴 Bolt Staffing · reply · 22h left · 2 new · no thread'
-export const ACME_FRESH = '🔴 Acme Roofing · reply ready · 21h left · no thread'
+// (0.7.73) the You row's head is the same with or without a thread: its next line says `needs a pin: no thread` (`YOU_NO_THREAD`)
+export const CEDAR_FRESH = 'Cedar Dental: deliver "Send the intake form"'
+export const BOLT_FRESH = 'Bolt Staffing: answer Client about "Question" (+1 more)'
+export const ACME_FRESH = "Acme Roofing: approve Acme Roofing's reply package"
 /**
  * (0.7.5, the panel redesign) A client's row in the pane: ONE line, the chip, the client, what is needed, the time left
- * (the thread's own name, ACME_TITLE and the others, is unchanged).
+ * (the thread's own name, ACME_TITLE and the others, is unchanged). (0.7.73) The You row's head: the client and what is
+ * needed from the person, then (`YOU_META`) one line of pace, by when, the pin and why, and then the row's own detail.
  */
-export const ACME_ROW = '🟡 Acme Roofing · reply ready · 21h left'
-export const BOLT_ROW = '🟡 Bolt Staffing · reply · 22h left · 2 new'
-export const CEDAR_ROW = '🔴 Cedar Dental · task · 5h left'
+export const ACME_ROW = "Acme Roofing: approve Acme Roofing's reply package"
+export const BOLT_ROW = 'Bolt Staffing: answer Client about "Question" (+1 more)'
+export const CEDAR_ROW = 'Cedar Dental: deliver "Send the intake form"'
+/** (0.7.73) A You row's second line: its pace dot and words first. */
+export const YOU_META = /^[🟢🟡🔴] /u
+export const YOU_NO_THREAD = 'needs a pin: no thread'
 /** (0.7.5) The pane's one clock, at NOW in the person's own time (11:00 AM in New York; CI runs in UTC). */
 export const UPDATED = `Updated ${localClock(NOW)}`
 /** (0.7.9) The second line of an Update row whose linked thread is due to be updated by itself, as a sync at NOW words it. */
@@ -784,12 +803,26 @@ export const personClose = (on: On, pid: string) => {
   return { close: () => { closing = true } }
 }
 /** A client's buttons on the pane, by their labels. */
-export const buttonsOf = async (ui: Drawing, projectId: string): Promise<string[]> => (await buttons(ui)).filter(b => b[0].endsWith(projectId)).map(b => b[1])
-/** (0.7.5) The text the pane draws right under a row's one line: its second line where it has one, else what comes next. */
+/** (0.7.73) Not the You row's own press on its words (`mm-you-open:<project>`), which opens the thread: the row's buttons under it. */
+export const buttonsOf = async (ui: Drawing, projectId: string): Promise<string[]> => (await buttons(ui)).filter(b => b[0].endsWith(projectId) && !b[0].startsWith('mm-you-open:')).map(b => b[1])
+/**
+ * (0.7.5) The text the pane draws right under a row's one line: its second line where it has one, else what comes next.
+ * (0.7.73) Past the You row's own line of pace, by when, pin and why (`meta`), which every You row has.
+ */
 export const under = async (ui: Drawing, row: string): Promise<string | undefined> => {
   const all = await lines(ui)
   const at = all.findIndex(l => l.endsWith(row))
-  return at < 0 ? undefined : all[at + 1]
+  if (at < 0) return undefined
+  return YOU_META.test(all[at + 1] ?? '') ? all[at + 2] : all[at + 1]
+}
+/** (0.7.73) A You row's detail lines (`youDetails`), by its project, as drawn (indented). */
+export const details = async (ui: Drawing, projectId: string): Promise<string[]> =>
+  (await ui.findAll({ type: 'Box' })).filter(e => e.key === `mm-you-details:${projectId}`).flatMap(detailTexts)
+/** (0.7.73) A You row's line of pace, by when, its pin and why. */
+export const meta = async (ui: Drawing, row: string): Promise<string | undefined> => {
+  const all = await lines(ui)
+  const at = all.findIndex(l => l.endsWith(row))
+  return at < 0 || !YOU_META.test(all[at + 1] ?? '') ? undefined : all[at + 1]
 }
 /** The feed, with something changed on Acme's package and the sessions it lists. */
 export const acmeFeed = (over: Record<string, unknown> = {}, threads: NonNullable<Feed['threads']> = [declared(ACME, 'cli-acme', 30)]): Feed => {

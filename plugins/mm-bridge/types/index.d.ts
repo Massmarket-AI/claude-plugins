@@ -115,6 +115,11 @@ export type MmQueue = {
   undated?: MmRow[]
   /** (0.7.5) The viewer's internal queue, drawn under the list as `Your build queue · N`. Absent for a viewer with none. */
   build?: MmBuild
+  /**
+   * (0.7.73) The You section's client rows: the list's clients, each with what is needed from the person, by when, why and its pin, late
+   * first and then by deadline (hooks/you.ts). It replaces the Needs you now dropdown. Absent on a list an older version stored.
+   */
+  you?: MmYouRow[]
     /**
    * (0.7.21, for the founder) Team · late: his teammates' late internal tickets, by person, then client, each ticket one
    * line. A closed group `Team · late (n)` at the end of the line of groups under the list, drawn below the others once
@@ -292,7 +297,13 @@ export type MmNotice = { text: string; at: number }
  * `closed`): anywhere else the pane opens by itself, and the band offers no way to it (Rob, 2026-11-11: "We don't need to have
  * something cluttering up that space telling us to open the side panel").
  */
-export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string; waiting?: string }
+/**
+ * (0.7.73) `head` and `next`: the band's first line as the desktop draws it, `Needs you: 7 · 2 late` and a button with the next client's
+ * words that opens its thread (hooks/you.ts `youBand`); `rest`, the lines after it. `text` stays the whole band in one sentence, for a
+ * surface with no button. `missing` is still counted; Start missing threads is drawn only while `unstarted` clients that need a thread
+ * have no Start card (0.7.73: the cards are made by themselves).
+ */
+export type MmBand = { text: string; drafts?: boolean; at?: number; missing?: number; why?: string; waiting?: string; head?: string; next?: { words: string; projectId: string; target?: string }; rest?: string; unstarted?: number }
 
 /**
  * (0.6.0) One line of the pane's Tracking part. `open`: the app thread (`local_…`) a press on the line opens, on a
@@ -478,13 +489,49 @@ export type MmCardAsked = { packageId: string; label: string; toolUseId: string;
  */
 export type MmCardFeedback = { label: string; said: 'sent' | 'busy' | 'go' | 'changed' | 'filled' | 'draft' | 'none' }
 
+/** (0.7.71 to 0.7.73) The band's Ship row's state, `ship`: gone in 0.7.73 (no Ship row). A value an older version left is never read. */
+
+/** (0.7.73) One dot of the "You" strip (hooks/health.ts): which, its level, its short count and the line a press shows. */
+export type MmYouDot = { key: 'pins' | 'late' | 'replies' | 'sessions' | 'pace' | 'tier' | 'track' | 'rc'; level: 'green' | 'amber' | 'red'; short: string; says: string }
 /**
- * (0.7.71) The Ship row of the band: this thread's folder is a git checkout on a branch other than its default, with commits past the default
- * branch, and some of them not pushed (`unpushed`, every one of them when the branch has no upstream) or no pull request for the branch yet
- * (`pr: 'none'`). `pr` is what `gh pr view` said for the branch at `head` (`unknown`: gh is not here, or did not answer). Hidden (`show`
- * false) on the default branch, in a folder that is not a git checkout, and in the control tower, whose edits go to main with no PR.
+ * (0.7.73) A thread that declared `mm waiting` and so waits on the person: its client's project when it is linked to one, its name, the
+ * question, and the thread (`target`) a press opens. The You section shows it beside that client's row, or as a row of its own.
  */
-export type MmShip = { show: boolean; branch: string; unpushed: number; pr: 'open' | 'merged' | 'closed' | 'none' | 'unknown'; head: string; at: number }
+export type MmYouWait = { sid: string; projectId?: string; client: string; question: string; type: string }
+/**
+ * (0.7.73) The strip as this thread last worked it out, the band's one line, the dot whose line is open in the pane, and the threads that
+ * wait on the person (`mm waiting`). ⛔ No `here` (this thread's client's pace for the theme's glow): Rob 2026-11-25, "i dont think i want
+ * to make the gradient in the chat pane change color based on dueness of task, i think indicator beside pin on thread like we have now is
+ * all we need for that". massmarket-theme 0.6.2 tints only when `here` is present, so its mesh stays plain.
+ */
+export type MmYou = { dots: MmYouDot[]; line: string; at: number; open?: MmYouDot['key']; waits?: MmYouWait[] }
+/** (0.7.73) Where a You row's "what's needed" came from (hooks/you.ts). */
+export type MmYouSource = 'open' | 'noreply' | 'draft' | 'ok' | 'package' | 'mail' | 'ask' | 'eta' | 'owner' | 'go' | 'task' | 'pace' | 'queue' | 'none' | 'waiting'
+/**
+ * (0.7.73) One client that needs the person, as the You section draws it (hooks/you.ts): what is needed (`ask`, from `from`), by when
+ * (`when` in the pane, `short` in the band), where it stands on its clock (`late` only for a client's date), the time it is ordered by
+ * (`at`, null with none), why it needs them, and its pin: pinned, needs a pin (`pinWhy`), or no pin needed yet. `target`: the thread a
+ * press opens.
+ */
+export type MmYouRow = {
+  projectId: string
+  client: string
+  ask: string
+  from: MmYouSource
+  when: string
+  short: string
+  clock: 'late' | 'behind' | 'soon' | 'later' | 'none'
+  at: number | null
+  why: string
+  /** (0.7.73) On pace to finish on time: green on pace or ahead, amber behind, red late (you.ts `youPace`), and its words. */
+  pace: 'green' | 'amber' | 'red'
+  paceWords: string
+  /** (0.7.73) The specifics under the row (you.ts `youDetails`): the client's newest message, the package, an ask, tickets, hours. Absent on a row an older build stored. */
+  details?: string[]
+  pin: 'pinned' | 'needs_pin' | 'later'
+  pinWhy?: string
+  target?: string
+}
 
 declare module 'claude-code' {
   interface PluginState {
@@ -517,7 +564,7 @@ declare module 'claude-code' {
       /** (0.7.38) The ready reply packages this thread's pane listed last: a new one scrolls the pane to its top. */
       seenPackages: string[]
       /** (0.7.71) The band's Ship row, as this thread's folder stood when last looked at. */
-      ship: MmShip
+      you: MmYou
     }
   }
 }

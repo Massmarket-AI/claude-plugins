@@ -94,7 +94,8 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
     expect(records(w).map(r => [r.pid, r.sid, r.ok, r.by, r.client])).toEqual([[ACME, 'local_a', true, SELF, 'Acme Roofing']])
     expect((w.stored['mm.sent'] as Record<string, { sid: string }>)[ACME]?.sid).toBe('local_a')
     expect(w.stored['mm.updating']).toEqual({})
-    expect((await bandLines($)).join(' ')).toContain('Updated Acme Roofing\'s thread.')
+    // (0.7.73) the band no longer says so: an update that went is work the bridge does by itself; only a failed one is shown
+    expect((await bandLines($)).join(' ')).not.toContain('Updated Acme Roofing')
     expect(notices(w)).toMatch(new RegExp(`updated Acme Roofing \\(${ACME}\\) sig [0-9a-f]{8} in local_a: something new for the client: drafts ready`))
     // nothing opened, nothing typed, nothing said in the pane
     expect([w.ran, w.opened, w.toasts, w.prompts]).toEqual([[], [], [], []])
@@ -355,10 +356,11 @@ describe('0.5.11: a client\'s thread updated by itself (Rob, 10-15: "I think we 
   // ---- (0.7.9, Rob 2026-10-29: "It seems like the threads aren't auto-updating anymore. They're not repinning
   // themselves.") A row whose thread is due to be updated by itself says when, and so does its thread's part of the pane
   /** (0.7.9) The line the pane draws right under Bolt's row. */
+  // (0.7.73) the line under Bolt's You row's line of pace, by when, pin and why
   const underBolt = async (ui: Drawing): Promise<string | undefined> => {
     const all = await lines(ui)
-    const at = all.findIndex(l => l.includes('Bolt Staffing ·'))
-    return at < 0 ? undefined : all[at + 1]
+    const at = all.findIndex(l => /^\d+\. Bolt Staffing: /.test(l))
+    return at < 0 ? undefined : all[at + 2]
   }
   /**
    * (0.7.9) When the first sync (at NOW + 4 s) first saw Bolt's mail, plus the 10 minutes ((0.7.14) until 0.7.14 "when the
@@ -2184,7 +2186,7 @@ describe('(0.7.5) the pane: Needs you now, then Your build queue, then the group
     expect(String(w.statuses.at(-1) ?? '')).toMatch(/^MM: 1 need you · \d+ pinned/)
     const ui = await pane($)
     const drawn = await lines(ui)
-    expect(drawn.slice(0, 2)).toEqual(['Needs you now (1)', `◆ 1. ${CEDAR_FRESH}`])
+    expect(drawn.slice(0, 2)).toEqual(['Needs you (1)', `1. ${CEDAR_FRESH}`])
     // the queue in its own part, the top 3 by rank, then how many more: no thread is linked to it here
     expect(drawn.slice(drawn.indexOf('Your build queue · 40'))).toEqual(['Your build queue · 40', ' 1. Ticket 1', ' 2. Ticket 2', ' 3. Ticket 3', ' + 37 more in the queue', UPDATED])
     expect((await buttons(ui)).filter(([k]) => k.startsWith('mm-fold:') || k === 'mm-build-open')).toEqual([['mm-fold:undated', 'No due date (1)']])
@@ -2615,7 +2617,8 @@ describe('0.7.10 (Rob, 10-28): kickoffs never hand a client out twice, start in 
     expect(one).toBe('Own thread archived: Road Dog Industrial. Never start a new thread for it: bring it back with mm "restore Road Dog Industrial" (the app may ask the person first).')
     // ⛔ not in the band's Start missing threads, and not on its no-thread list
     const band = await bandOf($)
-    expect((await buttons(band)).filter(b => b[0] === 'mm-start-missing')).toEqual([['mm-start-missing', 'All threads started']])
+    // (0.7.73) no Start missing threads at all (and no All threads started): no client here needs a thread and lacks a card
+    expect((await buttons(band)).filter(b => b[0] === 'mm-start-missing')).toEqual([])
     await band.unmount()
     expect(w.minted()).toEqual([])
     expect(starts(w)).toEqual([])
@@ -3730,8 +3733,8 @@ describe('0.7.21 (Rob, 11-05: "When things are overdue but not assigned to me, I
     expect(w.threads.get('local_c')).toMatchObject({ title: CEDAR_TITLE, pinned: true })
     const ui = await pane($)
     const before = await lines(ui)
-    // his row: one line, no `1 late with Builder B` under it (0.7.4 to 0.7.20)
-    const row = before.findIndex(l => l.includes('🔴 Cedar Dental · task · 5h left'))
+    // his row: (0.7.73) its You row, no `1 late with Builder B` under it (0.7.4 to 0.7.20)
+    const row = before.findIndex(l => /^\d+\. Cedar Dental: /.test(l))
     expect(row).toBeGreaterThan(-1)
     expect(before.some(l => l.includes('late with'))).toBe(false)
     // (0.7.21 to 0.7.26: Team · late, by person, then client, the last button on the line of groups)
@@ -5798,7 +5801,10 @@ describe('0.7.34: Team now, Needs you now that folds, the pin marks and the no-t
       const ui = await pane($)
       expect(await label(ui, TOGGLE)).toBe('Team now · 1 working  ▾')
       expect((await lines(ui)).some(l => l.startsWith('Asif'))).toBe(true)
-      expect(await label(ui, 'mm-needs-toggle')).toBe('Needs you now (3)  ▸')
+      // (0.7.73) the You section never folds: an older `needs: false` leaves its rows drawn, with no fold button
+      expect(await label(ui, 'mm-needs-toggle')).toBeUndefined()
+      expect(await lines(ui)).toContain('Needs you (3)')
+      expect((await lines(ui)).some(l => /^\d+\. Cedar Dental: /.test(l))).toBe(true)
       await ui.unmount()
     })
 
@@ -5865,17 +5871,13 @@ describe('0.7.34: Team now, Needs you now that folds, the pin marks and the no-t
   })
 
   describe('Needs you now', () => {
-    test('it folds, and the rows go with it; the groups under it stay', async ($, on) => {
+    test('it folds, and the rows go with it; the groups under it stay (0.7.73: the You section replaces it and never folds; its rows are always drawn)', async ($, on) => {
       const w = world(on, { feed: feed(), threads: [] })
       await tickOnce($, w)
       const ui = await pane($)
-      expect(await label(ui, 'mm-needs-toggle')).toBe('Needs you now (3)  ▾')
-      expect((await lines(ui)).some(l => l.includes('Cedar Dental'))).toBe(true)
-      await ui.press({ key: 'mm-needs-toggle' })
-      expect(await label(ui, 'mm-needs-toggle')).toBe('Needs you now (3)  ▸')
-      expect((await lines(ui)).some(l => l.includes('Cedar Dental'))).toBe(false)
-      await ui.press({ key: 'mm-needs-toggle' })
-      expect((await lines(ui)).some(l => l.includes('Cedar Dental'))).toBe(true)
+      expect(await label(ui, 'mm-needs-toggle')).toBeUndefined()
+      expect(await lines(ui)).toContain('Needs you (3)')
+      expect((await lines(ui)).some(l => /^\d+\. Cedar Dental: /.test(l))).toBe(true)
       await ui.unmount()
     })
 
@@ -6001,7 +6003,8 @@ describe('0.7.34: Team now, Needs you now that folds, the pin marks and the no-t
       const w = world(on, { feed: { member: H9, role: 'pm', drafts: [], mail: [], tickets: { overdue: [mine] }, threads: [] } as Feed, threads: [thread('local_c', 'Cedar', 5)], store: { 'mm.links': { [CEDAR]: 'local_c' } } })
       await tickOnce($, w)
       const ui = await pane($)
-      expect((await lines(ui)).some(l => l.includes('Cedar Dental · task'))).toBe(true)
+      // (0.7.73) his You row
+      expect((await lines(ui)).some(l => /^\d+\. Cedar Dental: /.test(l))).toBe(true)
       await ui.unmount()
     })
   })
@@ -6082,10 +6085,11 @@ describe('0.7.38 (Rob 2026-11-07: "Any Reply package should appear above the tea
     await w.clock.advance(4_000)
     for (let i = 0; i < 6; i++) await w.clock.advance(60_000)
     const ui = await pane($)
-    expect((await lines(ui)).slice(0, 3)).toEqual(['This thread: Acme Roofing', CARD_NOT_DRAWN, 'Needs you now (3)'])
+    expect((await lines(ui)).slice(0, 3)).toEqual(['This thread: Acme Roofing', CARD_NOT_DRAWN, 'Needs you (3)'])
     const keys = await keysOf(ui)
     expect(keys.indexOf('mm-teamnow-toggle')).toBeGreaterThan(keys.indexOf(`drafts:${BOLT}`))
-    expect(keys.indexOf('mm-teamnow-toggle')).toBeGreaterThan(keys.indexOf('mm-needs-toggle'))
+    // (0.7.73) the You section has no fold button: its last row's buttons come before Team now (above)
+    expect(keys).not.toContain('mm-needs-toggle')
     await ui.unmount()
   })
 
@@ -6106,7 +6110,7 @@ describe('0.7.38 (Rob 2026-11-07: "Any Reply package should appear above the tea
     const ui = await pane($)
     w.setFeed(feed())
     await mm($, '')
-    expect((await lines(ui))).toContain('Needs you now (3)')
+    expect((await lines(ui))).toContain('Needs you (3)')
     await ui.unmount()
   })
 })
@@ -6150,7 +6154,8 @@ describe('(0.7.41) a sent package leaves the side pane, and the chat says while 
     await w.clock.advance(60_000)
     const band = await bandTexts($)
     expect(band.texts[0]).toBe(WAITING)
-    expect(band.buttons).toEqual([['mm-open-waiting', 'Open the side pane'], ['mm-start-missing', 'Start missing threads (2)']])
+    // (0.7.73) then the next client to act on; no Start missing threads while both clients with no thread have their cards
+    expect(band.buttons).toEqual([['mm-open-waiting', 'Open the side pane'], ['mm-next', 'Cedar Dental, deliver "Send the intake form", due 4 PM']])
     const b = await bandOf($)
     const opened = w.opened.length
     await b.press({ key: 'mm-open-waiting' })
@@ -6773,7 +6778,7 @@ describe('0.7.53: Working manually in browser', () => {
   const browserReads = (w: { fetched: string[] }) => w.fetched.filter(u => u.endsWith('/api/ext/browser-now')).length
   const ROW_LINE = 'Working manually in browser · app.gohighlevel.com · Workflows · no thread'
 
-  test('a line goes under its client\'s row; a client with no row is in one short block above Team now', async ($, on) => {
+  test('a line goes under its client\'s row; a client with no row is in one short block above Team now (0.7.73: the You section never folds, so a row\'s line stays under it)', async ($, on) => {
     const w = world(on, { feed: feed(), browserNow: () => read({ lines: [line(), line({ project_id: DUNE, client: 'Dune Dental', site: 'dune.example', title: 'Booking', no_thread: false })] }) })
     await tickOnce($, w)
     const ui = await pane($)
@@ -6789,11 +6794,9 @@ describe('0.7.53: Working manually in browser', () => {
     const keys = (await buttons(ui)).map(b => b[0])
     expect(keys).toContain('mm-teamnow-toggle')
     expect(keys.some(k => k.startsWith('mm-browser:'))).toBe(false)
-    // Needs you now folded: Acme's row is not drawn, so its line goes to the block
-    await ui.press({ key: 'mm-needs-toggle' })
-    const folded = await lines(ui)
-    expect(folded).toContain('Acme Roofing · app.gohighlevel.com · Workflows · no thread')
-    expect(folded).not.toContain(ROW_LINE)
+    // (0.7.73) no fold to press: Acme's row is always drawn, so its line never goes to the block
+    expect(keys).not.toContain('mm-needs-toggle')
+    expect(drawn).not.toContain('Acme Roofing · app.gohighlevel.com · Workflows · no thread')
     await ui.unmount()
   })
 
@@ -6804,8 +6807,8 @@ describe('0.7.53: Working manually in browser', () => {
     const ui = await pane($)
     const drawn = await lines(ui)
     expect(drawn.slice(drawn.indexOf('Needs a client'), drawn.indexOf('Needs a client') + 2)).toEqual(['Needs a client', '14m in the browser · plumber.example · Plumber admin'])
-    // above Needs you now
-    expect(drawn.indexOf('Needs a client')).toBeLessThan(drawn.findIndex(l => l.startsWith('Needs you now')))
+    // (0.7.73) right under the You section, which is the top of the pane (it was above Needs you now)
+    expect(drawn.indexOf('Needs a client')).toBeGreaterThan(drawn.indexOf('Needs you (3)'))
     expect((await buttons(ui)).filter(b => b[0].startsWith(`mm-browser:pane:${Q1}`)).map(b => b[1])).toEqual(['Acme Roofing', 'Bolt Staffing', 'Internal', 'Personal'])
     now = read()
     const before = browserReads(w)
