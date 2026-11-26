@@ -79,10 +79,11 @@ test("a hook that throws on load is exit 0, nothing printed", () => {
 test("hooks.json registers the check for PreToolUse with a timeout", () => {
   const hooks = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "hooks", "hooks.json"), "utf8"));
   const pre = hooks.hooks.PreToolUse;
-  assert.ok(Array.isArray(pre) && pre.length === 1);
-  const h = pre[0].hooks[0];
-  assert.match(h.command, /skill-check\.js/);
+  assert.ok(Array.isArray(pre));
+  const entry = pre.filter((e) => /skill-check\.js/.test(e.hooks[0].command));
+  assert.strictEqual(entry.length, 1);
+  const h = entry[0].hooks[0];
   assert.ok(h.timeout > 0 && h.timeout <= 15);
-  assert.match(pre[0].matcher, /Bash/);
-  assert.match(pre[0].matcher, /mcp__/);
+  assert.match(entry[0].matcher, /Bash/);
+  assert.match(entry[0].matcher, /mcp__/);
 });
