@@ -145,6 +145,14 @@ test("desiredEntries: the worklog hook on three events, each present gate on its
   assert.equal(sc.desiredEntries({ worklog: false, gates: [] }).length, 0);
 });
 
+test("desiredEntries: the worklog hook on PreToolUse only with skillCheck (hook 0.16.0+)", () => {
+  const pre = (o) => sc.desiredEntries(o).filter((x) => x.event === "PreToolUse").map((x) => x.command.split(" ").pop());
+  assert.deepEqual(pre({ worklog: true, gates: [] }), []);
+  assert.deepEqual(pre({ worklog: true, gates: [], skillCheck: true }), ["--codex"]);
+  assert.deepEqual(pre({ worklog: false, gates: [], skillCheck: true }), [], "no worklog hook, no skill check");
+  assert.deepEqual(sc.MIN_CODEX_SKILL_CHECK_HOOK, [0, 16, 0]);
+});
+
 test("desiredEntries: the rob-ask gate on PreToolUse (every tool) and Stop, run with --codex", () => {
   const e = sc.desiredEntries({ worklog: false, gates: [], robGate: true });
   assert.deepEqual(e.map((x) => [x.event, x.matcher]), [["PreToolUse", "*"], ["Stop", null]]);
@@ -193,6 +201,20 @@ test("sync: an older worklog hook is not registered in Codex, the gates still ar
   const hooks = hooksOf(m);
   assert.equal(hooks.SessionStart, undefined);
   assert.equal(commands(hooks, "PreToolUse").length, 3, "the two gates and the rob-ask gate");
+});
+
+test("sync: a 0.16.0 hook is also registered on PreToolUse for the skill check; 0.14.0 is not", () => {
+  const old = machine({ hookVersion: "0.14.0" });
+  const r1 = runSync(old).codex;
+  assert.equal(r1.skill_check, "hook older than 0.16.0");
+  const hookCmd = (m) => `node "${path.join(m.hookDir, "worklog-hook.js")}" --codex`;
+  assert.ok(!commands(hooksOf(old), "PreToolUse").includes(hookCmd(old)));
+  const m = machine({ hookVersion: "0.16.0" });
+  const r2 = runSync(m).codex;
+  assert.equal(r2.skill_check, "registered");
+  assert.equal(r2.action, "current", JSON.stringify(r2));
+  assert.ok(commands(hooksOf(m), "PreToolUse").includes(hookCmd(m)));
+  assert.equal(r2.trust.ours, 8);
 });
 
 test("sync: a gate that lets the known-bad command through fails the self-test", () => {
