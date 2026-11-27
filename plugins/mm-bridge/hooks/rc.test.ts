@@ -5,13 +5,13 @@ import {
 } from './rc'
 import type { RcPass, RcRecord, RcView } from './rc'
 
-// (0.7.86, Rob 2026-11-27: "its supposed to be the most recently used 10 i think" and "my main concern is computer memory,
+// (0.7.87, Rob 2026-11-27: "its supposed to be the most recently used 10 i think" and "my main concern is computer memory,
 // it would be best if it kept a monitor on memory and 10 was flexible based on the machine")
 
 const GIB = 2 ** 30
 const NOW = Date.parse('2026-11-27T18:00:00Z')
 
-describe('0.7.86 how many threads this computer can hold with Remote Control', () => {
+describe('0.7.87 how many threads this computer can hold with Remote Control', () => {
   test('the app\'s live threads, as its governor counts them: max(6, RAM / 3 GB); 16 on Rob\'s 48 GB Mac (measured)', () => {
     expect(appLiveCap(48 * GIB)).toBe(16)
     expect(appLiveCap(16 * GIB)).toBe(6)
@@ -76,7 +76,7 @@ describe('0.7.86 how many threads this computer can hold with Remote Control', (
   })
 })
 
-describe('0.7.86 reading this computer\'s memory', () => {
+describe('0.7.87 reading this computer\'s memory', () => {
   test('a Mac, by sysctl with the names printed (measured on Rob\'s Mac, 11-27); a name this Mac lacks leaves only its own field out', () => {
     expect(memOfSysctl('hw.memsize: 51539607552\nkern.memorystatus_level: 65\nkern.memorystatus_vm_pressure_level: 1\n')).toEqual({ ram: 51539607552, free: 65, level: 'normal' })
     expect(memOfSysctl('hw.memsize: 51539607552\nkern.memorystatus_vm_pressure_level: 4\n')).toEqual({ ram: 51539607552, level: 'critical' })
@@ -97,7 +97,7 @@ describe('0.7.86 reading this computer\'s memory', () => {
   })
 })
 
-describe('0.7.86 which threads keep Remote Control in a pass', () => {
+describe('0.7.87 which threads keep Remote Control in a pass', () => {
   const view = (sid: string, hoursAgo: number, more: Partial<RcView> = {}): RcView => ({ sid, pinned: true, on: false, activity: new Date(NOW - hoursAgo * 3_600_000).toISOString(), running: false, ...more })
   const P: RcPass = { refused: new Set<string>(), by: 'this process' }
 

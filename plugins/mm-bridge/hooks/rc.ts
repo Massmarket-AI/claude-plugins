@@ -1,4 +1,4 @@
-// (0.7.86) Remote Control on the pinned threads: how many threads this computer can hold with it, and which ones.
+// (0.7.87) Remote Control on the pinned threads: how many threads this computer can hold with it, and which ones.
 // Pure, with no `$`: register.tsx (`rcFollowsPin`) reads the computer and the app, asks this file what to do, and does it.
 //
 // ⛔ (Rob, 2026-11-27: "we dont want all pins to have remote control since that slows the mac down too much. its supposed
@@ -18,37 +18,37 @@ export type RcWanted = { cap: number; full: number; tier: MemTier }
 /** The cap the bridge last used (`mm.rccap`): `at`, the last reading that asked for this cap or a lower one. */
 export type RcHeld = { cap: number; at: number; full: number; tier: MemTier; ram?: number }
 
-/** (0.7.86) Threads with Remote Control on a computer whose memory cannot be read: Rob's number ("the most recently used 10 i think"). */
+/** (0.7.87) Threads with Remote Control on a computer whose memory cannot be read: Rob's number ("the most recently used 10 i think"). */
 export const RC_MAX_THREADS = 10
-/** (0.7.86) Of the threads the app keeps loaded (`appLiveCap`), at most this share are held by Remote Control, so its governor can still unload the rest: 10 of 16 on a 48 GB Mac. */
+/** (0.7.87) Of the threads the app keeps loaded (`appLiveCap`), at most this share are held by Remote Control, so its governor can still unload the rest: 10 of 16 on a 48 GB Mac. */
 export const RC_SHARE = 5 / 8
-/** (0.7.86) The fewest threads that keep Remote Control on a computer whose memory is critical: the most recently used. */
+/** (0.7.87) The fewest threads that keep Remote Control on a computer whose memory is critical: the most recently used. */
 export const RC_FLOOR = 2
-/** (0.7.86) Memory is tight below this share free (or at the system's warning level): the cap is halved. */
+/** (0.7.87) Memory is tight below this share free (or at the system's warning level): the cap is halved. */
 export const RC_TIGHT_FREE = 25
-/** (0.7.86) Memory is critical below this share free (or at the system's critical level): the cap is RC_FLOOR. */
+/** (0.7.87) Memory is critical below this share free (or at the system's critical level): the cap is RC_FLOOR. */
 export const RC_CRITICAL_FREE = 12
-/** (0.7.86) A lower cap is raised again only once memory has read better for this long, so a short dip does not switch threads off and on. */
+/** (0.7.87) A lower cap is raised again only once memory has read better for this long, so a short dip does not switch threads off and on. */
 export const RC_RAISE_MS = 10 * 60_000
 /**
- * (0.7.86) A thread on record that the bridge saw with Remote Control on no longer ago than this, and now sees off while
+ * (0.7.87) A thread on record that the bridge saw with Remote Control on no longer ago than this, and now sees off while
  * the thread is in use (running, or used since): the person switched it off. Seen off any other way, it dropped.
  */
 export const RC_SEEN_MS = 3 * 60_000
 
 const GIB = 2 ** 30
 
-/** (0.7.86) The threads the desktop app keeps loaded, as its memory governor counts them: max(6, RAM / 3 GB). 16 on a 48 GB Mac (measured, `[CliGovernor] at cap=16`). */
+/** (0.7.87) The threads the desktop app keeps loaded, as its memory governor counts them: max(6, RAM / 3 GB). 16 on a 48 GB Mac (measured, `[CliGovernor] at cap=16`). */
 export function appLiveCap(ram: number): number {
   return Math.max(6, Math.floor(ram / (3 * GIB)))
 }
 
-/** (0.7.86) This computer's cap with memory normal: RC_SHARE of the app's live threads, at least RC_FLOOR; RC_MAX_THREADS when its size is not known. */
+/** (0.7.87) This computer's cap with memory normal: RC_SHARE of the app's live threads, at least RC_FLOOR; RC_MAX_THREADS when its size is not known. */
 export function rcFull(ram?: number): number {
   return typeof ram === 'number' && ram > 0 ? Math.max(RC_FLOOR, Math.round(appLiveCap(ram) * RC_SHARE)) : RC_MAX_THREADS
 }
 
-/** (0.7.86) How short memory is now, by the system's pressure level where it has one, and the share free. */
+/** (0.7.87) How short memory is now, by the system's pressure level where it has one, and the share free. */
 export function memTier(m: MemRead): MemTier {
   const free = typeof m.free === 'number' ? m.free : undefined
   if (m.level === 'critical' || (free !== undefined && free < RC_CRITICAL_FREE)) return 'critical'
@@ -57,7 +57,7 @@ export function memTier(m: MemRead): MemTier {
   return 'normal'
 }
 
-/** (0.7.86) The cap this reading asks for: the full cap, half of it while memory is tight, RC_FLOOR while it is critical (never above the full cap). */
+/** (0.7.87) The cap this reading asks for: the full cap, half of it while memory is tight, RC_FLOOR while it is critical (never above the full cap). */
 export function rcWanted(m: MemRead): RcWanted {
   const full = rcFull(m.ram)
   const tier = memTier(m)
@@ -67,7 +67,7 @@ export function rcWanted(m: MemRead): RcWanted {
 }
 
 /**
- * (0.7.86) The cap to use now, given the one held: a lower cap at once, a higher one only once RC_RAISE_MS have passed since
+ * (0.7.87) The cap to use now, given the one held: a lower cap at once, a higher one only once RC_RAISE_MS have passed since
  * the last reading that asked for the held cap or lower. `write` is the record to store, or null when nothing changed (a
  * computer with memory normal writes nothing pass after pass).
  */
@@ -83,7 +83,7 @@ export function rcHold(want: RcWanted, ram: number | undefined, held: RcHeld | n
   return { cap: want.cap, write: changed ? record(want.cap) : null }
 }
 
-/** (0.7.86) A held cap from the store, or null when it is not one. */
+/** (0.7.87) A held cap from the store, or null when it is not one. */
 export function heldOf(v: unknown): RcHeld | null {
   const h = v as Partial<RcHeld> | null | undefined
   if (!h || typeof h !== 'object' || typeof h.cap !== 'number' || typeof h.at !== 'number') return null
@@ -95,7 +95,7 @@ const LEVELS: Record<string, MemRead['level']> = { '1': 'normal', '2': 'warn', '
 const percent = (n: number): number | undefined => (Number.isFinite(n) && n >= 0 && n <= 100 ? n : undefined)
 
 /**
- * (0.7.86) A Mac's memory from `sysctl hw.memsize kern.memorystatus_level kern.memorystatus_vm_pressure_level` (names
+ * (0.7.87) A Mac's memory from `sysctl hw.memsize kern.memorystatus_level kern.memorystatus_vm_pressure_level` (names
  * printed, so a name this Mac lacks leaves only its own field out): the size, the share free as `memory_pressure` says it,
  * and the pressure level (1 normal, 2 warning, 4 critical).
  */
@@ -114,7 +114,7 @@ export function memOfSysctl(stdout: string): MemRead {
   return out
 }
 
-/** (0.7.86) A Linux computer's memory from /proc/meminfo: MemTotal, and MemAvailable as the share free. */
+/** (0.7.87) A Linux computer's memory from /proc/meminfo: MemTotal, and MemAvailable as the share free. */
 export function memOfMeminfo(text: string): MemRead {
   const kb = (name: string): number | undefined => {
     const m = new RegExp(`^${name}:\\s*(\\d+)\\s*kB`, 'm').exec(String(text))
@@ -133,7 +133,7 @@ export function memOfMeminfo(text: string): MemRead {
   return out
 }
 
-/** (0.7.86) A Windows computer's memory from Win32_OperatingSystem: `<TotalVisibleMemorySize> <FreePhysicalMemory>`, both in KB. */
+/** (0.7.87) A Windows computer's memory from Win32_OperatingSystem: `<TotalVisibleMemorySize> <FreePhysicalMemory>`, both in KB. */
 export function memOfWindows(stdout: string): MemRead {
   const m = /(\d+)\s+(\d+)/.exec(String(stdout))
   if (!m) return {}
@@ -145,17 +145,17 @@ export function memOfWindows(stdout: string): MemRead {
 }
 
 /**
- * (0.5.19) The threads whose Remote Control the bridge switched on (`mm.rc`): when it did. (0.7.86) `seen`, the last pass that
+ * (0.5.19) The threads whose Remote Control the bridge switched on (`mm.rc`): when it did. (0.7.87) `seen`, the last pass that
  * saw it on, `act`, the thread's last activity then, and `by`, the bridge process that saw it (a restart of the app starts new
  * ones); `dropped`, when a pass first saw it off since the bridge switched it on; `person`, the bridge saw the person switch
  * it off.
  */
 export type RcEntry = { at: number; seen?: number; act?: string; by?: string; dropped?: number; person?: true }
 export type RcRecord = Record<string, RcEntry>
-/** A thread as the plan reads it: (0.7.86) `running`, the app says a turn is going in it. */
+/** A thread as the plan reads it: (0.7.87) `running`, the app says a turn is going in it. */
 export type RcView = { sid: string; pinned: boolean; on: boolean; activity: string; running: boolean }
 /**
- * (0.7.86) What one pass does. `off` and `on` are calls to make, in that order (switching off first frees memory first), `on`
+ * (0.7.87) What one pass does. `off` and `on` are calls to make, in that order (switching off first frees memory first), `on`
  * most recently used first: the caller leaves out one switch-on from its end for each switch-off that did not happen, so a
  * refused switch-off never leaves more threads on than the cap. `forget` comes off the record; `person` is marked as the
  * person's own switch-off; `seen` is stamped as seen on now; `dropped` is stamped as found off; `top` is every thread Remote
@@ -164,7 +164,7 @@ export type RcView = { sid: string; pinned: boolean; on: boolean; activity: stri
  */
 export type RcPlan = { on: string[]; off: string[]; forget: string[]; person: string[]; seen: string[]; dropped: string[]; top: string[]; held: number }
 /**
- * (0.7.86) What else the plan reads: `refused`, the threads the app refused or did not answer and that have not been used
+ * (0.7.87) What else the plan reads: `refused`, the threads the app refused or did not answer and that have not been used
  * since (`mm.rcwait`, its activity still theirs); `by`, this bridge process.
  */
 export type RcPass = { refused: ReadonlySet<string>; by: string }
@@ -173,7 +173,7 @@ export type RcPass = { refused: ReadonlySet<string>; by: string }
 const newestFirst = (a: RcView, b: RcView): number => (b.activity || '').localeCompare(a.activity || '')
 
 /**
- * (0.7.86) The pass, decided. Every thread with Remote Control on that the bridge did not switch on (the person's own,
+ * (0.7.87) The pass, decided. Every thread with Remote Control on that the bridge did not switch on (the person's own,
  * pinned or not, and one on record that came back on with no switch-on of the bridge's since it was found off) keeps it and
  * uses one of the `cap` places: it keeps its thread loaded all the same. ⛔ The bridge never switches those off. The rest go
  * to the pinned threads, most recently used first, skipping one the app refused and that has not been used since (most

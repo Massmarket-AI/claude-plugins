@@ -2126,7 +2126,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(await mm(hub, 'rc on')).toBe(RC_ON)
     expect(w.stored('mm.rcpin')).toEqual({ on: true })
     expect(await mm(hub, 'rc')).toBe(rcSays('on'))
-    // (0.7.86) and, while it is on, the cap: no pass has read this computer's memory yet
+    // (0.7.87) and, while it is on, the cap: no pass has read this computer's memory yet
     expect(await mm(hub, 'status')).toContain("\nauto-update: on\nremote control follows the pin: on · up to 10 threads (memory size not read, memory not checked yet) · 0 on the bridge's record\nlast error: ")
     expect(await mm(hub, 'rc off')).toBe(RC_OFF)
     expect(w.stored('mm.rcpin')).toEqual({ on: false })
@@ -2150,7 +2150,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(thread(w, HUB).remoteControlActive).toBe(false)
   })
 
-  test('rule b: (0.7.86) the person switches off Remote Control the bridge turned on while the thread runs: it stays off while the thread stays pinned; unpinned and pinned again, it gets it again', async () => {
+  test('rule b: (0.7.87) the person switches off Remote Control the bridge turned on while the thread runs: it stays off while the thread stays pinned; unpinned and pinned again, it gets it again', async () => {
     const { w } = await running([{ sessionId: 'local_rc_b', pinned: true }])
     expect(rcCalls(w)).toEqual([['local_rc_b', true]])
     // a pass sees it on, and the next sees it off while a turn runs there
@@ -2173,7 +2173,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(thread(w, 'local_rc_b').remoteControlActive).toBe(true)
   })
 
-  test('rule b: (0.7.86) the person switches it off and goes on writing there: used since the pass that saw it on, so it stays off', async () => {
+  test('rule b: (0.7.87) the person switches it off and goes on writing there: used since the pass that saw it on, so it stays off', async () => {
     const { w } = await running([{ sessionId: 'local_rc_b2', pinned: true }])
     await tickOnce(w)
     thread(w, 'local_rc_b2').remoteControlActive = false
@@ -2222,7 +2222,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(w.stored('mm.rc')).toBeUndefined()
   })
 
-  test('rule g: a thread on record that the app does not list is left on record; (0.7.86) it is looked up by id, and with no such thread (or one of the other Claude profile) it is not looked up again for an hour', async () => {
+  test('rule g: a thread on record that the app does not list is left on record; (0.7.87) it is looked up by id, and with no such thread (or one of the other Claude profile) it is not looked up again for an hour', async () => {
     const { w } = await running([{ sessionId: 'local_rc_x' }], { before: w => w.put('mm.rc', { local_rc_gone: { at: NOW - 3_600_000 } }) })
     const looked = () => w.calls.filter(c => c.tool === 'get_session' && c.args.session_id === 'local_rc_gone').length
     const first = looked()
@@ -2246,7 +2246,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(rcCalls(w)).toEqual([['local_rc_r', true]])
     expect(w.stored('mm.rc')).toBeUndefined()
     const activity = thread(w, 'local_rc_r').lastActivityAt
-    // (0.7.86) with the app's own words, and the thread's name for /mm status
+    // (0.7.87) with the app's own words, and the thread's name for /mm status
     expect(w.stored('mm.rcwait')).toEqual({ local_rc_r: { until: NOW + 4_000 + WAIT, activity, why: REFUSAL, title: 'local_rc_r' } })
     for (let i = 0; i < 10; i++) await tickOnce(w)
     expect(rcCalls(w).length).toBe(1)
@@ -2303,7 +2303,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
       await settleAll()
     }
     expect(rcCalls(w)).toEqual(ids.map(id => [id, true]))
-    // (0.7.86) a switch-on not answered may still happen: on record, so the bridge can switch it off later
+    // (0.7.87) a switch-on not answered may still happen: on record, so the bridge can switch it off later
     expect(Object.keys(w.stored('mm.rc') as object)).toEqual(ids)
     const waits = w.stored('mm.rcwait') as Record<string, { until: number; activity: string; why?: string; title?: string }>
     expect(Object.keys(waits)).toEqual(ids)
@@ -2312,7 +2312,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(rcCalls(w).length).toBe(6)
   })
 
-  test('(0.7.86) the cap: twelve pinned threads on a computer whose memory cannot be read, and only the ten most recently used get Remote Control, ever', async () => {
+  test('(0.7.87) the cap: twelve pinned threads on a computer whose memory cannot be read, and only the ten most recently used get Remote Control, ever', async () => {
     const ids = Array.from({ length: 12 }, (_, i) => `local_rc_cap${i + 1}`)
     // cap1 is the most recently used, cap12 the least
     const { w } = await running(ids.map((sessionId, i) => ({ sessionId, pinned: true, lastActivityAt: ago(1 + i) })))
@@ -2325,7 +2325,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(w.stored('mm.rccap')).toEqual({ cap: 10, at: NOW + 4_000, full: 10, tier: 'unread' })
   })
 
-  // ---------------------------------------------------------------- (0.7.86) the cap, the drop, past the 60, the reasons
+  // ---------------------------------------------------------------- (0.7.87) the cap, the drop, past the 60, the reasons
 
   const GIB_KB = 1024 * 1024
   /** /proc/meminfo for a computer of `gb` GB with `free` percent available. */
@@ -2333,7 +2333,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
   const onNow = (w: World, ids: readonly string[]) => ids.filter(id => thread(w, id).remoteControlActive)
   const pinnedThreads = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => ({ sessionId: `${prefix}${i + 1}`, pinned: true, lastActivityAt: ago(1 + i) }))
 
-  test('(0.7.86) the cap\'s edge: an 11th pinned thread that is used becomes one of the ten, and the least recently used of them is switched off and taken off the record', async () => {
+  test('(0.7.87) the cap\'s edge: an 11th pinned thread that is used becomes one of the ten, and the least recently used of them is switched off and taken off the record', async () => {
     const threads = pinnedThreads('local_rc_e', 11)
     const ids = threads.map(t => t.sessionId)
     const { w } = await running(threads)
@@ -2349,7 +2349,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(rcCalls(w).length).toBe(12)
   })
 
-  test('(0.7.86) Remote Control the bridge did not switch on uses a place in the cap and is never switched off; once the person turns it off, the next pinned thread gets the place', async () => {
+  test('(0.7.87) Remote Control the bridge did not switch on uses a place in the cap and is never switched off; once the person turns it off, the next pinned thread gets the place', async () => {
     const threads = pinnedThreads('local_rc_h', 11)
     const ids = threads.map(t => t.sessionId)
     const { w } = await running([...threads, { sessionId: 'local_rc_hown', remoteControlActive: true }])
@@ -2361,7 +2361,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(rcCalls(w).some(([sid]) => sid === 'local_rc_hown')).toBe(false)
   })
 
-  test('(0.7.86) the cap follows the computer\'s memory: 13 on 64 GB, halved while memory is tight, 2 while it is critical, and raised again only after ten minutes of better readings', async () => {
+  test('(0.7.87) the cap follows the computer\'s memory: 13 on 64 GB, halved while memory is tight, 2 while it is critical, and raised again only after ten minutes of better readings', async () => {
     const threads = pinnedThreads('local_rc_m', 15)
     const ids = threads.map(t => t.sessionId)
     const { w } = await running(threads, { before: w => void (w.memory.meminfo = meminfo(64, 50)) })
@@ -2390,7 +2390,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(w.stored('mm.rccap')).toMatchObject({ cap: 13, tier: 'normal' })
   })
 
-  test('(0.7.86) a smaller computer gets fewer: 4 threads on 16 GB', async () => {
+  test('(0.7.87) a smaller computer gets fewer: 4 threads on 16 GB', async () => {
     const threads = pinnedThreads('local_rc_sm', 6)
     const ids = threads.map(t => t.sessionId)
     const { w } = await running(threads, { before: w => void (w.memory.meminfo = meminfo(16, 60)) })
@@ -2398,14 +2398,14 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(w.stored('mm.rccap')).toEqual({ cap: 4, at: NOW + 4_000, full: 4, tier: 'normal', ram: 16 * 2 ** 30 })
   })
 
-  test('(0.7.86) a drop: a thread on record from days ago whose Remote Control is off (the app restarted, or it went idle) is switched on again', async () => {
+  test('(0.7.87) a drop: a thread on record from days ago whose Remote Control is off (the app restarted, or it went idle) is switched on again', async () => {
     const { w } = await running([{ sessionId: 'local_rc_d1', pinned: true }], { before: w => w.put('mm.rc', { local_rc_d1: { at: NOW - 2 * DAY } }) })
     expect(rcCalls(w)).toEqual([['local_rc_d1', true]])
     expect(thread(w, 'local_rc_d1').remoteControlActive).toBe(true)
     expect(w.stored('mm.rc')).toEqual({ local_rc_d1: { at: NOW + 4_000 } })
   })
 
-  test('(0.7.86) a drop: Remote Control the bridge turned on goes off while the thread sits idle, and is switched on again on the next pass', async () => {
+  test('(0.7.87) a drop: Remote Control the bridge turned on goes off while the thread sits idle, and is switched on again on the next pass', async () => {
     const { w } = await running([{ sessionId: 'local_rc_d2', pinned: true }])
     await tickOnce(w)
     expect((w.stored('mm.rc') as Record<string, { seen?: number }>).local_rc_d2.seen).toBeGreaterThan(NOW + 4_000)
@@ -2415,7 +2415,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(thread(w, 'local_rc_d2').remoteControlActive).toBe(true)
   })
 
-  test('(0.7.86) the app restarted: a thread the bridge last saw on half an hour ago, now running with Remote Control off, dropped; it is not the person\'s switch-off', async () => {
+  test('(0.7.87) the app restarted: a thread the bridge last saw on half an hour ago, now running with Remote Control off, dropped; it is not the person\'s switch-off', async () => {
     const seen = NOW - 30 * 60_000
     const { w } = await running([{ sessionId: 'local_rc_d3', pinned: true, isRunning: true, lastActivityAt: ago(0) }], {
       before: w => w.put('mm.rc', { local_rc_d3: { at: NOW - DAY, seen, act: ago(2) } }),
@@ -2424,7 +2424,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect((w.stored('mm.rc') as Record<string, { person?: true }>).local_rc_d3.person).toBeUndefined()
   })
 
-  test('(0.7.86) a drop the app refuses to switch on (the thread is unloaded): it waits, /mm status says why, and once the thread is used it is switched on', async () => {
+  test('(0.7.87) a drop the app refuses to switch on (the thread is unloaded): it waits, /mm status says why, and once the thread is used it is switched on', async () => {
     const REFUSAL = 'Remote Control requires an active session. Send a message first.'
     const { w, hub } = await running([{ sessionId: 'local_rc_d4', pinned: true, title: 'Client Four · reply ready' }], {
       before: w => {
@@ -2449,7 +2449,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(await mm(hub, 'status')).not.toContain('remote control waiting:')
   })
 
-  test('(0.7.86) past the app\'s 60: with fewer pinned threads listed than the cap, the bridge\'s other pinned threads are looked up by id and get Remote Control; one no longer pinned is looked up once an hour', async () => {
+  test('(0.7.87) past the app\'s 60: with fewer pinned threads listed than the cap, the bridge\'s other pinned threads are looked up by id and get Remote Control; one no longer pinned is looked up once an hour', async () => {
     const pin = (n: number) => ({ projectId: pid(n), client: `Client ${n}`, byUs: false })
     const { w } = await running(
       [{ sessionId: 'local_rc_p1', pinned: true }, { sessionId: 'local_rc_far1', pinned: true, lastActivityAt: ago(80) }, { sessionId: 'local_rc_far2', pinned: true, lastActivityAt: ago(77) }, { sessionId: 'local_rc_far3', lastActivityAt: ago(90) }],
@@ -2468,7 +2468,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(rcCalls(w).length).toBe(3)
   })
 
-  test('(0.7.86) past the app\'s 60: a thread on record the list leaves out is looked up even with the cap full, and switched off as one past the ten; the other pinned threads are not looked up', async () => {
+  test('(0.7.87) past the app\'s 60: a thread on record the list leaves out is looked up even with the cap full, and switched off as one past the ten; the other pinned threads are not looked up', async () => {
     const threads = pinnedThreads('local_rc_f', 10)
     const { w } = await running([...threads, { sessionId: 'local_rc_ffar', pinned: true, remoteControlActive: true, lastActivityAt: ago(80) }, { sessionId: 'local_rc_fpin', pinned: true, lastActivityAt: ago(81) }], {
       unlisted: ['local_rc_ffar', 'local_rc_fpin'],
@@ -2485,9 +2485,9 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(w.calls.filter(c => c.tool === 'get_session' && c.args.session_id === 'local_rc_fpin').length).toBe(before)
   })
 
-  // ---------------------------------------------------------------- (0.7.86) the review's cases
+  // ---------------------------------------------------------------- (0.7.87) the review's cases
 
-  test('(0.7.86) a switch-on the app answers "connecting", then off on the next pass with a turn running: a drop, switched on again, never the person\'s', async () => {
+  test('(0.7.87) a switch-on the app answers "connecting", then off on the next pass with a turn running: a drop, switched on again, never the person\'s', async () => {
     const { w } = await running([{ sessionId: 'local_rc_cn', pinned: true }], { before: w => w.rcStates.set('local_rc_cn', 'connecting') })
     expect(rcCalls(w)).toEqual([['local_rc_cn', true]])
     expect(w.stored('mm.rc')).toEqual({ local_rc_cn: { at: NOW + 4_000 } })
@@ -2499,7 +2499,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect((w.stored('mm.rc') as Record<string, { person?: true }>).local_rc_cn.person).toBeUndefined()
   })
 
-  test('(0.7.86) the app restarted a minute and a half after a pass saw the thread on, and the thread is in use: another bridge process saw it, so it dropped', async () => {
+  test('(0.7.87) the app restarted a minute and a half after a pass saw the thread on, and the thread is in use: another bridge process saw it, so it dropped', async () => {
     const { w } = await running([{ sessionId: 'local_rc_fr', pinned: true, isRunning: true, lastActivityAt: ago(0) }], {
       before: w => w.put('mm.rc', { local_rc_fr: { at: NOW - DAY, seen: NOW - 90_000, act: ago(1), by: 'cli:local_rc_hub before-the-restart' } }),
     })
@@ -2507,7 +2507,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(thread(w, 'local_rc_fr').remoteControlActive).toBe(true)
   })
 
-  test('(0.7.86) a switch-off the app refuses leaves its thread on: the switch-on that would have taken its place waits, so no more than the cap are on', async () => {
+  test('(0.7.87) a switch-off the app refuses leaves its thread on: the switch-on that would have taken its place waits, so no more than the cap are on', async () => {
     const threads = pinnedThreads('local_rc_ro', 11)
     const ids = threads.map(t => t.sessionId)
     const { w } = await running(threads)
@@ -2524,7 +2524,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(onNow(w, ids)).toEqual([...ids.slice(0, 9), 'local_rc_ro11'])
   })
 
-  test('(0.7.86) ⛔ a dropped thread the app would not switch back on, which the person then switches on by hand, is theirs: never switched off by the bridge, even past the cap', async () => {
+  test('(0.7.87) ⛔ a dropped thread the app would not switch back on, which the person then switches on by hand, is theirs: never switched off by the bridge, even past the cap', async () => {
     const threads = pinnedThreads('local_rc_hd', 10)
     const { w } = await running([{ sessionId: 'local_rc_hand', pinned: true, lastActivityAt: ago(0.5) }, ...threads], {
       before: w => {
@@ -2545,7 +2545,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(onNow(w, threads.map(t => t.sessionId)).length).toBe(9)
   })
 
-  test('(0.7.86) a thread the app refused (unloaded) gives its place to the next until it is used; used, it takes it back and the least recently used is switched off', async () => {
+  test('(0.7.87) a thread the app refused (unloaded) gives its place to the next until it is used; used, it takes it back and the least recently used is switched off', async () => {
     const threads = pinnedThreads('local_rc_wt', 11)
     const ids = threads.map(t => t.sessionId)
     const { w } = await running(threads, { before: w => w.refuseRc.set('local_rc_wt1', 'Remote Control requires an active session. Send a message first.') })
@@ -2560,7 +2560,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(onNow(w, ids)).toEqual(ids.slice(0, 10))
   })
 
-  test('(0.7.86) an app that counts the switch itself as activity: the thread switched off for the cap does not come straight back, so nothing flaps', async () => {
+  test('(0.7.87) an app that counts the switch itself as activity: the thread switched off for the cap does not come straight back, so nothing flaps', async () => {
     const threads = pinnedThreads('local_rc_fl', 11)
     const ids = threads.map(t => t.sessionId)
     const { w } = await running(threads, { before: w => void (w.rcActivity.touches = true) })
@@ -2577,7 +2577,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(onNow(w, ids)).toEqual(on)
   })
 
-  test('(0.7.86) a switch-on the app carries out after the 15-second wait is the bridge\'s: unpinned, it is switched off', async () => {
+  test('(0.7.87) a switch-on the app carries out after the 15-second wait is the bridge\'s: unpinned, it is switched off', async () => {
     const { w } = await running([{ sessionId: 'local_rc_lt', pinned: true }], { before: w => w.lateRc.set('local_rc_lt', 20_000) })
     await w.advance(20_000)
     await settleAll()
@@ -2591,7 +2591,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(w.stored('mm.rc')).toEqual({})
   })
 
-  test('(0.7.86) a thread switched off for the cap that the person then uses once is the most recently used again: it gets Remote Control back', async () => {
+  test('(0.7.87) a thread switched off for the cap that the person then uses once is the most recently used again: it gets Remote Control back', async () => {
     const threads = pinnedThreads('local_rc_cu', 11)
     const ids = threads.map(t => t.sessionId)
     const { w } = await running(threads)

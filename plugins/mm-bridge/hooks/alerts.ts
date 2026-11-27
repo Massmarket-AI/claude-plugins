@@ -20,7 +20,7 @@
  *   client so a host holds one per client. It names the client and what is due, in the words the thread's name in the sidebar uses.
  * - It is raised from the pinned thread's own session (`ALERTS_DUE`, `claimDue`). The engine sends a mod's notification on the session
  *   that raised it, and the phone hears a thread over that thread's own Remote Control, which `/mm rc on` gives the most recently used
- *   pinned threads ((0.7.86) as many as memory allows: `rc.ts`). So
+ *   pinned threads ((0.7.87) as many as memory allows: `rc.ts`). So
  *   the thread that synced hands the alert to the pinned thread, which raises it within ALERTS_EVERY_MS (each running thread looks that
  *   often); one the pinned thread has not taken HANDOFF_MS later (it is not running here) is raised by any thread here that looks, and
  *   one still not raised after DUE_MAX_MS is dropped.

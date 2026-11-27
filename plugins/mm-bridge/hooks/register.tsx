@@ -152,7 +152,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 //    the next pass, named ` · still needs you` (`Pin.again`); one taken off a thread with nothing needed stays off.
 //    (0.5.19, Rob 10-20) One exception, only on a computer where the person typed /mm rc on: Remote Control
 //    follows the pin on any thread (`rcFollowsPin`). It never switches off Remote Control it did not switch on.
-//    ⛔ (0.7.86, Rob 2026-11-27: "we dont want all pins to have remote control since that slows the mac down too much" and
+//    ⛔ (0.7.87, Rob 2026-11-27: "we dont want all pins to have remote control since that slows the mac down too much" and
 //    "it would be best if it kept a monitor on memory and 10 was flexible based on the machine") Not on every pinned thread:
 //    on the most recently used ones, as many as this computer's memory allows (`rc.ts`: 10 on a 48 GB Mac, fewer while
 //    memory is short).
@@ -249,7 +249,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.86'
+export const VERSION = '0.7.87'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -5651,46 +5651,46 @@ async function setViewOnce($: EngineInterface): Promise<void> {
 const RC_MAX_CALLS = 10
 /** (0.5.19) A thread the app refused Remote Control for, or did not answer for, is not asked again for this long, unless it was used since. */
 const RC_WAIT_MS = 15 * 60_000
-/** (0.7.86) What /mm rc on says. */
+/** (0.7.87) What /mm rc on says. */
 const RC_ON_SAID = 'Remote Control follows the pin on this computer: the most recently used pinned threads get Remote Control, as many as this computer\'s memory allows (10 on a 48 GB Mac, fewer while memory is short), and lose it again when they drop out of those or are unpinned, if the bridge turned it on.'
 /**
  * (0.5.19) The threads the app refused or did not answer (`mm.rcwait`): skipped before `until` while their last activity is still `activity`.
- * (0.7.86) `why`, the app's own words (or that it did not answer), and `title`, the thread's name then: /mm status shows both.
+ * (0.7.87) `why`, the app's own words (or that it did not answer), and `title`, the thread's name then: /mm status shows both.
  */
 type RcWait = Record<string, { until: number; activity: string; why?: string; title?: string }>
-/** (0.5.19) A thread as the pass reads it: these fields of the app's answer and nothing else. (0.7.86) `running` (`isRunning`) and `title` too. */
+/** (0.5.19) A thread as the pass reads it: these fields of the app's answer and nothing else. (0.7.87) `running` (`isRunning`) and `title` too. */
 type RcThread = RcView & { title: string }
 /** (0.5.19) The sessions whose pass is waiting on the app: a second pass is not started in that session meanwhile. */
 const rcPassing = new Set<string>()
-/** (0.7.86) The most get_session calls one pass makes for threads the app's list of 60 leaves out. */
+/** (0.7.87) The most get_session calls one pass makes for threads the app's list of 60 leaves out. */
 const RC_LOOKUPS = 10
-/** (0.7.86) A thread looked up by id that gave the pass nothing to act on (gone, archived, not pinned and not on record) is not looked up again for this long, in this session. */
+/** (0.7.87) A thread looked up by id that gave the pass nothing to act on (gone, archived, not pinned and not on record) is not looked up again for this long, in this session. */
 const RC_LOOKUP_SKIP_MS = 60 * 60_000
-/** (0.7.86) Those threads, by `<session> <thread>`: until when they are skipped. */
+/** (0.7.87) Those threads, by `<session> <thread>`: until when they are skipped. */
 const rcSkip = new Map<string, number>()
 /**
- * (0.7.86) This bridge process, new each time the engine loads the bridge (a thread's session id survives an app restart; this
+ * (0.7.87) This bridge process, new each time the engine loads the bridge (a thread's session id survives an app restart; this
  * does not): a switch-off is read as the person's only when the same process saw the thread on just before.
  */
 const RC_PROCESS = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 /**
- * (0.7.86) The threads the bridge switched off for the cap, by `<session> <thread>`: their last activity before that call
+ * (0.7.87) The threads the bridge switched off for the cap, by `<session> <thread>`: their last activity before that call
  * (`before`) and, once a pass found it moved, after (`after`). In case the app counts the switch itself as activity, such a
  * thread is ranked by `before` until it moves again, so switching one off never makes it the most recently used and puts it
  * straight back in the top (and another out), pass after pass.
  */
 const rcCut = new Map<string, { before: string; at: number; after?: string }>()
-/** (0.7.86) A move of a thread's activity this close to the bridge's own switch-off is read as that switch's (`rcCut`); any other move is real use. */
+/** (0.7.87) A move of a thread's activity this close to the bridge's own switch-off is read as that switch's (`rcCut`); any other move is real use. */
 const RC_CUT_SLACK_MS = 10_000
-/** (0.7.86) A Windows reading of memory starts PowerShell, so it is reused for this long, in this session. */
+/** (0.7.87) A Windows reading of memory starts PowerShell, so it is reused for this long, in this session. */
 const WINDOWS_MEMORY_EVERY_MS = 5 * 60_000
-/** (0.7.86) The last Windows reading, by session. */
+/** (0.7.87) The last Windows reading, by session. */
 const windowsRead = new Map<string, { at: number; read: MemRead }>()
-/** (0.7.86) How long one reading of this computer's memory is given. */
+/** (0.7.87) How long one reading of this computer's memory is given. */
 const MEM_READ_MS = 5_000
-/** (0.7.86) A Mac's memory: its size, the share free and the pressure level, by name (a name this Mac lacks leaves only that one out). By its full path: the app's PATH may leave /usr/sbin out. */
+/** (0.7.87) A Mac's memory: its size, the share free and the pressure level, by name (a name this Mac lacks leaves only that one out). By its full path: the app's PATH may leave /usr/sbin out. */
 const MAC_MEMORY = ['/usr/sbin/sysctl', 'hw.memsize', 'kern.memorystatus_level', 'kern.memorystatus_vm_pressure_level']
-/** (0.7.86) A Windows computer's memory: its size and what is free, in KB. */
+/** (0.7.87) A Windows computer's memory: its size and what is free, in KB. */
 const WINDOWS_MEMORY = ['powershell', '-NoProfile', '-NonInteractive', '-Command', '$o = Get-CimInstance Win32_OperatingSystem; "$($o.TotalVisibleMemorySize) $($o.FreePhysicalMemory)"']
 
 /**
@@ -5734,7 +5734,7 @@ function rcDone(answer: unknown, enabled: boolean): boolean {
   return enabled ? state === 'on' || state === 'connecting' : state === 'off'
 }
 
-/** (0.7.86) Why a call was not done, in the app's own words where it gave some: what `mm.rcwait` keeps for /mm status. */
+/** (0.7.87) Why a call was not done, in the app's own words where it gave some: what `mm.rcwait` keeps for /mm status. */
 function rcWhy(answer: { ok: true; value: unknown } | { ok: false } | null, err?: unknown): string {
   if (err !== undefined) return short(String((err as Error)?.message ?? err).replace(/^ccd_session_mgmt\.set_remote_control:\s*/, ''), 160) || 'refused'
   if (!answer || !answer.ok) return `no answer in ${APP_WAIT_MS / 1000} seconds`
@@ -5743,7 +5743,7 @@ function rcWhy(answer: { ok: true; value: unknown } | { ok: false } | null, err?
 }
 
 /**
- * (0.7.86) This computer's memory, as its own system says it: a Mac by `sysctl`, Linux by /proc/meminfo, Windows by
+ * (0.7.87) This computer's memory, as its own system says it: a Mac by `sysctl`, Linux by /proc/meminfo, Windows by
  * Win32_OperatingSystem. Whatever cannot be read is left out (`rcWanted` then falls back to RC_MAX_THREADS). Never throws.
  */
 async function readMemory($: EngineInterface): Promise<MemRead> {
@@ -5772,7 +5772,7 @@ async function readMemory($: EngineInterface): Promise<MemRead> {
 }
 
 /**
- * (0.7.86, Rob 2026-11-27: "my main concern is computer memory, it would be best if it kept a monitor on memory and 10 was
+ * (0.7.87, Rob 2026-11-27: "my main concern is computer memory, it would be best if it kept a monitor on memory and 10 was
  * flexible based on the machine") How many threads keep Remote Control now: this computer's cap for its memory, lowered at
  * once while memory is short and raised again only after RC_RAISE_MS of better readings (`rcHold`). Kept in `mm.rccap`,
  * which /mm status reads; written by the thread that polls, and only when it changes.
@@ -5785,7 +5785,7 @@ async function rcCapNow($: EngineInterface, now: number): Promise<number> {
 }
 
 /**
- * (0.7.86) The threads the app's list of 60 leaves out (two of Rob's pinned threads were at 77 and 80, 11-27), looked up by
+ * (0.7.87) The threads the app's list of 60 leaves out (two of Rob's pinned threads were at 77 and 80, 11-27), looked up by
  * id and added to `threads`: each thread on record (`mm.rc`), so Remote Control the bridge switched on there can still be
  * switched off, and, while the listed threads hold fewer pinned threads than the cap, the other threads the bridge knows
  * pinned (`mm.pins`), newest first. At most RC_LOOKUPS calls, one small answer each. One that answers nothing to act on
@@ -5820,7 +5820,7 @@ async function rcLookUp($: EngineInterface, id: string, threads: RcThread[], rec
  * (0.5.19) Remote Control follows the pin. Run by the thread that polls, on each tick, while /mm rc is on: with it
  * off, nothing is asked of the app. Each open thread, as the app answers now (its list leaves this thread out, so
  * `get_session self` too), beside the threads the bridge switched on (`mm.rc`).
- * ⛔ (0.7.86, Rob 2026-11-27: "we dont want all pins to have remote control since that slows the mac down too much") Not
+ * ⛔ (0.7.87, Rob 2026-11-27: "we dont want all pins to have remote control since that slows the mac down too much") Not
  * every pinned thread: at most `rcCapNow` threads keep Remote Control, the cap this computer's memory allows (10 on a 48 GB
  * Mac, fewer while memory is short), and the bridge gives it to the pinned threads most recently used (`rcPlan`):
  *   - pinned, in the top, off, not on record: switched on, and put on record;
@@ -5838,7 +5838,7 @@ async function rcLookUp($: EngineInterface, id: string, threads: RcThread[], rec
  * from the app: no pass (unknown is never none). A call the app refuses (an error, or a state that is not the one asked
  * for: `rcDone`), or does not answer in APP_WAIT_MS, writes no record, and the thread waits RC_WAIT_MS (`mm.rcwait`, with
  * why: `rcWhy`) unless it is used meanwhile: an unloaded thread ("requires an active session"), one waiting on the person
- * to answer a request, one started from another device. (0.7.86) A switch-on not answered in time goes on record all the
+ * to answer a request, one started from another device. (0.7.87) A switch-on not answered in time goes on record all the
  * same: the app may still carry it out, and the bridge must be able to switch it off. At most RC_MAX_CALLS calls in a pass, switch-offs first; each
  * switch-off that does not happen holds back one switch-on, so the cap holds.
  */
@@ -5975,7 +5975,7 @@ async function rcFollowsPin($: EngineInterface): Promise<void> {
 }
 
 /**
- * (0.7.86) What /mm status says of Remote Control: whether it follows the pin; while it does, the cap now, the computer's
+ * (0.7.87) What /mm status says of Remote Control: whether it follows the pin; while it does, the cap now, the computer's
  * memory size and how short memory is (`mm.rccap`), how many threads are on the bridge's record, and one line for each
  * thread the app refused or did not answer, with why and until when.
  */
@@ -9955,7 +9955,7 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       `paused: ${Boolean(await $.store.get('mm.paused'))}`,
       `alerts (a notification for a new pin, a sound for a pin or a package): ${alertsOn(await $.store.get(ALERTS_SWITCH)) ? 'on' : 'off'}`,
       `auto-update: ${(await autoStartOn($)) ? 'on' : 'off'}`,
-      // (0.7.86) and while it does: the cap, the memory it was set by, and each thread waiting with why
+      // (0.7.87) and while it does: the cap, the memory it was set by, and each thread waiting with why
       ...(await rcStatusLines($)),
       `last error: ${last?.error ?? 'none'}`,
       // (0.7.28) what the app refused in the last sync's pin pass, which went on past each
