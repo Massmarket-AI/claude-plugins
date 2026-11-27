@@ -21,7 +21,7 @@ function home() {
 
 function run(h, payload, extraEnv, raw) {
   const env = { ...process.env, MM_HOOK_HOME: h };
-  for (const k of ["MM_UNATTENDED", "LANE2_RUN_ID", "MM_RUN_SESSION", "CLAUDE_CODE_ENTRYPOINT"]) delete env[k];
+  for (const k of ["MM_UNATTENDED", "LANE2_RUN_ID", "MM_RUN_SESSION", "CLAUDE_CODE_ENTRYPOINT", "MM_GPT_DELEGATED"]) delete env[k];
   return spawnSync(process.execPath, [SCRIPT], {
     input: raw !== undefined ? raw : JSON.stringify(payload),
     encoding: "utf8",
@@ -172,4 +172,90 @@ test("a read-only Discord MCP tool naming Rob's id is never denied", () => {
   silent(run(h, { hook_event_name: "PreToolUse", tool_name: "mcp__discord__read_messages", tool_input: { author_id: ROB } }));
   silent(run(h, { hook_event_name: "PreToolUse", tool_name: "mcp__discord__search_messages", tool_input: { query: `<@${ROB}>` } }));
   denied(run(h, { hook_event_name: "PreToolUse", tool_name: "mcp__discord__send_message", tool_input: { content: `<@${ROB}> hi` } }));
+});
+
+// ---------- Codex (GPT) ----------
+// Shapes measured on Codex 0.155.1 (2026-11-20 and 2026-11-27): shell calls arrive as tool_name Bash; the rollout
+// holds custom_tool_call "exec" items (code mode) or function_call items, each answered by an *_output with its call_id.
+
+const rollout = (h, items) => {
+  const file = path.join(h, "rollout.jsonl");
+  fs.writeFileSync(file, items.map((p) => JSON.stringify({ timestamp: "2026-11-27T00:00:00Z", type: "response_item", payload: p })).join("\n") + "\n");
+  return file;
+};
+const codexStop = (file, last, active) => ({
+  hook_event_name: "Stop",
+  session_id: "s",
+  turn_id: "t",
+  transcript_path: file,
+  stop_hook_active: Boolean(active),
+  last_assistant_message: last,
+});
+
+test("Codex: a Discord post tagging Rob from a code-mode shell call is denied", () => {
+  denied(run(home(), bash(CURL(`-d '{"content":"<@${ROB}> blocked"}'`))));
+});
+
+test("Codex: Stop waiting on Rob with no ask in the rollout is blocked, once", () => {
+  const h = home();
+  const file = rollout(h, [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Working on it." }] }]);
+  const r = run(h, codexStop(file, "Paused: waiting on Rob's approval for the date move."));
+  assert.strictEqual(JSON.parse(r.stdout).decision, "block");
+  silent(run(h, codexStop(file, "Paused: waiting on Rob's approval for the date move.", true)));
+});
+
+test("Codex: Stop with a filed ask (custom_tool_call exec) is silent", () => {
+  const h = home();
+  const file = rollout(h, [
+    { type: "custom_tool_call", call_id: "call_1", name: "exec", input: "text(await tools.exec_command({cmd:\"node mm-api.mjs ext POST /team-ask/file --body '{}'\"}))" },
+    { type: "custom_tool_call_output", call_id: "call_1", output: [{ type: "input_text", text: '{"ok":true,"ask_id":"abc"}' }] },
+  ]);
+  silent(run(h, codexStop(file, "Filed; waiting on Rob's answer.")));
+});
+
+test("Codex: Stop with a filed ask (function_call) answered covered_by_ruling is silent", () => {
+  const h = home();
+  const file = rollout(h, [
+    { type: "function_call", call_id: "call_2", name: "shell", arguments: JSON.stringify({ command: ["bash", "-lc", "node mm-api.mjs ext POST /team-ask/file"] }) },
+    { type: "function_call_output", call_id: "call_2", output: '{"error":"covered_by_ruling"}' },
+  ]);
+  silent(run(h, codexStop(file, "Rob already ruled; waiting on Rob is not needed but noting it.")));
+});
+
+test("Codex: a filed-ask call whose output has no ask id still blocks", () => {
+  const h = home();
+  const file = rollout(h, [
+    { type: "custom_tool_call", call_id: "call_3", name: "exec", input: "tools.exec_command({cmd:'node mm-api.mjs ext POST /team-ask/file'})" },
+    { type: "custom_tool_call_output", call_id: "call_3", output: '{"error":"ask_incomplete"}' },
+  ]);
+  assert.strictEqual(JSON.parse(run(h, codexStop(file, "Blocked on Rob for the go.")).stdout).decision, "block");
+});
+
+test("Codex: with no last_assistant_message the rollout's last assistant text is read", () => {
+  const h = home();
+  const file = rollout(h, [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "This needs Rob's approval before I go on." }] }]);
+  const p = codexStop(file, "");
+  delete p.last_assistant_message;
+  assert.strictEqual(JSON.parse(run(h, p).stdout).decision, "block");
+});
+
+test("Codex: a run Claude delegated to GPT (MM_GPT_DELEGATED=1) is skipped", () => {
+  silent(run(home(), bash(CURL(`-d '{"content":"<@${ROB}> blocked"}'`)), { MM_GPT_DELEGATED: "1" }));
+});
+
+test("test window: an open window runs the gate on Rob's machine; an expired or over-long one does not", () => {
+  const h = home();
+  fs.mkdirSync(path.join(h, ".config", "massmarket"), { recursive: true });
+  fs.writeFileSync(path.join(h, ".config", "massmarket", "rob-email"), "x");
+  const post = bash(CURL(`-d '{"content":"<@${ROB}> blocked"}'`));
+  silent(run(h, post));
+  const f = path.join(h, ".claude", "mm-hooks", "rob-ask-gate-test-until");
+  fs.writeFileSync(f, new Date(Date.now() + 30 * 60 * 1000).toISOString());
+  denied(run(h, post));
+  fs.writeFileSync(f, new Date(Date.now() - 1000).toISOString());
+  silent(run(h, post));
+  fs.writeFileSync(f, new Date(Date.now() + 3 * 3600 * 1000).toISOString());
+  silent(run(h, post));
+  fs.writeFileSync(f, new Date(Date.now() + 30 * 60 * 1000).toISOString());
+  silent(run(h, post, { MM_UNATTENDED: "1" }));
 });

@@ -174,4 +174,4 @@ jobs:
       # install. Every Chrome folder, home, server and Claude Code CLI they use is fabricated in a temporary
       # directory.
       - name: mm-hooks tests
-        run: node --test plugins/mm-hooks/scripts/sync-extension.test.js plugins/mm-hooks/scripts/update-plugins.test.js scripts/carry-extension.test.mjs plugins/mm-hooks/scripts/revision-insights-notice.test.js plugins/mm-hooks/scripts/skill-check.test.js plugins/mm-hooks/scripts/worklog-hook-open-line.test.js plugins/mm-hooks/scripts/sync-codex.test.js
+        run: node --test plugins/mm-hooks/scripts/sync-extension.test.js plugins/mm-hooks/scripts/update-plugins.test.js scripts/carry-extension.test.mjs plugins/mm-hooks/scripts/revision-insights-notice.test.js plugins/mm-hooks/scripts/skill-check.test.js plugins/mm-hooks/scripts/worklog-hook-open-line.test.js plugins/mm-hooks/scripts/sync-codex.test.js plugins/mm-hooks/scripts/rob-ask-gate.test.js

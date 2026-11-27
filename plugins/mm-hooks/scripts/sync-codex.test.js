@@ -145,6 +145,22 @@ test("desiredEntries: the worklog hook on three events, each present gate on its
   assert.equal(sc.desiredEntries({ worklog: false, gates: [] }).length, 0);
 });
 
+test("desiredEntries: the worklog hook on PreToolUse only with skillCheck (hook 0.16.0+)", () => {
+  const pre = (o) => sc.desiredEntries(o).filter((x) => x.event === "PreToolUse").map((x) => x.command.split(" ").pop());
+  assert.deepEqual(pre({ worklog: true, gates: [] }), []);
+  assert.deepEqual(pre({ worklog: true, gates: [], skillCheck: true }), ["--codex"]);
+  assert.deepEqual(pre({ worklog: false, gates: [], skillCheck: true }), [], "no worklog hook, no skill check");
+  assert.deepEqual(sc.MIN_CODEX_SKILL_CHECK_HOOK, [0, 16, 0]);
+});
+
+test("desiredEntries: the rob-ask gate on PreToolUse (every tool) and Stop, run with --codex", () => {
+  const e = sc.desiredEntries({ worklog: false, gates: [], robGate: true });
+  assert.deepEqual(e.map((x) => [x.event, x.matcher]), [["PreToolUse", "*"], ["Stop", null]]);
+  assert.ok(e.every((x) => /[\\/]codex[\\/]rob-ask-gate\.js" --codex$/.test(x.command)));
+  assert.ok(e.every((x) => sc.isOurs(x.command)));
+  assert.equal(sc.isOurs('node "/x/rob-ask-gate.js" --codex'), false, "only the copy in ~/.claude/mm-hooks/codex/ is ours");
+});
+
 test("sync: registers the hook and the gates, trusts exactly ours, and the self-test proves both gates stop", () => {
   const m = machine({ hooksJson: { hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: "node /x/mine.js", timeout: 5 }] }] } } });
   const { r, codex } = runSync(m);
@@ -153,15 +169,24 @@ test("sync: registers the hook and the gates, trusts exactly ours, and the self-
   assert.equal(codex.action, "current", JSON.stringify(codex));
   assert.equal(codex.worklog, "registered");
   assert.deepEqual(codex.gates, ["send-gate", "secret-read-gate"]);
-  assert.deepEqual(codex.selftest, { "send-gate": "pass", "secret-read-gate": "pass" });
+  assert.deepEqual(codex.selftest, { "send-gate": "pass", "secret-read-gate": "pass", "rob-ask-gate": "pass" });
+  assert.equal(codex.rob_gate, "updated");
   assert.equal(codex.trust.ok, true);
-  assert.equal(codex.trust.ours, 5);
+  assert.equal(codex.trust.ours, 7);
   const hooks = hooksOf(m);
   assert.deepEqual(commands(hooks, "PreToolUse").slice(-1), ["node /x/mine.js"]);
   assert.ok(fs.existsSync(path.join(m.hookDir, "codex", "codex-gate.js")));
+  assert.equal(
+    fs.readFileSync(path.join(m.hookDir, "codex", "rob-ask-gate.js"), "utf8"),
+    fs.readFileSync(path.join(SCRIPTS, "rob-ask-gate.js"), "utf8"),
+    "the rob-ask gate is copied byte for byte",
+  );
+  const robCmd = `node "${path.join(m.hookDir, "codex", "rob-ask-gate.js")}" --codex`;
+  assert.ok(commands(hooks, "PreToolUse").includes(robCmd));
+  assert.ok(commands(hooks, "Stop").includes(robCmd));
   const writes = fs.readFileSync(path.join(m.codexHome, "fake-writes.log"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
   const trustedKeys = Object.keys(writes[0].edits[0].value);
-  assert.equal(trustedKeys.length, 5);
+  assert.equal(trustedKeys.length, 7);
   assert.ok(trustedKeys.every((k) => !k.includes(":pre_tool_use:3:")), "the person's own hook is never trusted by us");
   // Second run: nothing to write, nothing to trust.
   const again = runSync(m).codex;
@@ -175,7 +200,21 @@ test("sync: an older worklog hook is not registered in Codex, the gates still ar
   assert.match(codex.worklog, /older than 0\.14\.0/);
   const hooks = hooksOf(m);
   assert.equal(hooks.SessionStart, undefined);
-  assert.equal(commands(hooks, "PreToolUse").length, 2);
+  assert.equal(commands(hooks, "PreToolUse").length, 3, "the two gates and the rob-ask gate");
+});
+
+test("sync: a 0.16.0 hook is also registered on PreToolUse for the skill check; 0.14.0 is not", () => {
+  const old = machine({ hookVersion: "0.14.0" });
+  const r1 = runSync(old).codex;
+  assert.equal(r1.skill_check, "hook older than 0.16.0");
+  const hookCmd = (m) => `node "${path.join(m.hookDir, "worklog-hook.js")}" --codex`;
+  assert.ok(!commands(hooksOf(old), "PreToolUse").includes(hookCmd(old)));
+  const m = machine({ hookVersion: "0.16.0" });
+  const r2 = runSync(m).codex;
+  assert.equal(r2.skill_check, "registered");
+  assert.equal(r2.action, "current", JSON.stringify(r2));
+  assert.ok(commands(hooksOf(m), "PreToolUse").includes(hookCmd(m)));
+  assert.equal(r2.trust.ours, 8);
 });
 
 test("sync: a gate that lets the known-bad command through fails the self-test", () => {
