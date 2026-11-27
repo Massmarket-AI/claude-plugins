@@ -89,6 +89,8 @@ const SECTIONS: Record<string, string> = {
   Findings: 'Findings',
   'What the quote says': 'What the quote says',
   'Date moves': 'Date moves',
+  // (0.7.86) The delivery check (client-reply-prep section 9.2e): the page's section and the card's, under one name.
+  'Delivery check': 'Delivery check',
 }
 /**
  * (0.7.43) The four cells of a quote row, and (0.7.57) a cell of a table OW read from the PDF and a word of its header: never a state
