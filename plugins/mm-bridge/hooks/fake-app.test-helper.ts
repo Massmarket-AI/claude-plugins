@@ -18,7 +18,8 @@ export const ME = 'owner@example.com'
 /** A made-up project id: `0000000n-0000-4000-8000-00000000000n`. */
 export const pid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`
 
-export type FakeThread = { sessionId: string; title: string; pinned: boolean; isArchived: boolean; lastActivityAt: string; remoteControlActive: boolean }
+/** (0.7.87) `isRunning`: a turn is going in it, as the app's list says (left out: not running). */
+export type FakeThread = { sessionId: string; title: string; pinned: boolean; isArchived: boolean; lastActivityAt: string; remoteControlActive: boolean; isRunning?: boolean }
 type Hook = ($: unknown, e: Record<string, unknown>, next: (e: unknown) => unknown) => Promise<unknown>
 type Mcp = { content: Array<{ type: 'text'; text: string }>; isError: boolean }
 
@@ -95,8 +96,14 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   const refuseRc = new Map<string, string>()
   /** (0.5.19) Threads whose Remote Control call the app never answers. */
   const silentRc = new Set<string>()
+  /** (0.7.87) Threads whose next Remote Control call the app answers, and carries out, only this many ms later (once). */
+  const lateRc = new Map<string, number>()
   /** (0.5.19) Threads the app answers this state for (on, off, connecting, unavailable), whatever was asked. */
   const rcStates = new Map<string, string>()
+  /** (0.7.87) What this computer's /proc/meminfo reads (the fake is a Linux computer): unset, it cannot be read. */
+  const memory: { meminfo?: string } = {}
+  /** (0.7.87) When `touches` is set, the app counts a Remote Control switch as the thread's activity (not measured: a case the bridge guards against). */
+  const rcActivity = { touches: false }
   /**
    * (0.7.6) How the app answers `unarchive_session` for a thread, when not as it does for one it may unarchive (it is
    * unarchived, and the app says so): `refuse`, the person said no to the app's question (an error answer); `error`, the
@@ -150,10 +157,21 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           // (0.5.19) as the app answers set_remote_control: the state afterwards (Claude.app, 10-20), or its refusal
           if (tool === 'set_remote_control') {
             if (silentRc.has(id)) return new Promise<Mcp>(() => undefined)
+            const lateBy = lateRc.get(id)
+            if (lateBy !== undefined) {
+              lateRc.delete(id)
+              return new Promise<Mcp>(resolve => {
+                timers.push({ at: time + lateBy, done: false, fn: () => {
+                  if (t) t.remoteControlActive = Boolean(args.enabled)
+                  resolve(text({ sessionId: id, remoteControlState: args.enabled ? 'on' : 'off' }))
+                } })
+              })
+            }
             const refusal = refuseRc.get(id) ?? (t ? undefined : `Session ${id} not found.`)
             if (refusal !== undefined) return { content: [{ type: 'text', text: refusal }], isError: true }
             const state = rcStates.get(id) ?? (args.enabled ? 'on' : 'off')
             if (t && (state === 'on' || state === 'off')) t.remoteControlActive = state === 'on'
+            if (t && rcActivity.touches) t.lastActivityAt = new Date(time).toISOString()
             return text({ sessionId: id, remoteControlState: state })
           }
           if (tool === 'get_usage') return text({ context: { status: 'unavailable' } })
@@ -177,6 +195,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
       fs: {
         read: async (path: string) => {
           if (path.endsWith('/.claude/mm-hooks/token')) return 'fixture-token-not-a-real-one'
+          // (0.7.87) the computer's memory, where a test gives it
+          if (path === '/proc/meminfo' && memory.meminfo !== undefined) return memory.meminfo
           // (0.5.11, review of PR #15, F4) a time-tracking hook that counts the bridge's turns as automatic (0.11.7's rule)
           if (path.endsWith('/.claude/mm-hooks/worklog-hook.js')) return 'const HOOK_VERSION = "0.11.7";\nconst TURN_ORIGIN_MARKER_RE = /^\\[mm-link [0-9a-f-]{36}\\]/;\n'
           throw new Error(`ENOENT: no such file or directory, open '${path}'`)
@@ -285,7 +305,10 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
     runs,
     refuseRc,
     silentRc,
+    lateRc,
     rcStates,
+    memory,
+    rcActivity,
     unarchiving,
     session,
     /** The fake clock now. */

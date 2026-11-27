@@ -156,7 +156,7 @@ export function trackDot(task: string | null): Dot {
 }
 
 export function rcDot(on: boolean): Dot {
-  if (on) return { key: 'rc', level: 'green', short: 'on', says: 'Remote Control follows the pin on this computer: a pinned thread reaches your phone.' }
+  if (on) return { key: 'rc', level: 'green', short: 'on', says: 'Remote Control follows the pin on this computer: your most recently used pinned threads reach your phone, as many as its memory allows.' }
   return { key: 'rc', level: 'amber', short: 'off', says: 'Remote Control does not follow the pin on this computer, so a pinned thread does not reach your phone. Type /mm rc on.' }
 }
 

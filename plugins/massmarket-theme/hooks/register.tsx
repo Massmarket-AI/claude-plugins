@@ -21,10 +21,11 @@ const BRAND = {
   sceneId: 'hero-mesh',
   sceneAlt: 'A slow cream and gray mesh drifting over a faint grid',
   roles: { accent: '#ff3d00', danger: '#c2203a', success: '#2e7d4f', warning: '#b7791f', pro: '#5b5f97' },
-  // Your messages in a solid square box, Claude's words with no box (Rob, 2026-11-25). `match`: your box the page's
-  // own color, white by day and black at night. `flip`: the reverse, black by day and cream at night.
+  // Your messages in a solid rounded box with a hairline edge, Claude's words with no box (Rob, 2026-11-25; rounded
+  // and edged 2026-11-27). `match`: your box in the hero's paper by day and black at night. `flip`: the reverse,
+  // black by day and cream at night.
   boxes: {
-    match: { light: { bg: '#ffffff', text: '#0a0a0a' }, dark: { bg: '#000000', text: '#f2efe8' } },
+    match: { light: { bg: '#f7f5ef', text: '#0a0a0a' }, dark: { bg: '#000000', text: '#f2efe8' } },
     flip: { light: { bg: '#0a0a0a', text: '#f2efe8' }, dark: { bg: '#f2efe8', text: '#0a0a0a' } },
   },
   light: {
@@ -64,7 +65,7 @@ const { theme, problems } = makeColors({
   dark: { gray: { anchors: BRAND.dark.anchors } },
 })
 
-/** match: your box in the page's own color (white by day, black at night); flip: the reverse. */
+/** match: your box in the page's own colors (paper by day, black at night); flip: the reverse. */
 export type Boxes = 'match' | 'flip'
 const BOXES: readonly Boxes[] = ['match', 'flip']
 
@@ -221,8 +222,10 @@ export function levelFor(saving: number | undefined): Level {
 
 // The app's sans for reading, mono for tool rows, semibold small headings.
 // The app takes only generic font families. Only your messages have a box:
-// plain and square on a solid fill (Rob tried feathered edges, 2026-11-24, and
-// liked it better without). Claude's words and its tool rows have none, so
+// rounded, with a hairline edge, on a solid fill (Rob tried feathered edges,
+// 2026-11-24, and liked it better without; square corners read as a different
+// box from the app's own, so 2026-11-27 he asked for the app's rounded, edged
+// box every time). Claude's words and its tool rows have none, so
 // nothing of Claude's is boxed in one place and bare in another (Rob,
 // 2026-11-25: "I kind of like it better with Claude's messages having the
 // transparent background and mine having the solid white or solid cream").
@@ -232,19 +235,29 @@ const TYPE_STYLE = {
   ToolUse: { fontFamily: ['mono'] },
 } as const satisfies NonNullable<ThemeSetArgs['style']>
 
-const USER_BOX = { radius: 0, paddingX: 16, paddingY: 12, shadow: 'none' } as const
+// The app's own rounding (10 points, measured off Rob's screenshot of 2026-11-27) and a hairline in the app's border
+// gray, which follows the mode, so the box reads as one on paper and on black. The fill and words are named here, not
+// left to the app, so the app always has an opaque fill to judge the words' contrast against over the mesh.
+const USER_BOX = {
+  radius: 10,
+  paddingX: 16,
+  paddingY: 12,
+  shadow: 'none',
+  borderColor: 'border',
+  borderWidth: 1,
+  backgroundColor: 'bg-user-message',
+  color: 'text-user-message',
+} as const
 
-function styleFor(boxes: Boxes): ThemeSetArgs['style'] {
-  // In the page's own color the box needs an edge to read as one (white on cream, black on black): a hairline in the
-  // app's border gray, which follows the mode.
-  return { ...TYPE_STYLE, UserMessage: boxes === 'match' ? { ...USER_BOX, borderColor: 'border', borderWidth: 1 } : USER_BOX }
+function styleFor(): ThemeSetArgs['style'] {
+  return { ...TYPE_STYLE, UserMessage: USER_BOX }
 }
 
 // The app frosts its own panels (the side panel, the thread list) over the
 // scene with no blur (any blur wipes out the grid's 1px lines) and a veil of
 // 40%, so the grid and mesh read through while their words stay legible.
 function lookFor(scheme: 'light' | 'dark' | undefined, level: Level, boxes: Boxes): ThemeSetArgs {
-  const look: ThemeSetArgs = { colors: colorsFor(boxes), backdrop: { scene: `${BRAND.sceneId}-${level}`, glass: { blur: 0, opacity: 0.4 } }, style: styleFor(boxes) }
+  const look: ThemeSetArgs = { colors: colorsFor(boxes), backdrop: { scene: `${BRAND.sceneId}-${level}`, glass: { blur: 0, opacity: 0.4 } }, style: styleFor() }
 
   return scheme ? { ...look, overrideColorScheme: scheme } : look
 }
@@ -597,8 +610,8 @@ async function describe($: EngineInterface): Promise<string> {
 
   const boxes =
     prefs.boxes === 'match'
-      ? "Your messages: a square box in the page's own color, white by day and black at night. Claude's have no box."
-      : "Your messages: a square box in the reverse of the page's color, black by day and cream at night. Claude's have no box."
+      ? "Your messages: a rounded box with a thin edge, paper by day and black at night. Claude's have no box."
+      : "Your messages: a rounded box with a thin edge, black by day and cream at night. Claude's have no box."
 
   return `${where}\n${glow}\n${boxes}\nChange it with /look auto (sunrise to sunset), /look hours 7 19 (fixed hours light and dark start, 0 to 23), /look light, /look dark, /look app, /look glow on|off, or /look boxes match|flip.`
 }

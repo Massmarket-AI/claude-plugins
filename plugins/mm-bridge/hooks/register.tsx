@@ -152,6 +152,10 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 //    the next pass, named ` · still needs you` (`Pin.again`); one taken off a thread with nothing needed stays off.
 //    (0.5.19, Rob 10-20) One exception, only on a computer where the person typed /mm rc on: Remote Control
 //    follows the pin on any thread (`rcFollowsPin`). It never switches off Remote Control it did not switch on.
+//    ⛔ (0.7.87, Rob 2026-11-27: "we dont want all pins to have remote control since that slows the mac down too much" and
+//    "it would be best if it kept a monitor on memory and 10 was flexible based on the machine") Not on every pinned thread:
+//    on the most recently used ones, as many as this computer's memory allows (`rc.ts`: 10 on a 48 GB Mac, fewer while
+//    memory is short).
 // ⛔ (0.7.19, measured 2026-11-04: an hour after 0.7.18 was installed, a thread still running 0.7.16 held the lease and
 //    put back the pins 0.7.18 had taken off) THE NEWEST BRIDGE ON THIS MACHINE HOLDS THE SYNC. A thread keeps the code it
 //    started with, so several versions run at once, and the session that holds `mm.lease` pins and names by its own
@@ -245,7 +249,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.85'
+export const VERSION = '0.7.87'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -4233,6 +4237,8 @@ import type { Overdue } from './health'
 import { clientDueOf, internalBehindAt } from './queue'
 import type { MmStats, MmYou, MmYouRow, MmYouWait } from '../types'
 import { NOTHING_NEEDS_YOU, comingUpText, needsYouSet, withWaits, youPace, youPinText, youRows } from './you'
+import { RC_MAX_THREADS, heldOf, memOfMeminfo, memOfSysctl, memOfWindows, rcHold, rcPlan, rcWanted } from './rc'
+import type { MemRead, RcEntry, RcRecord, RcView } from './rc'
 
 /**
  * The package a client's pickup view reads, or null: the one that is the viewer's to work, or (for the founder) the one that
@@ -4329,7 +4335,7 @@ async function drawLiveCard($: EngineInterface, els: Els, card: MmCard, surface:
     onCheck: label => void pressCheck($, label),
     onAsk: words => void pressAsk($, words),
     onPage: () => void togglePage($),
-    // (0.7.87) a delivery document's text, open on the card in both places at once (the same mark)
+    // (0.7.88) a delivery document's text, open on the card in both places at once (the same mark)
     onDoc: href => void toggleDoc($, href),
     // the field's own card: the package and the tag it was drawn for, which `pressFeedback` holds against the card as it is then
     onFeedback: (label, words) => void pressFeedback($, { packageId: card.packageId, label }, words),
@@ -5647,14 +5653,47 @@ async function setViewOnce($: EngineInterface): Promise<void> {
 const RC_MAX_CALLS = 10
 /** (0.5.19) A thread the app refused Remote Control for, or did not answer for, is not asked again for this long, unless it was used since. */
 const RC_WAIT_MS = 15 * 60_000
-/** (0.5.19) The threads whose Remote Control the bridge switched on (`mm.rc`): when it did. */
-type RcRecord = Record<string, { at: number }>
-/** (0.5.19) The threads the app refused or did not answer (`mm.rcwait`): skipped before `until` while their last activity is still `activity`. */
-type RcWait = Record<string, { until: number; activity: string }>
-/** (0.5.19) A thread as the pass reads it: these fields of the app's answer and nothing else. */
-type RcThread = { sid: string; pinned: boolean; on: boolean; activity: string }
+/** (0.7.87) What /mm rc on says. */
+const RC_ON_SAID = 'Remote Control follows the pin on this computer: the most recently used pinned threads get Remote Control, as many as this computer\'s memory allows (10 on a 48 GB Mac, fewer while memory is short), and lose it again when they drop out of those or are unpinned, if the bridge turned it on.'
+/**
+ * (0.5.19) The threads the app refused or did not answer (`mm.rcwait`): skipped before `until` while their last activity is still `activity`.
+ * (0.7.87) `why`, the app's own words (or that it did not answer), and `title`, the thread's name then: /mm status shows both.
+ */
+type RcWait = Record<string, { until: number; activity: string; why?: string; title?: string }>
+/** (0.5.19) A thread as the pass reads it: these fields of the app's answer and nothing else. (0.7.87) `running` (`isRunning`) and `title` too. */
+type RcThread = RcView & { title: string }
 /** (0.5.19) The sessions whose pass is waiting on the app: a second pass is not started in that session meanwhile. */
 const rcPassing = new Set<string>()
+/** (0.7.87) The most get_session calls one pass makes for threads the app's list of 60 leaves out. */
+const RC_LOOKUPS = 10
+/** (0.7.87) A thread looked up by id that gave the pass nothing to act on (gone, archived, not pinned and not on record) is not looked up again for this long, in this session. */
+const RC_LOOKUP_SKIP_MS = 60 * 60_000
+/** (0.7.87) Those threads, by `<session> <thread>`: until when they are skipped. */
+const rcSkip = new Map<string, number>()
+/**
+ * (0.7.87) This bridge process, new each time the engine loads the bridge (a thread's session id survives an app restart; this
+ * does not): a switch-off is read as the person's only when the same process saw the thread on just before.
+ */
+const RC_PROCESS = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+/**
+ * (0.7.87) The threads the bridge switched off for the cap, by `<session> <thread>`: their last activity before that call
+ * (`before`) and, once a pass found it moved, after (`after`). In case the app counts the switch itself as activity, such a
+ * thread is ranked by `before` until it moves again, so switching one off never makes it the most recently used and puts it
+ * straight back in the top (and another out), pass after pass.
+ */
+const rcCut = new Map<string, { before: string; at: number; after?: string }>()
+/** (0.7.87) A move of a thread's activity this close to the bridge's own switch-off is read as that switch's (`rcCut`); any other move is real use. */
+const RC_CUT_SLACK_MS = 10_000
+/** (0.7.87) A Windows reading of memory starts PowerShell, so it is reused for this long, in this session. */
+const WINDOWS_MEMORY_EVERY_MS = 5 * 60_000
+/** (0.7.87) The last Windows reading, by session. */
+const windowsRead = new Map<string, { at: number; read: MemRead }>()
+/** (0.7.87) How long one reading of this computer's memory is given. */
+const MEM_READ_MS = 5_000
+/** (0.7.87) A Mac's memory: its size, the share free and the pressure level, by name (a name this Mac lacks leaves only that one out). By its full path: the app's PATH may leave /usr/sbin out. */
+const MAC_MEMORY = ['/usr/sbin/sysctl', 'hw.memsize', 'kern.memorystatus_level', 'kern.memorystatus_vm_pressure_level']
+/** (0.7.87) A Windows computer's memory: its size and what is free, in KB. */
+const WINDOWS_MEMORY = ['powershell', '-NoProfile', '-NonInteractive', '-Command', '$o = Get-CimInstance Win32_OperatingSystem; "$($o.TotalVisibleMemorySize) $($o.FreePhysicalMemory)"']
 
 /**
  * (0.5.19, Rob 10-20: "Can you turn Remote Control on when they get pinned? Automatically.") The desktop app never
@@ -5673,10 +5712,17 @@ async function rcPinOn($: EngineInterface): Promise<boolean> {
  * for a thread it never recorded a pin for: not pinned.
  */
 function rcThread(raw: unknown): RcThread | null {
-  const t = raw as { sessionId?: unknown; pinned?: unknown; remoteControlActive?: unknown; lastActivityAt?: unknown; isArchived?: unknown } | null | undefined
+  const t = raw as { sessionId?: unknown; pinned?: unknown; remoteControlActive?: unknown; lastActivityAt?: unknown; isArchived?: unknown; isRunning?: unknown; title?: unknown } | null | undefined
   if (!t || typeof t !== 'object' || typeof t.sessionId !== 'string' || !SESSION_ID.test(t.sessionId) || t.isArchived) return null
   if (typeof t.remoteControlActive !== 'boolean') return null
-  return { sid: t.sessionId, pinned: t.pinned === true, on: t.remoteControlActive, activity: typeof t.lastActivityAt === 'string' ? t.lastActivityAt : '' }
+  return {
+    sid: t.sessionId,
+    pinned: t.pinned === true,
+    on: t.remoteControlActive,
+    activity: typeof t.lastActivityAt === 'string' ? t.lastActivityAt : '',
+    running: t.isRunning === true,
+    title: typeof t.title === 'string' ? t.title : '',
+  }
 }
 
 /**
@@ -5690,20 +5736,113 @@ function rcDone(answer: unknown, enabled: boolean): boolean {
   return enabled ? state === 'on' || state === 'connecting' : state === 'off'
 }
 
+/** (0.7.87) Why a call was not done, in the app's own words where it gave some: what `mm.rcwait` keeps for /mm status. */
+function rcWhy(answer: { ok: true; value: unknown } | { ok: false } | null, err?: unknown): string {
+  if (err !== undefined) return short(String((err as Error)?.message ?? err).replace(/^ccd_session_mgmt\.set_remote_control:\s*/, ''), 160) || 'refused'
+  if (!answer || !answer.ok) return `no answer in ${APP_WAIT_MS / 1000} seconds`
+  const state = answer.value && typeof answer.value === 'object' ? (answer.value as { remoteControlState?: unknown }).remoteControlState : undefined
+  return `the app answered ${typeof state === 'string' ? short(state, 40) : 'something else'}`
+}
+
+/**
+ * (0.7.87) This computer's memory, as its own system says it: a Mac by `sysctl`, Linux by /proc/meminfo, Windows by
+ * Win32_OperatingSystem. Whatever cannot be read is left out (`rcWanted` then falls back to RC_MAX_THREADS). Never throws.
+ */
+async function readMemory($: EngineInterface): Promise<MemRead> {
+  try {
+    const platform = platformOf({ OS: await $.env.get('OS'), HOME: await $.env.get('HOME') })
+    if (platform === 'linux') return memOfMeminfo(String(await $.fs.read('/proc/meminfo')))
+    if (platform === 'mac') {
+      // sysctl exits 1 when one name is unknown on this Mac, and still prints the others
+      const r = await $.process.run(MAC_MEMORY, { timeoutMs: MEM_READ_MS })
+      return memOfSysctl(r.stdout)
+    }
+    if (platform === 'windows') {
+      const id = await instanceId($)
+      const now = await $.clock.now()
+      const last = windowsRead.get(id)
+      if (last && now - last.at < WINDOWS_MEMORY_EVERY_MS) return last.read
+      const r = await $.process.run(WINDOWS_MEMORY, { timeoutMs: MEM_READ_MS })
+      const read = r.exitCode === 0 ? memOfWindows(r.stdout) : {}
+      windowsRead.set(id, { at: now, read })
+      return read
+    }
+  } catch {
+    // not read: the fallback cap
+  }
+  return {}
+}
+
+/**
+ * (0.7.87, Rob 2026-11-27: "my main concern is computer memory, it would be best if it kept a monitor on memory and 10 was
+ * flexible based on the machine") How many threads keep Remote Control now: this computer's cap for its memory, lowered at
+ * once while memory is short and raised again only after RC_RAISE_MS of better readings (`rcHold`). Kept in `mm.rccap`,
+ * which /mm status reads; written by the thread that polls, and only when it changes.
+ */
+async function rcCapNow($: EngineInterface, now: number): Promise<number> {
+  const m = await readMemory($)
+  const { cap, write } = rcHold(rcWanted(m), m.ram, heldOf(await $.store.get('mm.rccap')), now)
+  if (write) await $.store.set('mm.rccap', write)
+  return cap
+}
+
+/**
+ * (0.7.87) The threads the app's list of 60 leaves out (two of Rob's pinned threads were at 77 and 80, 11-27), looked up by
+ * id and added to `threads`: each thread on record (`mm.rc`), so Remote Control the bridge switched on there can still be
+ * switched off, and, while the listed threads hold fewer pinned threads than the cap, the other threads the bridge knows
+ * pinned (`mm.pins`), newest first. At most RC_LOOKUPS calls, one small answer each. One that answers nothing to act on
+ * (not found, archived, not pinned and not on record) is skipped for RC_LOOKUP_SKIP_MS and left as it is; one that does
+ * not answer is left as it is.
+ */
+async function rcLookUp($: EngineInterface, id: string, threads: RcThread[], record: RcRecord, cap: number, now: number): Promise<void> {
+  const have = new Set(threads.map(t => t.sid))
+  const pinnedHere = threads.filter(t => t.pinned).length
+  const pins = pinnedHere < cap ? Object.keys(await storeGet<Record<string, Pin>>($, 'mm.pins', {})).reverse() : []
+  const wanted = [...new Set([...Object.keys(record), ...pins])].filter(sid => SESSION_ID.test(sid) && !have.has(sid) && !((rcSkip.get(`${id} ${sid}`) ?? 0) > now))
+  for (const sid of wanted.slice(0, RC_LOOKUPS)) {
+    let raw: unknown = null
+    try {
+      const r = await within($, mcpJson($, 'ccd_session_mgmt', 'get_session', { session_id: sid }))
+      if (!r.ok) continue // no answer: unknown, left as it is
+      raw = r.value
+    } catch {
+      raw = null // refused, or not found: nothing to act on
+    }
+    const t = rcThread(raw)
+    if (t && t.sid === sid && (t.pinned || Object.hasOwn(record, sid))) {
+      threads.push(t)
+      continue
+    }
+    // ⛔ never off the record for a "not found": the app says that of a thread in the person's other Claude profile too (`askApp`)
+    rcSkip.set(`${id} ${sid}`, now + RC_LOOKUP_SKIP_MS)
+  }
+}
+
 /**
  * (0.5.19) Remote Control follows the pin. Run by the thread that polls, on each tick, while /mm rc is on: with it
  * off, nothing is asked of the app. Each open thread, as the app answers now (its list leaves this thread out, so
- * `get_session self` too), beside the threads the bridge switched on (`mm.rc`):
- *   - pinned, off, not on record: switched on, and put on record;
- *   - pinned, off, on record: the person switched it off by hand. It stays off while the thread stays pinned;
- *   - pinned, on: nothing;
+ * `get_session self` too), beside the threads the bridge switched on (`mm.rc`).
+ * ⛔ (0.7.87, Rob 2026-11-27: "we dont want all pins to have remote control since that slows the mac down too much") Not
+ * every pinned thread: at most `rcCapNow` threads keep Remote Control, the cap this computer's memory allows (10 on a 48 GB
+ * Mac, fewer while memory is short), and the bridge gives it to the pinned threads most recently used (`rcPlan`):
+ *   - pinned, in the top, off, not on record: switched on, and put on record;
+ *   - pinned, in the top, off, on record: Remote Control dropped (the thread went idle, was unloaded, the app restarted,
+ *     a switch-on was still connecting) and is switched on again, unless the bridge saw the person switch it off: off
+ *     while the thread was in use (running, or used since) no more than RC_SEEN_MS after this same bridge process
+ *     (RC_PROCESS) saw it on. Then it stays off while the thread stays pinned;
+ *   - pinned, past the top, on record: switched off and taken off the record;
  *   - not pinned, on record: switched off if it is on, and taken off the record;
- *   - not pinned, not on record: nothing. ⛔ Never switches off Remote Control the bridge did not switch on.
- * A thread on record that the app did not list is left as it is. No list from the app: no pass (unknown is never
- * none). A call the app refuses (an error, or a state that is not the one asked for: `rcDone`), or does not answer
- * in APP_WAIT_MS, writes no record, and the thread waits
- * RC_WAIT_MS (`mm.rcwait`) unless it is used meanwhile: an unloaded thread, one waiting on the person to answer a
- * request, one started from another device. At most RC_MAX_CALLS calls in a pass.
+ *   - ⛔ Remote Control the bridge did not switch on is never switched off, nor one on record that came back on with no
+ *     switch-on of the bridge's since a pass found it off (`dropped`). It uses a place in the cap all the same.
+ * A thread the app refused and that has not been used since gives its place to the next one (it would only be refused
+ * again), and one switched off for the cap is ranked by its activity before that call (`rcCut`) unless it is used since. A thread on record that
+ * the app does not list is looked up by id (`rcLookUp`), and so are pinned ones past its 60 while the cap has room. No list
+ * from the app: no pass (unknown is never none). A call the app refuses (an error, or a state that is not the one asked
+ * for: `rcDone`), or does not answer in APP_WAIT_MS, writes no record, and the thread waits RC_WAIT_MS (`mm.rcwait`, with
+ * why: `rcWhy`) unless it is used meanwhile: an unloaded thread ("requires an active session"), one waiting on the person
+ * to answer a request, one started from another device. (0.7.87) A switch-on not answered in time goes on record all the
+ * same: the app may still carry it out, and the bridge must be able to switch it off. At most RC_MAX_CALLS calls in a pass, switch-offs first; each
+ * switch-off that does not happen holds back one switch-on, so the cap holds.
  */
 async function rcFollowsPin($: EngineInterface): Promise<void> {
   if (!(await rcPinOn($)) || (await $.store.get('mm.paused'))) return
@@ -5732,55 +5871,134 @@ async function rcFollowsPin($: EngineInterface): Promise<void> {
         for (const [sid, w] of Object.entries(fresh)) if (old(w)) delete fresh[sid]
       })
     }
-    let calls = 0
-    for (const t of threads) {
-      const wait = Object.hasOwn(waits, t.sid) ? waits[t.sid] : undefined
-      if (wait && now < Number(wait.until) && wait.activity === t.activity) continue
-      const mine = Object.hasOwn(record, t.sid)
-      let enabled: boolean
-      if (t.pinned && !t.on && !mine) enabled = true
-      else if (!t.pinned && mine && t.on) enabled = false
-      else {
-        // not pinned, on record, already off: off the record. Every other case: nothing.
-        if (!t.pinned && mine) {
-          await patchStore<RcRecord>($, 'mm.rc', {}, fresh => {
-            if (!Object.hasOwn(fresh, t.sid)) return false
-            delete fresh[t.sid]
-          })
-        }
-        continue
+    const cap = await rcCapNow($, now)
+    await rcLookUp($, id, threads, record, cap, now)
+    const byId = new Map(threads.map(t => [t.sid, t]))
+    // the threads the app refused and that have not been used since: they take a place only when one is left over
+    const refused = new Set(threads.filter(t => Object.hasOwn(waits, t.sid) && waits[t.sid]?.activity === t.activity).map(t => t.sid))
+    // a thread switched off for the cap is ranked by its activity before that call until it moves again (`rcCut`)
+    const ranked = threads.map(t => {
+      const key = `${id} ${t.sid}`
+      const cut = rcCut.get(key)
+      if (!cut) return t
+      const moved = t.activity !== cut.before && t.activity !== cut.after
+      const bySwitch = cut.after === undefined && Math.abs(Date.parse(t.activity) - cut.at) <= RC_CUT_SLACK_MS
+      if (t.on || !t.pinned || (moved && !bySwitch)) {
+        rcCut.delete(key)
+        return t
       }
-      if (calls >= RC_MAX_CALLS) continue
+      if (moved) cut.after = t.activity
+      return { ...t, activity: cut.before }
+    })
+    const plan = rcPlan(ranked, record, cap, now, { refused, by: `${id} ${RC_PROCESS}` })
+    // what needs no call, in one write: off the record, the person's switch-offs, the threads seen on now and those found off
+    if (plan.forget.length || plan.person.length || plan.seen.length || plan.dropped.length) {
+      await patchStore<RcRecord>($, 'mm.rc', {}, fresh => {
+        let changed = false
+        for (const sid of plan.forget) {
+          if (!Object.hasOwn(fresh, sid)) continue
+          delete fresh[sid]
+          changed = true
+        }
+        for (const sid of plan.person) {
+          if (Object.hasOwn(fresh, sid)) {
+            fresh[sid] = { ...fresh[sid], person: true } as RcEntry
+            changed = true
+          }
+        }
+        for (const sid of plan.seen) {
+          if (Object.hasOwn(fresh, sid)) {
+            fresh[sid] = { ...fresh[sid], seen: now, act: byId.get(sid)?.activity ?? '', by: `${id} ${RC_PROCESS}` } as RcEntry
+            changed = true
+          }
+        }
+        for (const sid of plan.dropped) {
+          if (Object.hasOwn(fresh, sid) && typeof (fresh[sid] as Partial<RcEntry> | null)?.dropped !== 'number') {
+            fresh[sid] = { ...fresh[sid], dropped: now } as RcEntry
+            changed = true
+          }
+        }
+        return changed
+      })
+    }
+    let calls = 0
+    /** The switch-offs that did not happen (refused, not answered, waiting, past RC_MAX_CALLS): one switch-on fewer each. */
+    let notOff = 0
+    const ask = async (sid: string, enabled: boolean): Promise<boolean> => {
+      const t = byId.get(sid)
+      if (!t) return false
+      const wait = Object.hasOwn(waits, sid) ? waits[sid] : undefined
+      if (wait && now < Number(wait.until) && wait.activity === t.activity) return false
+      if (calls >= RC_MAX_CALLS) return false
       calls++
       let ok = false
+      let why = ''
+      let late = false
       try {
-        const answered = await within($, mcpJson($, 'ccd_session_mgmt', 'set_remote_control', { session_id: t.sid, enabled }))
+        const answered = await within($, mcpJson($, 'ccd_session_mgmt', 'set_remote_control', { session_id: sid, enabled }))
         ok = answered.ok && rcDone(answered.value, enabled)
-      } catch {
+        late = !answered.ok
+        if (!ok) why = rcWhy(answered)
+      } catch (err) {
         ok = false // refused
+        why = rcWhy(null, err)
       }
       const at = await $.clock.now()
       if (!ok) {
         await patchStore<RcWait>($, 'mm.rcwait', {}, fresh => {
-          fresh[t.sid] = { until: at + RC_WAIT_MS, activity: t.activity }
+          fresh[sid] = { until: at + RC_WAIT_MS, activity: t.activity, why, ...(t.title ? { title: short(t.title, 80) } : {}) }
         })
-        continue
+        // ⛔ a switch-on not answered in time may still happen: it goes on record, so the bridge still switches it off later
+        // (on record and off, it is only asked again). A refusal leaves the record as it was.
+        if (enabled && late) await patchStore<RcRecord>($, 'mm.rc', {}, fresh => void (fresh[sid] = { at }))
+        return false
       }
       await patchStore<RcRecord>($, 'mm.rc', {}, fresh => {
-        if (enabled) fresh[t.sid] = { at }
-        else if (Object.hasOwn(fresh, t.sid)) delete fresh[t.sid]
+        if (enabled) fresh[sid] = { at }
+        else if (Object.hasOwn(fresh, sid)) delete fresh[sid]
         else return false
       })
       if (wait) {
         await patchStore<RcWait>($, 'mm.rcwait', {}, fresh => {
-          if (!Object.hasOwn(fresh, t.sid)) return false
-          delete fresh[t.sid]
+          if (!Object.hasOwn(fresh, sid)) return false
+          delete fresh[sid]
         })
       }
+      if (enabled) rcCut.delete(`${id} ${sid}`)
+      else if (t.pinned) rcCut.set(`${id} ${sid}`, { before: t.activity, at })
+      return true
     }
+    for (const sid of plan.off) if (!(await ask(sid, false))) notOff++
+    // ⛔ a switch-off that did not happen leaves its thread on: the least recently used switch-ons wait, so the cap holds
+    for (const sid of plan.on.slice(0, Math.max(0, plan.on.length - notOff))) await ask(sid, true)
   } finally {
     rcPassing.delete(id)
   }
+}
+
+/**
+ * (0.7.87) What /mm status says of Remote Control: whether it follows the pin; while it does, the cap now, the computer's
+ * memory size and how short memory is (`mm.rccap`), how many threads are on the bridge's record, and one line for each
+ * thread the app refused or did not answer, with why and until when.
+ */
+async function rcStatusLines($: EngineInterface): Promise<string[]> {
+  if (!(await rcPinOn($))) return ['remote control follows the pin: off']
+  const held = heldOf(await $.store.get('mm.rccap'))
+  const shaped = (v: unknown) => (v !== null && typeof v === 'object' && !Array.isArray(v) ? v : {}) as Record<string, unknown>
+  const record = shaped(await $.store.get('mm.rc')) as RcRecord
+  const waits = shaped(await $.store.get('mm.rcwait')) as RcWait
+  const now = await $.clock.now()
+  const size = held?.ram ? `${Math.round(held.ram / 2 ** 30)} GB` : 'memory size not read'
+  const memory = !held ? 'memory not checked yet' : held.tier === 'unread' ? 'memory not read' : `memory ${held.tier}`
+  const onRecord = Object.values(record).filter(e => e && typeof e === 'object' && !e.person).length
+  const lines = [`remote control follows the pin: on · up to ${held?.cap ?? RC_MAX_THREADS} threads (${size}, ${memory}) · ${onRecord} on the bridge's record`]
+  for (const [sid, w] of Object.entries(waits)) {
+    if (!w || typeof w !== 'object' || !(Number(w.until) > now)) continue
+    const until = Number(w.until)
+    const when = Number.isFinite(until) && Math.abs(until) <= 8.64e15 ? new Date(until).toISOString() : 'later'
+    lines.push(`remote control waiting: ${w.title || sid} · ${w.why || 'no reason kept'} · asked again after ${when}, or once it is used`)
+  }
+  return lines
 }
 
 // ---------------------------------------------------------------- (0.7.71) the band's Ship row: gone in 0.7.73
@@ -9707,7 +9925,7 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
     if (arg !== 'on' && arg !== 'off') return `Remote Control follows the pin: ${(await rcPinOn($)) ? 'on' : 'off'} on this computer. Type /mm rc on or /mm rc off.`
     await $.store.set('mm.rcpin', { on: arg === 'on' })
     return arg === 'on'
-      ? 'Remote Control follows the pin on this computer: a pinned thread gets Remote Control, and loses it again when it is unpinned if the bridge turned it on.'
+      ? RC_ON_SAID
       : 'Remote Control no longer follows the pin on this computer. Threads keep the Remote Control they have now.'
   }
   // (0.7.71) whether a new pin raises one notification and a quiet sound on this computer, and a reply package landing the sound (on unless turned off)
@@ -9739,7 +9957,8 @@ async function runCommand($: EngineInterface, args: string, by: By, press = fals
       `paused: ${Boolean(await $.store.get('mm.paused'))}`,
       `alerts (a notification for a new pin, a sound for a pin or a package): ${alertsOn(await $.store.get(ALERTS_SWITCH)) ? 'on' : 'off'}`,
       `auto-update: ${(await autoStartOn($)) ? 'on' : 'off'}`,
-      `remote control follows the pin: ${(await rcPinOn($)) ? 'on' : 'off'}`,
+      // (0.7.87) and while it does: the cap, the memory it was set by, and each thread waiting with why
+      ...(await rcStatusLines($)),
       `last error: ${last?.error ?? 'none'}`,
       // (0.7.28) what the app refused in the last sync's pin pass, which went on past each
       ...(last?.pinRefused?.length ? [`pins the app refused: ${last.pinRefused.map(r => `${r.client || r.thread} (${r.why})`).join('; ')}`] : []),

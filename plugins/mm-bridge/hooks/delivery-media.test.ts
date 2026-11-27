@@ -1,4 +1,4 @@
-// (0.7.87) What a delivery gives the client, on the card (Rob, 2026-11-27: "delivery packages should render like reply
+// (0.7.88) What a delivery gives the client, on the card (Rob, 2026-11-27: "delivery packages should render like reply
 // packages"; "if we can play video in thread on reply package thats best as well"): each QA video, walkthrough and
 // document the delivery check lists, its poster frame or first page as a Markdown picture that opens it, its labelled link,
 // and a Google Doc's text behind a button. No video plays in the card: the desktop has no video or frame element and
@@ -57,7 +57,7 @@ function strings(node: unknown): string[] {
 }
 const button = (all: El[], label: string) => of(all, 'Button').find(b => b.props?.label === label)
 
-describe('0.7.87 delivery media: what the renderer hands over is read, and nothing else', () => {
+describe('0.7.88 delivery media: what the renderer hands over is read, and nothing else', () => {
   test('a well-formed entry reads as written', () => {
     const m = readMedia({ item: 'qa_video', label: 'QA video', media: 'video', provider: 'Loom', title: 'ZZ', length: '5:54', url: LOOM, poster: 'https://cdn.example/zz.jpg' })
     expect(m).toEqual({ item: 'qa_video', label: 'QA video', media: 'video', provider: 'Loom', title: 'ZZ', length: '5:54', url: LOOM, poster: 'https://cdn.example/zz.jpg' })
@@ -92,7 +92,7 @@ describe('0.7.87 delivery media: what the renderer hands over is read, and nothi
   })
 })
 
-describe('0.7.87 delivery media: the card draws each link of what the client gets', () => {
+describe('0.7.88 delivery media: the card draws each link of what the client gets', () => {
   test('the pairs hold the page, the media ride outside it, and the copy check still passes', () => {
     expect(Object.keys(DELIVERY_PAIRS).length).toBe(7)
     for (const name of Object.keys(DELIVERY_PAIRS)) {

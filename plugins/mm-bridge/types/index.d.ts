@@ -417,12 +417,12 @@ export type MmCardNode = {
   btn?: string
   ask?: string
   sign?: { label: string; signer: string }
-  /** (0.7.87) On a paragraph (`r`, the labelled link): one link of what a delivery gives the client (`MmCardMedia`). */
+  /** (0.7.88) On a paragraph (`r`, the labelled link): one link of what a delivery gives the client (`MmCardMedia`). */
   media?: MmCardMedia
 }
 
 /**
- * (0.7.87) One QA video, walkthrough or document a delivery check lists, as client-reply-prep's render_visual.py
+ * (0.7.88) One QA video, walkthrough or document a delivery check lists, as client-reply-prep's render_visual.py
  * `part_delivery_media` hands it over (Rob, 2026-11-27: "delivery packages should render like reply packages"): the poster
  * frame of a video or a document's first page (an https picture), and a Google Doc's text. Never the page's words: no check
  * of the card's words reads it. `url` is absent for a link the card never makes (the wizard's own pages).
@@ -493,7 +493,7 @@ export type MmCardMarks = {
   signed: Record<string, MmCardSigned>
   pageOpen?: boolean
   /**
-   * (0.7.87) The delivery document whose text is open on the card, by its link (`toggleDoc`). One at a time: a document's text
+   * (0.7.88) The delivery document whose text is open on the card, by its link (`toggleDoc`). One at a time: a document's text
    * is up to 20,000 characters, and one drawing draws 100,000 in all.
    */
   docOpen?: string

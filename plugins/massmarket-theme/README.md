@@ -7,7 +7,7 @@ massmarket.ai homepage hero.
   the computer's own time zone, so they follow the seasons wherever a teammate works.
 - By day: a slow cream and gray mesh over the hero's faint grid.
 - At night: the same in reverse, a cream mesh on black.
-- Your messages sit in a plain square box: white by day and black at night, with a hairline edge
+- Your messages sit in a rounded box: paper by day and black at night, with a hairline edge
   (`/look boxes flip` turns it around: black by day, cream at night). Claude's replies and tool rows
   have no box; their words sit on the page.
 - The mesh grows and deepens when a fresh thread would be much cheaper than this one: each step re-reads the
@@ -26,7 +26,7 @@ massmarket.ai homepage hero.
 | `/look dark` | Always dark. |
 | `/look app` | Follows the app's own light or dark setting. |
 | `/look glow on` or `/look glow off` | Turns the mesh's growing with that saving on or off. |
-| `/look boxes match` or `/look boxes flip` | Your messages' box in the page's own color (white by day, black at night; the default) or the reverse (black by day, cream at night). |
+| `/look boxes match` or `/look boxes flip` | Your messages' box in the page's own colors (paper by day, black at night; the default) or the reverse (black by day, cream at night). |
 
 The choice is kept on this computer, across threads.
 
