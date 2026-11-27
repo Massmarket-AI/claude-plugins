@@ -4224,7 +4224,7 @@ import { ANSWER_INTERNAL, ANSWER_PERSONAL, ASK_HEADING, BROWSER_HEADING, CONFIRM
 import type { BrowserRead } from './browser'
 import type { TeamNow, TeamSeen } from './team'
 import { sampleNotBuilt } from './card-parity'
-import { agentListReadable, askedOf, busyOf, cardDrawable, cardHooks, cardOf, cardVerdict, checkMissOf, checkedOf, clearCard, currentOf, drawCard, feedbackOf, fillWords, isOnScreen, marksOf, noteAsked, noteDrawn, notePending, noteVersion, onWindows, prepareCard, pressAsk, pressCheck, pressFeedback, pressSign, refreshCard, resetCard, showKept, togglePage, turnBegan, turnEnded, turnMark, type Els, type PageRead } from './card'
+import { agentListReadable, askedOf, busyOf, cardDrawable, cardHooks, cardOf, cardVerdict, checkMissOf, checkedOf, clearCard, currentOf, drawCard, feedbackOf, fillWords, isOnScreen, marksOf, noteAsked, noteDrawn, notePending, noteVersion, onWindows, prepareCard, pressAsk, pressCheck, pressFeedback, pressSign, refreshCard, resetCard, showKept, toggleDoc, togglePage, turnBegan, turnEnded, turnMark, type Els, type PageRead } from './card'
 import { holderName } from './queue'
 import { ALERTS_DUE, ALERTS_EVERY_MS, ALERTS_SWITCH, ALERT_GAP_MS, ALERT_TITLE, SOUND_ASSET, SOUND_GAIN, alertedOf, alertsOn, claimDue, moreAlertText, pinAlertText, pinSig, planAlerts, waitingAlertText, waitingSig } from './alerts'
 import type { AlertDue, AlertPlan, NewPin } from './alerts'
@@ -4329,6 +4329,8 @@ async function drawLiveCard($: EngineInterface, els: Els, card: MmCard, surface:
     onCheck: label => void pressCheck($, label),
     onAsk: words => void pressAsk($, words),
     onPage: () => void togglePage($),
+    // (0.7.87) a delivery document's text, open on the card in both places at once (the same mark)
+    onDoc: href => void toggleDoc($, href),
     // the field's own card: the package and the tag it was drawn for, which `pressFeedback` holds against the card as it is then
     onFeedback: (label, words) => void pressFeedback($, { packageId: card.packageId, label }, words),
   })
@@ -13091,7 +13093,7 @@ export const register: Register = on => {
         <Box key={`mm-card-line:${asked.packageId}`} flexDirection="column" gap={1}>
           {own}
           {drawn}
-          {pageText ? <Markdown text={pageText} /> : null}
+          {pageText && Markdown ? <Markdown text={pageText} /> : null}
         </Box>
       )
     } catch (err) {

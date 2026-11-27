@@ -69,9 +69,9 @@
  * - (0.7.57) A table OW read from the PDF's own text (OW #731) carries its own columns: its header (`rp-quote-cols`) on one line, each
  *   row (`rp-quote-gridrow`) one line of its own cells, header and rows sharing each column's width (`gridsOf`).
  */
-import type { BoxProps, ButtonProps, ElementConstructor, EngineInterface, InputProps, LinkProps, Register, RenderNode, SvgProps, TextProps } from 'claude-code'
+import type { BoxProps, ButtonProps, ElementConstructor, EngineInterface, InputProps, LinkProps, MarkdownProps, Register, RenderNode, SvgProps, TextProps } from 'claude-code'
 
-import type { MmCard, MmCardAsked, MmCardChecked, MmCardFeedback, MmCardMarks, MmCardNode, MmCardRun, MmCardSigned, MmCardTree } from '../types'
+import type { MmCard, MmCardAsked, MmCardChecked, MmCardFeedback, MmCardMarks, MmCardMedia, MmCardNode, MmCardRun, MmCardSigned, MmCardTree } from '../types'
 import { isOwUrl, pageGap, sampleNotBuilt, settleLines } from './card-parity'
 import { platformOf } from './threads'
 
@@ -195,6 +195,44 @@ function readRun(v: unknown): MmCardRun | null {
   return run
 }
 
+const MEDIA_ITEMS = ['qa_video', 'walkthrough', 'documentation'] as const
+const MEDIA_KINDS = ['video', 'doc', 'link'] as const
+/** The longest document text the card holds (the renderer cuts at 30,000 characters and says the rest is in the doc). */
+export const MEDIA_TEXT_MAX = 40_000
+const httpsOf = (v: unknown): string | undefined => {
+  const s = str(v, 2048)
+  // an https link with nothing a Markdown link or image could be broken out of; never the Onboarding Wizard
+  return s && /^https:\/\/[^\s<>"'()[\]\\`]+$/.test(s) && !isOwUrl(s) ? s : undefined
+}
+
+/** (0.7.87) One delivery link's media as render_visual.py `part_delivery_media` writes it, or null for anything else. */
+export function readMedia(v: unknown): MmCardMedia | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null
+  const o = v as Record<string, unknown>
+  const item = MEDIA_ITEMS.find((x) => x === o.item)
+  const media = MEDIA_KINDS.find((x) => x === o.media)
+  const label = str(o.label, 40)?.replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim()
+  if (!item || !media || !label) return null
+  const out: MmCardMedia = { item, label, media }
+  const url = httpsOf(o.url)
+  if (url) out.url = url
+  const poster = httpsOf(o.poster)
+  if (poster && url) out.poster = poster
+  for (const k of ['provider', 'title', 'length'] as const) {
+    const s = str(o[k], 200)?.replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim()
+    if (s) out[k] = s
+  }
+  // a document's text with no control character but a newline or tab (a Google Doc's export writes \v for a line break)
+  const text = str(o.text, MEDIA_TEXT_MAX)?.replace(/\r\n?|[\v\f\u2028\u2029]/g, '\n').replace(/[\u0000-\u0008\u000e-\u001f\u007f]/g, '')
+  if (text && text.trim() && media === 'doc') out.text = text
+  return out
+}
+
+/** (0.7.87) The words a delivery link is drawn with when its paragraph has none: `Loom · <title> · 5:54`, as render_visual.py writes them. */
+export function mediaLine(m: MmCardMedia): string {
+  return [m.provider, m.title, m.length].filter(Boolean).join(' · ') || m.label
+}
+
 function readNodes(v: unknown, depth: number, count: { n: number }): MmCardNode[] | null {
   if (!Array.isArray(v) || depth > DEPTH_MAX) return null
   const out: MmCardNode[] = []
@@ -227,6 +265,9 @@ function readNodes(v: unknown, depth: number, count: { n: number }): MmCardNode[
       node.r = r
       const fp = str(o.fp, 8)
       if (fp && /^[0-9a-f]{8}$/.test(fp)) node.fp = fp
+      // (0.7.87) a delivery's video or document: media the card cannot read is left off, and the paragraph keeps its link
+      const media = readMedia(o.media)
+      if (media) node.media = media
     } else return null
     out.push(node)
   }
@@ -592,12 +633,19 @@ export async function marksOf($: EngineInterface): Promise<MmCardMarks> {
     ...(value?.pageOpen === true ? { pageOpen: true } : {}),
     ...(value?.checking ? { checking: value.checking } : {}),
     ...(value?.notice ? { notice: value.notice } : {}),
+    ...(typeof value?.docOpen === 'string' && value.docOpen ? { docOpen: value.docOpen } : {}),
   }
 }
 
 export async function togglePage($: EngineInterface): Promise<void> {
   const marks = await marksOf($)
   await $.state.set(CARD_MARKS, { ...marks, pageOpen: !marks.pageOpen })
+}
+
+/** (0.7.87) Open one delivery document's text on the card, closing any other; a second press closes it. */
+export async function toggleDoc($: EngineInterface, href: string): Promise<void> {
+  const { docOpen, ...marks } = await marksOf($)
+  await $.state.set(CARD_MARKS, docOpen === href ? marks : { ...marks, docOpen: href.slice(0, 2048) })
 }
 
 /** (0.7.36) The versions this thread has finished checking (`MmCardChecked`). A restart loses them, which only closes the box. */
@@ -1158,6 +1206,8 @@ export type Els = {
   Svg?: ElementConstructor<SvgProps>
   /** (0.7.40) The Changes field: on every surface but mobile, which draws no field. */
   Input?: ElementConstructor<InputProps>
+  /** (0.7.87) A delivery's poster frame or first page, as a Markdown image (the desktop's table has no image element). */
+  Markdown?: ElementConstructor<MarkdownProps>
 }
 
 type Node = RenderNode | null
@@ -1186,6 +1236,10 @@ type Ctx = {
   grids?: Map<MmCardNode, Grid>
   /** (0.7.57) Inside a table header or row: its table's grid. */
   grid?: Grid
+  /** (0.7.87) The delivery document whose text is open on the card, by its link (`MmCardMarks.docOpen`). */
+  docOpen?: string
+  /** (0.7.87) Open or close one delivery document's text (`toggleDoc`). Left out, no button is drawn. */
+  onDoc?: (href: string) => void
 }
 
 /**
@@ -1291,6 +1345,9 @@ function paraStyle(c: string | undefined, ctx: Ctx, words = ''): TextProps {
   if (has(c, 'rp-band-sub')) Object.assign(p, { size: 'caption' }, dim())
   if (has(c, 'rp-tag')) Object.assign(p, { size: 'caption', weight: 'semibold' }, has(c, 'rp-proposed') ? { color: 'suggestion' } : dim())
   if (has(c, 'rp-bub-out')) p.color = '#ffffff'
+  // (0.7.87) what a delivery gives the client: the list's head as a section's, each item's name (QA video, Walkthrough, Documentation)
+  if (has(c, 'rp-media-head')) Object.assign(p, { weight: 'semibold', size: 'footnote' }, dim())
+  if (has(c, 'rp-media-item')) Object.assign(p, { weight: 'semibold', size: 'footnote' })
   if (ctx.dark && !p.color) p.color = DC_TEXT
   return p
 }
@@ -1316,6 +1373,7 @@ function boxStyle(c: string | undefined, ctx: Ctx): BoxProps {
   if (has(c, 'rp-band'))
     Object.assign(p, { flexDirection: 'row', gap: 1, borderStyle: 'round', borderColor: has(c, 'rp-band-proposed') ? 'suggestion' : 'subtle', paddingX: 1, marginTop: 1 })
   if (has(c, 'rp-actions')) Object.assign(p, { flexDirection: 'row', flexWrap: 'wrap', gap: 1, marginY: 'xs' })
+  if (has(c, 'rp-media-list')) Object.assign(p, { marginTop: 1 })
   if (has(c, 'rp-banner')) {
     const tone = toneColor(c)
     Object.assign(p, { borderStyle: 'round', borderColor: tone ?? 'subtle', paddingX: 1, marginY: 'xs' })
@@ -1420,8 +1478,43 @@ function drawNodes(els: Els, nodes: readonly MmCardNode[], ctx: Ctx, sign: (s: {
       }
       return <Box {...boxStyle(node.c, inner)}>{drawNodes(els, node.k, inner, sign)}</Box>
     }
+    if (node.media) return drawMedia(els, node, node.media, ctx)
     return drawPara(els, node, ctx, at)
   })
+}
+
+export const DOC_OPEN = 'Read the document here  ▸'
+export const DOC_HIDE = 'Hide the document  ▾'
+/** What a Markdown image's alt text may not hold: a bracket or backslash would end it early, a newline the paragraph. */
+const mdAlt = (s: string) => s.replace(/[[\]\\\s]+/g, ' ').trim().slice(0, 160)
+
+/**
+ * (0.7.87) One link of what a delivery gives the client (render_visual.py `part_delivery_media`; Rob, 2026-11-27: "delivery
+ * packages should render like reply packages"): in a box of its own, the video's poster frame or the document's first page as a
+ * picture that opens the link, then the labelled link (the paragraph, as an older bridge draws it alone), then for a Google Doc
+ * a button that opens its text on the card. No video plays here: the desktop has no video or frame element, and claude.ai refuses
+ * outside media and frames (measured 2026-11-27, delivery_media.py). A picture the surface does not draw shows its alt text.
+ */
+function drawMedia(els: Els, node: MmCardNode, m: MmCardMedia, ctx: Ctx): Node {
+  const { Box, Text, Button, Markdown } = els
+  const href = m.url ? drawHref(m.url) : ''
+  const poster = href && m.poster ? drawHref(m.poster) : ''
+  const alt = mdAlt(`${m.label} ${m.media === 'doc' ? 'first page' : 'poster frame'}: ${mediaLine(m)}`)
+  const open = Boolean(href && m.text && ctx.docOpen === href)
+  const onDoc = ctx.onDoc
+  const para: MmCardNode = node.r?.some(r => r.s.trim()) ? node : { ...node, r: [{ s: mediaLine(m), ...(m.url ? { href: m.url } : {}) }] }
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="subtle" paddingX={1} marginY="xs">
+      {poster && Markdown ? <Markdown text={`[![${alt}](${poster})](${href})`} /> : null}
+      {drawPara(els, para, ctx)}
+      {m.text && href && Button && onDoc ? <Button key={`mm-card-doc:${ctx.keyOf()}`} plain label={open ? DOC_HIDE : DOC_OPEN} onPress={() => onDoc(href)} /> : null}
+      {open ? (
+        <Box flexDirection="column" borderStyle="round" borderColor="subtle" paddingX={1}>
+          <Text wrap="wrap" size="footnote">{m.text}</Text>
+        </Box>
+      ) : null}
+    </Box>
+  )
 }
 
 const HAND = '"Snell Roundhand","Segoe Script","Bradley Hand","Brush Script MT",cursive'
@@ -1535,6 +1628,8 @@ export type CardDraw = {
   onCheck: (label: string) => void
   onAsk: (words: string) => void
   onPage: () => void
+  /** (0.7.87) Open or close a delivery document's text on the card (`toggleDoc`). Left out, the card draws no such button. */
+  onDoc?: (href: string) => void
   /** (0.7.40) What the Changes field last said (`feedbackOf`); its line is drawn for that tag alone. */
   feedback?: MmCardFeedback | null
   /** (0.7.40) Enter in the Changes field, with the tag drawn and the words (`pressFeedback`). Left out, no field is drawn. */
@@ -1562,7 +1657,7 @@ export function drawCard(els: Els, d: CardDraw): Node {
   const hold = holdOf(card)
   const notice = marks.notice?.packageId === card.packageId ? NOTICE[marks.notice.kind] : ''
   let n = 0
-  const ctx: Ctx = { dark: false, out: null, parent: '', own: card.own, onAsk: d.onAsk, keyOf: () => `${card.packageId}:${n++}` }
+  const ctx: Ctx = { dark: false, out: null, parent: '', own: card.own, onAsk: d.onAsk, keyOf: () => `${card.packageId}:${n++}`, docOpen: marks.docOpen, onDoc: d.onDoc }
   // (0.7.40) the Changes field, on every card of the thread's own client that can still change, whatever its box shows (a hold, the
   // thread at work: a submit waits until the thread is idle), with the line it last left for this tag alone. Drawn once, just above the
   // sign box, or at the card's end when the renderer drew none. Enter sends the words into the thread, never the go. ⛔ Nothing at all
