@@ -16,6 +16,8 @@
 //   - each gate copy that exists in ~/.claude/mm-hooks/ (send-gate, secret-read-gate, repo-home-guard on PreToolUse,
 //     repo-home-guard on PostToolUse, metered-key-gate on UserPromptSubmit), as
 //     `node "<home>/.claude/mm-hooks/codex/codex-gate.js" <gate>`. codex-gate.js is copied there from this release.
+//   - the required-skill check: the same worklog hook on PreToolUse, ONLY when it is 0.16.0 or later (the first
+//     version that checks Codex sessions; an older one exits at once on PreToolUse in Codex, but costs a node start);
 //   - the rob-ask gate (rob-ask-gate.js, Rob's 2026-11-26 rules: no Discord tag of Rob, no turn that ends waiting on
 //     him with no ask filed), on PreToolUse and Stop, as `node "<home>/.claude/mm-hooks/codex/rob-ask-gate.js" --codex`.
 //     It ships in this plugin, not in ~/.claude/mm-hooks/, so it is copied next to codex-gate.js and registered on
@@ -53,6 +55,8 @@ const UNINSTALLED_MARK = "// Massmarket worklog hook: uninstalled.";
 
 /** The first worklog hook that knows Codex (OW, CODEX SESSIONS). */
 const MIN_CODEX_HOOK = [0, 14, 0];
+/** The first worklog hook whose required-skill check runs in Codex (OW, hook 0.16.0). */
+const MIN_CODEX_SKILL_CHECK_HOOK = [0, 16, 0];
 
 /** Each gate, the events it answers in Codex, and its hook timeout (seconds). */
 const GATE_EVENTS = [
@@ -122,6 +126,8 @@ function desiredEntries(opts) {
     for (const [event, timeout] of WORKLOG_EVENTS) {
       out.push({ event, matcher: event === "PostToolUse" ? "*" : null, command: `node ${q(WORKLOG_HOOK)} --codex`, timeout });
     }
+    // The required-skill check (hook 0.16.0 and later): the same file on PreToolUse.
+    if (o.skillCheck) out.push({ event: "PreToolUse", matcher: "*", command: `node ${q(WORKLOG_HOOK)} --codex`, timeout: 10 });
   }
   for (const [gate, events] of GATE_EVENTS) {
     if (!(o.gates || []).includes(gate)) continue;
@@ -377,7 +383,9 @@ async function sync() {
       return Object.assign(out, { action: "hooks-json-unreadable" });
     }
   }
-  const entries = desiredEntries({ worklog, gates, robGate });
+  const skillCheck = Boolean(worklog && atLeast(version, MIN_CODEX_SKILL_CHECK_HOOK));
+  out.skill_check = skillCheck ? "registered" : "hook older than 0.16.0";
+  const entries = desiredEntries({ worklog, gates, robGate, skillCheck });
   out.entries = entries.length;
   out.hooks_json = writeHooksJson(mergeHooks(current, entries), before);
   out.trust = entries.length ? await trustOurs() : { ok: true, ours: 0, trusted: 0, wrote: 0 };
@@ -401,4 +409,4 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { desiredEntries, installedHookVersion, isOurs, mergeHooks, SELF_TESTS, MIN_CODEX_HOOK };
+module.exports = { desiredEntries, installedHookVersion, isOurs, mergeHooks, SELF_TESTS, MIN_CODEX_HOOK, MIN_CODEX_SKILL_CHECK_HOOK };
