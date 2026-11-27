@@ -150,6 +150,12 @@ describe('0.7.86 which threads keep Remote Control in a pass', () => {
     expect(plan.off).toEqual([])
   })
 
+  test('an entry of the wrong shape is still on record: a dropped thread in the top is switched on, never a throw', () => {
+    const plan = rcPlan([view('bad', 1), view('null', 2, { pinned: false, on: true })], { bad: 7, null: null } as unknown as RcRecord, 2, NOW)
+    expect(plan.on).toEqual(['bad'])
+    expect(plan.off).toEqual(['null'])
+  })
+
   test('unpinned, on record: switched off when on, taken off when off', () => {
     const plan = rcPlan([view('a', 1, { pinned: false, on: true }), view('b', 1, { pinned: false })], { a: { at: 1 }, b: { at: 1, person: true } }, 10, NOW)
     expect(plan.off).toEqual(['a'])

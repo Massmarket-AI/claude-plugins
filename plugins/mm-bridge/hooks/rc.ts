@@ -174,7 +174,12 @@ const newestFirst = (a: RcView, b: RcView): number => (b.activity || '').localeC
  */
 export function rcPlan(threads: readonly RcView[], record: Readonly<RcRecord>, cap: number, now: number): RcPlan {
   const plan: RcPlan = { on: [], off: [], forget: [], person: [], seen: [], top: [], held: 0 }
-  const entry = (sid: string): RcEntry | undefined => (Object.hasOwn(record, sid) ? record[sid] : undefined)
+  // an entry of the wrong shape (an older version's, a damaged file) is still on record, with nothing else known
+  const entry = (sid: string): RcEntry | undefined => {
+    if (!Object.hasOwn(record, sid)) return undefined
+    const e = record[sid] as unknown
+    return e && typeof e === 'object' ? (e as RcEntry) : { at: 0 }
+  }
   const candidates: RcView[] = []
   for (const t of threads) {
     const e = entry(t.sid)
