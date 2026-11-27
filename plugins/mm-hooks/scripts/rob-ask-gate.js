@@ -9,7 +9,19 @@
 //   - PreToolUse: a Discord post or reply that tags Rob is denied, with the path to use instead.
 //   - Stop: a turn that ends waiting on Rob with no ask filed this session is blocked once.
 //
-// Never runs (exit 0, no output): unattended runs, sdk entrypoints, Rob's own machine, a payload it cannot read.
+// Codex (GPT): sync-codex.js copies this file to ~/.claude/mm-hooks/codex/ and registers it in ~/.codex/hooks.json on
+// PreToolUse and Stop as `node "<that copy>" --codex`. Same rules, same words. What differs in Codex:
+//   - a shell call is tool_name `Bash` with tool_input.command a string (measured, 0.155.1), as in Claude;
+//   - the transcript is Codex's rollout: a call is a `response_item` whose payload is a function_call,
+//     custom_tool_call or local_shell_call with a call_id, and its result the *_output item with the same call_id;
+//     askFiled() and lastAssistantText() read both shapes;
+//   - Stop `{decision:"block", reason}` is honoured: Codex continues the turn with the reason, and the next Stop
+//     carries stop_hook_active: true and last_assistant_message (measured on 0.155.1, 2026-11-27);
+//   - a run Claude handed to GPT through gpt-task.mjs (MM_GPT_DELEGATED=1) is skipped: the Claude thread that
+//     delegated it is the one at work, and its own Stop hook covers the turn.
+//
+// Never runs (exit 0, no output): unattended runs, sdk entrypoints, delegated GPT runs, Rob's own machine, a payload
+// it cannot read.
 // Never: `ask`, a bare `allow`, a network call, a write, or any touch of ~/.claude/mm-hooks/ beyond reading
 // bridge-state.json. Any error is exit 0 with no output (fail open).
 "use strict";
@@ -46,11 +58,29 @@ function readStdin() {
   }
 }
 
+/** True while a test window written in the last hour is still open. Never throws. */
+function testWindowOpen() {
+  try {
+    const file = path.join(HOME, ".claude", "mm-hooks", "rob-ask-gate-test-until");
+    const st = fs.statSync(file);
+    const until = Date.parse(fs.readFileSync(file, "utf8").trim());
+    const now = Date.now();
+    return Number.isFinite(until) && until > now && until - st.mtimeMs <= 3600 * 1000 && now - st.mtimeMs <= 3600 * 1000;
+  } catch (_) {
+    return false;
+  }
+}
+
 /** Rob's machine, unattended runs and sdk runs never get this hook. Never throws. */
 function skipRun(env) {
   try {
     if (env.MM_UNATTENDED === "1" || env.LANE2_RUN_ID || env.MM_RUN_SESSION) return true;
+    if (env.MM_GPT_DELEGATED === "1") return true;
     if (String(env.CLAUDE_CODE_ENTRYPOINT || "").startsWith("sdk")) return true;
+    // A live test on Rob's own computer (the Codex desktop app takes no environment from us): the file
+    // ~/.claude/mm-hooks/rob-ask-gate-test-until holds an ISO time. Until then, and for at most one hour from its
+    // write, the Rob-machine checks below are skipped. Unattended, sdk and delegated runs above stay skipped.
+    if (testWindowOpen()) return false;
     try {
       const st = JSON.parse(fs.readFileSync(path.join(HOME, ".claude", "mm-hooks", "bridge-state.json"), "utf8"));
       if (st && typeof st.member === "string" && st.member.trim().toLowerCase() === "rob@massmarket.ai") return true;
@@ -178,6 +208,11 @@ function preToolUse(payload) {
 // ---------- Stop ----------
 
 function textOf(entry) {
+  // Codex rollout: {type:"response_item", payload:{type:"message", role:"assistant", content:[{type:"output_text"}]}}
+  const p = entry && entry.type === "response_item" && entry.payload;
+  if (p && p.type === "message" && p.role === "assistant" && Array.isArray(p.content)) {
+    return p.content.filter((b) => b && b.type === "output_text" && typeof b.text === "string").map((b) => b.text).join("\n");
+  }
   const msg = entry && entry.message;
   const content = msg && msg.content;
   if (typeof content === "string") return content;
@@ -199,7 +234,7 @@ function lastAssistantText(payload) {
     } catch (_) {
       continue;
     }
-    if (!e || e.type !== "assistant") continue;
+    if (!e || (e.type !== "assistant" && e.type !== "response_item")) continue;
     const t = textOf(e);
     if (t.trim()) return t;
   }
@@ -219,6 +254,16 @@ function askFiled(transcriptPath) {
     try {
       e = JSON.parse(line);
     } catch (_) {
+      continue;
+    }
+    const p = e && e.type === "response_item" && e.payload && typeof e.payload === "object" ? e.payload : null;
+    if (p && p.call_id) {
+      // Codex rollout: a call, then its *_output with the same call_id.
+      if (/^(function_call|custom_tool_call|local_shell_call)$/.test(p.type)) {
+        if (JSON.stringify([p.arguments, p.input, p.action]).includes("team-ask/file")) ids.add(p.call_id);
+      } else if (/_output$/.test(p.type)) {
+        results.push({ tool_use_id: p.call_id, content: p.output });
+      }
       continue;
     }
     const content = e && e.message && e.message.content;
