@@ -2076,7 +2076,7 @@ describe('0.5.13: the cap\'s line in the notice log, once per client per hour in
 // ======================================================================== 0.5.19
 
 describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer where /mm rc is on', () => {
-  const RC_ON = 'Remote Control follows the pin on this computer: a pinned thread gets Remote Control, and loses it again when it is unpinned if the bridge turned it on.'
+  const RC_ON = 'Remote Control follows the pin on this computer: the most recently used pinned threads get Remote Control, as many as this computer\'s memory allows (10 on a 48 GB Mac, fewer while memory is short), and lose it again when they drop out of those or are unpinned, if the bridge turned it on.'
   const RC_OFF = 'Remote Control no longer follows the pin on this computer. Threads keep the Remote Control they have now.'
   const rcSays = (state: 'on' | 'off') => `Remote Control follows the pin: ${state} on this computer. Type /mm rc on or /mm rc off.`
   const HUB = 'local_rc_hub'
@@ -2096,8 +2096,8 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
    * The app with this thread (HUB, which polls) and the given threads; its first tick has run. Remote Control follows
    * the pin unless `on` is false. `before` is run before that tick.
    */
-  async function running(threads: Array<Partial<FakeThread> & { sessionId: string }>, opts: { on?: boolean; hub?: Partial<FakeThread>; before?: (w: World) => void } = {}) {
-    const w = fakeApp(quiet(), [{ sessionId: HUB, ...opts.hub }, ...threads], [], { every: true })
+  async function running(threads: Array<Partial<FakeThread> & { sessionId: string }>, opts: { on?: boolean; hub?: Partial<FakeThread>; before?: (w: World) => void; unlisted?: string[] } = {}) {
+    const w = fakeApp(quiet(), [{ sessionId: HUB, ...opts.hub }, ...threads], opts.unlisted ?? [], { every: true })
     const hub = w.session(HUB)
     if (opts.on !== false) w.put('mm.rcpin', { on: true })
     opts.before?.(w)
@@ -2126,7 +2126,8 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(await mm(hub, 'rc on')).toBe(RC_ON)
     expect(w.stored('mm.rcpin')).toEqual({ on: true })
     expect(await mm(hub, 'rc')).toBe(rcSays('on'))
-    expect(await mm(hub, 'status')).toContain('\nauto-update: on\nremote control follows the pin: on\nlast error: ')
+    // (0.7.86) and, while it is on, the cap: no pass has read this computer's memory yet
+    expect(await mm(hub, 'status')).toContain("\nauto-update: on\nremote control follows the pin: on · up to 10 threads (memory size not read, memory not checked yet) · 0 on the bridge's record\nlast error: ")
     expect(await mm(hub, 'rc off')).toBe(RC_OFF)
     expect(w.stored('mm.rcpin')).toEqual({ on: false })
     expect(await mm(hub, 'rc maybe')).toBe(rcSays('off'))
@@ -2149,14 +2150,18 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(thread(w, HUB).remoteControlActive).toBe(false)
   })
 
-  test('rule b: the person switches off Remote Control the bridge turned on: it stays off while the thread stays pinned; unpinned and pinned again, it gets it again', async () => {
+  test('rule b: (0.7.86) the person switches off Remote Control the bridge turned on while the thread runs: it stays off while the thread stays pinned; unpinned and pinned again, it gets it again', async () => {
     const { w } = await running([{ sessionId: 'local_rc_b', pinned: true }])
     expect(rcCalls(w)).toEqual([['local_rc_b', true]])
+    // a pass sees it on, and the next sees it off while a turn runs there
+    await tickOnce(w)
     thread(w, 'local_rc_b').remoteControlActive = false
+    thread(w, 'local_rc_b').isRunning = true
     for (let i = 0; i < 5; i++) await tickOnce(w)
     expect(rcCalls(w)).toEqual([['local_rc_b', true]])
     expect(thread(w, 'local_rc_b').remoteControlActive).toBe(false)
     expect(Object.keys(w.stored('mm.rc') as object)).toEqual(['local_rc_b'])
+    expect((w.stored('mm.rc') as Record<string, { person?: true }>).local_rc_b.person).toBe(true)
     // unpinned with it off: off the record (rule e), no call; pinned again: a pin of its own, so it gets it again
     thread(w, 'local_rc_b').pinned = false
     await tickOnce(w)
@@ -2166,6 +2171,16 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     await tickOnce(w)
     expect(rcCalls(w)).toEqual([['local_rc_b', true], ['local_rc_b', true]])
     expect(thread(w, 'local_rc_b').remoteControlActive).toBe(true)
+  })
+
+  test('rule b: (0.7.86) the person switches it off and goes on writing there: used since the pass that saw it on, so it stays off', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_b2', pinned: true }])
+    await tickOnce(w)
+    thread(w, 'local_rc_b2').remoteControlActive = false
+    thread(w, 'local_rc_b2').lastActivityAt = new Date(w.now()).toISOString()
+    for (let i = 0; i < 5; i++) await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_b2', true]])
+    expect((w.stored('mm.rc') as Record<string, { person?: true }>).local_rc_b2.person).toBe(true)
   })
 
   test('rule c: a pinned thread that has Remote Control already: no call and no record, so unpinning it later leaves it on', async () => {
@@ -2207,12 +2222,15 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(w.stored('mm.rc')).toBeUndefined()
   })
 
-  test('rule g: a thread on record that the app does not list is left on record, and nothing is asked about it', async () => {
+  test('rule g: a thread on record that the app does not list is left on record; (0.7.86) it is looked up by id, and with no such thread (or one of the other Claude profile) it is not looked up again for an hour', async () => {
     const { w } = await running([{ sessionId: 'local_rc_x' }], { before: w => w.put('mm.rc', { local_rc_gone: { at: NOW - 3_600_000 } }) })
+    const looked = () => w.calls.filter(c => c.tool === 'get_session' && c.args.session_id === 'local_rc_gone').length
+    const first = looked()
+    expect(first).toBeGreaterThan(0)
     for (let i = 0; i < 3; i++) await tickOnce(w)
     expect(rcCalls(w)).toEqual([])
     expect(w.stored('mm.rc')).toEqual({ local_rc_gone: { at: NOW - 3_600_000 } })
-    expect(w.calls.filter(c => JSON.stringify(c.args).includes('local_rc_gone'))).toEqual([])
+    expect(looked()).toBe(first)
   })
 
   test('this thread pinned gets Remote Control through get_session self (the app\'s list leaves it out)', async () => {
@@ -2228,7 +2246,8 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(rcCalls(w)).toEqual([['local_rc_r', true]])
     expect(w.stored('mm.rc')).toBeUndefined()
     const activity = thread(w, 'local_rc_r').lastActivityAt
-    expect(w.stored('mm.rcwait')).toEqual({ local_rc_r: { until: NOW + 4_000 + WAIT, activity } })
+    // (0.7.86) with the app's own words, and the thread's name for /mm status
+    expect(w.stored('mm.rcwait')).toEqual({ local_rc_r: { until: NOW + 4_000 + WAIT, activity, why: REFUSAL, title: 'local_rc_r' } })
     for (let i = 0; i < 10; i++) await tickOnce(w)
     expect(rcCalls(w).length).toBe(1)
     // the person sends a message there, and the app takes it now
@@ -2250,7 +2269,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(rcCalls(w).length).toBe(1)
     await tickOnce(w)
     expect(rcCalls(w)).toEqual([['local_rc_s', true], ['local_rc_s', true]])
-    expect(w.stored('mm.rcwait')).toEqual({ local_rc_s: { until: NOW + 16 * 60_000 + WAIT, activity: thread(w, 'local_rc_s').lastActivityAt } })
+    expect(w.stored('mm.rcwait')).toEqual({ local_rc_s: { until: NOW + 16 * 60_000 + WAIT, activity: thread(w, 'local_rc_s').lastActivityAt, why: 'the session is waiting for the user to answer a request', title: 'local_rc_s' } })
     expect(w.stored('mm.rc')).toBeUndefined()
     for (let i = 0; i < 14; i++) await tickOnce(w)
     expect(rcCalls(w).length).toBe(2)
@@ -2261,7 +2280,7 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(rcCalls(w)).toEqual([['local_rc_v', true]])
     expect(thread(w, 'local_rc_v').remoteControlActive).toBe(false)
     expect(w.stored('mm.rc')).toBeUndefined()
-    expect(w.stored('mm.rcwait')).toEqual({ local_rc_v: { until: NOW + 4_000 + WAIT, activity: thread(w, 'local_rc_v').lastActivityAt } })
+    expect(w.stored('mm.rcwait')).toEqual({ local_rc_v: { until: NOW + 4_000 + WAIT, activity: thread(w, 'local_rc_v').lastActivityAt, why: 'the app answered unavailable', title: 'local_rc_v' } })
     // ticks at 1 to 15 minutes, unused: the last is still 4 seconds short of the wait's end
     for (let i = 0; i < 15; i++) await tickOnce(w)
     expect(rcCalls(w).length).toBe(1)
@@ -2285,24 +2304,184 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     }
     expect(rcCalls(w)).toEqual(ids.map(id => [id, true]))
     expect(w.stored('mm.rc')).toBeUndefined()
-    const waits = w.stored('mm.rcwait') as Record<string, { until: number; activity: string }>
+    const waits = w.stored('mm.rcwait') as Record<string, { until: number; activity: string; why?: string; title?: string }>
     expect(Object.keys(waits)).toEqual(ids)
-    expect(waits.local_rc_n1).toEqual({ until: NOW + 19_000 + WAIT, activity: thread(w, 'local_rc_n1').lastActivityAt })
+    expect(waits.local_rc_n1).toEqual({ until: NOW + 19_000 + WAIT, activity: thread(w, 'local_rc_n1').lastActivityAt, why: 'no answer in 15 seconds', title: 'local_rc_n1' })
     for (let i = 0; i < 5; i++) await tickOnce(w)
     expect(rcCalls(w).length).toBe(6)
   })
 
-  test('at most 10 calls in a pass: twelve pinned threads, ten now and the other two on the next tick', async () => {
+  test('(0.7.86) the cap: twelve pinned threads on a computer whose memory cannot be read, and only the ten most recently used get Remote Control, ever', async () => {
     const ids = Array.from({ length: 12 }, (_, i) => `local_rc_cap${i + 1}`)
-    const { w } = await running(ids.map(sessionId => ({ sessionId, pinned: true })))
+    // cap1 is the most recently used, cap12 the least
+    const { w } = await running(ids.map((sessionId, i) => ({ sessionId, pinned: true, lastActivityAt: ago(1 + i) })))
+    expect(rcCalls(w)).toEqual(ids.slice(0, 10).map(id => [id, true]))
+    for (let i = 0; i < 3; i++) await tickOnce(w)
     expect(rcCalls(w).length).toBe(10)
-    expect(new Set(rcCalls(w).map(c => c[0])).size).toBe(10)
+    expect(Object.keys(w.stored('mm.rc') as object).sort()).toEqual(ids.slice(0, 10).sort())
+    expect(thread(w, 'local_rc_cap11').remoteControlActive).toBe(false)
+    expect(thread(w, 'local_rc_cap12').remoteControlActive).toBe(false)
+    expect(w.stored('mm.rccap')).toEqual({ cap: 10, at: NOW + 4_000, full: 10, tier: 'unread' })
+  })
+
+  // ---------------------------------------------------------------- (0.7.86) the cap, the drop, past the 60, the reasons
+
+  const GIB_KB = 1024 * 1024
+  /** /proc/meminfo for a computer of `gb` GB with `free` percent available. */
+  const meminfo = (gb: number, free: number) => `MemTotal:       ${gb * GIB_KB} kB\nMemFree:        ${Math.round((gb * GIB_KB * free) / 200)} kB\nMemAvailable:   ${Math.round((gb * GIB_KB * free) / 100)} kB\nBuffers:          1024 kB\n`
+  const onNow = (w: World, ids: readonly string[]) => ids.filter(id => thread(w, id).remoteControlActive)
+  const pinnedThreads = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => ({ sessionId: `${prefix}${i + 1}`, pinned: true, lastActivityAt: ago(1 + i) }))
+
+  test('(0.7.86) the cap\'s edge: an 11th pinned thread that is used becomes one of the ten, and the least recently used of them is switched off and taken off the record', async () => {
+    const threads = pinnedThreads('local_rc_e', 11)
+    const ids = threads.map(t => t.sessionId)
+    const { w } = await running(threads)
+    expect(onNow(w, ids)).toEqual(ids.slice(0, 10))
     await tickOnce(w)
-    expect(rcCalls(w).length).toBe(12)
-    expect(new Set(rcCalls(w).map(c => c[0])).size).toBe(12)
-    expect(Object.keys(w.stored('mm.rc') as object).sort()).toEqual([...ids].sort())
+    // the person writes in the 11th
+    thread(w, 'local_rc_e11').lastActivityAt = new Date(w.now()).toISOString()
     await tickOnce(w)
+    expect(rcCalls(w).slice(10)).toEqual([['local_rc_e10', false], ['local_rc_e11', true]])
+    expect(onNow(w, ids)).toEqual([...ids.slice(0, 9), 'local_rc_e11'])
+    expect(Object.keys(w.stored('mm.rc') as object).sort()).toEqual([...ids.slice(0, 9), 'local_rc_e11'].sort())
+    for (let i = 0; i < 3; i++) await tickOnce(w)
     expect(rcCalls(w).length).toBe(12)
+  })
+
+  test('(0.7.86) Remote Control the bridge did not switch on uses a place in the cap and is never switched off; once the person turns it off, the next pinned thread gets the place', async () => {
+    const threads = pinnedThreads('local_rc_h', 11)
+    const ids = threads.map(t => t.sessionId)
+    const { w } = await running([...threads, { sessionId: 'local_rc_hown', remoteControlActive: true }])
+    expect(onNow(w, ids)).toEqual(ids.slice(0, 9))
+    expect(thread(w, 'local_rc_hown').remoteControlActive).toBe(true)
+    thread(w, 'local_rc_hown').remoteControlActive = false
+    await tickOnce(w)
+    expect(onNow(w, ids)).toEqual(ids.slice(0, 10))
+    expect(rcCalls(w).some(([sid]) => sid === 'local_rc_hown')).toBe(false)
+  })
+
+  test('(0.7.86) the cap follows the computer\'s memory: 13 on 64 GB, halved while memory is tight, 2 while it is critical, and raised again only after ten minutes of better readings', async () => {
+    const threads = pinnedThreads('local_rc_m', 15)
+    const ids = threads.map(t => t.sessionId)
+    const { w } = await running(threads, { before: w => void (w.memory.meminfo = meminfo(64, 50)) })
+    // ten calls a pass: thirteen over two passes
+    expect(onNow(w, ids).length).toBe(10)
+    await tickOnce(w)
+    expect(onNow(w, ids)).toEqual(ids.slice(0, 13))
+    expect(w.stored('mm.rccap')).toMatchObject({ cap: 13, full: 13, tier: 'normal', ram: 64 * 2 ** 30 })
+    // tight: the seven least recently used are switched off
+    w.memory.meminfo = meminfo(64, 20)
+    await tickOnce(w)
+    expect(onNow(w, ids)).toEqual(ids.slice(0, 6))
+    expect(Object.keys(w.stored('mm.rc') as object).sort()).toEqual(ids.slice(0, 6).sort())
+    expect(w.stored('mm.rccap')).toMatchObject({ cap: 6, tier: 'tight' })
+    // critical: two
+    w.memory.meminfo = meminfo(64, 5)
+    await tickOnce(w)
+    expect(onNow(w, ids)).toEqual(ids.slice(0, 2))
+    expect(w.stored('mm.rccap')).toMatchObject({ cap: 2, tier: 'critical' })
+    // normal again: held at two for ten minutes
+    w.memory.meminfo = meminfo(64, 50)
+    for (let i = 0; i < 8; i++) await tickOnce(w)
+    expect(onNow(w, ids)).toEqual(ids.slice(0, 2))
+    for (let i = 0; i < 4; i++) await tickOnce(w)
+    expect(onNow(w, ids)).toEqual(ids.slice(0, 13))
+    expect(w.stored('mm.rccap')).toMatchObject({ cap: 13, tier: 'normal' })
+  })
+
+  test('(0.7.86) a smaller computer gets fewer: 4 threads on 16 GB', async () => {
+    const threads = pinnedThreads('local_rc_sm', 6)
+    const ids = threads.map(t => t.sessionId)
+    const { w } = await running(threads, { before: w => void (w.memory.meminfo = meminfo(16, 60)) })
+    expect(onNow(w, ids)).toEqual(ids.slice(0, 4))
+    expect(w.stored('mm.rccap')).toEqual({ cap: 4, at: NOW + 4_000, full: 4, tier: 'normal', ram: 16 * 2 ** 30 })
+  })
+
+  test('(0.7.86) a drop: a thread on record from days ago whose Remote Control is off (the app restarted, or it went idle) is switched on again', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_d1', pinned: true }], { before: w => w.put('mm.rc', { local_rc_d1: { at: NOW - 2 * DAY } }) })
+    expect(rcCalls(w)).toEqual([['local_rc_d1', true]])
+    expect(thread(w, 'local_rc_d1').remoteControlActive).toBe(true)
+    expect(w.stored('mm.rc')).toEqual({ local_rc_d1: { at: NOW + 4_000 } })
+  })
+
+  test('(0.7.86) a drop: Remote Control the bridge turned on goes off while the thread sits idle, and is switched on again on the next pass', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_d2', pinned: true }])
+    await tickOnce(w)
+    expect((w.stored('mm.rc') as Record<string, { seen?: number }>).local_rc_d2.seen).toBeGreaterThan(NOW + 4_000)
+    thread(w, 'local_rc_d2').remoteControlActive = false
+    await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_d2', true], ['local_rc_d2', true]])
+    expect(thread(w, 'local_rc_d2').remoteControlActive).toBe(true)
+  })
+
+  test('(0.7.86) the app restarted: a thread the bridge last saw on half an hour ago, now running with Remote Control off, dropped; it is not the person\'s switch-off', async () => {
+    const seen = NOW - 30 * 60_000
+    const { w } = await running([{ sessionId: 'local_rc_d3', pinned: true, isRunning: true, lastActivityAt: ago(0) }], {
+      before: w => w.put('mm.rc', { local_rc_d3: { at: NOW - DAY, seen, act: ago(2) } }),
+    })
+    expect(rcCalls(w)).toEqual([['local_rc_d3', true]])
+    expect((w.stored('mm.rc') as Record<string, { person?: true }>).local_rc_d3.person).toBeUndefined()
+  })
+
+  test('(0.7.86) a drop the app refuses to switch on (the thread is unloaded): it waits, /mm status says why, and once the thread is used it is switched on', async () => {
+    const REFUSAL = 'Remote Control requires an active session. Send a message first.'
+    const { w, hub } = await running([{ sessionId: 'local_rc_d4', pinned: true, title: 'Client Four · reply ready' }], {
+      before: w => {
+        w.put('mm.rc', { local_rc_d4: { at: NOW - DAY } })
+        w.refuseRc.set('local_rc_d4', REFUSAL)
+      },
+    })
+    expect(rcCalls(w)).toEqual([['local_rc_d4', true]])
+    expect((w.stored('mm.rcwait') as Record<string, { why?: string }>).local_rc_d4.why).toBe(REFUSAL)
+    // still on record: a drop, never the person's switch-off
+    expect(w.stored('mm.rc')).toEqual({ local_rc_d4: { at: NOW - DAY } })
+    const status = await mm(hub, 'status')
+    expect(status).toContain(`\nremote control waiting: Client Four · reply ready · ${REFUSAL} · asked again after ${new Date(NOW + 4_000 + WAIT).toISOString()}, or once it is used\n`)
+    for (let i = 0; i < 5; i++) await tickOnce(w)
+    expect(rcCalls(w).length).toBe(1)
+    w.refuseRc.delete('local_rc_d4')
+    thread(w, 'local_rc_d4').lastActivityAt = new Date(w.now()).toISOString()
+    await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_d4', true], ['local_rc_d4', true]])
+    expect(thread(w, 'local_rc_d4').remoteControlActive).toBe(true)
+    expect(w.stored('mm.rcwait')).toEqual({})
+    expect(await mm(hub, 'status')).not.toContain('remote control waiting:')
+  })
+
+  test('(0.7.86) past the app\'s 60: with fewer pinned threads listed than the cap, the bridge\'s other pinned threads are looked up by id and get Remote Control; one no longer pinned is looked up once an hour', async () => {
+    const pin = (n: number) => ({ projectId: pid(n), client: `Client ${n}`, byUs: false })
+    const { w } = await running(
+      [{ sessionId: 'local_rc_p1', pinned: true }, { sessionId: 'local_rc_far1', pinned: true, lastActivityAt: ago(80) }, { sessionId: 'local_rc_far2', pinned: true, lastActivityAt: ago(77) }, { sessionId: 'local_rc_far3', lastActivityAt: ago(90) }],
+      { unlisted: ['local_rc_far1', 'local_rc_far2', 'local_rc_far3'] },
+    )
+    expect(rcCalls(w)).toEqual([['local_rc_p1', true]])
+    // the pins the bridge holds for its clients (put after the sync, which keeps only its own clients' records)
+    w.put('mm.pins', { local_rc_far1: pin(1), local_rc_far2: pin(2), local_rc_far3: pin(3) })
+    const looked = (sid: string) => w.calls.filter(c => c.tool === 'get_session' && c.args.session_id === sid).length
+    const before = ['local_rc_far1', 'local_rc_far2', 'local_rc_far3'].map(looked)
+    await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_p1', true], ['local_rc_far2', true], ['local_rc_far1', true]])
+    expect(['local_rc_far1', 'local_rc_far2', 'local_rc_far3'].map((sid, i) => looked(sid) - (before[i] ?? 0))).toEqual([1, 1, 1])
+    await tickOnce(w)
+    expect(['local_rc_far1', 'local_rc_far2', 'local_rc_far3'].map((sid, i) => looked(sid) - (before[i] ?? 0))).toEqual([2, 2, 1])
+    expect(rcCalls(w).length).toBe(3)
+  })
+
+  test('(0.7.86) past the app\'s 60: a thread on record the list leaves out is looked up even with the cap full, and switched off as one past the ten; the other pinned threads are not looked up', async () => {
+    const threads = pinnedThreads('local_rc_f', 10)
+    const { w } = await running([...threads, { sessionId: 'local_rc_ffar', pinned: true, remoteControlActive: true, lastActivityAt: ago(80) }, { sessionId: 'local_rc_fpin', pinned: true, lastActivityAt: ago(81) }], {
+      unlisted: ['local_rc_ffar', 'local_rc_fpin'],
+      before: w => w.put('mm.rc', { local_rc_ffar: { at: NOW - DAY } }),
+    })
+    // switch-offs first, then ten calls a pass: the tenth thread on the next
+    expect(rcCalls(w)).toEqual([['local_rc_ffar', false], ...threads.slice(0, 9).map(t => [t.sessionId, true])])
+    expect(thread(w, 'local_rc_ffar').remoteControlActive).toBe(false)
+    w.put('mm.pins', { local_rc_fpin: { projectId: pid(9), client: 'Client 9', byUs: false } })
+    const before = w.calls.filter(c => c.tool === 'get_session' && c.args.session_id === 'local_rc_fpin').length
+    await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_ffar', false], ...threads.map(t => [t.sessionId, true])])
+    expect(Object.keys(w.stored('mm.rc') as object).sort()).toEqual(threads.map(t => t.sessionId).sort())
+    expect(w.calls.filter(c => c.tool === 'get_session' && c.args.session_id === 'local_rc_fpin').length).toBe(before)
   })
 
   test('paused: no calls and no list; resumed, the next tick gives it', async () => {

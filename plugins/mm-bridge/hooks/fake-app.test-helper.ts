@@ -18,7 +18,8 @@ export const ME = 'owner@example.com'
 /** A made-up project id: `0000000n-0000-4000-8000-00000000000n`. */
 export const pid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`
 
-export type FakeThread = { sessionId: string; title: string; pinned: boolean; isArchived: boolean; lastActivityAt: string; remoteControlActive: boolean }
+/** (0.7.86) `isRunning`: a turn is going in it, as the app's list says (left out: not running). */
+export type FakeThread = { sessionId: string; title: string; pinned: boolean; isArchived: boolean; lastActivityAt: string; remoteControlActive: boolean; isRunning?: boolean }
 type Hook = ($: unknown, e: Record<string, unknown>, next: (e: unknown) => unknown) => Promise<unknown>
 type Mcp = { content: Array<{ type: 'text'; text: string }>; isError: boolean }
 
@@ -97,6 +98,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   const silentRc = new Set<string>()
   /** (0.5.19) Threads the app answers this state for (on, off, connecting, unavailable), whatever was asked. */
   const rcStates = new Map<string, string>()
+  /** (0.7.86) What this computer's /proc/meminfo reads (the fake is a Linux computer): unset, it cannot be read. */
+  const memory: { meminfo?: string } = {}
   /**
    * (0.7.6) How the app answers `unarchive_session` for a thread, when not as it does for one it may unarchive (it is
    * unarchived, and the app says so): `refuse`, the person said no to the app's question (an error answer); `error`, the
@@ -177,6 +180,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
       fs: {
         read: async (path: string) => {
           if (path.endsWith('/.claude/mm-hooks/token')) return 'fixture-token-not-a-real-one'
+          // (0.7.86) the computer's memory, where a test gives it
+          if (path === '/proc/meminfo' && memory.meminfo !== undefined) return memory.meminfo
           // (0.5.11, review of PR #15, F4) a time-tracking hook that counts the bridge's turns as automatic (0.11.7's rule)
           if (path.endsWith('/.claude/mm-hooks/worklog-hook.js')) return 'const HOOK_VERSION = "0.11.7";\nconst TURN_ORIGIN_MARKER_RE = /^\\[mm-link [0-9a-f-]{36}\\]/;\n'
           throw new Error(`ENOENT: no such file or directory, open '${path}'`)
@@ -286,6 +291,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
     refuseRc,
     silentRc,
     rcStates,
+    memory,
     unarchiving,
     session,
     /** The fake clock now. */
