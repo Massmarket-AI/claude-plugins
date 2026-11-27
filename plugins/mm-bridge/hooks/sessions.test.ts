@@ -2433,8 +2433,8 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     })
     expect(rcCalls(w)).toEqual([['local_rc_d4', true]])
     expect((w.stored('mm.rcwait') as Record<string, { why?: string }>).local_rc_d4.why).toBe(REFUSAL)
-    // still on record: a drop, never the person's switch-off
-    expect(w.stored('mm.rc')).toEqual({ local_rc_d4: { at: NOW - DAY } })
+    // still on record: a drop, stamped so, never the person's switch-off
+    expect(w.stored('mm.rc')).toEqual({ local_rc_d4: { at: NOW - DAY, dropped: NOW + 4_000 } })
     const status = await mm(hub, 'status')
     expect(status).toContain(`\nremote control waiting: Client Four · reply ready · ${REFUSAL} · asked again after ${new Date(NOW + 4_000 + WAIT).toISOString()}, or once it is used\n`)
     for (let i = 0; i < 5; i++) await tickOnce(w)
@@ -2482,6 +2482,98 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     expect(rcCalls(w)).toEqual([['local_rc_ffar', false], ...threads.map(t => [t.sessionId, true])])
     expect(Object.keys(w.stored('mm.rc') as object).sort()).toEqual(threads.map(t => t.sessionId).sort())
     expect(w.calls.filter(c => c.tool === 'get_session' && c.args.session_id === 'local_rc_fpin').length).toBe(before)
+  })
+
+  // ---------------------------------------------------------------- (0.7.86) the review's cases
+
+  test('(0.7.86) a switch-on the app answers "connecting", then off on the next pass with a turn running: a drop, switched on again, never the person\'s', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_cn', pinned: true }], { before: w => w.rcStates.set('local_rc_cn', 'connecting') })
+    expect(rcCalls(w)).toEqual([['local_rc_cn', true]])
+    expect(w.stored('mm.rc')).toEqual({ local_rc_cn: { at: NOW + 4_000 } })
+    w.rcStates.delete('local_rc_cn')
+    thread(w, 'local_rc_cn').isRunning = true
+    await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_cn', true], ['local_rc_cn', true]])
+    expect(thread(w, 'local_rc_cn').remoteControlActive).toBe(true)
+    expect((w.stored('mm.rc') as Record<string, { person?: true }>).local_rc_cn.person).toBeUndefined()
+  })
+
+  test('(0.7.86) the app restarted a minute and a half after a pass saw the thread on, and the thread is in use: another bridge process saw it, so it dropped', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_fr', pinned: true, isRunning: true, lastActivityAt: ago(0) }], {
+      before: w => w.put('mm.rc', { local_rc_fr: { at: NOW - DAY, seen: NOW - 90_000, act: ago(1), by: 'cli:local_rc_hub before-the-restart' } }),
+    })
+    expect(rcCalls(w)).toEqual([['local_rc_fr', true]])
+    expect(thread(w, 'local_rc_fr').remoteControlActive).toBe(true)
+  })
+
+  test('(0.7.86) a switch-off the app refuses leaves its thread on: the switch-on that would have taken its place waits, so no more than the cap are on', async () => {
+    const threads = pinnedThreads('local_rc_ro', 11)
+    const ids = threads.map(t => t.sessionId)
+    const { w } = await running(threads)
+    await tickOnce(w)
+    w.refuseRc.set('local_rc_ro10', 'the session is waiting for the user to answer a request')
+    thread(w, 'local_rc_ro11').lastActivityAt = new Date(w.now()).toISOString()
+    await tickOnce(w)
+    expect(rcCalls(w).slice(10)).toEqual([['local_rc_ro10', false]])
+    expect(onNow(w, ids)).toEqual(ids.slice(0, 10))
+    expect(Object.keys(w.stored('mm.rc') as object).length).toBe(10)
+    // the app takes the switch-off once its wait is over, and the 11th gets its place
+    w.refuseRc.delete('local_rc_ro10')
+    for (let i = 0; i < 16; i++) await tickOnce(w)
+    expect(onNow(w, ids)).toEqual([...ids.slice(0, 9), 'local_rc_ro11'])
+  })
+
+  test('(0.7.86) ⛔ a dropped thread the app would not switch back on, which the person then switches on by hand, is theirs: never switched off by the bridge, even past the cap', async () => {
+    const threads = pinnedThreads('local_rc_hd', 10)
+    const { w } = await running([{ sessionId: 'local_rc_hand', pinned: true, lastActivityAt: ago(0.5) }, ...threads], {
+      before: w => {
+        w.put('mm.rc', { local_rc_hand: { at: NOW - DAY } })
+        w.refuseRc.set('local_rc_hand', 'Remote Control requires an active session. Send a message first.')
+      },
+    })
+    expect((w.stored('mm.rc') as Record<string, { dropped?: number }>).local_rc_hand.dropped).toBe(NOW + 4_000)
+    // the person switches it on by hand; then ten other threads are used after it
+    thread(w, 'local_rc_hand').remoteControlActive = true
+    await tickOnce(w)
+    expect(Object.hasOwn(w.stored('mm.rc') as object, 'local_rc_hand')).toBe(false)
+    for (const t of threads) thread(w, t.sessionId).lastActivityAt = new Date(w.now()).toISOString()
+    for (let i = 0; i < 3; i++) await tickOnce(w)
+    expect(rcCalls(w).filter(([sid, on]) => sid === 'local_rc_hand' && on === false)).toEqual([])
+    expect(thread(w, 'local_rc_hand').remoteControlActive).toBe(true)
+    // its place counts: nine of the ten others
+    expect(onNow(w, threads.map(t => t.sessionId)).length).toBe(9)
+  })
+
+  test('(0.7.86) a thread the app refused (unloaded) gives its place to the next until it is used; used, it takes it back and the least recently used is switched off', async () => {
+    const threads = pinnedThreads('local_rc_wt', 11)
+    const ids = threads.map(t => t.sessionId)
+    const { w } = await running(threads, { before: w => w.refuseRc.set('local_rc_wt1', 'Remote Control requires an active session. Send a message first.') })
+    expect(rcCalls(w)[0]).toEqual(['local_rc_wt1', true])
+    await tickOnce(w)
+    expect(onNow(w, ids)).toEqual(ids.slice(1, 11))
+    w.refuseRc.delete('local_rc_wt1')
+    thread(w, 'local_rc_wt1').lastActivityAt = new Date(w.now()).toISOString()
+    await tickOnce(w)
+    expect(onNow(w, ids)).toEqual(ids.slice(0, 10))
+    for (let i = 0; i < 3; i++) await tickOnce(w)
+    expect(onNow(w, ids)).toEqual(ids.slice(0, 10))
+  })
+
+  test('(0.7.86) an app that counts the switch itself as activity: the thread switched off for the cap does not come straight back, so nothing flaps', async () => {
+    const threads = pinnedThreads('local_rc_fl', 11)
+    const ids = threads.map(t => t.sessionId)
+    const { w } = await running(threads, { before: w => void (w.rcActivity.touches = true) })
+    await tickOnce(w)
+    const before = rcCalls(w).length
+    thread(w, 'local_rc_fl11').lastActivityAt = new Date(w.now()).toISOString()
+    await tickOnce(w)
+    expect(rcCalls(w).length).toBe(before + 2)
+    const on = onNow(w, ids)
+    expect(on.length).toBe(10)
+    expect(on).toContain('local_rc_fl11')
+    for (let i = 0; i < 5; i++) await tickOnce(w)
+    expect(rcCalls(w).length).toBe(before + 2)
+    expect(onNow(w, ids)).toEqual(on)
   })
 
   test('paused: no calls and no list; resumed, the next tick gives it', async () => {

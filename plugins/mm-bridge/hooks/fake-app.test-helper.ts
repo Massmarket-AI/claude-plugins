@@ -100,6 +100,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   const rcStates = new Map<string, string>()
   /** (0.7.86) What this computer's /proc/meminfo reads (the fake is a Linux computer): unset, it cannot be read. */
   const memory: { meminfo?: string } = {}
+  /** (0.7.86) When `touches` is set, the app counts a Remote Control switch as the thread's activity (not measured: a case the bridge guards against). */
+  const rcActivity = { touches: false }
   /**
    * (0.7.6) How the app answers `unarchive_session` for a thread, when not as it does for one it may unarchive (it is
    * unarchived, and the app says so): `refuse`, the person said no to the app's question (an error answer); `error`, the
@@ -157,6 +159,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
             if (refusal !== undefined) return { content: [{ type: 'text', text: refusal }], isError: true }
             const state = rcStates.get(id) ?? (args.enabled ? 'on' : 'off')
             if (t && (state === 'on' || state === 'off')) t.remoteControlActive = state === 'on'
+            if (t && rcActivity.touches) t.lastActivityAt = new Date(time).toISOString()
             return text({ sessionId: id, remoteControlState: state })
           }
           if (tool === 'get_usage') return text({ context: { status: 'unavailable' } })
@@ -292,6 +295,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
     silentRc,
     rcStates,
     memory,
+    rcActivity,
     unarchiving,
     session,
     /** The fake clock now. */

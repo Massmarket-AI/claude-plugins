@@ -144,36 +144,50 @@ export function memOfWindows(stdout: string): MemRead {
   return { ram: total, ...(p !== undefined ? { free: p } : {}) }
 }
 
-/** (0.5.19) The threads whose Remote Control the bridge switched on (`mm.rc`): when it did. (0.7.86) `seen`, the last pass that saw it on, and `act`, the thread's last activity then; `person`, the bridge saw the person switch it off. */
-export type RcEntry = { at: number; seen?: number; act?: string; person?: true }
+/**
+ * (0.5.19) The threads whose Remote Control the bridge switched on (`mm.rc`): when it did. (0.7.86) `seen`, the last pass that
+ * saw it on, `act`, the thread's last activity then, and `by`, the bridge process that saw it (a restart of the app starts new
+ * ones); `dropped`, when a pass first saw it off since the bridge switched it on; `person`, the bridge saw the person switch
+ * it off.
+ */
+export type RcEntry = { at: number; seen?: number; act?: string; by?: string; dropped?: number; person?: true }
 export type RcRecord = Record<string, RcEntry>
 /** A thread as the plan reads it: (0.7.86) `running`, the app says a turn is going in it. */
 export type RcView = { sid: string; pinned: boolean; on: boolean; activity: string; running: boolean }
 /**
  * (0.7.86) What one pass does. `off` and `on` are calls to make, in that order (switching off first frees memory first), `on`
- * most recently used first; `forget` comes off the record; `person` is marked as the person's own switch-off; `seen` is
- * stamped as seen on now; `top` is every thread Remote Control should be on for, most recently used first; `held` counts
- * the threads whose Remote Control the bridge did not switch on, which use the cap all the same.
+ * most recently used first: the caller leaves out one switch-on from its end for each switch-off that did not happen, so a
+ * refused switch-off never leaves more threads on than the cap. `forget` comes off the record; `person` is marked as the
+ * person's own switch-off; `seen` is stamped as seen on now; `dropped` is stamped as found off; `top` is every thread Remote
+ * Control should be on for, most recently used first; `held` counts the threads whose Remote Control the bridge did not
+ * switch on, which use the cap all the same.
  */
-export type RcPlan = { on: string[]; off: string[]; forget: string[]; person: string[]; seen: string[]; top: string[]; held: number }
+export type RcPlan = { on: string[]; off: string[]; forget: string[]; person: string[]; seen: string[]; dropped: string[]; top: string[]; held: number }
+/**
+ * (0.7.86) What else the plan reads: `refused`, the threads the app refused or did not answer and that have not been used
+ * since (`mm.rcwait`, its activity still theirs); `by`, this bridge process.
+ */
+export type RcPass = { refused: ReadonlySet<string>; by: string }
 
 /** Newest first; a thread with no time last. */
 const newestFirst = (a: RcView, b: RcView): number => (b.activity || '').localeCompare(a.activity || '')
 
 /**
  * (0.7.86) The pass, decided. Every thread with Remote Control on that the bridge did not switch on (the person's own,
- * pinned or not) keeps it and uses one of the `cap` slots: it keeps its thread loaded all the same. ⛔ The bridge never
- * switches those off. The rest go to the pinned threads, most recently used first:
+ * pinned or not, and one on record that came back on with no switch-on of the bridge's since it was found off) keeps it and
+ * uses one of the `cap` places: it keeps its thread loaded all the same. ⛔ The bridge never switches those off. The rest go
+ * to the pinned threads, most recently used first, skipping one the app refused and that has not been used since (most
+ * likely unloaded: it would only be refused again) while another can take its place; it takes a place left over:
  *   - in the top: switched on when off, unless the person switched it off while using it (`person`, kept while it stays
- *     pinned). One on record that is off without that dropped (the thread went idle, was unloaded, the app restarted) and
- *     is switched on again;
+ *     pinned): off no more than RC_SEEN_MS after this same bridge process saw it on, with the thread running or used since.
+ *     Off any other way it dropped (it went idle, was unloaded, the app restarted, a switch-on still connecting) and is
+ *     switched on again;
  *   - past the top, on record: switched off, or, already off, taken off the record (so it gets Remote Control again
  *     once it is back in the top). Not on record: nothing.
- * An unpinned thread on record is switched off, or taken off the record when already off. A thread on record the person
- * switched on again is theirs now: off the record, and never switched off by the bridge.
+ * An unpinned thread on record is switched off, or taken off the record when already off.
  */
-export function rcPlan(threads: readonly RcView[], record: Readonly<RcRecord>, cap: number, now: number): RcPlan {
-  const plan: RcPlan = { on: [], off: [], forget: [], person: [], seen: [], top: [], held: 0 }
+export function rcPlan(threads: readonly RcView[], record: Readonly<RcRecord>, cap: number, now: number, pass: RcPass): RcPlan {
+  const plan: RcPlan = { on: [], off: [], forget: [], person: [], seen: [], dropped: [], top: [], held: 0 }
   // an entry of the wrong shape (an older version's, a damaged file) is still on record, with nothing else known
   const entry = (sid: string): RcEntry | undefined => {
     if (!Object.hasOwn(record, sid)) return undefined
@@ -183,8 +197,8 @@ export function rcPlan(threads: readonly RcView[], record: Readonly<RcRecord>, c
   const candidates: RcView[] = []
   for (const t of threads) {
     const e = entry(t.sid)
-    if (t.on && (!e || e.person)) {
-      // the person's own Remote Control: it uses a slot and is never touched
+    if (t.on && (!e || e.person || typeof e.dropped === 'number')) {
+      // the person's own Remote Control: it uses a place and is never touched
       plan.held++
       if (e) plan.forget.push(t.sid)
       continue
@@ -196,23 +210,40 @@ export function rcPlan(threads: readonly RcView[], record: Readonly<RcRecord>, c
     }
     if (e && !t.on) {
       if (e.person) continue
-      const watched = Number(e.seen ?? e.at) || 0
+      const watched = typeof e.seen === 'number' && e.by === pass.by && now - e.seen <= RC_SEEN_MS
       const used = t.running || (typeof e.act === 'string' && t.activity !== e.act)
-      if (now - watched <= RC_SEEN_MS && used) {
+      if (watched && used) {
         plan.person.push(t.sid)
         continue
       }
     }
     candidates.push(t)
   }
+  const ranked = [...candidates].sort(newestFirst)
+  const waiting = (t: RcView) => !t.on && pass.refused.has(t.sid)
+  const top = new Set<string>()
   let room = Math.max(0, cap - plan.held)
-  for (const t of [...candidates].sort(newestFirst)) {
-    const e = entry(t.sid)
-    if (room > 0) {
+  for (const t of ranked) {
+    if (room > 0 && !waiting(t)) {
+      top.add(t.sid)
       room--
+    }
+  }
+  for (const t of ranked) {
+    if (room > 0 && !top.has(t.sid)) {
+      top.add(t.sid)
+      room--
+    }
+  }
+  for (const t of ranked) {
+    const e = entry(t.sid)
+    if (top.has(t.sid)) {
       plan.top.push(t.sid)
-      if (!t.on) plan.on.push(t.sid)
-      else plan.seen.push(t.sid)
+      if (t.on) plan.seen.push(t.sid)
+      else {
+        plan.on.push(t.sid)
+        if (e && typeof e.dropped !== 'number') plan.dropped.push(t.sid)
+      }
     } else if (e && t.on) plan.off.push(t.sid)
     else if (e) plan.forget.push(t.sid)
   }
