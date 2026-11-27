@@ -25,6 +25,7 @@ import {
   TEAM_BEHIND, TEAM_LATE, lateOnly, teamLate, teamLateCount, teamLateLine, teamLateSplit,
   goOf, goOnly, goWithMail, stepWord,
   NO_REPLY_WHAT, afterPackage, checkDot, noReplyNow, owesNoReply, paceOf, paceOnly, paceStatus, paceWord, statusOf,
+  askHandoff,
 } from './queue'
 import type { AnswerType, AskRef, FeedThread, QueueItem, StatusDot } from './queue'
 import { wallTime } from './business-time'
@@ -1072,6 +1073,87 @@ export function askParagraph(a: Pick<AskRef, 'id' | 'asker' | 'dueAt'>): string 
 }
 
 /**
+ * (0.7.88, handoffs) What a handoff's ETA is recorded against, as `eta-commit`'s fields: each ticket it hands over by its
+ * full id, one call each (`task_fingerprint "ticket:<id>"`, then again with the next); with no ticket, the client's
+ * fingerprint and its project (`task_fingerprint "client:<project>" and project_id "<project>"`). '' for a plain ask, and
+ * for a handoff with neither a ticket nor a project that is a lower-case uuid: that one is asked about as a plain ask.
+ * ⛔ Every id is checked again (`askHandoff`, `isUuid`): it goes into the call Claude makes.
+ */
+function etaTarget(a: Pick<AskRef, 'projectId' | 'handoff'>): string {
+  const h = askHandoff(a)
+  if (!h) return ''
+  if (h.ticketIds.length) return h.ticketIds.map((t, i) => `${i === 0 ? '' : 'then again with '}task_fingerprint "ticket:${t}"`).join(', ')
+  return isUuid(a.projectId) ? `task_fingerprint "client:${a.projectId}" and project_id "${a.projectId}"` : ''
+}
+
+/** (0.7.88, handoffs) Whether a kickoff asks for this ask's ETA (`handoffAskParagraph`) rather than a reply (`askParagraph`). */
+export const isHandoffAsk = (a: Pick<AskRef, 'projectId' | 'handoff'>): boolean => etaTarget(a) !== ''
+
+/**
+ * (0.7.88, handoffs; Rob, 2026-11-27: "i dont see why we shouldnt have a team members thread ask them for eta when they
+ * are working on somethting that doesnt have one.") The paragraph a kickoff and an Update carry for an open ask that is a
+ * handoff, in `askParagraph`'s place (spec 2026-11-27, verbatim, values substituted): who handed it over, its short id and
+ * when its ETA is needed by, how to print its page, to ask the person when it will be done and record that with
+ * `eta-commit` (`etaTarget`), that a Discord reply closes nothing, and that one already done is closed with
+ * `/api/ext/team-ask/close` and how it was done (coordinator, 2026-11-27: OW's pickup page lists that way to close it). A part
+ * that goes into a reply package says so, last.
+ * ⛔ OW keeps a handoff open until the person's ETA, never a Discord reply: no reply is drafted for it. A handoff with
+ * nothing to record against (`etaTarget` ''): `askParagraph`, as before.
+ */
+export function handoffAskParagraph(a: Pick<AskRef, 'id' | 'asker' | 'dueAt' | 'projectId' | 'handoff'>): string {
+  const target = etaTarget(a)
+  const h = askHandoff(a)
+  if (!target || !h) return askParagraph(a)
+  const said = `Handoff from ${a.asker} (ask ${a.id.slice(0, 8)}, ETA needed by ${dueText(a.dueAt)}): print it with node ~/.claude/skills/team-api-gateway/scripts/mm-api.mjs ext GET "/team-ask?id=${a.id}&format=pickup". Then ask me when it will be done, and record my answer as task-chip-flow §5.3 says: POST /api/ext/eta-commit with ${target}. My ETA is what stops the reminders on it; a Discord reply does not. If I say it is already done, close it instead with POST /api/ext/team-ask/close and a reason saying how it was done. Do not draft a Discord reply for this.`
+  return h.part && h.packageId ? `${said} My part ("${h.part}") also goes into reply package ${h.packageId.slice(0, 8)} with /reply-package/contribute when it is ready.` : said
+}
+
+/** (0.7.88, handoffs) An open ask's paragraph: a handoff's (`handoffAskParagraph`), or a plain ask's (`askParagraph`), as before. */
+export const askParagraphOf = (a: AskRef): string => (isHandoffAsk(a) ? handoffAskParagraph(a) : askParagraph(a))
+
+/**
+ * (0.7.88, handoffs) What a kickoff's first line says of the asks that list a client: `2 internal ask(s) waiting on my
+ * reply`, as before; `1 handoff(s) waiting on my ETA` when every one is a handoff; both counts when some are.
+ */
+export function asksLead(asks: readonly AskRef[]): string {
+  const handoffs = asks.filter(isHandoffAsk).length
+  const plain = asks.length - handoffs
+  const asked = `${plain} internal ask(s) waiting on my reply`
+  if (!handoffs) return asked
+  const eta = `${handoffs} handoff(s) waiting on my ETA`
+  return plain ? `${eta} and ${asked}` : eta
+}
+
+/**
+ * (0.7.88, handoffs; Rob, 2026-11-27: "maybe we shouldnt even stop chase until they provide eta since they should be
+ * providing that to clients in the initial 24 hour reply.") The one sentence the person's own prompt in a client's thread
+ * carries while an open handoff of theirs on that client has no ETA (spec 2026-11-27, verbatim, values substituted): the ETA,
+ * or the close when it is already done.
+ */
+export const handoffPromptNote = (client: string, a: Pick<AskRef, 'id' | 'asker'>): string =>
+  `[mm-bridge] ${client}: a handoff of mine from ${a.asker} has no ETA yet (ask ${a.id.slice(0, 8)}). Before anything else, ask me when it will be done and record it with POST /api/ext/eta-commit (task-chip-flow §5.3), or close it with POST /api/ext/team-ask/close if it is already done.`
+
+/** (0.7.88, handoffs) The most asks a session keeps as told today (`handoffNoteFor`). */
+export const HANDOFF_TOLD_MAX = 30
+
+/**
+ * (0.7.88, handoffs) The note the person's prompt carries in the thread linked to `it`'s client, and the key that marks it
+ * told: the soonest due open handoff of theirs there (`isHandoffAsk`, an id that is a lower-case uuid and a due time) not
+ * yet told in this thread on `day` (`told`: `<day> <ask id>`, the New York calendar day). One per prompt: the next rides
+ * the next prompt. Undefined with none. Who asked and the client are cleaned again: they go into the prompt.
+ */
+export function handoffNoteFor(it: QueueItem | undefined, day: string, told: readonly string[]): { note: string; key: string } | undefined {
+  if (!it) return undefined
+  const asks = openAsks(it)
+    .filter(a => a && typeof a === 'object' && isUuid(a.id) && typeof a.dueAt === 'number' && Number.isFinite(a.dueAt) && isHandoffAsk(a))
+    .sort((x, y) => x.dueAt - y.dueAt)
+  const a = asks.find(x => !told.includes(`${day} ${x.id}`))
+  if (!a) return undefined
+  const client = cleanText(it.client, 80) || cleanText(it.projectName, 80) || 'this client'
+  return { note: handoffPromptNote(client, { id: a.id, asker: cleanText(a.asker, 40) || 'a teammate' }), key: `${day} ${a.id}` }
+}
+
+/**
  * (0.7.24, Rob 2026-11-04) The first line of a kickoff for a client listed by follow-up steps that wait for a go alone. The
  * viewer's own go: show the steps on the follow-ups-only package's pickup view and wait for the go (client-reply-prep §9;
  * the same approve schedules them, §9.5 step 5). A teammate's (for the founder and the PM): show them and wait, approving
@@ -1153,7 +1235,9 @@ export function goParagraph(it: QueueItem): string {
  * (0.5.28, internal asks) A client listed by the viewer's internal asks alone (no package, no client message, no task)
  *    has a case of its own in 7's place: a first line that names the client, as 7's does. In every case the body is
  *    followed by one paragraph per open ask (`askParagraph`, the spec's words verbatim), before any hand-over. An ask
- *    is not a package and its paragraph takes nothing, so a send by itself carries the same words.
+ *    is not a package and its paragraph takes nothing, so a send by itself carries the same words. (0.7.88, handoffs) An
+ *    ask that is a handoff has `handoffAskParagraph` in its place (the ETA, never a reply), and the first line counts
+ *    handoffs apart (`asksLead`).
  * (0.7.3, internal queue) The internal-ops item listed by the viewer's internal queue alone (no package, no client
  *    message, no task, no ask) has a case of its own after the asks': a first line that names it, how many tickets the
  *    queue holds, with no due dates, and to show the queue and wait. In every case the queue (`queueParagraph`) comes
@@ -1223,7 +1307,8 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
                     `[mm-link ${id}] ${who} has quoted work left on my plate and nothing else waiting. Load the client's project skill first, then show me what is left on the quote and wait for me. Send nothing without my go.`
                 : tasksBesidesUndated(it) === 0 && asks.length
                   ? // (0.5.28, internal asks) listed by its asks alone: a first line that names the client, then each ask's paragraph
-                    `[mm-link ${id}] ${who} has ${asks.length} internal ask(s) waiting on my reply. Load the client's project skill first.`
+                    // (0.7.88, handoffs) the handoffs counted apart, as waiting on my ETA (`asksLead`)
+                    `[mm-link ${id}] ${who} has ${asksLead(asks)}. Load the client's project skill first.`
                   : tasksBesidesUndated(it) === 0 && queue
                     ? // (0.7.3, internal queue) listed by its queue alone: a first line that names it, with no due time, then the queue
                       `[mm-link ${id}] ${who} has ${queueTotal(it)} ${newestFirst(it) ? 'open ticket(s) in my internal queue, newest first' : 'ticket(s) in my internal queue'}, with no due dates. Load massmarket-internal-ops first, then show me the queue below as it stands now and wait for me to pick what to work on here.`
@@ -1236,8 +1321,9 @@ export function kickoffText(it: QueueItem, opts: { update?: boolean; replaces?: 
                         : tasksLead(it, who, tasksDue)
   // (0.5.28, internal asks) once per open ask, after the body and before any hand-over: `askParagraph`, verbatim;
   // (0.7.4, ETA asks) then the tickets that owe an ETA (`etaParagraph`); (0.7.15, owner asks) then the tickets to give an
-  // owner (`assignParagraph`); (0.7.3, internal queue) then the queue, in rank order (`queueParagraph`)
-  const body = [lead, ...asks.map(askParagraph), etaParagraph(it), assignParagraph(it), goOnly(it) || goWithMail(it) ? '' : goParagraph(it), queue].filter(Boolean).join('\n\n')
+  // owner (`assignParagraph`); (0.7.3, internal queue) then the queue, in rank order (`queueParagraph`). (0.7.88, handoffs) A
+  // handoff's paragraph asks for the ETA, never a reply (`askParagraphOf`)
+  const body = [lead, ...asks.map(askParagraphOf), etaParagraph(it), assignParagraph(it), goOnly(it) || goWithMail(it) ? '' : goParagraph(it), queue].filter(Boolean).join('\n\n')
   const news = `New since this thread last worked on this client: ${waitingText(it)}.`
   // ⛔ (0.5.11, review of PR #15, F4) sent by itself: the marker first, at the very start of the text, as every hook
   // that tells the person's time from the bridge's reads it (a time-tracking hook too old to read the app's own

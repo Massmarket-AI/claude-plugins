@@ -362,6 +362,11 @@ export type MmSession = {
   lineDone?: string[]
   /** (0.7.0) The project and task labels whose one note to Claude (no line matched) was added. */
   lineNoted?: string[]
+  /**
+   * (0.7.88) The handoffs whose note the person's prompt in this thread carried today, as `<New York day> <ask id>`: at
+   * most one note per handoff per thread per day. Only today's are kept.
+   */
+  handoffTold?: string[]
 }
 
 /** (0.6.0) A client the band offers to track this thread to: its project, its name, and the skill that counts it. */

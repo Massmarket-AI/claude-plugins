@@ -30,6 +30,7 @@ import {
   DETACH_SELF_NOTE, isChildThread, recordLooksFinished, withTopLevelStep, withoutTopLevelStep,
   ANSWER_CLEARED, ANSWER_CLIENTS_ONLY, ANSWER_TOOL_TEXT, answerArgs, answerNoted, declaredOf,
   RUN_WAIT_NO_THREAD, RUN_WAIT_TOOL_TEXT, runWaitNotedUnlinked, baselineOf, newSince, runMissedTitle, runReport, runState, runWaitArgs, runWaitNoted, runWaitSuffix, runWaitWhy, runWaitsOf,
+  HANDOFF_TOLD_MAX, handoffNoteFor,
 } from './threads'
 import type { CacheLife, CostSeen, RunState, RunWait } from './threads'
 import type { OpenWhy, RowPin, AppThread, AwayClient, Declared, Fold, Kickoff, LookupSeen, Pairs, PinReport, Recommendation, Replaced, Row, RowButton, RowState, FirstSeen, Sent } from './threads'
@@ -249,7 +250,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.87'
+export const VERSION = '0.7.88'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -4222,7 +4223,7 @@ async function drawStored($: EngineInterface, last: Last, now: number): Promise<
 
 // (0.7.26) The reply-package card: prepared on arrival, drawn natively above the page (card.tsx).
 import { teamFrom, teamHeadingNow, teamLines, teamText, withMoves } from './team'
-import { myStatsLine, myStatsSays, statsFrom, teamStatsLines, teamStatsText } from './stats'
+import { myStatsLine, myStatsSays, nyDay, statsFrom, teamStatsLines, teamStatsText } from './stats'
 import type { DayStats } from './stats'
 import { ANSWER_INTERNAL, ANSWER_PERSONAL, ASK_HEADING, BROWSER_HEADING, CONFIRM_NOTE, PROFILE_TIP, SAVING, askText, blockLineText, confirmHeading, confirmText, parseBrowserNow, rowLineText, savedText, withoutAnswered } from './browser'
 import type { BrowserRead } from './browser'
@@ -12054,6 +12055,46 @@ async function countPrompt($: EngineInterface, text: string, origin: string | un
   if (patch.single && s.opened !== undefined) await Promise.resolve($.ui.close({ id: PANE_QUEUE })).catch(() => {})
 }
 
+/** (0.7.88) A bridge marker anywhere in a prompt: the bridge's own words, never the person's typing. */
+const BRIDGE_MARKS = /\[mm-link\b|\[mm-bridge\]/
+
+/**
+ * (0.7.88, handoffs; Rob, 2026-11-27: "i dont see why we shouldnt have a team members thread ask them for eta when they
+ * are working on somethting that doesnt have one." · "threads should chase them for eta." · "maybe we shouldnt even stop
+ * chase until they provide eta since they should be providing that to clients in the initial 24 hour reply.") The one
+ * sentence the person's own prompt carries in the thread linked to a client (`mm.links`) while the last sync lists an open
+ * handoff of theirs on that client (`handoffNoteFor`): to ask them for the ETA before anything else and record it, or close
+ * the handoff (`/api/ext/team-ask/close`) when it is already done. "No ETA
+ * yet" holds by construction: OW keeps a handoff open until the ETA (`/api/ext/eta-commit`), never a Discord reply.
+ * At most once a handoff a thread a New York calendar day (`MmSession.handoffTold`), and one per prompt.
+ * ⛔ Nothing for a prompt that is not the person's own (PERSON_ORIGINS), that carries a bridge marker (`[mm-link`,
+ * `[mm-bridge]`), a started thread's first task or a SINGLE-SESSION run, an unattended session, a paused bridge, a thread
+ * linked to no client, a handoff gone from the feed, or a sync that failed, is older than STALE_SYNC_MS (what the band and
+ * the timer's chips trust) or, on a shared login, is the other person's (`lastIsHolders`).
+ */
+async function handoffNote($: EngineInterface, text: string, origin: string | undefined): Promise<string | undefined> {
+  if (!origin || !PERSON_ORIGINS.has(origin)) return undefined
+  const { prompt, task } = promptOf(text)
+  if (task || prompt !== text || BRIDGE_MARKS.test(text) || /^SINGLE-SESSION\b/.test(text.trimStart())) return undefined
+  const s = await sessOf($)
+  if (s.unattended || s.single) return undefined
+  if (await $.store.get('mm.paused')) return undefined
+  const me = await knownSelf($)
+  if (!me) return undefined
+  const pid = ownerOf(me, await storeGet<Record<string, string>>($, 'mm.links', {}))
+  if (pid === undefined) return undefined
+  const now = await $.clock.now()
+  const last = await storeGet<Last | null>($, 'mm.last', null)
+  if (!last || last.error || !Array.isArray(last.items) || !Number.isFinite(last.at) || now - last.at > STALE_SYNC_MS) return undefined
+  if (!(await lastIsHolders($, last))) return undefined
+  const day = nyDay(now)
+  const told = (Array.isArray(s.handoffTold) ? s.handoffTold : []).filter((k): k is string => typeof k === 'string' && k.startsWith(`${day} `))
+  const pick = handoffNoteFor(listedIn(last).find(i => i.projectId === pid), day, told)
+  if (!pick) return undefined
+  await setSess($, { handoffTold: [...told, pick.key].slice(-HANDOFF_TOLD_MAX) })
+  return pick.note
+}
+
 /** (0.7.44) How long after an account switch the sync's record of the profile switch (`mm.profile.since`) is the same switch. Real hours. */
 const SWITCH_SAME_MS = 6 * 3_600_000
 
@@ -12375,6 +12416,9 @@ export const register: Register = on => {
       // ⛔ (0.7.33) never on the person's go: the send gate clears a signed card only on exactly `Send package <12>`. The line
       // waits for their next prompt.
       if (!sentence && !SIGNED_GO.test(text.trim())) sentence = await awayNote($, text, origin).catch(() => undefined)
+      // (0.7.88, Rob 2026-11-27: "threads should chase them for eta.") an open handoff of the person's on this thread's client
+      // with no ETA yet: one sentence, at most once a handoff a day here. ⛔ Never on the person's go, and never beside another line.
+      if (!sentence && !SIGNED_GO.test(text.trim())) sentence = await handoffNote($, text, origin).catch(() => undefined)
     } catch {
       // a marker that cannot be acted on never holds a prompt back
     }

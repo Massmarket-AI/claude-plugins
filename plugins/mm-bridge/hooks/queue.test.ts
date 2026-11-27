@@ -2134,7 +2134,7 @@ describe('(0.5.28, internal asks) an ask lists on the asked person\'s item for i
     expect(openAsks(it)).toEqual([
       {
         id: ASK, asker: 'Shezan', askedAt: Date.parse('2026-10-23T19:11:32Z'), dueAt: DUE, snippet: 'Hey @Rob, I am holding the change until you say. Which one should we use?',
-        hasDraft: false, link: 'https://discord.com/channels/1/2/1563268659705548863', draftSha: null,
+        hasDraft: false, link: 'https://discord.com/channels/1/2/1563268659705548863', draftSha: null, projectId: CREG,
       },
     ])
     // due within the next 24 business hours: it pins (R1)
@@ -2189,6 +2189,27 @@ describe('(0.5.28, internal asks) an ask lists on the asked person\'s item for i
     // an ask row's flag adds its project, and never decides by itself whether the feed carries the flag (L9)
     expect([...internalProjects(robFeed({ asks: [onOps] }))].sort()).toEqual([...INTERNAL_PROJECTS].sort())
     expect([...internalProjects(robFeed({ mail: [{ ...mail(P1, 'Client', -2, ROB), internal: false }], asks: [onOps] }))]).toEqual([INTERNAL_OPS])
+  })
+
+  // (0.7.88, handoffs; Rob, 2026-11-27: "threads should chase them for eta.") OW's `handoff` rides the ask: kept, checked
+  test('(0.7.88) a handoff rides its ask, checked; a plain ask (null, or no field) carries none; the clock and the list are as before', async () => {
+    const T1 = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
+    const PKG = '7e8f9a0b-1c2d-4e3f-8a4b-5c6d7e8f9a0b'
+    const handed = ask({ via: 'team_post', handoff: { kind: 'part', part: 'The intake form', clock: 'end_of_day', ticket_ids: [T1, 'not-a-ticket', T1.toUpperCase()], package_id: PKG } })
+    const [it] = buildQueue(robFeed({ asks: [handed] }), fri)
+    if (!it) throw new Error('no item')
+    expect(it).toMatchObject({ projectId: CREG, kind: 'ask', dueAt: DUE, actBy: DUE })
+    expect(openAsks(it)[0]).toMatchObject({ id: ASK, projectId: CREG, handoff: { ticketIds: [T1], part: 'The intake form', packageId: PKG } })
+    for (const plain of [ask(), ask({ handoff: null, via: 'mention' })]) {
+      const [p] = buildQueue(robFeed({ asks: [plain] }), fri)
+      if (!p) throw new Error('no item')
+      expect(openAsks(p)[0]?.handoff).toBeUndefined()
+      expect(openAsks(p)[0]?.projectId).toBe(CREG)
+      expect(p.dueAt).toBe(DUE)
+    }
+    // a handoff of another shape is none
+    const [odd] = buildQueue(robFeed({ asks: [ask({ handoff: 'shared' as never })] }), fri)
+    expect(odd ? openAsks(odd)[0]?.handoff : 'no item').toBeUndefined()
   })
 
   test('an older feed without asks behaves as before: the same lists, and no item carries asks', async () => {
