@@ -13312,7 +13312,7 @@ export const register: Register = on => {
         <Box key={`mm-card-line:${asked.packageId}`} flexDirection="column" gap={1}>
           {own}
           {drawn}
-          {pageText && Markdown ? <Markdown text={pageText} /> : null}
+          {pageText ? <Markdown text={pageText} /> : null}
         </Box>
       )
     } catch (err) {

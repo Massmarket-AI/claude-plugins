@@ -1,12 +1,13 @@
 // (0.7.88) What a delivery gives the client, on the card (Rob, 2026-11-27: "delivery packages should render like reply
 // packages"; "if we can play video in thread on reply package thats best as well"): each QA video, walkthrough and
-// document the delivery check lists, its poster frame or first page as a Markdown picture that opens it, its labelled link,
-// and a Google Doc's text behind a button. No video plays in the card: the desktop has no video or frame element and
-// claude.ai refuses outside media and frames (measured 2026-11-27; client-reply-prep's delivery_media.py has the evidence).
+// document the delivery check lists, its title as a link that opens it with the provider and length in grey under it, and a
+// Google Doc's text behind a button. No video plays and no picture shows in the card: the desktop has no video or frame element,
+// claude.ai refuses outside media and frames, and on the desktop a Markdown picture of a poster draws only its alt text
+// (measured 2026-11-27 on Foreign Nurses' check; client-reply-prep's delivery_media.py has the evidence).
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { MmCard, MmCardMarks, MmCardTree } from '../types'
-import { DOC_HIDE, DOC_OPEN, MEDIA_TEXT_MAX, copyCheck, drawCard, marksOf, mediaLine, readMedia, readTree, toggleDoc, type CardDraw } from './card'
+import { DOC_HIDE, DOC_OPEN, MEDIA_TEXT_MAX, copyCheck, drawCard, marksOf, mediaCaption, mediaLine, mediaLinkLabel, readMedia, readTree, toggleDoc, type CardDraw } from './card'
 import { pageGap } from './card-parity'
 import { DELIVERY_PAIRS } from './delivery-pairs.test-helper'
 
@@ -33,7 +34,7 @@ function walk(node: unknown, out: El[] = []): El[] {
 }
 
 const ELS = { Box: 'Box', Text: 'Text', Button: 'Button', Link: 'Link', Svg: 'Svg', Markdown: 'Markdown' } as never
-const ELS_NO_MARKDOWN = { Box: 'Box', Text: 'Text', Button: 'Button', Link: 'Link', Svg: 'Svg' } as never
+const ELS_NO_LINK = { Box: 'Box', Text: 'Text', Button: 'Button', Svg: 'Svg' } as never
 
 function draw(marks: MmCardMarks = { signed: {} }, over: Partial<CardDraw> = {}, els: never = ELS) {
   const tree = treeOf(MEDIA_PAIR)
@@ -62,6 +63,12 @@ describe('0.7.88 delivery media: what the renderer hands over is read, and nothi
     const m = readMedia({ item: 'qa_video', label: 'QA video', media: 'video', provider: 'Loom', title: 'ZZ', length: '5:54', url: LOOM, poster: 'https://cdn.example/zz.jpg' })
     expect(m).toEqual({ item: 'qa_video', label: 'QA video', media: 'video', provider: 'Loom', title: 'ZZ', length: '5:54', url: LOOM, poster: 'https://cdn.example/zz.jpg' })
     expect(mediaLine(m as never)).toBe('Loom · ZZ · 5:54')
+    expect(mediaLinkLabel(m as never)).toBe('▶ ZZ')
+    expect(mediaCaption(m as never)).toBe('Loom · 5:54')
+    // with no title read, the provider names the link and the caption keeps only the length
+    expect(mediaLinkLabel({ item: 'qa_video', label: 'QA video', media: 'video', provider: 'Loom', length: '5:54' })).toBe('▶ Loom')
+    expect(mediaCaption({ item: 'qa_video', label: 'QA video', media: 'video', provider: 'Loom', length: '5:54' })).toBe('5:54')
+    expect(mediaLinkLabel({ item: 'documentation', label: 'Documentation', media: 'doc' })).toBe('📄 Documentation')
   })
 
   test('an unknown item or kind, no label, or not an object is no media', () => {
@@ -112,23 +119,27 @@ describe('0.7.88 delivery media: the card draws each link of what the client get
     }
   })
 
-  test('a poster frame or first page is a Markdown picture that opens the link, then the labelled link', () => {
+  test('each item is its title as one link that opens it, with the provider and length in grey, and no picture', () => {
     const { all } = draw()
-    const pictures = of(all, 'Markdown').map(m => m.props?.text)
-    expect(pictures).toEqual([
-      `[![QA video poster frame: Loom · ZZ_qa_video · 5:54](https://zz.example/poster/qa_video.jpg)](${LOOM})`,
-      '[![Walkthrough poster frame: YouTube · ZZ_walkthrough](https://zz.example/poster/walkthrough.jpg)](https://youtu.be/AbCdEfGhIjK)',
-      `[![Documentation first page: Google Doc · ZZ_documentation](https://zz.example/poster/documentation.jpg)](${DOC})`,
-    ])
+    expect(of(all, 'Markdown')).toEqual([])
     const links = of(all, 'Link').map(l => [l.props?.label, l.props?.href])
-    expect(links).toContainEqual(['Loom · ZZ_qa_video · 5:54', LOOM])
-    expect(links).toContainEqual(['Google Doc · ZZ_documentation', DOC])
+    expect(links).toContainEqual(['▶ ZZ_qa_video', LOOM])
+    expect(links).toContainEqual(['▶ ZZ_walkthrough', 'https://youtu.be/AbCdEfGhIjK'])
+    expect(links).toContainEqual(['📄 ZZ_documentation', DOC])
+    // each title once: never again as a second link or as a picture's words
+    for (const t of ['ZZ_qa_video', 'ZZ_walkthrough', 'ZZ_documentation'])
+      expect(links.filter(([label]) => String(label).includes(t)).length).toBe(1)
+    const said = words(all)
+    expect(said).toContain('Loom · 5:54')
+    expect(said).toContain('YouTube')
+    expect(said).toContain('Google Doc')
+    expect(JSON.stringify(all)).not.toContain('zz.example/poster')
   })
 
-  test("a surface with no Markdown keeps the labelled links, and an older bridge's reading of the tree draws them alone", () => {
-    const { all } = draw({ signed: {} }, {}, ELS_NO_MARKDOWN)
-    expect(of(all, 'Markdown')).toEqual([])
-    expect(of(all, 'Link').map(l => l.props?.label)).toContain('Loom · ZZ_qa_video · 5:54')
+  test("a surface with no Link draws the item's paragraph as the page writes it", () => {
+    const { all } = draw({ signed: {} }, {}, ELS_NO_LINK)
+    expect(of(all, 'Link')).toEqual([])
+    expect(words(all).some(w => w.includes('Loom · ZZ_qa_video · 5:54'))).toBe(true)
   })
 
   test("a Google Doc's text opens on the card at a press, one document at a time", () => {

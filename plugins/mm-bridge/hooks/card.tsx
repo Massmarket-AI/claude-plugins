@@ -69,7 +69,7 @@
  * - (0.7.57) A table OW read from the PDF's own text (OW #731) carries its own columns: its header (`rp-quote-cols`) on one line, each
  *   row (`rp-quote-gridrow`) one line of its own cells, header and rows sharing each column's width (`gridsOf`).
  */
-import type { BoxProps, ButtonProps, ElementConstructor, EngineInterface, InputProps, LinkProps, MarkdownProps, Register, RenderNode, SvgProps, TextProps } from 'claude-code'
+import type { BoxProps, ButtonProps, ElementConstructor, EngineInterface, InputProps, LinkProps, Register, RenderNode, SvgProps, TextProps } from 'claude-code'
 
 import type { MmCard, MmCardAsked, MmCardChecked, MmCardFeedback, MmCardMarks, MmCardMedia, MmCardNode, MmCardRun, MmCardSigned, MmCardTree } from '../types'
 import { isOwUrl, pageGap, sampleNotBuilt, settleLines } from './card-parity'
@@ -1206,8 +1206,6 @@ export type Els = {
   Svg?: ElementConstructor<SvgProps>
   /** (0.7.40) The Changes field: on every surface but mobile, which draws no field. */
   Input?: ElementConstructor<InputProps>
-  /** (0.7.88) A delivery's poster frame or first page, as a Markdown image (the desktop's table has no image element). */
-  Markdown?: ElementConstructor<MarkdownProps>
 }
 
 type Node = RenderNode | null
@@ -1483,33 +1481,53 @@ function drawNodes(els: Els, nodes: readonly MmCardNode[], ctx: Ctx, sign: (s: {
   })
 }
 
-export const DOC_OPEN = 'Read the document here  ▸'
-export const DOC_HIDE = 'Hide the document  ▾'
-/** What a Markdown image's alt text may not hold: a bracket or backslash would end it early, a newline the paragraph. */
-const mdAlt = (s: string) => s.replace(/[[\]\\\s]+/g, ' ').trim().slice(0, 160)
+export const DOC_OPEN = 'Read it here  ▸'
+export const DOC_HIDE = 'Hide it  ▾'
+
+/** (0.7.88) What an item's link says: its title (or, with none read, its provider or its name), a video's ▶ or a document's 📄 before it. */
+export function mediaLinkLabel(m: MmCardMedia): string {
+  return `${m.media === 'doc' ? '📄' : '▶'} ${m.title ?? m.provider ?? m.label}`
+}
+
+/** (0.7.88) The grey line under the link: the provider when the title took the link, and a video's length. */
+export function mediaCaption(m: MmCardMedia): string {
+  return [m.title ? m.provider : undefined, m.length].filter(Boolean).join(' · ')
+}
 
 /**
  * (0.7.88) One link of what a delivery gives the client (render_visual.py `part_delivery_media`; Rob, 2026-11-27: "delivery
- * packages should render like reply packages"): in a box of its own, the video's poster frame or the document's first page as a
- * picture that opens the link, then the labelled link (the paragraph, as an older bridge draws it alone), then for a Google Doc
- * a button that opens its text on the card. No video plays here: the desktop has no video or frame element, and claude.ai refuses
- * outside media and frames (measured 2026-11-27, delivery_media.py). A picture the surface does not draw shows its alt text.
+ * packages should render like reply packages"): the title as a link that opens it, a grey line with the provider and a video's
+ * length, and for a Google Doc a button that opens its text on the card, in a box the pane scrolls past.
+ *
+ * No picture. Measured on the desktop on 2026-11-27 (Foreign Nurses' check, in a side pane): a Markdown picture of a Loom
+ * poster or a Drive first page drew as its alt text, so every item said its title twice in link colour. No video plays either:
+ * the desktop has no video or frame element, and claude.ai refuses outside media and frames (delivery_media.py has the evidence).
+ * The tree keeps the poster for a renderer that draws it. A link the card cannot draw safely (the Onboarding Wizard's own, which
+ * `readMedia` drops) keeps the paragraph as the page writes it.
  */
 function drawMedia(els: Els, node: MmCardNode, m: MmCardMedia, ctx: Ctx): Node {
-  const { Box, Text, Button, Markdown } = els
+  const { Box, Text, Button, Link } = els
   const href = m.url ? drawHref(m.url) : ''
-  const poster = href && m.poster ? drawHref(m.poster) : ''
-  const alt = mdAlt(`${m.label} ${m.media === 'doc' ? 'first page' : 'poster frame'}: ${mediaLine(m)}`)
-  const open = Boolean(href && m.text && ctx.docOpen === href)
+  if (!href || !Link) {
+    const para: MmCardNode = node.r?.some(r => r.s.trim()) ? node : { ...node, r: [{ s: mediaLine(m) }] }
+    return <Box paddingLeft={1} marginBottom="xs">{drawPara(els, para, ctx)}</Box>
+  }
+  const open = Boolean(m.text && ctx.docOpen === href)
   const onDoc = ctx.onDoc
-  const para: MmCardNode = node.r?.some(r => r.s.trim()) ? node : { ...node, r: [{ s: mediaLine(m), ...(m.url ? { href: m.url } : {}) }] }
+  const caption = mediaCaption(m)
+  const toggle = m.text && Button && onDoc ? <Button key={`mm-card-doc:${ctx.keyOf()}`} plain label={open ? DOC_HIDE : DOC_OPEN} onPress={() => onDoc(href)} /> : null
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="subtle" paddingX={1} marginY="xs">
-      {poster && Markdown ? <Markdown text={`[![${alt}](${poster})](${href})`} /> : null}
-      {drawPara(els, para, ctx)}
-      {m.text && href && Button && onDoc ? <Button key={`mm-card-doc:${ctx.keyOf()}`} plain label={open ? DOC_HIDE : DOC_OPEN} onPress={() => onDoc(href)} /> : null}
+    <Box flexDirection="column" paddingLeft={1} marginBottom="xs">
+      <Link href={href} label={mediaLinkLabel(m)} />
+      {caption || toggle ? (
+        <Box flexDirection="row" flexWrap="wrap" columnGap={1} alignItems="center">
+          {caption ? <Text size="footnote" dimColor>{caption}</Text> : null}
+          {caption && toggle ? <Text size="footnote" dimColor>·</Text> : null}
+          {toggle}
+        </Box>
+      ) : null}
       {open ? (
-        <Box flexDirection="column" borderStyle="round" borderColor="subtle" paddingX={1}>
+        <Box flexDirection="column" borderStyle="round" borderColor="subtle" paddingX={1} marginTop="xs">
           <Text wrap="wrap" size="footnote">{m.text}</Text>
         </Box>
       ) : null}
