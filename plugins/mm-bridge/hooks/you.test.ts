@@ -69,7 +69,7 @@ describe('0.7.73: the "You" strip at the top of the side pane', () => {
     expect(dots).toHaveLength(8)
     expect(Object.fromEntries(dots)['mm-you:pace']).toBe('🟢 Pace on pace')
     await ui.press({ key: 'mm-you:rc' })
-    expect(await lines(ui)).toContain('Remote Control follows the pin on this computer: a pinned thread reaches your phone.')
+    expect(await lines(ui)).toContain('Remote Control follows the pin on this computer: your most recently used pinned threads reach your phone, as many as its memory allows.')
     await ui.unmount()
   })
 
