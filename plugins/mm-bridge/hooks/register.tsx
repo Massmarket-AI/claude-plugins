@@ -5679,7 +5679,9 @@ const RC_PROCESS = `${Date.now().toString(36)}-${Math.random().toString(36).slic
  * thread is ranked by `before` until it moves again, so switching one off never makes it the most recently used and puts it
  * straight back in the top (and another out), pass after pass.
  */
-const rcCut = new Map<string, { before: string; after?: string }>()
+const rcCut = new Map<string, { before: string; at: number; after?: string }>()
+/** (0.7.86) A move of a thread's activity this close to the bridge's own switch-off is read as that switch's (`rcCut`); any other move is real use. */
+const RC_CUT_SLACK_MS = 10_000
 /** (0.7.86) A Windows reading of memory starts PowerShell, so it is reused for this long, in this session. */
 const WINDOWS_MEMORY_EVERY_MS = 5 * 60_000
 /** (0.7.86) The last Windows reading, by session. */
@@ -5831,12 +5833,13 @@ async function rcLookUp($: EngineInterface, id: string, threads: RcThread[], rec
  *   - ⛔ Remote Control the bridge did not switch on is never switched off, nor one on record that came back on with no
  *     switch-on of the bridge's since a pass found it off (`dropped`). It uses a place in the cap all the same.
  * A thread the app refused and that has not been used since gives its place to the next one (it would only be refused
- * again), and one switched off for the cap is ranked by its activity before that call (`rcCut`). A thread on record that
+ * again), and one switched off for the cap is ranked by its activity before that call (`rcCut`) unless it is used since. A thread on record that
  * the app does not list is looked up by id (`rcLookUp`), and so are pinned ones past its 60 while the cap has room. No list
  * from the app: no pass (unknown is never none). A call the app refuses (an error, or a state that is not the one asked
  * for: `rcDone`), or does not answer in APP_WAIT_MS, writes no record, and the thread waits RC_WAIT_MS (`mm.rcwait`, with
  * why: `rcWhy`) unless it is used meanwhile: an unloaded thread ("requires an active session"), one waiting on the person
- * to answer a request, one started from another device. At most RC_MAX_CALLS calls in a pass, switch-offs first; each
+ * to answer a request, one started from another device. (0.7.86) A switch-on not answered in time goes on record all the
+ * same: the app may still carry it out, and the bridge must be able to switch it off. At most RC_MAX_CALLS calls in a pass, switch-offs first; each
  * switch-off that does not happen holds back one switch-on, so the cap holds.
  */
 async function rcFollowsPin($: EngineInterface): Promise<void> {
@@ -5876,11 +5879,13 @@ async function rcFollowsPin($: EngineInterface): Promise<void> {
       const key = `${id} ${t.sid}`
       const cut = rcCut.get(key)
       if (!cut) return t
-      if (t.on || !t.pinned || (cut.after !== undefined && t.activity !== cut.after)) {
+      const moved = t.activity !== cut.before && t.activity !== cut.after
+      const bySwitch = cut.after === undefined && Math.abs(Date.parse(t.activity) - cut.at) <= RC_CUT_SLACK_MS
+      if (t.on || !t.pinned || (moved && !bySwitch)) {
         rcCut.delete(key)
         return t
       }
-      if (cut.after === undefined && t.activity !== cut.before) cut.after = t.activity
+      if (moved) cut.after = t.activity
       return { ...t, activity: cut.before }
     })
     const plan = rcPlan(ranked, record, cap, now, { refused, by: `${id} ${RC_PROCESS}` })
@@ -5926,9 +5931,11 @@ async function rcFollowsPin($: EngineInterface): Promise<void> {
       calls++
       let ok = false
       let why = ''
+      let late = false
       try {
         const answered = await within($, mcpJson($, 'ccd_session_mgmt', 'set_remote_control', { session_id: sid, enabled }))
         ok = answered.ok && rcDone(answered.value, enabled)
+        late = !answered.ok
         if (!ok) why = rcWhy(answered)
       } catch (err) {
         ok = false // refused
@@ -5939,6 +5946,9 @@ async function rcFollowsPin($: EngineInterface): Promise<void> {
         await patchStore<RcWait>($, 'mm.rcwait', {}, fresh => {
           fresh[sid] = { until: at + RC_WAIT_MS, activity: t.activity, why, ...(t.title ? { title: short(t.title, 80) } : {}) }
         })
+        // ⛔ a switch-on not answered in time may still happen: it goes on record, so the bridge still switches it off later
+        // (on record and off, it is only asked again). A refusal leaves the record as it was.
+        if (enabled && late) await patchStore<RcRecord>($, 'mm.rc', {}, fresh => void (fresh[sid] = { at }))
         return false
       }
       await patchStore<RcRecord>($, 'mm.rc', {}, fresh => {
@@ -5953,7 +5963,7 @@ async function rcFollowsPin($: EngineInterface): Promise<void> {
         })
       }
       if (enabled) rcCut.delete(`${id} ${sid}`)
-      else if (t.pinned) rcCut.set(`${id} ${sid}`, { before: t.activity })
+      else if (t.pinned) rcCut.set(`${id} ${sid}`, { before: t.activity, at })
       return true
     }
     for (const sid of plan.off) if (!(await ask(sid, false))) notOff++

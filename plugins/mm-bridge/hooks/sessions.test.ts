@@ -2303,7 +2303,8 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
       await settleAll()
     }
     expect(rcCalls(w)).toEqual(ids.map(id => [id, true]))
-    expect(w.stored('mm.rc')).toBeUndefined()
+    // (0.7.86) a switch-on not answered may still happen: on record, so the bridge can switch it off later
+    expect(Object.keys(w.stored('mm.rc') as object)).toEqual(ids)
     const waits = w.stored('mm.rcwait') as Record<string, { until: number; activity: string; why?: string; title?: string }>
     expect(Object.keys(waits)).toEqual(ids)
     expect(waits.local_rc_n1).toEqual({ until: NOW + 19_000 + WAIT, activity: thread(w, 'local_rc_n1').lastActivityAt, why: 'no answer in 15 seconds', title: 'local_rc_n1' })
@@ -2574,6 +2575,34 @@ describe('0.5.19 (Rob 10-20): Remote Control follows the pin, on a computer wher
     for (let i = 0; i < 5; i++) await tickOnce(w)
     expect(rcCalls(w).length).toBe(before + 2)
     expect(onNow(w, ids)).toEqual(on)
+  })
+
+  test('(0.7.86) a switch-on the app carries out after the 15-second wait is the bridge\'s: unpinned, it is switched off', async () => {
+    const { w } = await running([{ sessionId: 'local_rc_lt', pinned: true }], { before: w => w.lateRc.set('local_rc_lt', 20_000) })
+    await w.advance(20_000)
+    await settleAll()
+    expect(thread(w, 'local_rc_lt').remoteControlActive).toBe(true)
+    expect(Object.keys(w.stored('mm.rc') as object)).toEqual(['local_rc_lt'])
+    thread(w, 'local_rc_lt').pinned = false
+    // the wait the late answer left (15 minutes, unused) ends first
+    for (let i = 0; i < 17; i++) await tickOnce(w)
+    expect(rcCalls(w)).toEqual([['local_rc_lt', true], ['local_rc_lt', false]])
+    expect(thread(w, 'local_rc_lt').remoteControlActive).toBe(false)
+    expect(w.stored('mm.rc')).toEqual({})
+  })
+
+  test('(0.7.86) a thread switched off for the cap that the person then uses once is the most recently used again: it gets Remote Control back', async () => {
+    const threads = pinnedThreads('local_rc_cu', 11)
+    const ids = threads.map(t => t.sessionId)
+    const { w } = await running(threads)
+    await tickOnce(w)
+    thread(w, 'local_rc_cu11').lastActivityAt = new Date(w.now()).toISOString()
+    await tickOnce(w)
+    expect(onNow(w, ids)).toEqual([...ids.slice(0, 9), 'local_rc_cu11'])
+    await tickOnce(w)
+    thread(w, 'local_rc_cu10').lastActivityAt = new Date(w.now()).toISOString()
+    await tickOnce(w)
+    expect(onNow(w, ids)).toEqual([...ids.slice(0, 8), 'local_rc_cu10', 'local_rc_cu11'])
   })
 
   test('paused: no calls and no list; resumed, the next tick gives it', async () => {

@@ -96,6 +96,8 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
   const refuseRc = new Map<string, string>()
   /** (0.5.19) Threads whose Remote Control call the app never answers. */
   const silentRc = new Set<string>()
+  /** (0.7.86) Threads whose next Remote Control call the app answers, and carries out, only this many ms later (once). */
+  const lateRc = new Map<string, number>()
   /** (0.5.19) Threads the app answers this state for (on, off, connecting, unavailable), whatever was asked. */
   const rcStates = new Map<string, string>()
   /** (0.7.86) What this computer's /proc/meminfo reads (the fake is a Linux computer): unset, it cannot be read. */
@@ -155,6 +157,16 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
           // (0.5.19) as the app answers set_remote_control: the state afterwards (Claude.app, 10-20), or its refusal
           if (tool === 'set_remote_control') {
             if (silentRc.has(id)) return new Promise<Mcp>(() => undefined)
+            const lateBy = lateRc.get(id)
+            if (lateBy !== undefined) {
+              lateRc.delete(id)
+              return new Promise<Mcp>(resolve => {
+                timers.push({ at: time + lateBy, done: false, fn: () => {
+                  if (t) t.remoteControlActive = Boolean(args.enabled)
+                  resolve(text({ sessionId: id, remoteControlState: args.enabled ? 'on' : 'off' }))
+                } })
+              })
+            }
             const refusal = refuseRc.get(id) ?? (t ? undefined : `Session ${id} not found.`)
             if (refusal !== undefined) return { content: [{ type: 'text', text: refusal }], isError: true }
             const state = rcStates.get(id) ?? (args.enabled ? 'on' : 'off')
@@ -293,6 +305,7 @@ export function fakeApp(feed: Feed, threads: Array<Partial<FakeThread> & { sessi
     runs,
     refuseRc,
     silentRc,
+    lateRc,
     rcStates,
     memory,
     rcActivity,
