@@ -16,6 +16,10 @@
 //   - each gate copy that exists in ~/.claude/mm-hooks/ (send-gate, secret-read-gate, repo-home-guard on PreToolUse,
 //     repo-home-guard on PostToolUse, metered-key-gate on UserPromptSubmit), as
 //     `node "<home>/.claude/mm-hooks/codex/codex-gate.js" <gate>`. codex-gate.js is copied there from this release.
+//   - the rob-ask gate (rob-ask-gate.js, Rob's 2026-11-26 rules: no Discord tag of Rob, no turn that ends waiting on
+//     him with no ask filed), on PreToolUse and Stop, as `node "<home>/.claude/mm-hooks/codex/rob-ask-gate.js" --codex`.
+//     It ships in this plugin, not in ~/.claude/mm-hooks/, so it is copied next to codex-gate.js and registered on
+//     every computer with Codex. It skips Rob's own computer by itself, as it does in Claude.
 //
 // What it never does:
 //   - touch an entry in hooks.json that is not ours, or trust one (ours = its command runs worklog-hook.js --codex or
@@ -40,6 +44,11 @@ const WORKLOG_HOOK = path.join(HOOK_DIR, "worklog-hook.js");
 const GATE_DIR = path.join(HOOK_DIR, "codex");
 const GATE_WRAPPER = path.join(GATE_DIR, "codex-gate.js");
 const BUNDLED_WRAPPER = path.join(__dirname, "codex-gate.js");
+const ROB_GATE = path.join(GATE_DIR, "rob-ask-gate.js");
+const BUNDLED_ROB_GATE = path.join(__dirname, "rob-ask-gate.js");
+/** The rob-ask gate's events in Codex, and its hook timeout (seconds). */
+const ROB_GATE_EVENTS = ["PreToolUse", "Stop"];
+const ROB_GATE_TIMEOUT_S = 10;
 const UNINSTALLED_MARK = "// Massmarket worklog hook: uninstalled.";
 
 /** The first worklog hook that knows Codex (OW, CODEX SESSIONS). */
@@ -69,6 +78,7 @@ const SELF_TESTS = {
   "send-gate": "curl -s -X POST https://discord.com/api/v10/channels/1/messages -H 'Content-Type: application/json' -d '{\"content\":\"mm self-test\"}'",
   "secret-read-gate": "cat ~/.claude/mm-hooks/token",
   "repo-home-guard": "gh repo create mm-selftest-repo --private",
+  "rob-ask-gate": "curl -s -X POST https://discord.com/api/v10/channels/1/messages -H 'Content-Type: application/json' -d '{\"content\":\"<@1053744158763925514> mm self-test\"}'",
 };
 
 const q = (p) => `"${p}"`;
@@ -101,7 +111,7 @@ function atLeast(v, min) {
 function isOurs(command) {
   const c = String(command || "").replace(/\\/g, "/");
   if (!/\.claude\/mm-hooks\//.test(c)) return false;
-  return /worklog-hook\.js"? --codex(\s|$)/.test(c) || /\/codex\/codex-gate\.js"? /.test(c);
+  return /worklog-hook\.js"? --codex(\s|$)/.test(c) || /\/codex\/codex-gate\.js"? /.test(c) || /\/codex\/rob-ask-gate\.js"? --codex(\s|$)/.test(c);
 }
 
 /** The Massmarket entries this computer should have, in a fixed order: `[{event, matcher, command, timeout}]`. */
@@ -117,6 +127,11 @@ function desiredEntries(opts) {
     if (!(o.gates || []).includes(gate)) continue;
     for (const event of events) {
       out.push({ event, matcher: event === "UserPromptSubmit" ? null : "*", command: `node ${q(GATE_WRAPPER)} ${gate}`, timeout: GATE_TIMEOUT_S });
+    }
+  }
+  if (o.robGate) {
+    for (const event of ROB_GATE_EVENTS) {
+      out.push({ event, matcher: event === "PreToolUse" ? "*" : null, command: `node ${q(ROB_GATE)} --codex`, timeout: ROB_GATE_TIMEOUT_S });
     }
   }
   return out;
@@ -155,20 +170,22 @@ function mergeHooks(current, entries) {
   return doc;
 }
 
-/** Copy codex-gate.js to its stable place when it differs. Returns "current" | "updated". */
-function syncWrapper() {
-  const want = fs.readFileSync(BUNDLED_WRAPPER);
+/** Copy a bundled script (codex-gate.js by default) to its stable place when it differs. "current" | "updated". */
+function syncWrapper(src, dst) {
+  const from = src || BUNDLED_WRAPPER;
+  const to = dst || GATE_WRAPPER;
+  const want = fs.readFileSync(from);
   let have = null;
   try {
-    have = fs.readFileSync(GATE_WRAPPER);
+    have = fs.readFileSync(to);
   } catch (_) {
     // not there yet
   }
   if (have && sha(have) === sha(want)) return "current";
   fs.mkdirSync(GATE_DIR, { recursive: true });
-  const tmp = GATE_WRAPPER + ".new-" + process.pid;
+  const tmp = to + ".new-" + process.pid;
   fs.writeFileSync(tmp, want, { mode: 0o644 });
-  fs.renameSync(tmp, GATE_WRAPPER);
+  fs.renameSync(tmp, to);
   return "updated";
 }
 
@@ -308,9 +325,12 @@ function selfTest(gates) {
         tool_input: { command: SELF_TESTS[gate] },
         tool_use_id: "exec-selftest",
       };
-      const env = Object.assign({}, process.env, { HOME: tmpHome, USERPROFILE: tmpHome, MM_HOOK_HOME: HOME });
-      delete env.MM_UNATTENDED;
-      const r = childProcess.spawnSync(process.execPath, [GATE_WRAPPER, gate], { input: JSON.stringify(payload), encoding: "utf8", timeout: 20000, env, cwd: tmpHome, windowsHide: true });
+      // The rob-ask gate runs directly, in an empty home: it skips Rob's own computer, so its test must not see it.
+      const robGate = gate === "rob-ask-gate";
+      const env = Object.assign({}, process.env, { HOME: tmpHome, USERPROFILE: tmpHome, MM_HOOK_HOME: robGate ? tmpHome : HOME });
+      for (const k of ["MM_UNATTENDED", "LANE2_RUN_ID", "MM_RUN_SESSION", "MM_GPT_DELEGATED", "CLAUDE_CODE_ENTRYPOINT"]) delete env[k];
+      const args = robGate ? [ROB_GATE, "--codex"] : [GATE_WRAPPER, gate];
+      const r = childProcess.spawnSync(process.execPath, args, { input: JSON.stringify(payload), encoding: "utf8", timeout: 20000, env, cwd: tmpHome, windowsHide: true });
       let decision = "none";
       try {
         const parsed = JSON.parse(String(r.stdout || "").trim());
@@ -345,6 +365,8 @@ async function sync() {
   const gates = GATE_EVENTS.map(([g]) => g).filter((g) => fs.existsSync(path.join(HOOK_DIR, `${g}.js`)));
   out.gates = gates;
   out.wrapper = gates.length ? syncWrapper() : "not-needed";
+  const robGate = fs.existsSync(BUNDLED_ROB_GATE);
+  out.rob_gate = robGate ? syncWrapper(BUNDLED_ROB_GATE, ROB_GATE) : "not-bundled";
 
   const before = readText(HOOKS_JSON);
   let current = {};
@@ -355,11 +377,12 @@ async function sync() {
       return Object.assign(out, { action: "hooks-json-unreadable" });
     }
   }
-  const entries = desiredEntries({ worklog, gates });
+  const entries = desiredEntries({ worklog, gates, robGate });
   out.entries = entries.length;
   out.hooks_json = writeHooksJson(mergeHooks(current, entries), before);
   out.trust = entries.length ? await trustOurs() : { ok: true, ours: 0, trusted: 0, wrote: 0 };
-  out.selftest = gates.length ? selfTest(gates) : {};
+  const tested = robGate ? gates.concat(["rob-ask-gate"]) : gates;
+  out.selftest = tested.length ? selfTest(tested) : {};
   const failed = Object.values(out.selftest).some((v) => String(v).startsWith("FAIL")) || Boolean(out.selftest.error);
   out.action = !out.trust.ok ? "trust-failed" : failed ? "selftest-failed" : entries.length ? "current" : "nothing-to-register";
   return out;
