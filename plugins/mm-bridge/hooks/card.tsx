@@ -197,8 +197,8 @@ function readRun(v: unknown): MmCardRun | null {
 
 const MEDIA_ITEMS = ['qa_video', 'walkthrough', 'documentation'] as const
 const MEDIA_KINDS = ['video', 'doc', 'link'] as const
-/** The longest document text the card holds (the renderer cuts at 30,000 characters and says the rest is in the doc). */
-export const MEDIA_TEXT_MAX = 40_000
+/** The longest document text the card holds (the renderer cuts at 20,000 characters and says the rest is in the doc). */
+export const MEDIA_TEXT_MAX = 24_000
 const httpsOf = (v: unknown): string | undefined => {
   const s = str(v, 2048)
   // an https link with nothing a Markdown link or image could be broken out of; never the Onboarding Wizard
