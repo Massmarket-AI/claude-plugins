@@ -27,7 +27,7 @@ import {
   ARCHIVED_REASON, KICKOFF_PENDING_MS,
   lookupOrder, pinReport, pinReportForOlderOw, refusedPinCount, refusedPinsText,
   awayHandoverText, awayPromptLine, awaySorted, carryKickoff, switchPromptLine, transcriptPath,
-  DETACH_SELF_NOTE, isChildThread, recordLooksFinished, withTopLevelStep, withoutTopLevelStep,
+  DETACH_SELF_NOTE, isChildThread, recordLooksFinished, recordPrs, rowPrOpen, withTopLevelStep, withoutTopLevelStep,
   ANSWER_CLEARED, ANSWER_CLIENTS_ONLY, ANSWER_TOOL_TEXT, answerArgs, answerNoted, declaredOf,
   RUN_WAIT_NO_THREAD, RUN_WAIT_TOOL_TEXT, runWaitNotedUnlinked, baselineOf, newSince, runMissedTitle, runReport, runState, runWaitArgs, runWaitNoted, runWaitSuffix, runWaitWhy, runWaitsOf,
   HANDOFF_TOLD_MAX, handoffNoteFor,
@@ -250,7 +250,7 @@ import type { ClientTime, Current, How, ProjectKind, ScopeLine, SkillEntry, Thre
 const EXT = 'https://onboarding-wizard.massmarket.ai/api/ext'
 // Keep equal to .claude-plugin/plugin.json; scripts/release.mjs checks it. (0.7.19) Exported for the tests alone: the lease
 // another session of this same version holds.
-export const VERSION = '0.7.88'
+export const VERSION = '0.7.90'
 /** The version that changes the person's thread list view once per machine (R15): it is recorded with the change. */
 const VIEW_VERSION = '0.5.2'
 const CLIENT_HEADER = { 'X-MM-Client': `mm-bridge/${VERSION}` }
@@ -1076,6 +1076,10 @@ function asThread(raw: unknown): AppThread | null {
     ...(typeof t.detached === 'boolean' ? { detached: t.detached } : {}),
     // (0.7.64) the app says it is in the middle of a turn: a message sent now waits for the turn to end
     ...((t as { isRunning?: unknown }).isRunning === true ? { running: true } : {}),
+    // (0.7.90) a pull request of its that is not merged or closed, by the app's list: never archived by itself (`archivePass`)
+    ...(rowPrOpen(t) ? { prOpen: true as const } : {}),
+    // (0.7.90) its permission mode, where the app says (this thread's own): only a thread in bypass permissions archives
+    ...(typeof (t as { permissionMode?: unknown }).permissionMode === 'string' ? { permissionMode: String((t as { permissionMode?: unknown }).permissionMode).slice(0, 40) } : {}),
   }
 }
 
@@ -1744,7 +1748,9 @@ async function listRecords($: EngineInterface, now: number): Promise<Map<string,
 // its work is finished by the record's own status fields (`recordLooksFinished`), computed as it is read; the fields themselves
 // are never kept.
 // (0.7.44) `dir`: only a file in that folder of records (one profile's) is read.
-type RecordSaid = { archived: boolean; dir: string; starred?: boolean; cli?: string; cwd?: string; finished: boolean }
+// (0.7.90) `openPr` and `mergedPr`: what its record says of its pull requests (`recordPrs`), each kept only when true; `focused`,
+// when the person last brought it on screen (`lastFocusedAt`).
+type RecordSaid = { archived: boolean; dir: string; starred?: boolean; cli?: string; cwd?: string; finished: boolean; openPr?: true; mergedPr?: true; focused?: number }
 async function recordOf($: EngineInterface, files: ReadonlyMap<string, readonly RecordFile[]>, sid: string, budget: { left: number }, dir?: string): Promise<RecordSaid | undefined> {
   for (const file of files.get(sid) ?? []) {
     if (dir !== undefined && file.dir !== dir) continue
@@ -1760,6 +1766,9 @@ async function recordOf($: EngineInterface, files: ReadonlyMap<string, readonly 
           ...(typeof record.cliSessionId === 'string' && SESSION_ID.test(record.cliSessionId) ? { cli: record.cliSessionId } : {}),
           ...(typeof record.cwd === 'string' && record.cwd.length <= 1000 ? { cwd: record.cwd } : {}),
           finished: recordLooksFinished(record),
+          ...(recordPrs(record).open ? { openPr: true as const } : {}),
+          ...(recordPrs(record).merged ? { mergedPr: true as const } : {}),
+          ...(typeof (record as { lastFocusedAt?: unknown }).lastFocusedAt === 'number' && Number.isFinite((record as { lastFocusedAt: number }).lastFocusedAt) ? { focused: (record as { lastFocusedAt: number }).lastFocusedAt } : {}),
         }
       }
     } catch {
@@ -6324,6 +6333,9 @@ async function tick($: EngineInterface): Promise<void> {
     await autoUpdates($).catch(err => noteFailure($, 'auto update', err))
     // (0.7.44, Rob 2026-11-10: "The bridge should probably know when it pins a client thread to make sure it's top level") after
     // the sync this thread made, and the updates it chose from it: the housekeeping notes (`topLevelPass`)
+    // ⛔ (0.7.90, Rob 2026-11-27: "this should be how the bridge handles any pinned parent threads children") first, the finished
+    // threads under a pinned thread are archived (`archivePass`): the top-level pass's note never wakes one of those
+    if (synced) await archivePass($, synced).catch(err => noteFailure($, 'archive', err))
     if (synced) await topLevelPass($, synced).catch(err => noteFailure($, 'top level', err))
     await refreshSelf($, false)
     // (0.6.0) this thread's Tracking part, status line and band line, from the store; the pane opens for a new project
@@ -7423,6 +7435,9 @@ async function topLevelPass($: EngineInterface, pass: Pass): Promise<void> {
   // (7) the children under a pinned client thread that are not that client's own work
   const all = await currents($)
   const records = recordReader($, now, me)
+  /** (0.7.90) This thread archives finished children (`archivePass`), and what it asked the app to archive. */
+  const archives = pass.live.get(me)?.permissionMode === 'bypassPermissions'
+  const archivedOf = archives ? await storeGet<Record<string, Archived>>($, 'mm.archived', {}) : {}
   for (const [parent, { pid }] of ofClients) {
     const p = pass.live.get(parent)
     if (!p || !p.pinned || p.isArchived) continue
@@ -7435,7 +7450,8 @@ async function topLevelPass($: EngineInterface, pass: Pass): Promise<void> {
       let why: string | undefined
       if (other !== undefined && other !== pid) why = 'linked to another client'
       else if (on !== undefined && on !== pid) why = internalIds.has(on) ? 'on the internal-ops project' : "on another client's project"
-      else if (other === undefined && on === undefined && (await records.read(sid))?.finished === true) why = 'finished'
+      // ⛔ (0.7.90) a finished one in a thread that archives (bypass permissions) is the archive pass's, unless the app refused it
+      else if (other === undefined && on === undefined && !(archives && archivedOf[sid]?.ok !== false) && (await records.read(sid))?.finished === true) why = 'finished'
       if (!why) continue
       chosen.add(sid)
       asks.push({ sid, pid: other, client: nameOf(other, sid), line: `top level: asked ${sid} to leave pinned ${parent} (${nameOf(pid, parent)}): ${why}` })
@@ -7477,6 +7493,235 @@ async function topLevelPass($: EngineInterface, pass: Pass): Promise<void> {
       why = errorText(err)
     }
     await logAuto($, why === null ? a.line : `${a.line}; not sent: ${short(why, 160)}`)
+  }
+}
+
+// ---------------------------------------------------------------- (0.7.90) finished children of a pinned thread are archived
+
+/** (0.7.90) How long a child must have been quiet in the app before it is archived: the 10 minutes an update by itself waits for. */
+const ARCHIVE_IDLE_MS = AUTO_IDLE_MS
+/** (0.7.90) The most threads one sync archives: the rest wait for the next sync. */
+const ARCHIVE_PER_SYNC = 5
+/**
+ * ⛔ (0.7.90) How many of the app's threads the pass asks for: all of them. The sync's own list holds the 60 most recent, a
+ * finished child is often older, and archiving a thread archives its idle side sessions with it (they share its folder), so every
+ * open thread under one must be seen first. An answer this long may be cut short: nothing is archived on it.
+ */
+const ARCHIVE_LIST = 5_000
+/** (0.7.90) How often the pass lists them, at most: every third sync (Rob's computer has some 1,400 open threads). */
+const ARCHIVE_EVERY_MS = 15 * 60_000
+/** (0.7.90) How far down from a pinned thread the pass looks: its children, theirs, and so on. */
+const ARCHIVE_DEPTH = 4
+/** (0.7.90) How long a thread the app refused to archive waits before it is asked again: as a refused pin waits. */
+const ARCHIVE_AGAIN_MS = PIN_WAIT_MS
+/** (0.7.90) The most threads `mm.archived` keeps. */
+const ARCHIVED_MAX = 500
+/** (0.7.90) What the app shows beside the archive (only outside bypass permissions, where the bridge never asks). */
+const ARCHIVE_REASON = 'finished, under a pinned thread (mm-bridge)'
+
+/**
+ * (0.7.90) A thread the bridge asked the app to archive (`mm.archived`, by thread): when, under which pinned thread, and how it
+ * went: `ok` true, archived; false, the app refused or the call failed (`why`, its words), asked again after ARCHIVE_AGAIN_MS;
+ * null, no answer yet (written when one comes, however late). ⛔ A thread on record as archived (or still unanswered) that is open
+ * again was brought back by the person: it is never archived by itself again.
+ */
+type Archived = { at: number; parent: string; ok: boolean | null; why?: string }
+
+/**
+ * (0.7.90) The children this session found not finished, by session (`instanceId`), each with the time of its record then (by the
+ * listing): not read again until its record is newer, so the sync's files reach the next ones.
+ */
+const notFinishedBy = new Map<string, Map<string, number>>()
+/** (0.7.90) When this session last listed every thread for the pass, by session (`instanceId`). */
+const archiveListedAt = new Map<string, number>()
+
+/**
+ * ⛔ (0.7.90, Rob 2026-11-27: "You should unpin your subthreads or archive them when they're finished to clear up clutter." And:
+ * "and to focus me on the threads that actually need help, this should be how the bridge handles any pinned parent threads
+ * children") After each sync this thread makes: every open thread under a pinned thread (its children, theirs, ARCHIVE_DEPTH
+ * down) that is FINISHED is archived through the app (`archive_session`). Archiving can be undone (the app's Archived list,
+ * `unarchive_session`); nothing is ever deleted.
+ *
+ * Finished, all of these: the app's own record of it says its last turn completed with nothing left (`recordLooksFinished`: not
+ * blocked, not review_ready, nothing it needs from the person, no prompt of the person's after it); every pull request its record
+ * and the app's list name is merged or closed (or it has none); it has been quiet ARCHIVE_IDLE_MS; and each open thread under it
+ * is finished too.
+ *
+ * ⛔ Left alone, whatever else holds: one that is working now (`isRunning`); one with an open pull request; one pinned in its own
+ * right, or with a pin record of the bridge's; one that waits on the person (`mm waiting`) or only on a scheduled run (`mm waiting
+ * scheduled`: the pin rules decide); a client's linked thread (the top-level pass asks it to detach instead); a scheduled task's
+ * run; this thread and every thread above it (the app archives the side sessions that share a thread's folder with it, which
+ * could be this one); a thread under it that is not finished; one the person brought back from the archive; one with no record
+ * this sync could read; one the person brought on screen in the last ARCHIVE_IDLE_MS (its record's `lastFocusedAt`: in bypass
+ * permissions the app archives a thread that is on screen). When in doubt it is left: a thread wrongly archived hides work, a
+ * leftover one only adds clutter.
+ *
+ * ⛔ Only in a thread whose permission mode is bypass permissions: in every other the app asks the person before each archive, and
+ * the bridge never adds a question. Elsewhere nothing is asked and nothing is written, and the top-level pass's note stays.
+ * Just before each, the app is asked for the thread by id (`lookup`): open, under the same thread, not moved to top level, not
+ * pinned, not running, quiet. On record first (`mm.archived`, over a fresh copy: two threads never both ask), then archived. At
+ * most ARCHIVE_PER_SYNC a sync. A refusal is logged once and asked again after ARCHIVE_AGAIN_MS. Nothing else is written: no
+ * link, pin, name or message.
+ */
+async function archivePass($: EngineInterface, pass: Pass): Promise<void> {
+  if (!pass.listed || pass.stored) return
+  if ((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) !== 'claude-desktop') return
+  if (await $.store.get('mm.paused')) return
+  const me = await knownSelf($)
+  const self = me ? pass.live.get(me) : undefined
+  if (!me || !self || self.permissionMode !== 'bypassPermissions') return
+  const now = await $.clock.now()
+  const id = await instanceId($)
+  if (now - (archiveListedAt.get(id) ?? -Infinity) < ARCHIVE_EVERY_MS) return
+  archiveListedAt.set(id, now)
+  const raw = await desktopOnly(() => mcpJsonWithin($, 'ccd_session_mgmt', 'list_sessions', { limit: ARCHIVE_LIST }), null)
+  if (!Array.isArray(raw) || raw.length >= ARCHIVE_LIST) return
+  const open = new Map<string, AppThread>([[me, self]])
+  /** Threads the app says are starting: as working ones, left alone. */
+  const starting = new Set<string>()
+  for (const r of raw) {
+    const t = asThread(r)
+    if (!t || t.sessionId === me) continue
+    open.set(t.sessionId, t)
+    if ((r as { starting?: unknown }).starting === true) starting.add(t.sessionId)
+  }
+  const parentOf = (t: AppThread | undefined): string | undefined => t?.parentSessionId ?? t?.startedBy
+  /** Each thread's open children, as the list says (the app names no parent for a side session moved to top level). */
+  const kids = new Map<string, string[]>()
+  for (const t of open.values()) {
+    const p = parentOf(t)
+    if (p && t.detached !== true && p !== t.sessionId) kids.set(p, [...(kids.get(p) ?? []), t.sessionId])
+  }
+  // this thread and every thread above it
+  const above = new Set<string>([me])
+  for (let p = parentOf(self), i = 0; p && i < 20 && !above.has(p); i++) {
+    above.add(p)
+    p = parentOf(open.get(p))
+  }
+  // the threads under a pinned thread, each with the pinned thread it is under (the nearest)
+  const pinned = [...open.values()].filter(t => t.pinned && !t.scheduled).map(t => t.sessionId)
+  const under = new Map<string, string>()
+  let level = pinned.map(p => [p, p] as const)
+  for (let d = 0; d < ARCHIVE_DEPTH && level.length; d++) {
+    const below: Array<readonly [string, string]> = []
+    for (const [sid, top] of level) {
+      for (const k of kids.get(sid) ?? []) {
+        if (under.has(k) || pinned.includes(k)) continue
+        under.set(k, top)
+        below.push([k, top])
+      }
+    }
+    level = below
+  }
+  if (!under.size) return
+  const links = await storeGet<Record<string, string>>($, 'mm.links', {})
+  const pins = await storeGet<Record<string, Pin>>($, 'mm.pins', {})
+  const runs = await storeGet<Record<string, number>>($, 'mm.scheduled', {})
+  const declared = declaredOf(await storeGet<unknown>($, 'mm.waiting', {}))
+  const runWaits = runWaitsOf(await storeGet<unknown>($, 'mm.runwait', {}))
+  const archived = await storeGet<Record<string, Archived>>($, 'mm.archived', {})
+  const judged = notFinishedBy.get(id) ?? new Map<string, number>()
+  notFinishedBy.set(id, judged)
+  if (judged.size > 2_000) judged.clear()
+  const records = recordReader($, now, me)
+  const quiet = (t: { lastActivityAt?: string }): boolean => {
+    const at = Date.parse(t.lastActivityAt ?? '')
+    return Number.isFinite(at) && now - at >= ARCHIVE_IDLE_MS
+  }
+  /** Why a thread is left as it is, by what the list and the bridge's own records say; undefined: its record decides. */
+  const leftFor = (sid: string): string | undefined => {
+    const t = open.get(sid)
+    if (!t) return 'not open here'
+    if (above.has(sid)) return 'this thread or one above it'
+    if (t.pinned) return 'pinned'
+    if (t.running || starting.has(sid)) return 'working'
+    if (t.scheduled || Object.hasOwn(runs, sid)) return 'a scheduled run'
+    if (t.prOpen) return 'an open pull request'
+    if (ownerOf(sid, links) !== undefined) return "a client's linked thread"
+    if (Object.hasOwn(pins, sid)) return 'a pin record'
+    if (Object.hasOwn(declared, sid)) return 'waiting on you'
+    if (Object.hasOwn(runWaits, sid)) return 'waiting on a scheduled run'
+    const a = Object.hasOwn(archived, sid) ? archived[sid] : undefined
+    if (a && typeof a === 'object' && a.ok !== false) return a.ok === true ? 'brought back from the archive' : 'asked before, no answer'
+    if (a && typeof a === 'object' && now - Number(a.at) < ARCHIVE_AGAIN_MS) return 'refused lately'
+    if (!quiet(t)) return 'in use lately'
+    return undefined
+  }
+  /**
+   * Why a thread is not finished, or undefined when it is: memoised, so a thread under two checks is read once. `path`: the threads
+   * above it in this check (a thread that is its own ancestor, which the app should never answer, is not finished).
+   */
+  const memo = new Map<string, Promise<string | undefined>>()
+  const notDone = (sid: string, path: ReadonlySet<string>): Promise<string | undefined> => {
+    if (path.has(sid)) return Promise.resolve('a loop of threads')
+    const had = memo.get(sid)
+    if (had) return had
+    const work = (async (): Promise<string | undefined> => {
+      const left = leftFor(sid)
+      if (left) return left
+      if (path.size > ARCHIVE_DEPTH) return 'too far down to check'
+      const m = await records.hereAt(sid)
+      if (m !== undefined && judged.get(sid) === m) return 'not finished'
+      const rec = await records.read(sid)
+      if (!rec || rec.archived) return 'no record read'
+      if (rec.openPr) return 'an open pull request'
+      // the app archives a thread on screen in bypass permissions: one the person brought up lately may be open there now
+      if (rec.focused !== undefined && now - rec.focused < ARCHIVE_IDLE_MS) return 'on screen lately'
+      if (!rec.finished) {
+        if (m !== undefined) judged.set(sid, m)
+        return 'not finished'
+      }
+      for (const k of kids.get(sid) ?? []) {
+        const why = await notDone(k, new Set([...path, sid]))
+        if (why) return `a thread under it (${k}): ${why}`
+      }
+      judged.delete(sid)
+      return undefined
+    })()
+    memo.set(sid, work)
+    return work
+  }
+  let done = 0
+  for (const [sid, top] of under) {
+    if (done >= ARCHIVE_PER_SYNC) break
+    if (await notDone(sid, new Set())) continue
+    // the app, just before: open here, under the same thread, still nested, not pinned, not running, quiet
+    const found = await lookup($, sid)
+    if (typeof found !== 'object' || found.isArchived || found.scheduled || found.pinned || found.running || found.prOpen) continue
+    if (found.detached === true || parentOf(found) !== parentOf(open.get(sid)) || !quiet(found)) continue
+    // ⛔ on record first, over a fresh copy: two threads never both ask
+    let mine = false
+    await patchStore<Record<string, Archived>>($, 'mm.archived', {}, fresh => {
+      const was = Object.hasOwn(fresh, sid) ? fresh[sid] : undefined
+      if (was && typeof was === 'object' && (was.ok !== false || now - Number(was.at) < ARCHIVE_AGAIN_MS)) return false
+      delete fresh[sid]
+      fresh[sid] = { at: now, parent: top, ok: null }
+      capped(fresh, ARCHIVED_MAX)
+      mine = true
+    }).catch(err => noteFailure($, 'the record of archives', err))
+    if (!mine) continue
+    done++
+    const what = `${sid} under pinned ${top}`
+    const finished = records.said(sid)?.mergedPr ? 'finished, its pull request merged or closed' : 'finished'
+    // whenever the app answers, in time or not, its answer goes on record
+    const answered = mcpJson($, 'ccd_session_mgmt', 'archive_session', { session_id: sid, reason: ARCHIVE_REASON }).then(
+      () => ({ ok: true as const }),
+      (err: unknown) => ({ ok: false as const, why: short(errorText(err).replace(/^ccd_session_mgmt\.archive_session:\s*/, ''), 160) }),
+    )
+    const settled = answered.then(a =>
+      patchStore<Record<string, Archived>>($, 'mm.archived', {}, fresh => {
+        const was = Object.hasOwn(fresh, sid) ? fresh[sid] : undefined
+        if (!was || typeof was !== 'object' || was.at !== now) return false
+        fresh[sid] = { at: now, parent: top, ok: a.ok, ...(a.ok ? {} : { why: a.why }) }
+      }).catch(err => noteFailure($, 'the record of archives', err)),
+    )
+    const r = await within($, answered)
+    if (!r.ok) {
+      await logAuto($, `archive: asked to archive ${what} (${finished}); no answer from the app yet`)
+      continue
+    }
+    await settled
+    await logAuto($, r.value.ok ? `archive: archived ${what}: ${finished}` : `archive: ${what} not archived: ${r.value.why}`)
   }
 }
 
