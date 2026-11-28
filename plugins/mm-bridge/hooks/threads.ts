@@ -69,6 +69,38 @@ export type AppThread = {
    * and delivered when the turn ends, however long that takes and whatever has changed by then.
    */
   running?: boolean
+  /**
+   * (0.7.90) The app's list names a pull request of the thread that is not merged or closed (`prNumber` with a `prState` other
+   * than MERGED or CLOSED, or none): such a thread is never archived by itself (`archivePass`).
+   */
+  prOpen?: true
+  /**
+   * (0.7.90) The thread's permission mode, as `get_session` answers it (for this thread, and the threads this thread started):
+   * the app asks the person before every `archive_session` outside bypass permissions, so only a thread in it archives.
+   */
+  permissionMode?: string
+}
+
+/**
+ * (0.7.90) Whether the app's list row for a thread names a pull request that is not merged or closed: a `prNumber` with a
+ * `prState` other than MERGED or CLOSED (OPEN, a merge queue's QUEUED, anything else, or none). A row with no `prNumber` names
+ * none.
+ */
+export function rowPrOpen(raw: unknown): boolean {
+  const r = raw as { prNumber?: unknown; prState?: unknown } | null | undefined
+  if (!r || typeof r !== 'object' || r.prNumber === undefined || r.prNumber === null) return false
+  return r.prState !== 'MERGED' && r.prState !== 'CLOSED'
+}
+
+/**
+ * (0.7.90) What the app's own record of a thread says of its pull requests (`prs`, each with the app's `state`: OPEN, MERGED or
+ * CLOSED): `open`, one is anything but merged or closed (a state missing or unknown counts as open); `merged`, one is merged.
+ */
+export function recordPrs(record: unknown): { open: boolean; merged: boolean } {
+  const prs = (record as { prs?: unknown } | null | undefined)?.prs
+  if (!Array.isArray(prs)) return { open: false, merged: false }
+  const states = prs.map(p => (p && typeof p === 'object' ? (p as { state?: unknown }).state : undefined))
+  return { open: states.some(s => s !== 'MERGED' && s !== 'CLOSED'), merged: states.includes('MERGED') }
 }
 
 /**

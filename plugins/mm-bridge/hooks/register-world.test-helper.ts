@@ -191,6 +191,12 @@ export type WorldOptions = {
    * answers (the person has not answered its question).
    */
   unarchive?: 'refuse' | 'error' | 'silent' | (() => 'refuse' | 'error' | 'silent' | undefined)
+  /**
+   * (0.7.90) How the app answers `archive_session` for a thread: left out, the thread is archived and the app says so (as
+   * Claude.app 3.1795 does: `Archived session <id>.`); `refuse`, it refuses in its own words (an error answer, as for a thread
+   * still working); `error`, the call itself fails; `silent`, the app never answers. A function: by thread.
+   */
+  archive?: 'refuse' | 'error' | 'silent' | ((sid: string) => 'refuse' | 'error' | 'silent' | undefined)
   /** (0.7.26) The renderer on this computer draws the card (the synthetic text package's tree), instead of being one from before --tree. */
   renderer?: 'tree'
   /** (0.7.26) What the reply-package pickup read answers, when not the plain page. */
@@ -273,6 +279,17 @@ export function world(on: On, opts: WorldOptions = {}) {
       if (!t) return refused(`Session ${id} not found.`)
       t.isArchived = false
       return text(`Session ${id} unarchived.`)
+    }
+    // (0.7.90) as the app answers archive_session (its words read in Claude.app 3.1795's bundle)
+    if (e.tool === 'archive_session') {
+      const how = typeof opts.archive === 'function' ? opts.archive(id) : opts.archive
+      if (how === 'silent') return new Promise<never>(() => undefined)
+      if (how === 'error') return { deny: 'mm-bridge: $.mcp.call: ccd_session_mgmt.archive_session failed: internal error' }
+      if (how === 'refuse') return refused(`Session ${id} was not archived: a side session of it is still working.`)
+      if (!t) return refused(`Session ${id} not found.`)
+      if (t.isArchived) return refused(`Session ${id} is already archived.`)
+      t.isArchived = true
+      return text(`Archived session ${id}.`)
     }
     if (e.tool === 'set_session_title' && t) t.title = String(e.args.title)
     if (e.tool === 'set_pinned' && opts.refusePins && Object.hasOwn(opts.refusePins, id)) return refused(String(opts.refusePins[id]))
