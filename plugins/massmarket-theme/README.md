@@ -3,8 +3,13 @@
 The Massmarket look for the Claude desktop and mobile apps, in the paper-and-ink colors of the
 massmarket.ai homepage hero.
 
-- Light from sunrise to sunset where this computer is, dark at night. Sunrise and sunset come from
-  the computer's own time zone, so they follow the seasons wherever a teammate works.
+- Light or dark as the app's own appearance setting says (the default). For light by day and dark at
+  night, set the app's appearance to match the system, and the system's to automatic.
+- Or `/look auto`: light from sunrise to sunset where this computer is, dark at night, from the
+  computer's own time zone. This overrides the app's own setting. Since desktop 7.37 (2026-11-26) the
+  desktop window goes back to the app's own setting a second after a thread opens, so where the two
+  differ the window flashes between them each time you change threads. That is why it is no longer
+  the default.
 - By day: a slow cream and gray mesh over the hero's faint grid.
 - At night: the same in reverse, a cream mesh on black.
 - Your messages sit in a rounded box: paper by day and black at night, with a hairline edge
@@ -20,11 +25,11 @@ massmarket.ai homepage hero.
 | Command | What it does |
 | --- | --- |
 | `/look` | Says what the look is doing now, and what a fresh thread would save over this one. |
-| `/look auto` | Light from sunrise to sunset, dark at night (the default). |
-| `/look hours 7 19` | Fixed hours instead: light from 7, dark from 19 (any two hours from 0 to 23). |
-| `/look light` | Always light. |
-| `/look dark` | Always dark. |
-| `/look app` | Follows the app's own light or dark setting. |
+| `/look app` | Follows the app's own light or dark setting (the default). |
+| `/look auto` | Light from sunrise to sunset, dark at night, over the app's own setting. |
+| `/look hours 7 19` | Fixed hours instead: light from 7, dark from 19 (any two hours from 0 to 23), over the app's own setting. |
+| `/look light` | Always light, over the app's own setting. |
+| `/look dark` | Always dark, over the app's own setting. |
 | `/look glow on` or `/look glow off` | Turns the mesh's growing with that saving on or off. |
 | `/look boxes match` or `/look boxes flip` | Your messages' box in the page's own colors (paper by day, black at night; the default) or the reverse (black by day, cream at night). |
 

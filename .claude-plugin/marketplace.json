@@ -20,7 +20,7 @@
     {
       "name": "massmarket-theme",
       "source": "./plugins/massmarket-theme",
-      "description": "The Massmarket look for the Claude apps: light from sunrise to sunset where the computer is and dark at night, in the massmarket.ai hero colors with its slow mesh and grid behind the conversation; /look changes it"
+      "description": "The Massmarket look for the Claude apps: light or dark as the app is set (or sunrise to sunset with /look auto), in the massmarket.ai hero colors with its slow mesh and grid behind the conversation; /look changes it"
     }
   ]
 }

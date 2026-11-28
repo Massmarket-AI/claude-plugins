@@ -5,7 +5,8 @@ import { makeColors } from './make-colors.js'
 // ============================================================================
 // THE BRAND. A client edition copies this mod and replaces PLUGIN and BRAND
 // with the client's own; everything below the line stays as it is, so every
-// edition gets the same light-by-day, dark-at-night behaviour.
+// edition gets the same light and dark behaviour: the app's own setting by
+// default, or light by day and dark at night with /look auto.
 // ============================================================================
 
 const PLUGIN = 'massmarket-theme'
@@ -264,17 +265,35 @@ function lookFor(scheme: 'light' | 'dark' | undefined, level: Level, boxes: Boxe
 
 // ---------------------------------------------------------------- the switch
 
-/** auto: light by day and dark at night on this computer's clock; light or dark: always; app: the app's own setting. */
+/**
+ * app: the app's own light or dark setting (the default); auto: light by day and dark at night on this computer's
+ * clock; light or dark: always.
+ *
+ * Every mode but `app` overrides the app's own setting, and since desktop 7.37 (2026-11-26) the desktop window goes
+ * back to the app's own setting a second after a thread opens. A look that differs from the app's setting therefore
+ * flashes between the two on every thread switch: measured on Rob's Mac 2026-11-27, app set to Light and auto at
+ * night, 127 switches in a day. So the theme only overrides when the person asks for it.
+ */
 export type Mode = 'auto' | 'light' | 'dark' | 'app'
 /**
  * In auto, what day means: `sun`, sunrise to sunset where this computer's time
  * zone is (so it follows the seasons), or `hours`, fixed hours the person set.
  * `glow`: whether the scene deepens and glows as the thread nears compacting.
  * `boxes`: your messages' box, in the page's own color or the reverse.
+ * `autoChosen`: the person chose auto with /look auto or /look hours. Before 0.6.7 auto was the default, so a stored
+ * auto without it was never chosen, and reads as the new default.
  */
-export type Prefs = { mode: Mode; schedule: 'sun' | 'hours'; lightFrom: number; darkFrom: number; glow: boolean; boxes: Boxes }
+export type Prefs = {
+  mode: Mode
+  schedule: 'sun' | 'hours'
+  lightFrom: number
+  darkFrom: number
+  glow: boolean
+  boxes: Boxes
+  autoChosen: boolean
+}
 
-const DEFAULTS: Prefs = { mode: 'auto', schedule: 'sun', lightFrom: 7, darkFrom: 19, glow: true, boxes: 'match' }
+const DEFAULTS: Prefs = { mode: 'app', schedule: 'sun', lightFrom: 7, darkFrom: 19, glow: true, boxes: 'match', autoChosen: false }
 const PREFS_KEY = `${PLUGIN}.prefs`
 const MODES: readonly Mode[] = ['auto', 'light', 'dark', 'app']
 
@@ -403,14 +422,17 @@ function isHour(v: unknown): v is number {
 /** This computer's choices, kept across sessions; anything unreadable falls back to the defaults. */
 async function readPrefs($: EngineInterface): Promise<Prefs> {
   const raw = (await $.store.get(PREFS_KEY)) as Partial<Prefs> | null | undefined
-  const mode = raw && MODES.includes(raw.mode as Mode) ? (raw.mode as Mode) : DEFAULTS.mode
   const schedule = raw && (raw.schedule === 'sun' || raw.schedule === 'hours') ? raw.schedule : DEFAULTS.schedule
+  // /look hours always chose auto; a stored auto on the sun without the mark is the old default, not a choice.
+  const autoChosen = raw?.autoChosen === true || schedule === 'hours'
+  const stored = raw && MODES.includes(raw.mode as Mode) ? (raw.mode as Mode) : DEFAULTS.mode
+  const mode = stored === 'auto' && !autoChosen ? DEFAULTS.mode : stored
   const lightFrom = raw && isHour(raw.lightFrom) ? raw.lightFrom : DEFAULTS.lightFrom
   const darkFrom = raw && isHour(raw.darkFrom) && raw.darkFrom !== lightFrom ? raw.darkFrom : DEFAULTS.darkFrom
   const glow = raw && typeof raw.glow === 'boolean' ? raw.glow : DEFAULTS.glow
   const boxes = raw && BOXES.includes(raw.boxes as Boxes) ? (raw.boxes as Boxes) : DEFAULTS.boxes
 
-  return { mode, schedule, lightFrom, darkFrom: darkFrom === lightFrom ? DEFAULTS.darkFrom : darkFrom, glow, boxes }
+  return { mode, schedule, lightFrom, darkFrom: darkFrom === lightFrom ? DEFAULTS.darkFrom : darkFrom, glow, boxes, autoChosen }
 }
 
 function clockMinutes(hours: number): string {
@@ -600,12 +622,14 @@ async function describe($: EngineInterface): Promise<string> {
         ? `the sun ${sun === 'day' ? 'stays up' : 'stays down'} today, so ${sun === 'day' ? 'light' : 'dark'} all day`
         : `light from sunrise (${clockMinutes(sun.rise)}) to sunset (${clockMinutes(sun.set)}) today, dark otherwise`
   }
+  const flash =
+    "It overrides the app's own light or dark setting, so where the two differ the desktop window flashes back to the app's setting each time a thread opens. /look app follows the app's setting instead."
   const where =
     prefs.mode === 'auto'
-      ? `${BRAND.name} look: automatic, ${day}, on this computer's clock (${zone}). Now: ${scheme}.`
+      ? `${BRAND.name} look: automatic, ${day}, on this computer's clock (${zone}). Now: ${scheme}. ${flash}`
       : prefs.mode === 'app'
-        ? `${BRAND.name} look: following the app's own light or dark setting.`
-        : `${BRAND.name} look: always ${prefs.mode}.`
+        ? `${BRAND.name} look: following the app's own light or dark setting (the default). For light by day and dark at night, set the app's appearance to match the system and the system's to automatic.`
+        : `${BRAND.name} look: always ${prefs.mode}. ${flash}`
   const glow = !prefs.glow ? 'Thread glow: off.' : costWords(await costNow($), now.getTime())
 
   const boxes =
@@ -613,7 +637,7 @@ async function describe($: EngineInterface): Promise<string> {
       ? "Your messages: a rounded box with a thin edge, paper by day and black at night. Claude's have no box."
       : "Your messages: a rounded box with a thin edge, black by day and cream at night. Claude's have no box."
 
-  return `${where}\n${glow}\n${boxes}\nChange it with /look auto (sunrise to sunset), /look hours 7 19 (fixed hours light and dark start, 0 to 23), /look light, /look dark, /look app, /look glow on|off, or /look boxes match|flip.`
+  return `${where}\n${glow}\n${boxes}\nChange it with /look app (the app's own setting), /look auto (sunrise to sunset), /look hours 7 19 (fixed hours light and dark start, 0 to 23), /look light, /look dark, /look glow on|off, or /look boxes match|flip.`
 }
 
 export const register: Register = on => {
@@ -626,7 +650,7 @@ export const register: Register = on => {
 
     await $.command.register({
       name: 'look',
-      description: `${BRAND.name} look: light from sunrise to sunset, dark at night. /look auto, hours 7 19, light, dark, app, glow on|off, boxes match|flip`,
+      description: `${BRAND.name} look: follows the app's light or dark setting. /look app, auto (sunrise to sunset), hours 7 19, light, dark, glow on|off, boxes match|flip`,
     })
     await apply($, true)
 
@@ -671,7 +695,7 @@ export const register: Register = on => {
     }
 
     if (first === 'auto' || first === 'sun') {
-      await $.store.set(PREFS_KEY, { ...prefs, mode: 'auto', schedule: 'sun' })
+      await $.store.set(PREFS_KEY, { ...prefs, mode: 'auto', schedule: 'sun', autoChosen: true })
     } else if (MODES.includes(first as Mode)) {
       await $.store.set(PREFS_KEY, { ...prefs, mode: first as Mode })
     } else if (first === 'hours') {
@@ -681,7 +705,7 @@ export const register: Register = on => {
       if (!isHour(lightFrom) || !isHour(darkFrom) || lightFrom === darkFrom) {
         return { text: 'Give two different hours from 0 to 23: when light starts, then when dark starts. For example /look hours 7 19.' }
       }
-      await $.store.set(PREFS_KEY, { ...prefs, mode: 'auto', schedule: 'hours', lightFrom, darkFrom })
+      await $.store.set(PREFS_KEY, { ...prefs, mode: 'auto', schedule: 'hours', lightFrom, darkFrom, autoChosen: true })
     } else if (first === 'glow' && (words[1] === 'on' || words[1] === 'off')) {
       await $.store.set(PREFS_KEY, { ...prefs, glow: words[1] === 'on' })
     } else if (first === 'boxes' && BOXES.includes(words[1] as Boxes)) {
