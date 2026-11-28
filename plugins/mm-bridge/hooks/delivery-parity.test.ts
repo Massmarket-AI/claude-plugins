@@ -11,7 +11,7 @@ import { DELIVERY_PAIRS } from './delivery-pairs.test-helper'
 
 describe('0.7.86 delivery check: the card holds the page', () => {
   test('the pairs are delivery packages', () => {
-    expect(Object.keys(DELIVERY_PAIRS).length).toBe(5)
+    expect(Object.keys(DELIVERY_PAIRS).length).toBe(7)
   })
   for (const name of Object.keys(DELIVERY_PAIRS)) {
     test(name, () => {
