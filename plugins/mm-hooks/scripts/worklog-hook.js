@@ -226,7 +226,7 @@ const WORKLOG_URL = `${API_BASE}/api/ext/worklog`;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** This file's release. See the block above: bump it with every release. */
-const HOOK_VERSION = "0.15.1";
+const HOOK_VERSION = "0.16.0";
 
 /** What a plugin-sync.json may say as its version: digits and dots, three parts. */
 const PLUGIN_SYNC_VERSION_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -9838,8 +9838,18 @@ async function syncRegistrySkills(budgetMs) {
 // The mode is OW's answer to the last setup report, kept in
 // state/skill-check.json; with no answer on file it is observe.
 //   ⛔ NEVER IN: a run with MM_UNATTENDED=1, a Lane-2 run (LANE2_RUN_ID,
-//   MM_RUN_SESSION), a session no person is at (isInteractiveSession), Codex, a
+//   MM_RUN_SESSION), a session no person is at (isInteractiveSession), a
 //   mod's own call, or a machine with no token. Those are never checked.
+//   ⛔ CODEX (0.16.0). Rob, 2026-11-27: "lets fix everything for codex too".
+//   A Codex session a person drives (codexTurnOrigin "person": the desktop app,
+//   the TUI, the IDE) is checked like a Claude one. Not a headless `codex exec`
+//   (no person, like an sdk run), and not a run Claude handed to GPT
+//   (MM_GPT_DELEGATED=1: the Claude thread that handed it over is checked).
+//   Codex has no Skill tool: a skill counts as loaded when a shell call read its
+//   SKILL.md and the output showed its `name:` line (codexSkillReads, which
+//   writes the same SKILL LOADS marker). The Codex rollout is not scanned. The
+//   deny reason tells GPT to read the file. Registered in ~/.codex/hooks.json by
+//   the mm-hooks plugin's sync-codex.js (PreToolUse, from this version on).
 //   ⛔ FAIL-OPEN, ALWAYS. Any error, a slow disk or a hard exit is "no
 //   objection". The check never asks the person anything.
 //   ⛔ Registered by the mm-hooks plugin (hooks/hooks.json, PreToolUse →
@@ -12375,7 +12385,8 @@ function loadedSkillsForCheck(sessionId, transcriptPath, required, needsClient) 
   }
   const satisfied = () =>
     required.every((n) => loaded.has(n)) && (!needsClient || hasClientSkill(loaded));
-  if (!satisfied()) {
+  // CODEX (0.16.0): a Codex rollout is never scanned; its loads are the markers.
+  if (!satisfied() && !isCodexTranscriptPath(transcriptPath)) {
     transcriptSkills(transcriptPath).forEach((n) => {
       const base = skillBaseName(n);
       if (loaded.has(base)) return;
@@ -12420,6 +12431,24 @@ function skillCheckReason(rule, missing, clientMissing) {
   );
 }
 
+/**
+ * VERBATIM — Opus, 2026-11-27. The Codex (GPT) reason: Codex has no Skill tool,
+ * so a skill is loaded by reading its SKILL.md in the shell.
+ */
+function skillCheckReasonCodex(rule, missing, clientMissing) {
+  const names = missing.map((n) => `${n}`);
+  if (clientMissing) names.push("the client's own <client>-project skill");
+  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  const them = names.length === 1 ? "it" : "them";
+  const example = missing.length ? missing[0] : "<client>-project";
+  return (
+    `Massmarket skill check: this step is ${SKILL_CHECK_ACTION_WORDS[rule.action]}, and the rules for it are in ${list}, ` +
+    `which this session has not read. Read ${them} now, each with one shell command such as ` +
+    `\`sed -n 1,200p ~/.codex/skills/${example}/SKILL.md\`, follow ${them}, then run this step again. ` +
+    `Do not ask the person; this is your step. (Rule ${rule.id}.)`
+  );
+}
+
 /** May this run be checked at all? A person at an attended Claude Code session on a tracked machine. */
 function skillCheckApplies(payload, env) {
   const e = env || process.env;
@@ -12427,7 +12456,11 @@ function skillCheckApplies(payload, env) {
   if (e.MM_UNATTENDED === "1") return false;
   if (e.LANE2_RUN_ID || e.MM_RUN_SESSION) return false;
   if (!isInteractiveSession(e)) return false;
-  if (CODEX_RUN || isCodexHookPayload(payload)) return false;
+  if (CODEX_RUN || isCodexHookPayload(payload)) {
+    // CODEX (0.16.0): a person's Codex session only.
+    if (isDelegatedGptRun(e)) return false;
+    if (codexTurnOrigin(payload) !== "person") return false;
+  }
   if (isPluginToolCall(payload)) return false;
   return true;
 }
@@ -12490,7 +12523,10 @@ async function handlePreToolUse(payload) {
     // Observe mode: each finding once a session. A block is always sent.
     if (!blocked && skillCheckSeen(payload.session_id, `${rule.id}|${missing.join(",")}|${clientMissing ? 1 : 0}`)) return;
     const writes = [];
-    if (blocked) writes.push(emitPreToolUseDeny(skillCheckReason(rule, missing, clientMissing)));
+    const codex = CODEX_RUN || isCodexHookPayload(payload);
+    if (blocked) {
+      writes.push(emitPreToolUseDeny((codex ? skillCheckReasonCodex : skillCheckReason)(rule, missing, clientMissing)));
+    }
     let declared = null;
     try {
       const rec = readDeclarationRecord(payload.session_id);
