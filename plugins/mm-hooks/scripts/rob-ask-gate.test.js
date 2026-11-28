@@ -151,6 +151,52 @@ test("Stop: an ask whose result has no ask_id does not count", () => {
   assert.strictEqual(JSON.parse(run(h, { hook_event_name: "Stop", transcript_path: file }).stdout).decision, "block");
 });
 
+test("Stop: 'your call' and 'a go on' asked of Rob are blocked (Antu's 11-27 ask, OW #873)", () => {
+  const h = home();
+  for (const text of [
+    "Rob, your call: a go on package 07d87ca6.",
+    "Your call, Rob: a go on package 07d87ca6?",
+    "Rob — your call on whether the date moves.",
+    "Rob: it's your call.",
+    `<@${ROB}> Final Recovery is ready.\n\nYour call: a go on package 07d87ca6`,
+    "@Rob your call on the font.",
+    "That's Rob's call, so I'll stop here.",
+    "The price is Rob's call.",
+    "Holding for a go on package 07d87ca6 from Rob.",
+    "This needs a go from Rob.",
+    "Stopping until Rob's go on the invoice.",
+    "Rob, a go on the reply package?",
+    "Your go on the send, Rob?",
+    "That’s Rob’s call.",
+  ]) {
+    const r = run(h, stopP(text));
+    assert.strictEqual(r.status, 0, text);
+    assert.strictEqual(r.stdout ? JSON.parse(r.stdout).decision : "", "block", text);
+  }
+});
+
+test("Stop: ordinary 'your call' and 'a go on', and either said to the builder, are silent", () => {
+  const h = home();
+  for (const text of [
+    "It's your call which font to use.",
+    "Have a go on the draft and tell me what you think.",
+    // said to the builder, whose go it is: no Rob named
+    "Your call: a go on package 07d87ca6.",
+    "The reply is ready. A go on package 07d87ca6 sends it.",
+    // a meeting, a past go, Rob's rule, another Rob-like name
+    "On Rob's call with Tamara yesterday he agreed to the price.",
+    "That was in Rob's call on 11-20.",
+    "This is Rob's call from Tuesday, summarized.",
+    "Merged with Rob's go.",
+    "Per Rob's rule the go on the package is yours.",
+    "Your go on the package, Rob's rule says you hold it.",
+    "Robert, your call on the font.",
+    "@Roberta has a go on the draft.",
+  ]) {
+    silent(run(h, stopP(text)));
+  }
+});
+
 test("Stop: stop_hook_active, 'robust', and no pattern are silent", () => {
   const h = home();
   silent(run(h, stopP("waiting on Rob", { stop_hook_active: true })));
