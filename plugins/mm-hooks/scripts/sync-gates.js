@@ -91,7 +91,11 @@ function skipReason(env = process.env) {
   }
 }
 
-/** The `team_gates` record from the installer's state file: names, short shas and when. Pure on its input. */
+/**
+ * The `team_gates` record from the installer's state file: names, short shas and when; `failed`, the gates whose
+ * current version failed a check here (the installer waits for main to change it); `not_done`, what the last run could
+ * not do, by reason code. Pure on its input.
+ */
 function summarize(state, run) {
   const rec = Object.assign({}, run);
   const gates = {};
@@ -109,6 +113,13 @@ function summarize(state, run) {
   }
   rec.installed = gates;
   if (failed.length) rec.failed = failed;
+  // What the last run could not do, by gate, as the installer's reason codes (install.mjs `not_done`).
+  const nd = s && s.not_done && typeof s.not_done === "object" && !Array.isArray(s.not_done) ? s.not_done : null;
+  if (nd) {
+    const notDone = {};
+    for (const g of GATES) if (typeof nd[g] === "string" && /^[a-z-]{1,30}$/.test(nd[g])) notDone[g] = nd[g];
+    if (Object.keys(notDone).length) rec.not_done = notDone;
+  }
   return rec;
 }
 

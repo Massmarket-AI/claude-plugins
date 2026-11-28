@@ -35,6 +35,7 @@ fs.writeFileSync(path.join(dir, "team-safety-gates.json"), JSON.stringify({
   },
   rules: null,
   failed: { "secret-read-gate": "c".repeat(64) },
+  not_done: { "secret-read-gate": "smoke", "send-gate": "/Users/x/path" },
 }));
 process.exit(Number(process.env.FAKE_EXIT || 0));
 `;
@@ -125,6 +126,8 @@ test("the child runs the installer with --auto in the home folder and records na
     "metered-key-gate": { main: "e".repeat(12), at: "2026-11-28T16:00:01.000Z" },
   });
   assert.deepEqual(rec.failed, ["secret-read-gate"]);
+  // reason codes only: a value that is not one is dropped
+  assert.deepEqual(rec.not_done, { "secret-read-gate": "smoke" });
   assert.deepEqual(status(h).team_gates, rec);
   // never a full sha or a path in the record
   assert.doesNotMatch(JSON.stringify(rec), /[0-9a-f]{40}|[\\/]/);
