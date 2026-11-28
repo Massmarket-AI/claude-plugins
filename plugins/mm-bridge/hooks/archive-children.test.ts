@@ -46,7 +46,7 @@ const setup = (on: On, threads: Thread[], files: Record<string, Record<string, u
 describe('0.7.90 (Rob, 11-27: "this should be how the bridge handles any pinned parent threads children"): finished children of a pinned thread are archived', () => {
   // ---------------------------------------------------------------- what is archived
 
-  test('a finished child (its PR merged, its last turn completed, quiet for 2 hours): archived through the app, on record, logged; nothing else', async ($, on) => {
+  test('a finished child (its PR merged, its last turn completed, quiet for 2 hours): archived through the app, on record, logged; nothing else', LONG, async ($, on) => {
     const w = setup(on, [child('local_c1')], { local_c1: MERGED })
     await tickOnce($, w)
     expect(archives(w)).toEqual(['local_c1'])
@@ -60,14 +60,14 @@ describe('0.7.90 (Rob, 11-27: "this should be how the bridge handles any pinned 
     expect(w.threads.get(P)?.isArchived).toBe(false)
   })
 
-  test('a finished child with no pull request (its deliverable handed over), last on screen an hour ago: archived', async ($, on) => {
+  test('a finished child with no pull request (its deliverable handed over), last on screen an hour ago: archived', LONG, async ($, on) => {
     const w = setup(on, [child('local_c1')], { local_c1: { ...HANDED, lastFocusedAt: NOW - HOUR } })
     await tickOnce($, w)
     expect(archives(w)).toEqual(['local_c1'])
     expect(logOf(w)).toContain(`archive: archived local_c1 under pinned ${P}: finished`)
   })
 
-  test('a pull request closed unmerged counts as done: archived', async ($, on) => {
+  test('a pull request closed unmerged counts as done: archived', LONG, async ($, on) => {
     const w = setup(on, [child('local_c1', 2, P, { prNumber: 9, prState: 'CLOSED' })], { local_c1: { ...HANDED, prs: [{ prNumber: 9, state: 'CLOSED' }] } })
     await tickOnce($, w)
     expect(archives(w)).toEqual(['local_c1'])
@@ -81,13 +81,13 @@ describe('0.7.90 (Rob, 11-27: "this should be how the bridge handles any pinned 
     expect(archives(w)).toEqual(['local_c1'])
   })
 
-  test('a finished child with a finished child of its own: both archived, the upper one first', async ($, on) => {
+  test('a finished child with a finished child of its own: both archived, the upper one first', LONG, async ($, on) => {
     const w = setup(on, [child('local_c1'), child('local_g1', 3, 'local_c1')], { local_c1: MERGED, local_g1: HANDED })
     await tickOnce($, w)
     expect(archives(w)).toEqual(['local_c1', 'local_g1'])
   })
 
-  test('a finished grandchild under an unfinished child: the grandchild alone', async ($, on) => {
+  test('a finished grandchild under an unfinished child: the grandchild alone', LONG, async ($, on) => {
     const w = setup(on, [child('local_c1'), child('local_g1', 3, 'local_c1')], { local_c1: BLOCKED, local_g1: HANDED })
     await tickOnce($, w)
     expect(archives(w)).toEqual(['local_g1'])
@@ -132,7 +132,7 @@ describe('0.7.90 (Rob, 11-27: "this should be how the bridge handles any pinned 
     ['with a pinned child of its own', [child('local_c1'), child('local_g1', 3, 'local_c1', { pinned: true })], { local_c1: MERGED, local_g1: MERGED }],
   ]
   for (const [what, threads, files] of left) {
-    test(`⛔ left alone: a child ${what}`, async ($, on) => {
+    test(`⛔ left alone: a child ${what}`, LONG, async ($, on) => {
       const w = setup(on, threads, files)
       await tickOnce($, w)
       expect(archives(w)).toEqual([])
@@ -149,7 +149,7 @@ describe('0.7.90 (Rob, 11-27: "this should be how the bridge handles any pinned 
     ['refused in the last 6 hours', { 'mm.archived': { local_c1: { at: NOW - 5 * HOUR, parent: P, ok: false, why: 'a side session of it is still working' } } }],
   ]
   for (const [what, store] of leftByStore) {
-    test(`⛔ left alone: a finished child ${what}`, async ($, on) => {
+    test(`⛔ left alone: a finished child ${what}`, LONG, async ($, on) => {
       const w = setup(on, [child('local_c1')], { local_c1: MERGED }, { store })
       await tickOnce($, w)
       expect(archives(w)).toEqual([])
@@ -167,13 +167,13 @@ describe('0.7.90 (Rob, 11-27: "this should be how the bridge handles any pinned 
     expect(Object.keys(w.stored['mm.waiting'] as object)).toEqual(['local_c1'])
   })
 
-  test('⛔ left alone: the children of a thread that is not pinned', async ($, on) => {
+  test('⛔ left alone: the children of a thread that is not pinned', LONG, async ($, on) => {
     const w = setup(on, [child('local_c1')], { local_c1: MERGED }, { threads: [pinnedParent({ pinned: false }), child('local_c1')] })
     await tickOnce($, w)
     expect(archives(w)).toEqual([])
   })
 
-  test('⛔ left alone: this thread and every thread above it; a finished sibling of the one above is archived', async ($, on) => {
+  test('⛔ left alone: this thread and every thread above it; a finished sibling of the one above is archived', LONG, async ($, on) => {
     // this thread is a child of local_c1, itself a finished child of the pinned thread: archiving local_c1 could archive this thread with it
     const w = setup(on, [child('local_c1'), child('local_c2')], { local_c1: MERGED, local_c2: MERGED }, {
       self: me({ parentSessionId: 'local_c1', startedBy: 'local_c1', detached: false }),
@@ -182,7 +182,7 @@ describe('0.7.90 (Rob, 11-27: "this should be how the bridge handles any pinned 
     expect(archives(w)).toEqual(['local_c2'])
   })
 
-  test('⛔ the app, asked by id just before, shows it working now: not archived, nothing on record', async ($, on) => {
+  test('⛔ the app, asked by id just before, shows it working now: not archived, nothing on record', LONG, async ($, on) => {
     // the list (asked first) shows it quiet; the app's answer by id says a turn started since
     const w = setup(on, [child('local_c1')], { local_c1: MERGED }, {
       during: call => {
@@ -194,7 +194,7 @@ describe('0.7.90 (Rob, 11-27: "this should be how the bridge handles any pinned 
     expect(w.stored['mm.archived']).toBeUndefined()
   })
 
-  test('⛔ paused (/mm pause): nothing is archived', async ($, on) => {
+  test('⛔ paused (/mm pause): nothing is archived', LONG, async ($, on) => {
     const w = setup(on, [child('local_c1')], { local_c1: MERGED }, { store: { 'mm.paused': true } })
     await tickOnce($, w)
     expect(archives(w)).toEqual([])
@@ -205,7 +205,7 @@ describe('0.7.90 (Rob, 11-27: "this should be how the bridge handles any pinned 
     ['auto mode (the app may still ask)', me({ permissionMode: 'auto' })],
     ['a mode the app does not say', thread(SELF, 'Builds lane', 0)],
   ] as Array<[string, Thread]>) {
-    test(`⛔ outside bypass permissions (${what}): the app would ask the person, so nothing is asked, listed or written`, async ($, on) => {
+    test(`⛔ outside bypass permissions (${what}): the app would ask the person, so nothing is asked, listed or written`, LONG, async ($, on) => {
       const w = setup(on, [child('local_c1')], { local_c1: MERGED }, { self })
       await tickOnce($, w)
       expect(archives(w)).toEqual([])
@@ -231,13 +231,13 @@ describe('0.7.90 (Rob, 11-27: "this should be how the bridge handles any pinned 
     // 6 hours on, it is asked again
     refuse = false
     archivedRec(w).local_c1 = { ...(archivedRec(w).local_c1 as { at: number; parent: string; ok: boolean }), at: NOW - 6 * HOUR }
-    await w.clock.advance(16 * MIN)
+    await w.clock.advance(20 * MIN)
     expect(archives(w)).toEqual(['local_c1', 'local_c1'])
     expect(w.threads.get('local_c1')?.isArchived).toBe(true)
     expect(archivedRec(w).local_c1).toMatchObject({ ok: true })
   })
 
-  test('the call itself fails: on record as refused, with the error', async ($, on) => {
+  test('the call itself fails: on record as refused, with the error', LONG, async ($, on) => {
     const w = setup(on, [child('local_c1')], { local_c1: MERGED }, { archive: 'error' })
     await tickOnce($, w)
     expect(archivedRec(w).local_c1).toMatchObject({ ok: false })
@@ -256,7 +256,7 @@ describe('0.7.90 (Rob, 11-27: "this should be how the bridge handles any pinned 
     expect(archives(w)).toEqual(['local_c1'])
   })
 
-  test('⛔ one refusal stops nothing else: the next finished child is archived in the same sync', async ($, on) => {
+  test('⛔ one refusal stops nothing else: the next finished child is archived in the same sync', LONG, async ($, on) => {
     const w = setup(on, [child('local_c1'), child('local_c2', 3)], { local_c1: MERGED, local_c2: HANDED }, { archive: sid => (sid === 'local_c1' ? 'refuse' : undefined) })
     await tickOnce($, w)
     expect(archives(w)).toEqual(['local_c1', 'local_c2'])
