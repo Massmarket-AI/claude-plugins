@@ -205,7 +205,7 @@ const httpsOf = (v: unknown): string | undefined => {
   return s && /^https:\/\/[^\s<>"'()[\]\\`]+$/.test(s) && !isOwUrl(s) ? s : undefined
 }
 
-/** (0.7.88) One delivery link's media as render_visual.py `part_delivery_media` writes it, or null for anything else. */
+/** (0.7.89) One delivery link's media as render_visual.py `part_delivery_media` writes it, or null for anything else. */
 export function readMedia(v: unknown): MmCardMedia | null {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return null
   const o = v as Record<string, unknown>
@@ -228,7 +228,7 @@ export function readMedia(v: unknown): MmCardMedia | null {
   return out
 }
 
-/** (0.7.88) The words a delivery link is drawn with when its paragraph has none: `Loom · <title> · 5:54`, as render_visual.py writes them. */
+/** (0.7.89) The words a delivery link is drawn with when its paragraph has none: `Loom · <title> · 5:54`, as render_visual.py writes them. */
 export function mediaLine(m: MmCardMedia): string {
   return [m.provider, m.title, m.length].filter(Boolean).join(' · ') || m.label
 }
@@ -265,7 +265,7 @@ function readNodes(v: unknown, depth: number, count: { n: number }): MmCardNode[
       node.r = r
       const fp = str(o.fp, 8)
       if (fp && /^[0-9a-f]{8}$/.test(fp)) node.fp = fp
-      // (0.7.88) a delivery's video or document: media the card cannot read is left off, and the paragraph keeps its link
+      // (0.7.89) a delivery's video or document: media the card cannot read is left off, and the paragraph keeps its link
       const media = readMedia(o.media)
       if (media) node.media = media
     } else return null
@@ -642,7 +642,7 @@ export async function togglePage($: EngineInterface): Promise<void> {
   await $.state.set(CARD_MARKS, { ...marks, pageOpen: !marks.pageOpen })
 }
 
-/** (0.7.88) Open one delivery document's text on the card, closing any other; a second press closes it. */
+/** (0.7.89) Open one delivery document's text on the card, closing any other; a second press closes it. */
 export async function toggleDoc($: EngineInterface, href: string): Promise<void> {
   const { docOpen, ...marks } = await marksOf($)
   await $.state.set(CARD_MARKS, docOpen === href ? marks : { ...marks, docOpen: href.slice(0, 2048) })
@@ -1234,9 +1234,9 @@ type Ctx = {
   grids?: Map<MmCardNode, Grid>
   /** (0.7.57) Inside a table header or row: its table's grid. */
   grid?: Grid
-  /** (0.7.88) The delivery document whose text is open on the card, by its link (`MmCardMarks.docOpen`). */
+  /** (0.7.89) The delivery document whose text is open on the card, by its link (`MmCardMarks.docOpen`). */
   docOpen?: string
-  /** (0.7.88) Open or close one delivery document's text (`toggleDoc`). Left out, no button is drawn. */
+  /** (0.7.89) Open or close one delivery document's text (`toggleDoc`). Left out, no button is drawn. */
   onDoc?: (href: string) => void
 }
 
@@ -1343,7 +1343,7 @@ function paraStyle(c: string | undefined, ctx: Ctx, words = ''): TextProps {
   if (has(c, 'rp-band-sub')) Object.assign(p, { size: 'caption' }, dim())
   if (has(c, 'rp-tag')) Object.assign(p, { size: 'caption', weight: 'semibold' }, has(c, 'rp-proposed') ? { color: 'suggestion' } : dim())
   if (has(c, 'rp-bub-out')) p.color = '#ffffff'
-  // (0.7.88) what a delivery gives the client: the list's head as a section's, each item's name (QA video, Walkthrough, Documentation)
+  // (0.7.89) what a delivery gives the client: the list's head as a section's, each item's name (QA video, Walkthrough, Documentation)
   if (has(c, 'rp-media-head')) Object.assign(p, { weight: 'semibold', size: 'footnote' }, dim())
   if (has(c, 'rp-media-item')) Object.assign(p, { weight: 'semibold', size: 'footnote' })
   if (ctx.dark && !p.color) p.color = DC_TEXT
@@ -1484,18 +1484,18 @@ function drawNodes(els: Els, nodes: readonly MmCardNode[], ctx: Ctx, sign: (s: {
 export const DOC_OPEN = 'Read it here  ▸'
 export const DOC_HIDE = 'Hide it  ▾'
 
-/** (0.7.88) What an item's link says: its title (or, with none read, its provider or its name), a video's ▶ or a document's 📄 before it. */
+/** (0.7.89) What an item's link says: its title (or, with none read, its provider or its name), a video's ▶ or a document's 📄 before it. */
 export function mediaLinkLabel(m: MmCardMedia): string {
   return `${m.media === 'doc' ? '📄' : '▶'} ${m.title ?? m.provider ?? m.label}`
 }
 
-/** (0.7.88) The grey line under the link: the provider when the title took the link, and a video's length. */
+/** (0.7.89) The grey line under the link: the provider when the title took the link, and a video's length. */
 export function mediaCaption(m: MmCardMedia): string {
   return [m.title ? m.provider : undefined, m.length].filter(Boolean).join(' · ')
 }
 
 /**
- * (0.7.88) One link of what a delivery gives the client (render_visual.py `part_delivery_media`; Rob, 2026-11-27: "delivery
+ * (0.7.89) One link of what a delivery gives the client (render_visual.py `part_delivery_media`; Rob, 2026-11-27: "delivery
  * packages should render like reply packages"): the title as a link that opens it, a grey line with the provider and a video's
  * length, and for a Google Doc a button that opens its text on the card, in a box the pane scrolls past.
  *
@@ -1646,7 +1646,7 @@ export type CardDraw = {
   onCheck: (label: string) => void
   onAsk: (words: string) => void
   onPage: () => void
-  /** (0.7.88) Open or close a delivery document's text on the card (`toggleDoc`). Left out, the card draws no such button. */
+  /** (0.7.89) Open or close a delivery document's text on the card (`toggleDoc`). Left out, the card draws no such button. */
   onDoc?: (href: string) => void
   /** (0.7.40) What the Changes field last said (`feedbackOf`); its line is drawn for that tag alone. */
   feedback?: MmCardFeedback | null

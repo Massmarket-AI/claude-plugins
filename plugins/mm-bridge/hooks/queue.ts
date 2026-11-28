@@ -250,15 +250,46 @@ export type FeedAsk = {
   has_draft?: boolean
   draft_sha256?: string | null
   updated_at?: string | null
+  /**
+   * (0.7.88) How OW made the ask (`detection.via`): a Discord path (`mention`, `reply`, ...), `filed`, or a handoff path
+   * (`team_post`, `ticket_assign`, `team_ask_answer`). Read for nothing yet: `handoff` says what a handoff is.
+   */
+  via?: string | null
+  /** (0.7.88) A handoff's details (OW `team-asks/feed.ts` `feedHandoff`), or null or absent for a plain ask. */
+  handoff?: FeedAskHandoff | null
 }
+
+/**
+ * (0.7.88, handoffs; Rob, 2026-11-27: "threads should chase them for eta.") What OW's feed says of a handoff: `shared` (the
+ * first answer closes it for everyone) or `part` (only this person's own part, named in `part`), its clock, the tickets it
+ * hands over and the reply package a part goes into. OW keeps a handoff open until the person's ETA (`/api/ext/eta-commit`),
+ * never a Discord reply. Every field may be missing or of another shape: read as data (`handoffOf`).
+ */
+export type FeedAskHandoff = {
+  kind?: 'shared' | 'part' | string | null
+  part?: string | null
+  clock?: 'end_of_day' | 'standard' | string | null
+  ticket_ids?: string[] | null
+  package_id?: string | null
+}
+
+/**
+ * (0.7.88, handoffs) A handoff as an ask keeps it: the tickets it hands over (lower-case uuids only, at most
+ * HANDOFF_TICKETS_MAX, each once: they go into the call Claude makes), the person's own part (cleaned, or null) and the
+ * reply package that part goes into (a lower-case uuid, or null).
+ */
+export type AskHandoff = { ticketIds: string[]; part: string | null; packageId: string | null }
 
 /**
  * (0.5.28, internal asks) An open ask as a client's item keeps it: its id (a lower-case uuid: it goes into the kickoff
  * and the page request), who asked (cleaned: it goes into the kickoff), when it was asked and when its reply is due (ms),
  * its snippet (drawn, never handed to Claude), whether a reply is drafted and that draft's hash, and the link to the
  * message (https only, or '').
+ * (0.7.88, handoffs) `projectId`: the ask's project (a lower-case uuid; absent otherwise, and on an ask an older version
+ * stored). `handoff`: what a handoff hands over (`handoffOf`); absent for a plain ask and on an ask an older version stored,
+ * which is read as a plain ask.
  */
-export type AskRef = { id: string; asker: string; askedAt: number; dueAt: number; snippet: string; hasDraft: boolean; link: string; draftSha: string | null }
+export type AskRef = { id: string; asker: string; askedAt: number; dueAt: number; snippet: string; hasDraft: boolean; link: string; draftSha: string | null; projectId?: string; handoff?: AskHandoff }
 
 /**
  * (0.7.3, internal queue; Rob, 2026-10-27: "I should be assigned all those tickets. They should just be in a queue... for
@@ -2527,8 +2558,47 @@ const SHA256 = /^[0-9a-f]{64}$/
  */
 export const askerName = (name: unknown, email: unknown): string => cleanText(name, ASKER_MAX) || holderName(email)
 
+/** (0.7.88, handoffs) The most tickets one handoff's paragraph names: each is one call Claude makes. */
+export const HANDOFF_TICKETS_MAX = 10
+/** (0.7.88, handoffs) The most characters of a part's name, as it goes into the kickoff. */
+const HANDOFF_PART_MAX = 200
+
+/** (0.7.88, handoffs) The three parts of a handoff, each checked: what `handoffOf` and `askHandoff` both keep. */
+function handoffParts(ids: unknown, part: unknown, pkg: unknown): AskHandoff {
+  return {
+    ticketIds: [...new Set((Array.isArray(ids) ? ids : []).filter(isUuid))].slice(0, HANDOFF_TICKETS_MAX),
+    part: cleanText(part, HANDOFF_PART_MAX) || null,
+    packageId: isUuid(pkg) ? pkg : null,
+  }
+}
+
+/**
+ * (0.7.88, handoffs) The feed's handoff as an ask keeps it (AskHandoff), read as data: the ticket ids that are lower-case
+ * uuids (each once, at most HANDOFF_TICKETS_MAX), the part cleaned (none: null), the package id when it is a lower-case
+ * uuid (null otherwise). Undefined for anything that is not an object: a plain ask (OW sends null), an older feed (no
+ * field), or a value of another shape.
+ */
+export function handoffOf(raw: unknown): AskHandoff | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const h = raw as Record<string, unknown>
+  return handoffParts(h.ticket_ids, h.part, h.package_id)
+}
+
+/**
+ * (0.7.88, handoffs) An ask's handoff as a store holds it, checked again as `handoffOf` checks the feed's (an item an older
+ * version stored has none, and a store edited by hand is data): undefined for a plain ask.
+ */
+export function askHandoff(a: Pick<AskRef, 'handoff'> | null | undefined): AskHandoff | undefined {
+  const h = a?.handoff as unknown
+  if (!h || typeof h !== 'object' || Array.isArray(h)) return undefined
+  const o = h as Record<string, unknown>
+  return handoffParts(o.ticketIds, o.part, o.packageId)
+}
+
 /** (0.5.28, internal asks) An ask of the feed's as its client's item keeps it (AskRef): every text cleaned or checked. */
 function askRefOf(a: FeedAsk, askedAt: number, dueAt: number): AskRef {
+  // (0.7.88, handoffs) its project (a lower-case uuid) and, for a handoff, what it hands over
+  const handoff = handoffOf(a.handoff)
   return {
     id: a.ask_id,
     asker: askerName(a.asker_name, a.asker_email),
@@ -2538,6 +2608,8 @@ function askRefOf(a: FeedAsk, askedAt: number, dueAt: number): AskRef {
     hasDraft: a.has_draft === true,
     link: sourceLink(a.message_link),
     draftSha: typeof a.draft_sha256 === 'string' && SHA256.test(a.draft_sha256) ? a.draft_sha256 : null,
+    ...(isUuid(a.project_id) ? { projectId: a.project_id } : {}),
+    ...(handoff ? { handoff } : {}),
   }
 }
 
