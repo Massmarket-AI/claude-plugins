@@ -48,6 +48,18 @@ const WAITING_ON_ROB = [
   /\b(needs?|requires?|awaiting|pending)\s+Rob'?s\s+(ok|okay|go|approval|answer|decision|sign-?off|input|yes|call)\b/i,
   /\b(ask|asking|escalat\w*(\s+(this|it))?\s+to|check\w*\s+with|flag\w*(\s+(this|it))?\s+(for|to))\s+Rob\b/i,
   /\bRob\s+(needs to|has to|must|should|to)\s+(approve|confirm|decide|answer|sign off|ok|okay|weigh in|review)\b/i,
+  // "Your call" and "a go on", asked OF Rob (2026-11-28; Antu's 11-27 Discord ask ended "Your call: a go on package
+  // 07d87ca6", OW #873). Only with Rob named or tagged: on a builder's computer a bare "your call" or "a go on the
+  // package" is said to the builder, and a go on a send is the builder's own (Rob, 2026-11-11).
+  // "it's Rob's call", "that is Rob's call on the font"; not "on Rob's call with the client" (a meeting)
+  /\b(it['’]?s|that['’]?s|this is|that is|is|stays|remains)\s+Rob['’]s\s+call\b(?!\s+(with|from|yesterday|today|recording|transcript|notes|summary|on\s+(\d|mon|tue|wed|thu|fri|sat|sun)))/i,
+  // "Rob, your call", "Rob: it's your call", "Rob — your call", "your call, Rob"
+  /\bRob\s*[,:—–-]+\s*(it['’]?s\s+|this is\s+)?your\s+call\b|\byour\s+call\s*[,:—–-]+\s*Rob\b(?!['’]s)/i,
+  // "Rob's go on package 07d87ca6", "a go on the reply from Rob", "a go from Rob", "Rob, a go on the invoice?",
+  // "your go on the send, Rob"; not "merged with Rob's go" or "per Rob's rule the go on it is yours"
+  /\bRob['’]s\s+go(-ahead)?\s+on\b|\b(a|the|his)\s+go(-ahead)?\s+(on\s+[^.?!\n]{1,120}?\s+)?from\s+Rob\b|\bRob\s*[,:—–-]+\s*((need|needing|just need|can i get|could i get|requesting|asking for)\s+)?(a|your)\s+go(-ahead)?\s+on\b|\b(a|your)\s+go(-ahead)?\s+on\b[^.?!\n]{1,120}?,\s*Rob\b(?!['’]s)/i,
+  // tagged in the text itself: "<@1053744158763925514> ... Your call: a go on package 07d87ca6", "@Rob your call"
+  /^(?=[\s\S]*(<@!?1053744158763925514>|@Rob\b))(?=[\s\S]*\b(your\s+call|(a|your)\s+go(-ahead)?\s+on)\b)/i,
 ];
 
 function readStdin() {
