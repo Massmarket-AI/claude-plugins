@@ -76,7 +76,7 @@ try {
 // `revision_insights_notice` and sync-codex.js under `codex`; this step carries all four over.
 updateStatus(HOOK_DIR, (current) => {
   const kept = {};
-  for (const key of ["extension", "self_update", "revision_insights_notice", "codex"]) if (current[key]) kept[key] = current[key];
+  for (const key of ["extension", "self_update", "revision_insights_notice", "codex", "team_gates"]) if (current[key]) kept[key] = current[key];
   return Object.assign({}, result, kept);
 });
 process.exit(0);

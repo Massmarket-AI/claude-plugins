@@ -8,6 +8,11 @@
       },
       {
         "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/sync-gates.js\"", "timeout": 10 }
+        ]
+      },
+      {
+        "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/sync-codex.js\"", "timeout": 15 }
         ]
       },

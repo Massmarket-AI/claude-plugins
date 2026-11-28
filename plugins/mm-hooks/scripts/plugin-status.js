@@ -3,7 +3,7 @@
 // Several SessionStart steps record what they did there, and Claude Code runs them at the same time:
 // sync-hook.js owns the top-level fields (the worklog hook reads `plugin` and `version` from them for its
 // X-MM-Plugin header), sync-extension.js owns the `extension` field, and revision-insights-notice.js claims its
-// notice under `revision_insights_notice`, and sync-codex.js keeps Codex's under `codex`. Each step changes only its own part, under a short lock, and the file
+// notice under `revision_insights_notice`, sync-codex.js keeps Codex's under `codex`, and sync-gates.js the team safety gates' under `team_gates`. Each step changes only its own part, under a short lock, and the file
 // is replaced by a rename, so neither step's record wipes the other's and the worklog hook never reads half a file.
 //
 // The lock (mm-hooks 1.0.24): a lock left by a session that died is broken after 5 seconds. Before 1.0.24 any
